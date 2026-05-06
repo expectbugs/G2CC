@@ -103,23 +103,25 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         private var rightDone = false; private var rightOk = false
 
         fun left(ok: Boolean) {
-            val finished: Boolean
-            synchronized(lock) {
+            // Bug-fix-pass-2 #5: read leftOk/rightOk INSIDE the synchronized
+            // block to establish happens-before for cross-thread visibility.
+            // The prior version released the lock then read the fields — without
+            // a memory barrier the second thread could race the first's writes.
+            val result: Boolean? = synchronized(lock) {
                 if (leftDone) return  // double-call guard
                 leftDone = true; leftOk = ok
-                finished = rightDone
+                if (rightDone) (leftOk && rightOk) else null
             }
-            if (finished) onComplete(leftOk && rightOk)
+            if (result != null) onComplete(result)
         }
 
         fun right(ok: Boolean) {
-            val finished: Boolean
-            synchronized(lock) {
+            val result: Boolean? = synchronized(lock) {
                 if (rightDone) return
                 rightDone = true; rightOk = ok
-                finished = leftDone
+                if (leftDone) (leftOk && rightOk) else null
             }
-            if (finished) onComplete(leftOk && rightOk)
+            if (result != null) onComplete(result)
         }
     }
 

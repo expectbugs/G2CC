@@ -136,19 +136,18 @@ class MicCapture(private val context: Context) {
         val sampleRate = usbDevice.sampleRates?.firstOrNull { it == 48_000 }
             ?: usbDevice.sampleRates?.maxOrNull()
             ?: 48_000
-        val channelMaskCandidates = listOf(
-            AudioFormat.CHANNEL_IN_STEREO,
-            AudioFormat.CHANNEL_IN_FRONT_BACK,
-        )
+        // Bug-fix-pass-2 #7: removed CHANNEL_IN_FRONT_BACK fallback — that mask
+        // is also stereo (2 channels) but the original code's channelCount math
+        // treated it as mono. Stick to CHANNEL_IN_STEREO for USB; if the device
+        // doesn't support stereo input via USB-audio, we fall back to phone mic.
+        val channelMask = AudioFormat.CHANNEL_IN_STEREO
         val encoding = AudioFormat.ENCODING_PCM_FLOAT     // 32-bit float per spec §B2
-        val channelMask = channelMaskCandidates.firstOrNull { mask ->
-            val bufSize = AudioRecord.getMinBufferSize(sampleRate, mask, encoding)
-            bufSize > 0
-        } ?: run {
-            onEvent(Event.Failure("no usable channel mask for USB device"))
+        val bufCheck = AudioRecord.getMinBufferSize(sampleRate, channelMask, encoding)
+        if (bufCheck <= 0) {
+            onEvent(Event.Failure("CHANNEL_IN_STEREO + PCM_FLOAT not supported at $sampleRate Hz on USB"))
             return null
         }
-        val bufSize = AudioRecord.getMinBufferSize(sampleRate, channelMask, encoding) * 4   // 4× margin
+        val bufSize = bufCheck * 4   // 4× margin
         val rec = try {
             AudioRecord.Builder()
                 .setAudioSource(MediaRecorder.AudioSource.UNPROCESSED)
@@ -176,8 +175,7 @@ class MicCapture(private val context: Context) {
             try { rec.release() } catch (e: Exception) { Log.w(TAG, "release", e) }
             return null
         }
-        val channelCount = if (channelMask == AudioFormat.CHANNEL_IN_STEREO) 2 else 1
-        return AttemptResult(rec, Source.DjiUsb, sampleRate, channelCount, encoding)
+        return AttemptResult(rec, Source.DjiUsb, sampleRate, 2, encoding)
     }
 
     @SuppressLint("MissingPermission")

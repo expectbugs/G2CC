@@ -1,5 +1,6 @@
 package com.g2cc.g2cc.audio
 
+import android.media.AudioFormat
 import android.util.Log
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.ConnectionManager
@@ -33,11 +34,34 @@ class AudioStreamer(
         synchronized(this) {
             if (isStreaming) return
             isStreaming = true
-            connection.send(ClientMessage.AudioStart)
+            // Bug-fix-pass-2 #8: defer audio_start until MicCapture reports the
+            // actual format. The phone-mic fallback path is 16 kHz / 1 ch / int16
+            // (server's existing pipeline handles directly). The DJI USB path is
+            // 48 kHz / 2 ch / float32 (server doesn't yet have a pipeline for
+            // this — Phase 8 wiring; until then the server should reject loudly
+            // rather than misinterpret the bytes as int16).
             mic.start { event ->
                 when (event) {
                     is MicCapture.Event.Started -> {
                         Log.i(TAG, "started source=${event.source} sr=${event.sampleRate} ch=${event.channels} enc=${event.encoding}")
+                        val encName = when (event.encoding) {
+                            AudioFormat.ENCODING_PCM_FLOAT -> "float32"
+                            AudioFormat.ENCODING_PCM_16BIT -> "int16"
+                            AudioFormat.ENCODING_PCM_8BIT -> "int8"
+                            else -> "unknown"
+                        }
+                        val sourceName = when (event.source) {
+                            MicCapture.Source.DjiUsb -> "dji-usb"
+                            MicCapture.Source.PhoneMic -> "phone-mic"
+                        }
+                        connection.send(
+                            ClientMessage.AudioStart(
+                                sampleRate = event.sampleRate,
+                                channels = event.channels,
+                                encoding = encName,
+                                source = sourceName,
+                            ),
+                        )
                     }
                     is MicCapture.Event.Frame -> {
                         if (!isStreaming) return@start

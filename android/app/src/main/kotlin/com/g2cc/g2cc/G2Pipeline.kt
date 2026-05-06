@@ -61,21 +61,31 @@ class G2Pipeline(
     private var confirmation: ConfirmationFlow? = null
     private var connection: ConnectionManager? = null
     private var streamer: AudioStreamer? = null
+    private var bleScanner: BleScanner? = null
 
     /** Bug fix #1 wiring: scan for the G2 lens pair, connect both, and install
      *  the BLE clients into the pipeline. Idempotent — calling twice is a no-op
-     *  if BLE clients are already installed. */
+     *  if BLE clients are already installed.
+     *
+     *  Bug-fix-pass-2 #2: BleScanner is now stored as a member so `stop()` can
+     *  cancel an in-flight scan if the service is shut down before the pair
+     *  is found. */
     @android.annotation.SuppressLint("MissingPermission")
     fun scanAndConnect() {
         if (leftBle != null && rightBle != null) {
             Log.i(TAG, "scanAndConnect: BLE already installed")
             return
         }
+        if (bleScanner != null) {
+            Log.i(TAG, "scanAndConnect: scan already in progress")
+            return
+        }
         val scanner = BleScanner(context)
+        bleScanner = scanner
         scanner.start { event ->
             when (event) {
                 is BleScanner.Event.FoundPair -> {
-                    scanner.stop()
+                    bleScanner = null            // scanner self-stopped; drop reference
                     val leftClient = G2BleClient(context, Side.Left)
                     val rightClient = G2BleClient(context, Side.Right)
                     leftClient.connectTo(event.left)
@@ -87,6 +97,7 @@ class G2Pipeline(
                     installBleClients(leftClient, rightClient)
                 }
                 is BleScanner.Event.Failure -> {
+                    bleScanner = null            // scanner self-stopped on failure
                     Log.w(TAG, "scan failure: ${event.reason}")
                     state.transition(AppState.ERROR)
                 }
@@ -254,6 +265,8 @@ class G2Pipeline(
     }
 
     fun stop() {
+        bleScanner?.stop()
+        bleScanner = null
         connection?.shutdown()
         connection = null
         scope.cancel()

@@ -86,8 +86,15 @@ sealed interface ClientMessage {
     @Serializable @SerialName("client_hb")
     data class ClientHb(val now: Long) : ClientMessage
 
+    /** Audio format announcement. Defaults match the legacy 16 kHz mono int16
+     *  path so older callers don't need to set anything. */
     @Serializable @SerialName("audio_start")
-    data object AudioStart : ClientMessage
+    data class AudioStart(
+        val sampleRate: Int = 16_000,
+        val channels: Int = 1,
+        val encoding: String = "int16",          // "int16" | "float32"
+        val source: String? = null,              // "phone-mic" | "dji-usb"
+    ) : ClientMessage
 
     @Serializable @SerialName("audio_end")
     data object AudioEnd : ClientMessage

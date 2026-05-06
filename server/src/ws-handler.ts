@@ -69,6 +69,16 @@ export interface WSClient {
   lastAppActivityMs: number
   /** Phase 7 Channel Router — tracks BLE delivery acks per messageId. */
   router: ChannelRouter
+  /** Bug-fix-pass-2 #8: format the phone announced on audio_start. Drives
+   *  the route taken in audio_end (handleAudio). */
+  audioFormat: AudioFormat | null
+}
+
+export interface AudioFormat {
+  sampleRate: number
+  channels: number
+  encoding: 'int16' | 'float32'
+  source?: string
 }
 
 export function sendMsg(client: WSClient, msg: ServerMessage): void {
@@ -99,6 +109,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     livenessInterval: null,
     lastAppActivityMs: Date.now(),
     router: new ChannelRouter(),
+    audioFormat: null,
   }
 
   pool.on('background_alert', (alert: { sessionId: string; alertType: string; details?: string }) => {
@@ -256,14 +267,24 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     case 'audio_start': {
       client.audioChunks = []
       client.collectingAudio = true
+      // Bug-fix-pass-2 #8: capture format so we route correctly on audio_end.
+      client.audioFormat = {
+        sampleRate: msg.sampleRate ?? 16_000,
+        channels: msg.channels ?? 1,
+        encoding: msg.encoding ?? 'int16',
+        source: msg.source,
+      }
+      console.log(`[ws] audio_start sr=${client.audioFormat.sampleRate} ch=${client.audioFormat.channels} enc=${client.audioFormat.encoding} src=${client.audioFormat.source ?? '?'}`)
       break
     }
 
     case 'audio_end': {
       client.collectingAudio = false
       const pcmBuffer = Buffer.concat(client.audioChunks)
+      const format = client.audioFormat ?? { sampleRate: 16_000, channels: 1, encoding: 'int16' as const }
       client.audioChunks = []
-      void handleAudio(client, pcmBuffer, config)
+      client.audioFormat = null
+      void handleAudio(client, pcmBuffer, format, config)
       break
     }
 
@@ -580,11 +601,36 @@ function wireSessionEvents(client: WSClient, entry: PoolEntry): void {
   })
 }
 
-async function handleAudio(client: WSClient, pcmBuffer: Buffer, config: G2CCConfig): Promise<void> {
+async function handleAudio(
+  client: WSClient,
+  pcmBuffer: Buffer,
+  format: AudioFormat,
+  config: G2CCConfig,
+): Promise<void> {
   if (pcmBuffer.length < 100) {
     sendMsg(client, { type: 'stt_error', error: 'Audio too short' })
     return
   }
+
+  // Bug-fix-pass-2 #8: route based on the phone-announced format. The legacy
+  // path (16 kHz mono int16) goes through the existing transcribe pipeline
+  // (preprocessAudio + faster-whisper / Parakeet). The DJI stereo float path
+  // (48 kHz / 2 ch / float32) needs the NLMS + DFN server-side pipeline,
+  // which is gated on Phase 8 captures landing. Until then we LOUDLY refuse
+  // rather than misinterpret stereo float bytes as int16 PCM (which would
+  // produce gibberish silently).
+  const isLegacyShape = format.encoding === 'int16' &&
+    format.channels === 1 &&
+    format.sampleRate === 16_000
+  if (!isLegacyShape) {
+    const reason = `Audio format ${format.encoding}/${format.channels}ch/${format.sampleRate}Hz` +
+      ` not yet routable — server NLMS+DFN pipeline gated on Phase 8 capture work.` +
+      ` See docs/HOLDS.md §H5/H6.`
+    console.warn(`[ws] ${reason}`)
+    sendMsg(client, { type: 'stt_error', error: reason })
+    return
+  }
+
   try {
     const text = await transcribe(pcmBuffer, config)
     if (!text.trim()) {
