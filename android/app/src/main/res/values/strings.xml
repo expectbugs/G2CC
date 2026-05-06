@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">G2CC</string>
+
+    <!-- Foreground service notification -->
+    <string name="fg_channel_name">G2CC service</string>
+    <string name="fg_channel_desc">Persistent BLE + WebSocket bridge to G2 glasses.</string>
+    <string name="fg_title">G2CC</string>
+
+    <string name="fg_state_booting">Booting…</string>
+    <string name="fg_state_connecting">Connecting…</string>
+    <string name="fg_state_authed">Authed</string>
+    <string name="fg_state_idle">Idle — tap to record</string>
+    <string name="fg_state_menu">Menu</string>
+    <string name="fg_state_directory_picker">Picking directory</string>
+    <string name="fg_state_transcribing">Transcribing…</string>
+    <string name="fg_state_awaiting">Confirm? tap=ok • double-tap=reject</string>
+    <string name="fg_state_streaming">Streaming…</string>
+    <string name="fg_state_error">Error — see app</string>
+
+    <!-- Main activity status -->
+    <string name="status_running">service running: %1$s</string>
+    <string name="status_configured">configured: %1$s</string>
+    <string name="status_battery_exempt">battery exempt: %1$s</string>
+    <string name="status_perm_missing">missing permissions: %1$s</string>
+    <string name="status_unconfigured">Setup incomplete — open Setup and paste the QR URL.</string>
+    <string name="status_battery_required">Battery-optimization exemption required — open Setup.</string>
+
+    <string name="main_setup_btn">Setup</string>
+    <string name="main_start_btn">Start service</string>
+    <string name="main_stop_btn">Stop service</string>
+
+    <!-- Setup activity -->
+    <string name="setup_title">G2CC setup</string>
+    <string name="setup_step1">1. Battery-optimization exemption</string>
+    <string name="setup_step1_desc">Required so the foreground service survives Android Doze. Tap the button, then approve in the system dialog.</string>
+    <string name="setup_batt_btn">Request exemption</string>
+    <string name="setup_batt_ok">Exempt ✓</string>
+    <string name="setup_batt_pending">Exemption pending</string>
+
+    <string name="setup_step2">2. Server URL + auth token</string>
+    <string name="setup_step2_desc">Paste the URL from the server\'s /setup page (any of the QR codes — the phone will refetch the full endpoint list at runtime).</string>
+    <string name="setup_paste_btn">Paste from clipboard</string>
+    <string name="setup_url_hint">ws://&lt;host&gt;:7300/ws</string>
+    <string name="setup_token_hint">auth token (UUID)</string>
+    <string name="setup_save_btn">Save</string>
+
+    <string name="setup_clipboard_empty">Clipboard is empty.</string>
+    <string name="setup_url_invalid">URL/token not recognized — paste a /setup page URL.</string>
+    <string name="setup_missing_fields">Both URL and token are required.</string>
+    <string name="setup_saved">Saved.</string>
+</resources>

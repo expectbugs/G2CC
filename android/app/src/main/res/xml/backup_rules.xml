@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Persist server URL + auth token across reinstall via cloud backup. -->
+    <include domain="sharedpref" path="g2cc-prefs.xml" />
+</full-backup-content>

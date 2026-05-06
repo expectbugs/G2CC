@@ -1,0 +1,35 @@
+node_modules/
+dist/
+.env
+config.json
+*.log
+
+# Python
+audio/venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Audio captures (real workplace recordings — keep out of git)
+audio/samples/*.wav
+audio/samples/*.flac
+audio/samples/*.json
+
+# Claude Code session state
+.claude/
+
+# Gradle build artifacts
+.gradle/
+android/build/
+android/app/build/
+local.properties
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Build artifacts
+*.tsbuildinfo

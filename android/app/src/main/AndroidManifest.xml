@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      G2CC — direct-BLE G2 glasses companion + Claude Code dispatch.
+      Phase 4: platform plumbing only (no BLE driver, no WebSocket, no HUD).
+      Phases 5/6 add the BLE driver and the network paths.
+    -->
+
+    <!-- BLE (Phase 5 active; declared here so the foreground service of type
+         connectedDevice can reference them). -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+    <!-- Required for BLE scanning on API < 31; harmless on 31+. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+
+    <!-- Network (Phase 6 active). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Audio capture (Phase 8 active). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Foreground service (Phase 4 active — survives doze). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!-- Battery-optimization exemption: required so the FG service survives
+         aggressive doze. Surfaced as a one-time setup prompt. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Auto-start service on boot (Adam mentioned reboot as a real-world scenario). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Notification permission (Android 13+). FG service notification is
+         exempt, but POST_NOTIFICATIONS still must be requested for any
+         user-visible notifications we add later. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- BLE-required hardware. -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <application
+        android:name=".G2CCApp"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.G2CC"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".setup.SetupActivity"
+            android:exported="false"
+            android:label="@string/setup_title" />
+
+        <!-- Foreground service: connectedDevice type. Sticky so Android
+             restarts it if killed (subject to battery-opt exemption). -->
+        <service
+            android:name=".service.G2CCService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- BootReceiver: re-launches the service after a reboot. -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:exported="true"
+            android:directBootAware="false"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- IntentReceiver: Tasker / Assistant integration. Exported with explicit
+             actions only — listed in INTENTS.md so other automations can target it. -->
+        <receiver
+            android:name=".intents.IntentReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.g2cc.intent.action.START_RECORDING" />
+                <action android:name="com.g2cc.intent.action.STOP_RECORDING" />
+                <action android:name="com.g2cc.intent.action.SHOW_DIRECTORY_PICKER" />
+                <action android:name="com.g2cc.intent.action.SWITCH_DISPATCH_TARGET" />
+                <action android:name="com.g2cc.intent.action.PING" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

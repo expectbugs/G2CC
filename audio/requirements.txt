@@ -1,0 +1,27 @@
+# G2CC Audio pipeline dependencies — installed into /home/user/G2CC/audio/venv/
+#
+# Phase 2B (capture infrastructure) needs only sounddevice + soundfile + scipy + numpy + matplotlib.
+# Phase 3B (NLMS + DFN modules) adds padasip + deepfilternet.
+# Phase 8 (Parakeet swap) adds nemo_toolkit[asr] (large dep tree; verify driver compat first).
+#
+# Pin loosely; CUDA-bound packages (deepfilternet's torch backend, nemo) need to match
+# the running NVIDIA driver. Re-verify CUDA / driver versions before installing.
+
+# Phase 2B — capture infrastructure
+sounddevice>=0.5.0
+soundfile>=0.12.0
+numpy>=2.0.0
+scipy>=1.14.0
+matplotlib>=3.9.0
+
+# Phase 3B — NLMS + DeepFilterNet polish
+# (NLMS is hand-rolled NumPy per spec §B2; padasip is optional second implementation
+# for cross-validation. DeepFilterNet ships its own torch.)
+padasip>=1.2.4
+deepfilternet>=0.5.6
+
+# Phase 8 — Parakeet ASR via NeMo
+# UNCOMMENT after Phase 0/8 driver/toolkit re-verification. NeMo pulls PyTorch + the
+# full NVIDIA speech stack; install size ~3 GB. Conflicts with the existing
+# /home/user/aria/venv/ are why this is project-scoped here.
+# nemo_toolkit[asr]>=2.0.0

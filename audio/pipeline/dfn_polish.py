@@ -1,0 +1,118 @@
+"""dfn_polish — DeepFilterNet polish layer for cleaned mono speech.
+
+Applies after NLMS to clean residual ambient noise (any non-machine,
+non-mechanical hum the adaptive filter didn't catch). Lazy-loaded with a
+threading.Lock — same shape as /home/user/aria/whisper_engine.py:121-181 so
+GPU access is single-threaded.
+
+Phase 3B writes this with sane defaults; Phase 8 may tune (e.g. attenuation
+floor) once real captures show the residual character.
+
+Module CLI:
+  python -m pipeline.dfn_polish --import-check  verify lazy-load class shape
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+import threading
+import time
+
+import numpy as np
+
+log = logging.getLogger('g2cc.dfn')
+
+
+class DfnPolisher:
+    """Lazy-loaded DeepFilterNet wrapper. Single-threaded GPU via instance-level lock."""
+
+    def __init__(self, device: str = 'cuda') -> None:
+        self.device = device
+        self._lock = threading.Lock()
+        self._model: object | None = None        # opaque DF model handle
+        self._df_state: object | None = None     # opaque state for streaming use
+
+    def _ensure_model(self) -> None:
+        """Load model on first use. Caller MUST hold self._lock."""
+        if self._model is not None:
+            return
+        # Lazy import — DeepFilterNet pulls torch + a CUDA wheel. Keep it out
+        # of the hot import path so other tools (capture, sanity_listen) don't
+        # pay the load cost.
+        from df.enhance import enhance, init_df       # type: ignore
+        log.info('Loading DeepFilterNet on %s ...', self.device)
+        start = time.time()
+        model, df_state, _ = init_df()              # default DFN3 model
+        self._model = model
+        self._df_state = df_state
+        # Stash enhance for use; importing inside _ensure_model keeps it lazy.
+        self._enhance = enhance
+        log.info('DeepFilterNet loaded in %.1fs', time.time() - start)
+
+    def polish(self, mono: np.ndarray, sample_rate: int = 48_000) -> np.ndarray:
+        """Polish a mono float32 array. Returns float32 of the same length.
+
+        Raises ValueError on bad input shape — no silent fallback.
+        """
+        if not isinstance(mono, np.ndarray):
+            raise ValueError(f'polish expects np.ndarray, got {type(mono).__name__}')
+        if mono.ndim != 1:
+            raise ValueError(f'polish expects mono 1-D array, got shape {mono.shape}')
+        if mono.dtype != np.float32:
+            mono = mono.astype(np.float32, copy=False)
+
+        with self._lock:
+            self._ensure_model()
+            assert self._model is not None and self._df_state is not None
+            # DeepFilterNet's enhance() expects torch tensors of shape (1, n_samples).
+            import torch                              # noqa: WPS433 — lazy to avoid hot import
+            t = torch.from_numpy(mono).unsqueeze(0)
+            out = self._enhance(self._model, self._df_state, t)
+            return out.squeeze(0).cpu().numpy().astype(np.float32, copy=False)
+
+
+# Module-level singleton (matches whisper_engine.py's get_engine() pattern).
+_polisher: DfnPolisher | None = None
+
+
+def get_polisher() -> DfnPolisher:
+    global _polisher
+    if _polisher is None:
+        _polisher = DfnPolisher()
+    return _polisher
+
+
+# Convenience wrapper — Phase 8's eval / tune scripts call this directly.
+def polish(mono: np.ndarray, sample_rate: int = 48_000) -> np.ndarray:
+    return get_polisher().polish(mono, sample_rate=sample_rate)
+
+
+def _import_check() -> int:
+    """Verify the lazy-load class shape WITHOUT actually loading the model.
+
+    The model load pulls torch + DFN3 weights (~hundreds of MB) and is GPU-bound,
+    so this check just confirms the import surface is sane in Phase 3B.
+    """
+    p = DfnPolisher()
+    print(f'DfnPolisher created (model not loaded yet, _lock={p._lock!r}, _model={p._model})')
+    print(f'public methods: {[m for m in dir(p) if not m.startswith("_")]}')
+    print(f'singleton getter: {get_polisher.__name__}')
+    print('shape OK — ready for Phase 8 to instantiate against real audio.')
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description='DeepFilterNet polish wrapper.')
+    parser.add_argument('--import-check', action='store_true',
+                        help='Confirm lazy-load class shape without loading the model.')
+    args = parser.parse_args()
+    if args.import_check:
+        return _import_check()
+    parser.print_help()
+    return 0
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    sys.exit(main())
