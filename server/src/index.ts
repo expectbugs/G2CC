@@ -89,7 +89,15 @@ function shutdown(): void {
   console.log('\n[g2cc-server] Shutting down...')
   watchdogInstance.stop()
   stopDiscovery()
-  void server.close().then(() => process.exit(0))
+  // Bug fix #9: catch close rejection — otherwise we'd hang on signal if
+  // server.close() rejects (rare but possible: stuck connection). Loud-and-
+  // proud per the no-silent-failure rule.
+  server.close()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error('[g2cc-server] server.close() rejected:', err)
+      process.exit(1)
+    })
 }
 
 process.on('SIGINT', shutdown)

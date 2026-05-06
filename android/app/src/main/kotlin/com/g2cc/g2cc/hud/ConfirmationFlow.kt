@@ -45,7 +45,12 @@ class ConfirmationFlow(
     private val _active = MutableStateFlow(false)
     val active: StateFlow<Boolean> = _active.asStateFlow()
 
-    /** Called by G2Pipeline when a ConfirmOnHud arrives. */
+    /** Called by G2Pipeline when a ConfirmOnHud arrives.
+     *
+     *  Phase 7 fix #3: after the BLE write batch drains, send a `BleAckMsg`
+     *  with the delivery status. The server's Channel Router uses this to
+     *  flip the channel status to `verified` (writes drained successfully)
+     *  or `unverified` (any write failed / no ack within window). */
     fun onConfirmRequest(msg: ServerMessage.ConfirmOnHud) {
         Log.i(TAG, "confirm requested id=${msg.requestId} textLen=${msg.text.length}")
         pending.set(msg)
@@ -53,7 +58,15 @@ class ConfirmationFlow(
         // Render scrollably; the rendered prefix tells the user their gesture options.
         // Per spec §6 "Confirm: tap • Reject: double-tap" line.
         val rendered = "${msg.text}\n\nConfirm: tap   Reject: double-tap"
-        hud.render(rendered)
+        hud.render(rendered) { success ->
+            connection.send(
+                ClientMessage.BleAck(
+                    messageId = msg.requestId,
+                    status = if (success) "verified" else "unverified",
+                    reason = if (success) null else "BLE write batch failed (see logcat)",
+                ),
+            )
+        }
     }
 
     /** User produced a single-tap event. Emit confirmed if a request is pending. */

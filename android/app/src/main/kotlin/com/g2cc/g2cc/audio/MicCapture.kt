@@ -217,7 +217,26 @@ class MicCapture(private val context: Context) {
     }
 
     private fun runReadLoop(rec: AudioRecord, encoding: Int, onEvent: (Event) -> Unit) {
-        val frameBytes = ByteArray(FRAME_BYTES)
+        // Bug fix #7: rate-aware frame size. Target ~20ms of audio per WebSocket
+        // binary frame regardless of sample rate / channel count / encoding —
+        // gives consistent ~50 Hz update rate to the server.
+        val bytesPerSample = when (encoding) {
+            AudioFormat.ENCODING_PCM_FLOAT -> 4
+            AudioFormat.ENCODING_PCM_16BIT -> 2
+            AudioFormat.ENCODING_PCM_8BIT -> 1
+            else -> 2
+        }
+        val sampleRate = rec.sampleRate
+        val channels = if (rec.channelCount > 0) rec.channelCount else 1
+        val targetBytes = ((sampleRate * channels * bytesPerSample) * TARGET_FRAME_MS / 1000)
+            .coerceAtLeast(MIN_FRAME_BYTES)
+            .coerceAtMost(MAX_FRAME_BYTES)
+        // Round to a multiple of bytesPerSample×channels so we don't slice mid-sample.
+        val align = bytesPerSample * channels
+        val frameSize = (targetBytes / align) * align
+        Log.i(TAG, "frameSize=$frameSize bytes (~${TARGET_FRAME_MS}ms @ ${sampleRate}Hz × $channels ch × $bytesPerSample bytes)")
+
+        val frameBytes = ByteArray(frameSize)
         while (isCapturing) {
             val read = try {
                 rec.read(frameBytes, 0, frameBytes.size, AudioRecord.READ_BLOCKING)
@@ -245,7 +264,11 @@ class MicCapture(private val context: Context) {
 
     companion object {
         const val TAG = "G2CCMicCapture"
-        // 4 KB / read — keeps WebSocket frames a sensible size; tunable in Phase 8 polish.
-        private const val FRAME_BYTES = 4096
+        // Target ~20ms of audio per frame. At 48 kHz stereo float32 that's
+        // ~7680 bytes; at 16 kHz mono int16 that's ~640 bytes. Same latency,
+        // very different byte counts.
+        private const val TARGET_FRAME_MS = 20
+        private const val MIN_FRAME_BYTES = 256
+        private const val MAX_FRAME_BYTES = 16 * 1024
     }
 }

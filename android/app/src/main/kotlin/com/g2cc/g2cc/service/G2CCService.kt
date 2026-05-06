@@ -54,12 +54,13 @@ class G2CCService : LifecycleService() {
             }
         }
 
-        // Start the WebSocket connection. BLE clients (G2BleClient × 2) get
-        // installed via pipeline.installBleClients() once the user has
-        // authorized BLE scan + connect to real glasses (per Phase 5 hardware
-        // verification gate). The WebSocket path works without BLE — the HUD
-        // calls become no-ops until BLE clients are installed.
+        // Start the WebSocket connection.
         pipeline.start()
+        // Bug fix #1: kick off the BLE scan-and-connect now that the pipeline
+        // exists. Permissions for BLUETOOTH_SCAN/CONNECT must be granted
+        // beforehand by MainActivity; if not, scanAndConnect logs loudly and
+        // transitions state to ERROR.
+        pipeline.scanAndConnect()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

@@ -183,6 +183,50 @@ class G2BleClient(
         }.enqueue()
     }
 
+    /** Phase 7 fix #3: queue a batch of writes atomically and signal completion.
+     *  Calls `onComplete(true)` when all writes succeed, `onComplete(false)` on
+     *  any failure. Used by Hud.render to know when the BLE write side of a
+     *  display update has reached the glasses (within Nordic library's
+     *  best-effort definition of "reached"). */
+    @SuppressLint("MissingPermission")
+    fun queueWrites(
+        packets: List<ByteArray>,
+        label: String = "queue",
+        onComplete: (success: Boolean) -> Unit,
+    ) {
+        val char = writeChar ?: run {
+            Log.w(TAG, "[$side] queueWrites($label) called before write char available")
+            onComplete(false)
+            return
+        }
+        if (packets.isEmpty()) {
+            onComplete(true)
+            return
+        }
+
+        var anyFailed = false
+        val q = beginAtomicRequestQueue()
+        for (packet in packets) {
+            q.add(
+                writeCharacteristic(
+                    char,
+                    packet,
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
+                ).fail { _, status ->
+                    anyFailed = true
+                    _state.value = ConnectionState.Error(side, "$label: write status=$status")
+                    Log.e(TAG, "[$side] $label write failed status=$status")
+                },
+            )
+        }
+        q.done {
+            onComplete(!anyFailed)
+        }.fail { _, status ->
+            Log.e(TAG, "[$side] $label queue failed status=$status")
+            onComplete(false)
+        }.enqueue()
+    }
+
     override fun log(priority: Int, message: String) {
         Log.println(priority, TAG, "[$side] $message")
     }

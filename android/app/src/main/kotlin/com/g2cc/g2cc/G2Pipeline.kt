@@ -5,9 +5,11 @@ import android.util.Log
 import com.g2cc.g2cc.audio.AudioStreamer
 import com.g2cc.g2cc.audio.MicCapture
 import com.g2cc.g2cc.ble.AckEmitter
+import com.g2cc.g2cc.ble.BleScanner
 import com.g2cc.g2cc.ble.EventParser
 import com.g2cc.g2cc.ble.G2BleClient
 import com.g2cc.g2cc.ble.PairingState
+import com.g2cc.g2cc.ble.Side
 import com.g2cc.g2cc.hud.ConfirmationFlow
 import com.g2cc.g2cc.hud.Hud
 import com.g2cc.g2cc.hud.MenuController
@@ -60,8 +62,46 @@ class G2Pipeline(
     private var connection: ConnectionManager? = null
     private var streamer: AudioStreamer? = null
 
-    /** Phase 5 hookpoint: install the connected BLE clients (one per lens). The
-     *  G2CCService scans, finds, and connects on hardware-authorized startup. */
+    /** Bug fix #1 wiring: scan for the G2 lens pair, connect both, and install
+     *  the BLE clients into the pipeline. Idempotent — calling twice is a no-op
+     *  if BLE clients are already installed. */
+    @android.annotation.SuppressLint("MissingPermission")
+    fun scanAndConnect() {
+        if (leftBle != null && rightBle != null) {
+            Log.i(TAG, "scanAndConnect: BLE already installed")
+            return
+        }
+        val scanner = BleScanner(context)
+        scanner.start { event ->
+            when (event) {
+                is BleScanner.Event.FoundPair -> {
+                    scanner.stop()
+                    val leftClient = G2BleClient(context, Side.Left)
+                    val rightClient = G2BleClient(context, Side.Right)
+                    leftClient.connectTo(event.left)
+                    rightClient.connectTo(event.right)
+                    val leftName = try { event.left.name ?: "" } catch (e: SecurityException) { "" }
+                    val rightName = try { event.right.name ?: "" } catch (e: SecurityException) { "" }
+                    pairing.setForSide(Side.Left, event.left.address, leftName)
+                    pairing.setForSide(Side.Right, event.right.address, rightName)
+                    installBleClients(leftClient, rightClient)
+                }
+                is BleScanner.Event.Failure -> {
+                    Log.w(TAG, "scan failure: ${event.reason}")
+                    state.transition(AppState.ERROR)
+                }
+            }
+        }
+    }
+
+    /** Install the connected BLE clients (one per lens). Wires:
+     *   - Hud + MenuController + ConfirmationFlow against the new clients
+     *   - BLE input events from BOTH lenses, debounced to dedup paired emissions
+     *
+     *  Phase 7 fix #10: subscribe to BOTH sides. PROTOCOL_NOTES.md §"Open
+     *  research items" #3 notes we don't yet know whether both lenses emit
+     *  the same input event or only one — debounce by EVENT_DEBOUNCE_MS so a
+     *  paired emission doesn't fire onTap twice. */
     fun installBleClients(left: G2BleClient, right: G2BleClient) {
         leftBle = left
         rightBle = right
@@ -71,24 +111,48 @@ class G2Pipeline(
             menu = MenuController(newHud, it)
             confirmation = ConfirmationFlow(newHud, it)
         }
-        // Phase 7: route BLE input events through the event parser to gestures.
-        // We subscribe to ONE side (Left). Phase 5 hardware testing will determine
-        // whether both lenses emit the same event or only one — adjust as needed.
-        scope.launch {
-            left.events.collect { event ->
-                when (event) {
-                    is EventParser.Event.Tap -> onTap()
-                    is EventParser.Event.DoubleTap -> onDoubleTap()
-                    is EventParser.Event.ScrollUp,
-                    is EventParser.Event.ScrollDown -> {
-                        // Firmware-native scroll handles teleprompter pages.
+        scope.launch { collectEventsDebounced(left.events) }
+        scope.launch { collectEventsDebounced(right.events) }
+    }
+
+    @Volatile private var lastTapAt: Long = 0L
+    @Volatile private var lastDoubleTapAt: Long = 0L
+    @Volatile private var lastScrollUpAt: Long = 0L
+    @Volatile private var lastScrollDownAt: Long = 0L
+
+    private suspend fun collectEventsDebounced(events: kotlinx.coroutines.flow.Flow<EventParser.Event>) {
+        events.collect { event ->
+            val now = System.currentTimeMillis()
+            when (event) {
+                is EventParser.Event.Tap -> {
+                    if (now - lastTapAt >= EVENT_DEBOUNCE_MS) {
+                        lastTapAt = now
+                        onTap()
                     }
-                    is EventParser.Event.Unknown -> {
-                        // Phase 5 hardware testing refines EventParser → these become Tap/DoubleTap.
+                }
+                is EventParser.Event.DoubleTap -> {
+                    if (now - lastDoubleTapAt >= EVENT_DEBOUNCE_MS) {
+                        lastDoubleTapAt = now
+                        onDoubleTap()
                     }
-                    is EventParser.Event.Malformed -> {
-                        Log.w(TAG, "malformed BLE event: ${event.reason}")
+                }
+                is EventParser.Event.ScrollUp -> {
+                    if (now - lastScrollUpAt >= EVENT_DEBOUNCE_MS) {
+                        lastScrollUpAt = now
+                        // Firmware-native scroll handles teleprompter pages; no app action.
                     }
+                }
+                is EventParser.Event.ScrollDown -> {
+                    if (now - lastScrollDownAt >= EVENT_DEBOUNCE_MS) {
+                        lastScrollDownAt = now
+                    }
+                }
+                is EventParser.Event.Unknown -> {
+                    // Phase 5 hardware testing refines EventParser → these become Tap/DoubleTap.
+                    // Logged at DEBUG by EventParser itself; no further action here.
+                }
+                is EventParser.Event.Malformed -> {
+                    Log.w(TAG, "malformed BLE event: ${event.reason}")
                 }
             }
         }
@@ -245,11 +309,20 @@ class G2Pipeline(
                 state.transition(AppState.ERROR)
                 hud?.render("ERROR: ${msg.message}")
             }
-            else -> {
-                // Other types (Status, ToolUse, etc.) are accepted but not yet
-                // surfaced to the HUD. Phase 6 polish or Phase 9 may add status-bar
-                // rendering using Status messages.
+            // Bug fix #6: log loudly instead of silently dropping.
+            is ServerMessage.Status -> Log.i(TAG, "status: mode=${msg.mode} ctx=${msg.contextPct}% processing=${msg.isProcessing}")
+            is ServerMessage.ToolUse -> Log.i(TAG, "tool_use: ${msg.tool} ${msg.description}")
+            is ServerMessage.BackgroundAlertMsg -> Log.i(TAG, "bg_alert: ${msg.alertType} session=${msg.sessionId} ${msg.details ?: ""}")
+            is ServerMessage.PermissionRequest -> Log.i(TAG, "permission_request: id=${msg.requestId} tool=${msg.tool}")
+            is ServerMessage.SttResult -> Log.i(TAG, "stt_result: \"${msg.text}\"")
+            is ServerMessage.SessionList -> Log.i(TAG, "session_list: ${msg.sessions.size} saved")
+            is ServerMessage.ActiveSessionList -> Log.i(TAG, "active_session_list: ${msg.sessions.size} active")
+            is ServerMessage.RewindResult -> Log.i(TAG, "rewind_result: success=${msg.success} ${msg.summary}")
+            is ServerMessage.AuthResult, is ServerMessage.Hb -> {
+                // Handled inside ConnectionManager — these don't surface to dispatchInbound.
             }
+            is ServerMessage.ConfigSnapshot -> Log.i(TAG, "config_snapshot received")
+            is ServerMessage.DispatchTargetSet -> Log.i(TAG, "dispatch_target_set: ${msg.targetId} flow=${msg.flow}")
         }
     }
 
@@ -278,6 +351,9 @@ class G2Pipeline(
 
     companion object {
         const val TAG = "G2Pipeline"
+
+        /** Debounce window for paired-lens BLE input events (Phase 7 fix #10). */
+        const val EVENT_DEBOUNCE_MS = 300L
 
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(Duration.ofSeconds(10))

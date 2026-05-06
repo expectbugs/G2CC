@@ -101,9 +101,11 @@ class ConnectionManager(
     }
 
     fun connect() {
-        ws?.let { existing ->
-            if (existing.queueSize() >= 0 && _connected.value) return
-        }
+        // Bug fix #5: don't reconnect if we already have a healthy authed
+        // socket. (g2aria's TS check on `readyState === OPEN` doesn't translate
+        // directly — OkHttp's WebSocket doesn't expose readyState. Use our
+        // `_connected` flag, which flips true on auth_result success.)
+        if (ws != null && _connected.value) return
         wsGen.incrementAndGet()
         val myGen = wsGen.get()
         val endpoint = endpoints.getOrNull(currentEndpointIdx) ?: run {

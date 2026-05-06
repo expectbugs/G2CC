@@ -621,6 +621,29 @@ function handlePrompt(client: WSClient, text: string): void {
   }
 }
 
+/** Phase 7 entry point — server-side request to ask the HUD a yes/no question.
+ *  Returns a Promise that resolves when the client sends back ConfirmOnHudResponseMsg.
+ *  No timeout — the user gets as long as they need. If the WebSocket disconnects
+ *  before a response arrives, the in-flight callback is invoked with 'rejected'
+ *  (loud, logged, not silent).
+ *
+ *  Phase 7 fix #2: also tags the requestId with the Channel Router so when the
+ *  phone's `BleAckMsg` arrives, delivery status is tracked. The returned promise
+ *  ONLY surfaces the user's confirm/reject choice — delivery status is a separate
+ *  concern that callers can opt into via `awaitDeliveryAck` if they care. */
+export function confirmOnHudWithDelivery(
+  client: WSClient,
+  text: string,
+): { response: Promise<'confirmed' | 'rejected'>; delivery: Promise<{ status: 'verified' | 'unverified'; reason?: string }> } {
+  const requestId = `cfh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const response = new Promise<'confirmed' | 'rejected'>((resolve) => {
+    client.confirmCallbacks.set(requestId, resolve)
+    sendMsg(client, { type: 'confirm_on_hud', requestId, text })
+  })
+  const delivery = client.router.awaitAck(requestId)
+  return { response, delivery }
+}
+
 /** Phase 3A heartbeat — start the server-driven hb + APP_ACTIVITY_TIMEOUT_MS kick.
  *  Runs only after a successful auth (so unauthed sockets don't get hb traffic).
  *
@@ -649,9 +672,16 @@ function startHeartbeat(client: WSClient): void {
  *  Returns a Promise that resolves when the client sends back ConfirmOnHudResponseMsg.
  *  No timeout — the user gets as long as they need. If the WebSocket disconnects
  *  before a response arrives, the in-flight callback is invoked with 'rejected'
- *  (loud, logged, not silent). */
+ *  (loud, logged, not silent).
+ *
+ *  Phase 7 fix #2: tags the requestId with the Channel Router so the BLE
+ *  delivery ack (BleAckMsg from phone) is tracked. The returned promise still
+ *  resolves only with the user's choice; delivery status is consumed via the
+ *  router's fireAndForget bookkeeping. Callers wanting both can use
+ *  `confirmOnHudWithDelivery` instead. */
 export function confirmOnHud(client: WSClient, text: string): Promise<'confirmed' | 'rejected'> {
   const requestId = `cfh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  client.router.fireAndForget(requestId)
   return new Promise<'confirmed' | 'rejected'>((resolve) => {
     client.confirmCallbacks.set(requestId, resolve)
     sendMsg(client, { type: 'confirm_on_hud', requestId, text })
