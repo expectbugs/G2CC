@@ -92,6 +92,17 @@ class G2Pipeline(
     private var leftCollectorJob: Job? = null
     private var rightCollectorJob: Job? = null
 
+    // Heartbeat job — keeps the teleprompter HUD session alive against the
+    // ~10-second firmware idle timeout (confirmed 2026-06-01: render
+    // succeeded, text displayed, session terminated 10 s later with no
+    // intervening packets). Periodically re-issues sync_trigger which is the
+    // lightest known teleprompter-flow packet. Allowed under the no-timeouts
+    // rule (annotated as HB pacing, not a clock-kill).
+    private var heartbeatJob: Job? = null
+    private val heartbeatSeq = java.util.concurrent.atomic.AtomicInteger(0xF0)
+    private val heartbeatMsgId = java.util.concurrent.atomic.AtomicInteger(0xF000)
+    private val heartbeatTickCount = java.util.concurrent.atomic.AtomicInteger(0)
+
     /** Scan or directed-connect to the G2 lens pair, then install BLE clients.
      *  Idempotent — calling twice is a no-op if BLE clients are already installed.
      *
@@ -235,6 +246,8 @@ class G2Pipeline(
                             connection?.send(ClientMessage.Diag(
                                 "hud: hello-done ok=$ok | notify: $notifyBefore → L=$lCount R=$rCount | lastHex L=$lHex R=$rHex"
                             ))
+                            // Kick off heartbeat once the render is on screen.
+                            if (ok) startHeartbeat()
                         }
                         conn?.send(ClientMessage.Diag("hud: hello-render pages=$pageCount | notify-before $notifyBefore"))
                     }
@@ -289,8 +302,55 @@ class G2Pipeline(
         is ConnectionState.Error -> "err"
     }
 
+    /** Keep the teleprompter HUD session alive. Without periodic packets the
+     *  G2 firmware ends the session ~10 s after the last activity, blanks the
+     *  screen, and the "connection lost" toast appears on the glasses
+     *  (confirmed 2026-06-01 on Adam's pair).
+     *
+     *  This is an empirical guess at the keepalive — i-soxi docs don't
+     *  document a heartbeat, and the teleprompter.py example just disconnects
+     *  after rendering. We re-issue sync_trigger (service 0x80-00 type=0x0E,
+     *  the lightest known teleprompter-flow packet) every 5 seconds.
+     *
+     *  HB annotation: per CLAUDE.md "no-timeouts rule" exception list,
+     *  heartbeat pacing is allowed (it's not a clock-kill on an operation).
+     *  Cadence chosen at half of the observed 10 s timeout to give margin. */
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatTickCount.set(0)
+        heartbeatJob = scope.launch {
+            connection?.send(ClientMessage.Diag("hb: started (cadence=5s, packet=sync_trigger)"))
+            try {
+                while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
+                    kotlinx.coroutines.delay(5_000L)
+                    val l = leftBle ?: break
+                    val r = rightBle ?: break
+                    val seq = heartbeatSeq.getAndIncrement() and 0xFF
+                    val msgId = heartbeatMsgId.getAndIncrement() and 0xFFFF
+                    val pkt = com.g2cc.g2cc.ble.Teleprompter.buildSyncTrigger(seq, msgId)
+                    l.sendPacket(pkt, "HB:L")
+                    r.sendPacket(pkt, "HB:R")
+                    val tick = heartbeatTickCount.incrementAndGet()
+                    // Emit a diag every tick so we can see if the heartbeat is
+                    // firing AND notice the moment it stops.
+                    connection?.send(ClientMessage.Diag(
+                        "hb: tick=$tick | notify L=${l.notifyCount.get()} R=${r.notifyCount.get()}"
+                    ))
+                }
+            } finally {
+                connection?.send(ClientMessage.Diag("hb: stopped after ${heartbeatTickCount.get()} ticks"))
+            }
+        }
+    }
+
+    private fun stopHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+    }
+
     private fun onInstallFailure(side: String, state: ConnectionState) {
         Log.w(TAG, "[$side] connect failed before Ready (state=$state) — tearing down and retrying via scan")
+        stopHeartbeat()
         // Tear down current install so scanAndConnect() can rebuild.
         leftBle?.shutdownBle()
         rightBle?.shutdownBle()
@@ -464,6 +524,7 @@ class G2Pipeline(
 
     fun stop() {
         bleScannerRef.getAndSet(null)?.stop()
+        stopHeartbeat()
         // Tear down GATT connections cleanly so the BLE stack doesn't leak
         // open handles across service restart cycles (foreground service
         // reload-on-stuck per the watchdog).
