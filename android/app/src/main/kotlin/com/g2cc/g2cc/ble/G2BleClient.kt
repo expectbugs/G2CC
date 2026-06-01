@@ -97,21 +97,45 @@ class G2BleClient(
         disconnect().enqueue()
     }
 
+    /** Diagnostic — populated by isRequiredServiceSupported. Read by
+     *  G2Pipeline.observeBleHealth on Disconnected to surface in bleStatus
+     *  so we can tell whether firmware UUIDs drifted from i-soxi's reference. */
+    @Volatile var lastDiagnostic: String = "(no connection yet)"
+        private set
+
     override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
-        val service = gatt.getService(G2Constants.SERVICE) ?: run {
-            Log.w(TAG, "[$side] G2 service ${G2Constants.SERVICE} not found")
+        val services = gatt.services
+        val uuidShort = services.map { it.uuid.toString().take(13) }   // first 13 chars = "xxxxxxxx-xxxx"
+        Log.i(TAG, "[$side] discovered ${services.size} services: ${uuidShort.joinToString()}")
+
+        val service = gatt.getService(G2Constants.SERVICE)
+        if (service == null) {
+            // Firmware drift OR completely-different service family. Stash a
+            // diagnostic for the bleStatus pipeline; Nordic disconnects on false.
+            lastDiagnostic = "no G2 svc; found ${services.size}: ${uuidShort.take(6).joinToString()}"
+            Log.w(TAG, "[$side] G2 service ${G2Constants.SERVICE} not found; have: ${services.map { it.uuid }}")
+            // Promote to Error so observeBleHealth sees the diagnostic via state flow
+            // (instead of just the bare Disconnected with no context).
+            _state.value = ConnectionState.Error(side, lastDiagnostic)
             return false
         }
+
+        val chars = service.characteristics.map { it.uuid.toString().take(13) }
         writeChar = service.getCharacteristic(G2Constants.CHAR_WRITE)
         notifyChar = service.getCharacteristic(G2Constants.CHAR_NOTIFY)
         if (writeChar == null) {
-            Log.w(TAG, "[$side] write characteristic ${G2Constants.CHAR_WRITE} not found")
+            lastDiagnostic = "no write char (5401); svc has ${chars.joinToString()}"
+            Log.w(TAG, "[$side] write characteristic ${G2Constants.CHAR_WRITE} not found in svc; chars: ${service.characteristics.map { it.uuid }}")
+            _state.value = ConnectionState.Error(side, lastDiagnostic)
             return false
         }
         if (notifyChar == null) {
-            Log.w(TAG, "[$side] notify characteristic ${G2Constants.CHAR_NOTIFY} not found")
+            lastDiagnostic = "no notify char (5402); svc has ${chars.joinToString()}"
+            Log.w(TAG, "[$side] notify characteristic ${G2Constants.CHAR_NOTIFY} not found in svc; chars: ${service.characteristics.map { it.uuid }}")
+            _state.value = ConnectionState.Error(side, lastDiagnostic)
             return false
         }
+        lastDiagnostic = "svc+chars ok"
         return true
     }
 

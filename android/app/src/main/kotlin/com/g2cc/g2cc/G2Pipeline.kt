@@ -230,7 +230,7 @@ class G2Pipeline(
                         is ConnectionState.Error,
                         is ConnectionState.Disconnected -> {
                             if (!leftReady) {
-                                _bleStatus.value = "L failed: ${stateLabel(s)}"
+                                _bleStatus.value = "L fail: ${left.lastDiagnostic}"
                                 onInstallFailure("L", s)
                             }
                         }
@@ -245,7 +245,7 @@ class G2Pipeline(
                         is ConnectionState.Error,
                         is ConnectionState.Disconnected -> {
                             if (!rightReady) {
-                                _bleStatus.value = "R failed: ${stateLabel(s)}"
+                                _bleStatus.value = "R fail: ${right.lastDiagnostic}"
                                 onInstallFailure("R", s)
                             }
                         }
