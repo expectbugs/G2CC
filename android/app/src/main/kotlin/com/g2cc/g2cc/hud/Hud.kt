@@ -27,6 +27,12 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
     private var seq: Int = 0x10        // server reserves 0x00-0x0F for auth; we start higher
     private var msgId: Int = 0x20
 
+    /** Last rendered first page text — used by the heartbeat to re-send a
+     *  content_page packet (the strongest "teleprompter session still active"
+     *  signal). Null until first render. */
+    @Volatile var lastPage0: String? = null
+        private set
+
     /** Render `text` on the HUD via the teleprompter primitive. Returns the
      *  number of pages produced (informational; UI may show "page 1 of N").
      *
@@ -36,6 +42,7 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
      *  delivery status. */
     fun render(text: String, onComplete: (success: Boolean) -> Unit = {}): Int {
         val pages = Teleprompter.formatPages(text)
+        lastPage0 = pages.firstOrNull()
         Log.i(TAG, "render: ${text.length} chars → ${pages.size} pages")
 
         // Build the full packet bundle with locked counter access. Per

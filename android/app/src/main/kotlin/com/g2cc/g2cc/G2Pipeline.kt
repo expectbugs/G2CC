@@ -303,36 +303,41 @@ class G2Pipeline(
     }
 
     /** Keep the teleprompter HUD session alive. Without periodic packets the
-     *  G2 firmware ends the session ~10 s after the last activity, blanks the
+     *  G2 firmware ends the session ~22 s after the last activity, blanks the
      *  screen, and the "connection lost" toast appears on the glasses
      *  (confirmed 2026-06-01 on Adam's pair).
      *
-     *  This is an empirical guess at the keepalive — i-soxi docs don't
-     *  document a heartbeat, and the teleprompter.py example just disconnects
-     *  after rendering. We re-issue sync_trigger (service 0x80-00 type=0x0E,
-     *  the lightest known teleprompter-flow packet) every 5 seconds.
+     *  Empirical findings 2026-06-01:
+     *  - sync_trigger every 5 s does NOT keep session alive. Glasses ack each
+     *    one (notify counts climb) but still time out at 22 s.
+     *  - Trying content_page (re-send page 0 of last render with fresh
+     *    seq/msgId) — this is the strongest "I'm still actively teleprompting"
+     *    signal documented in the i-soxi proto (type=3 content).
      *
      *  HB annotation: per CLAUDE.md "no-timeouts rule" exception list,
      *  heartbeat pacing is allowed (it's not a clock-kill on an operation).
-     *  Cadence chosen at half of the observed 10 s timeout to give margin. */
+     *  Cadence chosen well under the observed 22 s timeout for margin. */
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatTickCount.set(0)
         heartbeatJob = scope.launch {
-            connection?.send(ClientMessage.Diag("hb: started (cadence=5s, packet=sync_trigger)"))
+            connection?.send(ClientMessage.Diag("hb: started (cadence=8s, packet=content_page[0])"))
             try {
                 while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
-                    kotlinx.coroutines.delay(5_000L)
+                    kotlinx.coroutines.delay(8_000L)
                     val l = leftBle ?: break
                     val r = rightBle ?: break
+                    val page0 = hud?.lastPage0
+                    if (page0 == null) {
+                        connection?.send(ClientMessage.Diag("hb: no lastPage0 yet — skipping tick"))
+                        continue
+                    }
                     val seq = heartbeatSeq.getAndIncrement() and 0xFF
                     val msgId = heartbeatMsgId.getAndIncrement() and 0xFFFF
-                    val pkt = com.g2cc.g2cc.ble.Teleprompter.buildSyncTrigger(seq, msgId)
+                    val pkt = com.g2cc.g2cc.ble.Teleprompter.buildContentPage(seq, msgId, 0, page0)
                     l.sendPacket(pkt, "HB:L")
                     r.sendPacket(pkt, "HB:R")
                     val tick = heartbeatTickCount.incrementAndGet()
-                    // Emit a diag every tick so we can see if the heartbeat is
-                    // firing AND notice the moment it stops.
                     connection?.send(ClientMessage.Diag(
                         "hb: tick=$tick | notify L=${l.notifyCount.get()} R=${r.notifyCount.get()}"
                     ))
