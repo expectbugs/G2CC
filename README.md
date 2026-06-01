@@ -67,7 +67,7 @@ External:
 | 8 — Parakeet swap + DJI captures + tuning + speak/see/confirm | ✓ (code-only) | parakeet_engine.py + MicCapture.kt + AudioStreamer.kt. NeMo install + tuning gated on H5/H6. |
 | 9 — Dispatch-target abstraction polish + holds doc | ✓ | DISPATCH.md + HOLDS.md; `SwarmCodeDispatcher` stub in dispatch.ts. |
 
-**Total project:** 103 source files, ~7,900 LOC of TypeScript + Kotlin + Python; 26 Markdown docs.
+**Total project:** ~70 source files of TypeScript + Kotlin + Python; ~15 Markdown docs (counts grow with each phase; numbers approximate, not load-bearing).
 
 **What's left** is the hardware-gated test bucket (H1-H7) + swarm-gated wiring (S1-S4), all enumerated in `docs/HOLDS.md`. None of it blocks the primary speak/see/confirm flow once Adam has the glasses + DJI in hand.
 

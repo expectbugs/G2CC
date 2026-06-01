@@ -100,10 +100,14 @@ All flags the spec depends on confirmed present in `claude --help`:
 
 ## Path state checks
 
-- `/home/user/G2CC/`: contains `CLAUDE.md`, `g2_custom_app_spec.md`, and now `docs/`. No source code yet.
-- `/home/user/G2 Custom/even-g2-protocol/`: **DOES NOT EXIST** — Phase 1 will clone.
-- `/home/user/G2CC/audio/venv/`: **DOES NOT EXIST** — Phase 1 will create.
-- `/home/user/G2CC/server/src/`, `/home/user/G2CC/shared/src/`, `/home/user/G2CC/audio/`: **DO NOT EXIST** — Phase 1 creates the skeleton; Phases 2A/3A populate `server/src/`; Phases 2B/3B populate `audio/`.
+> **Snapshot dated 2026-05-05 — pre-Phase-1.** Most "DOES NOT EXIST" entries
+> below have since been created by Phases 1-9. Kept here as a historical
+> baseline; consult `git log` for current state.
+
+- `/home/user/G2CC/`: contains `CLAUDE.md`, `g2_custom_app_spec.md`, and now `docs/`. (At snapshot: no source code yet. Now: full server/shared/audio/android trees populated.)
+- `/home/user/G2 Custom/even-g2-protocol/`: snapshot-DID-NOT-EXIST; Phase 1 cloned (commit `b227335`).
+- `/home/user/G2CC/audio/venv/`: snapshot-DID-NOT-EXIST; Phase 1 created.
+- `/home/user/G2CC/server/src/`, `shared/src/`, `audio/`: snapshot-DID-NOT-EXIST; Phases 2A/3A/3B populated.
 - `/home/user/g2code/`: untouched, working.
 - `/home/user/g2aria/`: untouched, working.
 - `/home/user/aria/venv/bin/python`: exists, Python 3.13.12. Reference only.
