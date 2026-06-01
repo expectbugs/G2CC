@@ -36,10 +36,9 @@ export interface PoolEntry {
   lastActivity: Date
   contextPct: number
   pendingPermissionId: string | null
-  /** True iff this entry's CCSession was spawned with --resume. Tracked at
-   *  create-time so re-selecting a reused entry still reports the correct
-   *  "resumed prior conversation" status to the HUD. */
-  spawnedWithResume: boolean
+  // NB: there's no spawnedWithResume field — derive from
+  // entry.session.spawnedWithResume which reflects the LATEST spawn (including
+  // watchdog respawns that adopted --resume). Caching here would go stale.
 }
 
 export interface CreateOptions {
@@ -108,7 +107,6 @@ export class SessionPool extends EventEmitter {
       lastActivity: new Date(),
       contextPct: 0,
       pendingPermissionId: null,
-      spawnedWithResume: false,
     }
 
     this.sessions.set(id, entry)
@@ -140,7 +138,6 @@ export class SessionPool extends EventEmitter {
       lastActivity: new Date(),
       contextPct: 0,
       pendingPermissionId: null,
-      spawnedWithResume: true,
     }
 
     this.sessions.set(id, entry)
@@ -158,14 +155,25 @@ export class SessionPool extends EventEmitter {
    *  MUST skip wireSessionEvents() + spawn() in that case — otherwise listeners
    *  accumulate (S-H1) and a second subprocess is spawned orphaning the first
    *  (S-H2). `resumed` reflects whether the underlying CCSession was spawned
-   *  with --resume at create time, NOT whether this particular call re-spawned. */
+   *  with --resume at create time, NOT whether this particular call re-spawned.
+   *
+   *  4th-pass F3: if the reused entry has a DEAD session (watchdog gave up after
+   *  CRASH_LOOP_MAX_FAILURES — see watchdog.ts), evict it and create a fresh
+   *  one. Previously the caller would skip spawn (wired=true) and immediately
+   *  hit "No active CC session" on the next prompt, with no recovery path. */
   getOrCreateByDirectory(projectPath: string, options: CreateOptions = {}): { entry: PoolEntry; resumed: boolean; wired: boolean } {
     // First, see if we already have a live pool entry for this path.
     for (const entry of this.sessions.values()) {
-      if (entry.projectPath === projectPath) {
-        this.activeId = entry.id
-        return { entry, resumed: entry.spawnedWithResume, wired: true }
+      if (entry.projectPath !== projectPath) continue
+      if (!entry.session.isAlive()) {
+        // Stale crash-looped entry — evict so we recreate below.
+        console.warn(`[pool] evicting dead pool entry ${entry.id} for ${projectPath} (crash-loop or kill); creating fresh`)
+        this.sessions.delete(entry.id)
+        if (this.activeId === entry.id) this.activeId = null
+        break
       }
+      this.activeId = entry.id
+      return { entry, resumed: entry.session.spawnedWithResume, wired: true }
     }
 
     // Look up the most recent saved session for this directory.

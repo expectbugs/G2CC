@@ -39,6 +39,12 @@ interface SessionRecord {
 export class Watchdog extends EventEmitter {
   private interval: ReturnType<typeof setInterval> | null = null
   private sessions: Map<string, SessionRecord> = new Map()
+  // 4th-pass F2: serialize check() invocations. setInterval doesn't await its
+  // callback, so a tick that's still awaiting backoff (up to 32s at attempt 5)
+  // can overlap the next tick (30s). Without this guard, two checks see the
+  // same dead session, both call spawn(), the second hits cc-session's new
+  // double-spawn guard, throws, and double-increments consecutiveFailures.
+  private checking = false
 
   /** Register a session that's been spawned (or about to be spawned) outside
    *  the watchdog. The caller is expected to have called spawn() already so
@@ -64,6 +70,19 @@ export class Watchdog extends EventEmitter {
   }
 
   private async check(): Promise<void> {
+    if (this.checking) {
+      console.log('[watchdog] previous tick still in flight; skipping')
+      return
+    }
+    this.checking = true
+    try {
+      await this.checkLocked()
+    } finally {
+      this.checking = false
+    }
+  }
+
+  private async checkLocked(): Promise<void> {
     const now = Date.now()
 
     // Pass 1 — clear failure counters for sessions that have been ALIVE long
@@ -112,6 +131,8 @@ export class Watchdog extends EventEmitter {
         await new Promise<void>(resolve => setTimeout(resolve, backoff))
         // If CC had assigned a session ID, adopt it for --resume so the
         // conversation context is preserved across the respawn.
+        // (4th-pass L6: spawnedWithResume now derives from session.config so
+        // the HUD's "resumed" indicator stays accurate without an event wire.)
         const priorCcId = session.ccSessionId
         if (priorCcId) {
           session.setResumeTarget(priorCcId)

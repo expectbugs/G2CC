@@ -12,9 +12,10 @@ import type { DirectoryEntry } from '@g2cc/shared'
 const HOME_USER = '/home/user'
 
 /** Return the full sorted list of /home/user/<name>/ directories.
- *  Filters: skip dotfiles; skip non-directories; skip the G2CC tree itself
- *  (CC sessions started in G2CC would be confusing — Adam can re-add it
- *  manually if desired by configuring an explicit project list later). */
+ *  Filters: skip dotfiles; skip non-directories. (Note: prior JSDoc claimed
+ *  "skip the G2CC tree itself" — not actually implemented; G2CC is listed
+ *  alongside everything else under /home/user/. Doc-fix only, behavior
+ *  unchanged.) */
 export function listProjectDirectories(): DirectoryEntry[] {
   const entries: DirectoryEntry[] = []
 

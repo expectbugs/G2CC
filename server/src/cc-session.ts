@@ -78,6 +78,11 @@ export class CCSession extends EventEmitter {
   get projectPath(): string { return this.config.projectPath }
   /** CC's own session UUID — captured from the system init event. Used for --resume. */
   get ccSessionId(): string | null { return this._ccSessionId }
+  /** True iff the most-recent spawn used --resume (i.e. preserves prior CC
+   *  conversation context). Updated by setResumeTarget — including watchdog
+   *  respawns of originally-fresh sessions, so the HUD's "resumed" indicator
+   *  stays accurate across respawn boundaries. */
+  get spawnedWithResume(): boolean { return this.config.sessionId !== undefined }
   /** Prime the --resume sessionId for the next spawn() (used by watchdog). */
   setResumeTarget(ccSessionId: string): void { this.config.sessionId = ccSessionId }
 

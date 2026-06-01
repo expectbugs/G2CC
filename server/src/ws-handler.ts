@@ -188,11 +188,14 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     // alive orphans them past the WS close (g2code's bug we inherited).
     // Explicit policy: kill on disconnect. The "persist + auto-resume on
     // reconnect" alternative is documented in HOLDS.md but not implemented here.
+    // Capture count BEFORE the kill loop — after it runs, client.pool.count is 0
+    // and the log would always say "killed 0 sessions" (4th-pass L4).
+    const killedCount = client.pool.count
     for (const entry of client.pool.allEntries()) {
       watchdog?.unregister(entry.id)
       client.pool.closeSession(entry.id)
     }
-    console.log(`[ws] client closed (code=${code} reason="${String(reason)}") — killed ${client.pool.count} sessions`)
+    console.log(`[ws] client closed (code=${code} reason="${String(reason)}") — killed ${killedCount} sessions`)
   })
 
   return client
@@ -517,6 +520,11 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
 async function respawnActiveWithMode(
   client: WSClient, entry: PoolEntry, mode: PermissionMode, config: G2CCConfig,
 ): Promise<void> {
+  // 4th-pass F1: this function used to send cc_error + return on its two
+  // internal failure paths instead of throwing, which let the set_mode caller's
+  // `client.mode = msg.mode` run after a failure → local mode diverged from
+  // underlying session. Now throws on every failure path; the caller's catch
+  // is the single place that handles user-facing reporting.
   const ccSessionId = entry.session.ccSessionId
   const projectPath = entry.projectPath
 
@@ -540,8 +548,7 @@ async function respawnActiveWithMode(
           systemPrompt: config.claude.systemPrompt,
         })
   } catch (err) {
-    sendMsg(client, { type: 'cc_error', error: `Failed to switch mode: ${err}` })
-    return
+    throw new Error(`Failed to create session for mode switch: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   wireSessionEvents(client, newEntry)
@@ -564,7 +571,7 @@ async function respawnActiveWithMode(
   } catch (err) {
     watchdog?.unregister(newEntry.id)
     client.pool.closeSession(newEntry.id)
-    sendMsg(client, { type: 'cc_error', error: `Failed to spawn with new mode: ${err}` })
+    throw new Error(`Failed to spawn with new mode: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
