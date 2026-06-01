@@ -42,7 +42,17 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         // i-soxi/docs/teleprompter.md §"Message Sequence" the order is:
         //   display_config → init → first 10 pages → marker → next 2 pages
         //   → sync trigger → remaining pages
+        //
+        // Reset seq/msgId at the start of each render. The 8-bit seq used to
+        // wrap (~14 renders × 18 packets) and 16-bit msgId would eventually
+        // wrap too. Per-render reset gives each batch a fresh range so
+        // in-batch ordering is unambiguous. NOTE: this assumes renders
+        // serialize; two concurrent render() calls would collide on the
+        // same seq range. Phase 9 polish should add a render-level lock if
+        // concurrent renders become a real scenario.
         val packets = synchronized(counterLock) {
+            seq = 0x10
+            msgId = 0x20
             buildList {
                 add(Teleprompter.buildDisplayConfig(nextSeqLocked(), nextMsgIdLocked()))
                 add(

@@ -71,9 +71,13 @@ class ConnectionManager(
     private var ws: WebSocket? = null
     private val wsGen = AtomicInteger(0)
 
-    private var endpoints: List<String> = initialEndpoints
-    private var currentEndpointIdx = 0
-    private var endpointsTriedSinceSuccess = 0
+    // Mutated from both the OkHttp dispatcher thread (onClosed / onFailure) and
+    // from refreshEndpoints (scope.launch on Dispatchers.IO). @Volatile + the
+    // safe-index pattern on read prevents IOOBE if endpoints shrinks between
+    // a read of `endpoints` and `endpoints[currentEndpointIdx]`.
+    @Volatile private var endpoints: List<String> = initialEndpoints
+    @Volatile private var currentEndpointIdx = 0
+    @Volatile private var endpointsTriedSinceSuccess = 0
     private var reconnectDelayMs = RECONNECT_BASE_MS
     private var consecutiveAuthFailures = 0
     private var lastMessageReceivedAt = System.currentTimeMillis()
@@ -131,10 +135,22 @@ class ConnectionManager(
     }
 
     fun send(msg: ClientMessage) {
-        val w = ws ?: return
+        // A-H3: loud-fail on send before the socket is ready. The brief window
+        // between _connected.value=false and forceReconnect()'s new socket is a
+        // real period where messages used to vanish invisibly.
+        val w = ws ?: run {
+            Log.w(TAG, "send(${msg::class.simpleName}) before socket ready — message dropped")
+            return
+        }
         try {
             val text = WsJson.codec.encodeToString(ClientMessage.serializer(), msg)
-            w.send(text)
+            // OkHttp's WebSocket.send() returns false when the message couldn't
+            // be enqueued — buffer full (16 MiB cap) or socket closing. Used to
+            // be silently dropped; surface loudly per LOUD AND PROUD.
+            val accepted = w.send(text)
+            if (!accepted) {
+                Log.w(TAG, "OkHttp.send(${msg::class.simpleName}) returned false — message dropped (buffer full or closing)")
+            }
         } catch (e: Exception) {
             Log.w(TAG, "send threw", e)
         }
@@ -142,9 +158,18 @@ class ConnectionManager(
 
     /** Send binary frame (Phase 8 audio streaming between audio_start/audio_end). */
     fun sendBinary(payload: ByteArray) {
-        val w = ws ?: return
+        // A-H3: same loud-fail logic as send() — audio frames at ~50 Hz are
+        // exactly the case where silent drops would be invisible until the
+        // server reports "audio too short" with no clue why.
+        val w = ws ?: run {
+            Log.w(TAG, "sendBinary(${payload.size}B) before socket ready — frame dropped")
+            return
+        }
         try {
-            w.send(okio.ByteString.of(*payload))
+            val accepted = w.send(okio.ByteString.of(*payload))
+            if (!accepted) {
+                Log.w(TAG, "OkHttp.send(binary ${payload.size}B) returned false — frame dropped (buffer full or closing)")
+            }
         } catch (e: Exception) {
             Log.w(TAG, "sendBinary threw", e)
         }
@@ -223,7 +248,15 @@ class ConnectionManager(
                 }
                 else -> {
                     onMessage(msg)
-                    _events.tryEmit(msg)
+                    // A-H4: tryEmit returns false when the SharedFlow buffer is
+                    // full (extraBufferCapacity=64, BufferOverflow.SUSPEND default
+                    // → tryEmit drops). Used to be silently dropped; downstream
+                    // SharedFlow collectors that are slow would lose protocol
+                    // messages invisibly. LOUD AND PROUD.
+                    val accepted = _events.tryEmit(msg)
+                    if (!accepted) {
+                        Log.w(TAG, "SharedFlow buffer overflow — dropped ${msg::class.simpleName} (slow collector?)")
+                    }
                 }
             }
         }

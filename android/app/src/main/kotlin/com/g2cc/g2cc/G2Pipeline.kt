@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Log
 import com.g2cc.g2cc.audio.AudioStreamer
 import com.g2cc.g2cc.audio.MicCapture
-import com.g2cc.g2cc.ble.AckEmitter
 import com.g2cc.g2cc.ble.BleScanner
 import com.g2cc.g2cc.ble.EventParser
 import com.g2cc.g2cc.ble.G2BleClient
@@ -22,11 +21,14 @@ import com.g2cc.g2cc.state.StateMachine
 import com.g2cc.g2cc.storage.Prefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.time.Duration
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Top-level Phase 6 integration: ConnectionManager ↔ HUD ↔ BLE clients.
@@ -61,31 +63,68 @@ class G2Pipeline(
     private var confirmation: ConfirmationFlow? = null
     private var connection: ConnectionManager? = null
     private var streamer: AudioStreamer? = null
-    private var bleScanner: BleScanner? = null
+    // AtomicReference so writes from the BLE handler thread (scan callback) are
+    // visible from the main thread (stop()) without a torn-reference race.
+    private val bleScannerRef = AtomicReference<BleScanner?>(null)
+    // Collector job handles — stored so installBleClients can cancel before
+    // re-launching on a re-install (e.g. post-reconnect after BLE disconnect).
+    // Without this, every re-install leaks a coroutine that keeps firing
+    // onTap/onDoubleTap from the OLD flow.
+    private var leftCollectorJob: Job? = null
+    private var rightCollectorJob: Job? = null
 
-    /** Bug fix #1 wiring: scan for the G2 lens pair, connect both, and install
-     *  the BLE clients into the pipeline. Idempotent — calling twice is a no-op
-     *  if BLE clients are already installed.
+    /** Scan or directed-connect to the G2 lens pair, then install BLE clients.
+     *  Idempotent — calling twice is a no-op if BLE clients are already installed.
      *
-     *  Bug-fix-pass-2 #2: BleScanner is now stored as a member so `stop()` can
-     *  cancel an in-flight scan if the service is shut down before the pair
-     *  is found. */
+     *  Spec compliance fix: if a saved pair exists in PairingState (CLAUDE.md
+     *  "BLE bonding state survives across app restarts"), do a DIRECTED connect
+     *  via BluetoothAdapter.getRemoteDevice() and skip the scan entirely.
+     *  Falls back to scan only if the directed connect throws (e.g. invalid
+     *  saved address, BT not enabled). Saves battery + reconnect latency on
+     *  every wake-from-Doze.
+     */
     @android.annotation.SuppressLint("MissingPermission")
     fun scanAndConnect() {
         if (leftBle != null && rightBle != null) {
             Log.i(TAG, "scanAndConnect: BLE already installed")
             return
         }
-        if (bleScanner != null) {
+        if (bleScannerRef.get() != null) {
             Log.i(TAG, "scanAndConnect: scan already in progress")
             return
         }
+
+        // Directed-connect path: skip scan if we know the addresses.
+        if (pairing.hasPair) {
+            try {
+                val btMgr = context.getSystemService(Context.BLUETOOTH_SERVICE)
+                    as? android.bluetooth.BluetoothManager
+                val adapter = btMgr?.adapter
+                if (adapter != null && adapter.isEnabled) {
+                    val leftDevice = adapter.getRemoteDevice(pairing.leftAddress!!)
+                    val rightDevice = adapter.getRemoteDevice(pairing.rightAddress!!)
+                    val leftClient = G2BleClient(context, Side.Left)
+                    val rightClient = G2BleClient(context, Side.Right)
+                    leftClient.connectTo(leftDevice)
+                    rightClient.connectTo(rightDevice)
+                    Log.i(TAG, "scanAndConnect: directed connect L=${pairing.leftAddress} R=${pairing.rightAddress}")
+                    installBleClients(leftClient, rightClient)
+                    return
+                } else {
+                    Log.w(TAG, "scanAndConnect: BT adapter unavailable for directed connect, falling back to scan")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "scanAndConnect: directed-connect threw, falling back to scan", e)
+            }
+        }
+
+        // Scan path (no saved pair OR directed-connect failed).
         val scanner = BleScanner(context)
-        bleScanner = scanner
+        bleScannerRef.set(scanner)
         scanner.start { event ->
             when (event) {
                 is BleScanner.Event.FoundPair -> {
-                    bleScanner = null            // scanner self-stopped; drop reference
+                    bleScannerRef.set(null)            // scanner self-stopped; drop reference
                     val leftClient = G2BleClient(context, Side.Left)
                     val rightClient = G2BleClient(context, Side.Right)
                     leftClient.connectTo(event.left)
@@ -97,7 +136,7 @@ class G2Pipeline(
                     installBleClients(leftClient, rightClient)
                 }
                 is BleScanner.Event.Failure -> {
-                    bleScanner = null            // scanner self-stopped on failure
+                    bleScannerRef.set(null)            // scanner self-stopped on failure
                     Log.w(TAG, "scan failure: ${event.reason}")
                     state.transition(AppState.ERROR)
                 }
@@ -122,40 +161,49 @@ class G2Pipeline(
             menu = MenuController(newHud, it)
             confirmation = ConfirmationFlow(newHud, it)
         }
-        scope.launch { collectEventsDebounced(left.events) }
-        scope.launch { collectEventsDebounced(right.events) }
+        // Cancel any prior collectors so a re-install (e.g. after BLE disconnect
+        // + reconnect) doesn't stack a second pair, double-firing every onTap.
+        leftCollectorJob?.cancel()
+        rightCollectorJob?.cancel()
+        leftCollectorJob = scope.launch { collectEventsDebounced(left.events) }
+        rightCollectorJob = scope.launch { collectEventsDebounced(right.events) }
     }
 
-    @Volatile private var lastTapAt: Long = 0L
-    @Volatile private var lastDoubleTapAt: Long = 0L
-    @Volatile private var lastScrollUpAt: Long = 0L
-    @Volatile private var lastScrollDownAt: Long = 0L
+    // AtomicLong + CAS gives us atomic check-then-set so two collectors firing
+    // a paired-emission near-simultaneously don't both pass the debounce check.
+    // @Volatile alone only provides visibility, not atomicity for the if/set.
+    private val lastTapAt = AtomicLong(0L)
+    private val lastDoubleTapAt = AtomicLong(0L)
+    private val lastScrollUpAt = AtomicLong(0L)
+    private val lastScrollDownAt = AtomicLong(0L)
 
     private suspend fun collectEventsDebounced(events: kotlinx.coroutines.flow.Flow<EventParser.Event>) {
         events.collect { event ->
             val now = System.currentTimeMillis()
             when (event) {
                 is EventParser.Event.Tap -> {
-                    if (now - lastTapAt >= EVENT_DEBOUNCE_MS) {
-                        lastTapAt = now
+                    val prev = lastTapAt.get()
+                    if (now - prev >= EVENT_DEBOUNCE_MS && lastTapAt.compareAndSet(prev, now)) {
                         onTap()
                     }
                 }
                 is EventParser.Event.DoubleTap -> {
-                    if (now - lastDoubleTapAt >= EVENT_DEBOUNCE_MS) {
-                        lastDoubleTapAt = now
+                    val prev = lastDoubleTapAt.get()
+                    if (now - prev >= EVENT_DEBOUNCE_MS && lastDoubleTapAt.compareAndSet(prev, now)) {
                         onDoubleTap()
                     }
                 }
                 is EventParser.Event.ScrollUp -> {
-                    if (now - lastScrollUpAt >= EVENT_DEBOUNCE_MS) {
-                        lastScrollUpAt = now
+                    val prev = lastScrollUpAt.get()
+                    if (now - prev >= EVENT_DEBOUNCE_MS) {
+                        lastScrollUpAt.compareAndSet(prev, now)
                         // Firmware-native scroll handles teleprompter pages; no app action.
                     }
                 }
                 is EventParser.Event.ScrollDown -> {
-                    if (now - lastScrollDownAt >= EVENT_DEBOUNCE_MS) {
-                        lastScrollDownAt = now
+                    val prev = lastScrollDownAt.get()
+                    if (now - prev >= EVENT_DEBOUNCE_MS) {
+                        lastScrollDownAt.compareAndSet(prev, now)
                     }
                 }
                 is EventParser.Event.Unknown -> {
@@ -265,8 +313,16 @@ class G2Pipeline(
     }
 
     fun stop() {
-        bleScanner?.stop()
-        bleScanner = null
+        bleScannerRef.getAndSet(null)?.stop()
+        // Tear down GATT connections cleanly so the BLE stack doesn't leak
+        // open handles across service restart cycles (foreground service
+        // reload-on-stuck per the watchdog).
+        leftBle?.shutdownBle()
+        rightBle?.shutdownBle()
+        leftBle = null
+        rightBle = null
+        leftCollectorJob?.cancel(); leftCollectorJob = null
+        rightCollectorJob?.cancel(); rightCollectorJob = null
         connection?.shutdown()
         connection = null
         scope.cancel()
@@ -349,18 +405,9 @@ class G2Pipeline(
         }
     }
 
-    /** Phase 7 hookpoint: emit BLE-ack signals back to the server's Channel Router.
-     *  AckEmitter logs today; Phase 7 wires the BleAckMsg send path through ConnectionManager. */
-    fun emitAck(messageId: String, verified: Boolean, reason: String? = null) {
-        if (verified) AckEmitter.markVerified(messageId)
-        else AckEmitter.markUnverified(messageId, reason ?: "(no reason)")
-        val cm = connection ?: return
-        cm.send(ClientMessage.BleAck(
-            messageId = messageId,
-            status = if (verified) "verified" else "unverified",
-            reason = reason,
-        ))
-    }
+    // Phase 7's emitAck + AckEmitter stub were obsoleted: ConfirmationFlow.kt
+    // now sends BleAckMsg inline from its hud.render onComplete callback. The
+    // dead code (and AckEmitter.kt) was removed in the third-pass cleanup.
 
     companion object {
         const val TAG = "G2Pipeline"

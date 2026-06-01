@@ -91,8 +91,19 @@
             </intent-filter>
         </receiver>
 
-        <!-- IntentReceiver: Tasker / Assistant integration. Exported with explicit
-             actions only — listed in INTENTS.md so other automations can target it. -->
+        <!-- IntentReceiver: Tasker / Assistant integration.
+             SECURITY NOTE: deliberately exported with NO custom permission. Any
+             installed app can broadcast these actions. This is an explicit
+             tradeoff per HOLDS.md / INTENTS.md §Threat Model:
+               - Sideloaded distribution (no Play Store) on Adam's single device
+               - Limited app population (curated install list)
+               - Tasker integration is the explicit reason for the open surface
+                 — a signature-level permission would require Adam to sign
+                 Tasker (or a Tasker plugin) with the same cert.
+             If the threat model ever changes (e.g. broader distribution), add
+             android:permission="com.g2cc.permission.CONTROL" and declare a
+             signature-level <permission> element above. See INTENTS.md.
+        -->
         <receiver
             android:name=".intents.IntentReceiver"
             android:exported="true">

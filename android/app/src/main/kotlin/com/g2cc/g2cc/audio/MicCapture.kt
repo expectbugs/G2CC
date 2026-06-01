@@ -83,6 +83,10 @@ class MicCapture(private val context: Context) {
                 rec.startRecording()
             } catch (e: IllegalStateException) {
                 onEvent(Event.Failure("AudioRecord.startRecording() failed", e))
+                // A-H2: reset isCapturing to false BEFORE releasing, otherwise
+                // the instance is sticky-true and subsequent start() calls
+                // return "already capturing" — mic permanently wedged.
+                isCapturing = false
                 releaseLocked()
                 return
             }
@@ -90,8 +94,24 @@ class MicCapture(private val context: Context) {
             onEvent(Event.Started(source, sampleRate, channels, encoding))
 
             captureJob = scope.launch {
-                runReadLoop(rec, encoding, onEvent)
-                onEvent(Event.Stopped)
+                try {
+                    runReadLoop(rec, encoding, onEvent)
+                } finally {
+                    // A-H1: if runReadLoop exited via an error path (USB unplug,
+                    // read returning ERROR_DEAD_OBJECT, etc.) isCapturing is still
+                    // true and resources are still held. Own the cleanup here so
+                    // the instance isn't permanently wedged. stop() flips
+                    // isCapturing=false first then cancels this job, so the check
+                    // below avoids double-release in the user-stopped path.
+                    synchronized(this@MicCapture) {
+                        if (isCapturing) {
+                            Log.w(TAG, "read-loop exited while isCapturing=true — cleaning up")
+                            isCapturing = false
+                            releaseLocked()
+                        }
+                    }
+                    onEvent(Event.Stopped)
+                }
             }
         }
     }

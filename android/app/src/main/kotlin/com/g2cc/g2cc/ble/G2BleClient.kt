@@ -88,6 +88,15 @@ class G2BleClient(
             .enqueue()
     }
 
+    /** Tear down the GATT connection cleanly. Wired in G2Pipeline.stop() so
+     *  service restart cycles don't leak GATT connections. The BleManager's
+     *  parent `disconnect()` is final, so we can't override — wrap and enqueue
+     *  under a distinct name. */
+    @SuppressLint("MissingPermission")
+    fun shutdownBle() {
+        disconnect().enqueue()
+    }
+
     override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
         val service = gatt.getService(G2Constants.SERVICE) ?: run {
             Log.w(TAG, "[$side] G2 service ${G2Constants.SERVICE} not found")

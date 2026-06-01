@@ -44,8 +44,42 @@ adb shell am broadcast -a com.g2cc.intent.action.SWITCH_DISPATCH_TARGET --es tar
 2. Action: `com.g2cc.intent.action.START_RECORDING`
 3. Target: Broadcast Receiver
 
-## Security note
+## Security note + threat model
 
-The receiver is `exported="true"` so other apps can target it; that's the entire point of the integration surface. **No untrusted input is consumed** — actions are pure side-effect triggers with at most a string `target_id` extra. Phase 4's stub handlers don't write to any persistent state from intent payloads.
+The receiver is `exported="true"` with **no** `android:permission` attribute — any installed app can broadcast these actions. The third-pass code review flagged this (finding A-Medium #10). Adam's call after weighing the tradeoffs: **leave open**, explicitly documented here.
 
-When new actions are added later (Phase 6 may add `OPEN_PROJECT` with a path payload, Phase 9 may add `INVOKE_SPECIALIST` with a target id + free-form prompt), every new payload field gets explicit validation at the receiver — no implicit deserialization, no silent failure on bad input.
+### Why open
+
+1. **Sideloaded only** — no Play Store distribution. The APK only lands on Adam's single Pixel 10a via USB ADB.
+2. **Curated install set** — the threat model is "what apps does Adam install." That set is small and known.
+3. **Tasker integration is the point** — a signature-level permission would require signing Tasker (or a custom plugin) with the G2CC release cert, which adds friction without addressing a real attacker.
+4. **Action surface is minimal** — actions are pure side-effect triggers (start/stop record, show picker, switch target). No untrusted input is consumed; at most a string `target_id` extra. Phase 4's stub handlers don't write to any persistent state from intent payloads.
+
+### When this should be tightened
+
+If any of these become false, add the signature-level permission immediately:
+
+- Broader distribution (sharing the APK beyond Adam's phone)
+- An untrusted app gets installed
+- Future actions consume free-form input that reaches the dispatcher (e.g. a hypothetical `INVOKE_SPECIALIST` with a prompt extra — that would let any app drive Claude Code with arbitrary text)
+
+### Tightening recipe
+
+Add to `AndroidManifest.xml`:
+
+```xml
+<permission android:name="com.g2cc.permission.CONTROL"
+            android:protectionLevel="signature" />
+
+<receiver android:name=".intents.IntentReceiver"
+          android:exported="true"
+          android:permission="com.g2cc.permission.CONTROL">
+  ...
+</receiver>
+```
+
+Then re-sign Tasker (or build a Tasker plugin signed with the G2CC cert) so it can hold the new permission.
+
+### Payload validation discipline
+
+When new actions land later (Phase 6 may add `OPEN_PROJECT` with a path payload, Phase 9 may add `INVOKE_SPECIALIST` with target id + free-form prompt), every new payload field gets explicit validation at the receiver — no implicit deserialization, no silent failure on bad input. If a future action consumes free-form text, the tightening recipe above becomes mandatory.

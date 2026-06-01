@@ -64,17 +64,27 @@ class AudioStreamer(
                         )
                     }
                     is MicCapture.Event.Frame -> {
-                        if (!isStreaming) return@start
-                        connection.sendBinary(event.pcm)
+                        // Hold the streamer lock around the isStreaming check + sendBinary
+                        // so a concurrent stop() can't slip between the read and the send
+                        // — that race used to allow one Frame to fire AFTER audio_end was
+                        // already sent, violating the protocol invariant.
+                        synchronized(this@AudioStreamer) {
+                            if (!isStreaming) return@synchronized
+                            connection.sendBinary(event.pcm)
+                        }
                     }
                     is MicCapture.Event.Failure -> {
                         Log.e(TAG, "capture failure: ${event.reason}", event.cause)
                         // Loud failure: flip back to idle by sending audio_end so server doesn't
                         // wait forever for a tail of frames. The server's stt.transcribe will
                         // surface "Audio too short" or similar to the HUD.
+                        // A-H1 follow-on: also call mic.stop() so MicCapture isn't left
+                        // holding AudioRecord resources — its own internal cleanup will
+                        // fire too, but explicit stop here makes the lifecycle clear.
                         if (isStreaming) {
                             connection.send(ClientMessage.AudioEnd)
                             isStreaming = false
+                            mic.stop()
                         }
                     }
                     is MicCapture.Event.Stopped -> {

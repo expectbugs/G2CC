@@ -50,10 +50,20 @@ class ConfirmationFlow(
      *  Phase 7 fix #3: after the BLE write batch drains, send a `BleAckMsg`
      *  with the delivery status. The server's Channel Router uses this to
      *  flip the channel status to `verified` (writes drained successfully)
-     *  or `unverified` (any write failed / no ack within window). */
+     *  or `unverified` (any write failed / no ack within window).
+     *
+     *  Third-pass fix: if a prior request is still pending when a new one
+     *  arrives (Channel Router bug, two specialists, or any unexpected
+     *  overlap), explicitly REJECT the prior so its server-side promise
+     *  resolves loudly instead of deadlocking forever (no-timeouts rule
+     *  means the server waits indefinitely). */
     fun onConfirmRequest(msg: ServerMessage.ConfirmOnHud) {
         Log.i(TAG, "confirm requested id=${msg.requestId} textLen=${msg.text.length}")
-        pending.set(msg)
+        val prev = pending.getAndSet(msg)
+        if (prev != null) {
+            Log.w(TAG, "superseding pending confirm id=${prev.requestId} (new id=${msg.requestId}) — emitting rejected for prior")
+            connection.send(ClientMessage.ConfirmOnHudResponse(prev.requestId, "rejected"))
+        }
         _active.value = true
         // Render scrollably; the rendered prefix tells the user their gesture options.
         // Per spec §6 "Confirm: tap • Reject: double-tap" line.
