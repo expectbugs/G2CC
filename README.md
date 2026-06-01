@@ -2,7 +2,7 @@
 
 Direct-BLE G2 glasses + Claude Code dispatch + DJI two-mic ANC + Parakeet ASR.
 
-Replaces the Even Hub seven-tap relaunch dance with a Pixel 10a foreground service that talks BLE to the Even G2 glasses and WebSocket to a home server. The server bridges to a Claude Code subprocess (vanilla CC today; swarm Code/Engineering specialist later). Audio path goes server-side: NLMS ANC on stereo DJI Mic 3 input → DeepFilterNet polish → NVIDIA Parakeet TDT 0.6B v2.
+Replaces the Even Hub seven-tap relaunch dance with a Pixel 10a foreground service that talks BLE to the Even G2 glasses and WebSocket to a home server. The server bridges to a Claude Code subprocess (vanilla CC today; swarm Code/Engineering specialist later). Audio path goes server-side: DJI Mic 3 (mono TX2) → spectral subtraction with learned noise profile → DeepFilterNet polish → NVIDIA Parakeet TDT 0.6B v2. Two-mic NLMS retained in-tree as fallback for non-stationary noise scenarios.
 
 ## Layout
 
@@ -29,8 +29,11 @@ G2CC/
                                + padasip, deepfilternet (Phase 3B)
                                + nemo_toolkit[asr] (Phase 8)
     samples/                   captured DJI recordings (Phase 8 when at the machine)
-    tools/                     verify_dji_settings.py, capture.py, sanity_listen.py
-    pipeline/                  nlms.py, dfn_polish.py, parakeet_engine.py
+    profiles/                  learned noise-PSD profiles (.npz; one per environment)
+    tools/                     verify_dji_settings.py, capture.py, sanity_listen.py,
+                               learn_noise_profile.py
+    pipeline/                  notch_filter.py, spectral_subtract.py, nlms.py (fallback),
+                               dfn_polish.py, parakeet_engine.py
   android/                     Kotlin Android app (Phase 4+)
   docs/
     INHERITANCE_MAP.md         which G2CC file inherits from which g2code/g2aria/aria source
@@ -56,7 +59,7 @@ External:
 | 2A — Server core (CC dispatch + WS) | ✓ | TS workspace builds; smoke test passes 6 expectations. |
 | 2B — DJI capture infrastructure | ✓ | `verify_dji_settings.py` + `capture.py` + `sanity_listen.py`. Captures deferred to H5 (Adam at machine). |
 | 3A — Server robustness polish | ✓ | Heartbeat, `/endpoints` refresh, multi-endpoint QR. |
-| 3B — NLMS + DFN modules | ✓ | Math sanity passes; tuning gated on H5 captures. |
+| 3B — noise-reduction + DFN modules | ✓ | spectral_subtract + notch_filter (default) + nlms (fallback) + dfn_polish. Math sanity + real-data holdout validation passing on May phone recording (5-8 dB reduction with <0.6 dB speech impact at +18 dB SNR). Production tuning gated on H5 DJI captures. |
 | 4 — Android shell + foreground service | ✓ | Sideloadable; gate H1 (8-hour pocket test) on Pixel 10a. |
 | 5 — BLE driver against i-soxi | ✓ | 12 BLE files + 6 unit tests. Hardware test gate H2 (real glasses) before BLE bonding flow. |
 | 6 — App↔Server WebSocket + 5-defence reconnect + HUD | ✓ | wsGen race-safe pattern, kotlinx.serialization protocol, Hud + MenuController. |

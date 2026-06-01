@@ -180,6 +180,17 @@ The HUD becomes a generic confirmation surface for high-stakes actions. The app 
 
 ## 8. Audio Capture Path (mic-capture-gated, build-later)
 
+> **REVISION NOTE (post-May-28 noise analysis):** the noise-reduction default
+> shifted from two-mic NLMS to **single-mic spectral subtraction with a
+> learned PSD**. Phone recording of Adam's machine showed textbook
+> stationarity (PSD drift 0.4 ± 1.4 dB across 60 s, ~3 s cycle) — a learned
+> PSD plus Wiener gain handles this cleanly without a second mic. Real-data
+> holdout on the May recording: 5-8 dB noise reduction with <0.6 dB loss on
+> a speech-level signal. The two-mic NLMS plan in this section is retained
+> as the fallback (`pipeline/nlms.py`) but **the default pipeline is now
+> notch → spectral_subtract → DFN → Parakeet on mono TX2.** See
+> `audio/pipeline/README.md` for the current canonical order.
+
 When mic capture lands upstream, the app's role is to deliver clean stereo audio from the DJI Mic 3 to the server's STT pipeline. Per `stt_upgrade.md`:
 
 ### DJI Mic 3 setup constraints (must be honored)

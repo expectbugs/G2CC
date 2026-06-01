@@ -64,19 +64,32 @@ H4 confirms the actual gesture-to-confirmation works on real glasses.
 ### H5. Phase 8 — DJI captures + audio pipeline tuning
 
 **Trigger:** Adam is back at the machine with the DJI receiver.
-**Scope:** see `/home/user/G2CC/audio/samples/README.md` for the workflow.
-Brief:
-  1. Run `verify_dji_settings.py` (six-toggle hard-fail checklist)
-  2. Capture three samples: `machine_alone`, `voice_plus_machine`, `voice_alone`
-  3. Run `sanity_listen.py` to confirm structural integrity
-  4. Run NLMS+DFN against the voice_plus_machine.wav with default parameters
-     (μ=0.025, taps=1024, hp=60Hz)
-  5. SNR target on TX2: ≥15dB improvement (per spec §B2)
-  6. Use `tune.py` to sweep parameters until target met
-  7. Run faster-whisper on the cleaned audio and confirm WER approaches
-     `voice_alone.wav`'s baseline
-  8. Then swap to Parakeet (after H6 below).
-**Cost:** ~2-3 days including iteration on parameters.
+**Scope:** the default pipeline shifted from two-mic NLMS to single-mic
+learned-profile after the May 28 phone-recording analysis showed textbook
+stationarity (PSD drift 0.4 ± 1.4 dB over 60 s, 2.96 s cycle). H5 now is:
+  1. Plug in DJI TX2 only (mono collar mic; NC off; auto-gain off; 32-bit float)
+  2. Record ~30-60 s of noise alone with the machine running:
+     `audio/tools/capture.py noise --mono` (no voice)
+  3. Learn the production profile:
+     `audio/tools/learn_noise_profile.py samples/noise-<ts>.wav \
+        --output audio/profiles/machine.npz`
+     (replaces the prototyping profile learned from the phone recording)
+  4. Record ~30 s of speech against the machine for validation:
+     `audio/tools/capture.py voice_plus_machine --mono`
+  5. Run the pipeline against the validation capture:
+       - notch_filter at profile['peak_freqs']
+       - wiener_subtract with profile['noise_psd'], alpha=1.5 default
+       - DeepFilterNet polish
+       - faster-whisper
+     Confirm WER is meaningfully better than the unprocessed baseline.
+  6. If residual machine noise is audible, raise alpha to 2.0-2.5 (sweep
+     showed +1-2 dB more reduction per +0.5 alpha at <0.2 dB extra speech
+     impact on a +18 dB SNR signal).
+  7. Then swap to Parakeet (after H6 below).
+**Cost:** ~1 day. Simpler than the original two-mic NLMS workflow because
+no reference mic alignment, no μ/taps sweep, no DJI NC-on-both-TX verification.
+**Fallback:** `pipeline/nlms.py` is still in-tree if the single-mic path
+underperforms in practice (e.g. additional non-stationary noise sources).
 
 ### H6. Phase 8 — NeMo install + Parakeet swap
 

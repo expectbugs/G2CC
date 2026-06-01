@@ -1,108 +1,135 @@
 # `audio/pipeline/`
 
-Offline / server-side audio processing modules.
+Server-side audio processing for the G2CC build.
 
-## Order
+## Default pipeline (single-mic + learned-profile)
 
 ```
-DJI stereo .wav (TX1=ref, TX2=speech)
-       │
-       ▼
-  nlms.py  →  cleaned mono
-       │
-       ▼
-  dfn_polish.py  →  polished mono
-       │
-       ▼
-  parakeet_engine.py  →  transcript     ← Phase 8 ONLY
-       │
-       ▼
-  eval.py / tune.py  →  SNR + WER metrics    ← needs real captures
+noise-only recording  →  learn_noise_profile.py  →  profiles/<name>.npz
+                                                       │
+                                                       ▼
+DJI TX2 mono speech  →  notch_filter  →  spectral_subtract  →  dfn_polish  →  parakeet_engine  →  transcript
+                       (peak_freqs)     (noise_psd)
 ```
+
+Rationale: the May 28 recording of Adam's machine showed **near-textbook
+stationarity** (PSD first-half vs second-half differs by 0.4 dB mean ± 1.4 dB)
+and a consistent **2.96 s cycle period**. For noise that stationary, a learned
+noise PSD does most of the work that two-mic NLMS would; one mic (DJI TX2
+collar) is sufficient. Validated on real holdout: 5-8 dB noise reduction at
+α=1.5-3.0 with <0.6 dB loss on a speech-level signal.
+
+NLMS stays in-tree (`nlms.py`) as a fallback for non-stationary noise scenarios
+(e.g. a different workplace, additional uncorrelated sources). Not on the
+default path.
 
 ## Modules
 
-### `nlms.py` (Phase 3B — written; tuning deferred to Phase 8)
+### `notch_filter.py`
 
 Public API:
 
 ```python
-from pipeline.nlms import nlms_clean
-cleaned_mono = nlms_clean(stereo_float32, sample_rate=48000, mu=0.025, taps=1024, hp_cutoff=60.0)
+from pipeline.notch_filter import apply_notches
+audio = apply_notches(audio_mono, sample_rate=48000, frequencies=peak_freqs, Q=30.0)
 ```
 
-Defaults from spec §B2. Hand-rolled NumPy (~30 lines core loop). High-pass on
-ref channel strips magnet-vibration rumble. Bad input shape raises `ValueError`
-loudly.
+IIR notch cascade. Use BEFORE spectral subtraction so the broadband Wiener
+stage doesn't have to chase tones a 2-line IIR can carve cleanly. Empty
+frequency list returns the input unchanged.
 
-Math sanity: `python -m pipeline.nlms --self-test`. The synthetic test confirms
-the math doesn't blow up but is **not a substitute for tuning on real captures**
-— per the discipline rule.
+Math sanity: `python -m pipeline.notch_filter --self-test`
 
-### `dfn_polish.py` (Phase 3B — written; model load deferred to Phase 8)
+### `spectral_subtract.py`
+
+Public API:
+
+```python
+from pipeline.spectral_subtract import wiener_subtract, load_profile
+profile = load_profile('profiles/machine.npz')
+audio = wiener_subtract(audio_mono, profile['sample_rate'], profile['noise_psd'],
+                        alpha=1.5, floor=0.05)
+```
+
+Wiener filter with learned noise PSD: `G(f,t) = max(floor, (|Y|² - α·N)/|Y|²)`.
+`α` controls aggressiveness (1.5 conservative, 2.5 typical, 3.0 max-without-
+artifacts based on May-recording sweep). `floor` is the spectral floor
+preventing musical-noise artifacts (-26 dB default).
+
+The noise PSD MUST be learned with the same STFT params used at inference —
+`learn_noise_profile.py` saves them inside the .npz alongside the PSD so this
+is automatic.
+
+Math sanity: `python -m pipeline.spectral_subtract --self-test`
+
+### `dfn_polish.py`
 
 Public API:
 
 ```python
 from pipeline.dfn_polish import polish
-polished_mono = polish(cleaned_mono, sample_rate=48000)
+polished = polish(audio_mono, sample_rate=48000)
 ```
 
-Lazy-loads DeepFilterNet (DFN3) on first call inside `threading.Lock` —
-mirrors `/home/user/aria/whisper_engine.py:121-181` exactly. CUDA-default
-(falls back to CPU if torch decides). Bad input shape raises `ValueError`.
+DeepFilterNet polish — generic residual denoising after the profile-based
+pipeline. Lazy-loads DFN3 on first call inside a `threading.Lock`; mirrors
+`/home/user/aria/whisper_engine.py:121-181` exactly.
 
-Class shape check: `python -m pipeline.dfn_polish --import-check`. Does NOT
-load the model (which takes ~15s the first time).
+Class shape check: `python -m pipeline.dfn_polish --import-check`
 
-### `parakeet_engine.py` (Phase 8 ONLY — not yet written)
+### `parakeet_engine.py` (Phase 8 ONLY — not yet shipping)
 
-Will mirror `dfn_polish.py`'s lazy-load + lock pattern, with internals replaced
-by `from nemo.collections.asr.models import EncDecRNNTBPEModel` (verify exact
+Will mirror `dfn_polish.py`'s lazy-load + lock pattern, internals replaced by
+`from nemo.collections.asr.models import EncDecRNNTBPEModel` (verify exact
 class against the Parakeet model card BEFORE writing — do not guess). Input
-shape validated against a clean LibriSpeech sample with known WER (1.69%) before
-plugging into the live pipeline.
+shape validated against a clean LibriSpeech sample with known WER (1.69%)
+before plugging into the live pipeline.
 
-### `eval.py`, `tune.py` (Phase 3B placeholder; Phase 8 active)
+### `nlms.py` (FALLBACK — not on default path)
 
-Refuse to run when captures are missing. Raise `NotEnoughCapturesYet` loudly
-so a Phase 8 developer can't accidentally tune against an empty directory.
+Two-mic adaptive cancellation. Kept in-tree because:
+- Workplace noise character may change (different machine, additional sources).
+- Non-stationary scenarios (variable RPM, doors slamming, untrained noise
+  sources) where the static PSD model degrades.
+- Diagnostic A/B against the single-mic path during Phase 8 tuning.
+
+Math sanity: `python -m pipeline.nlms --self-test`
+
+### `eval.py`, `tune.py`
+
+Refuse to run when real captures are missing — raise `NotEnoughCapturesYet`
+loudly per the no-silent-failure rule.
 
 ```bash
 python -m pipeline.eval         # raises NotEnoughCapturesYet today
 python -m pipeline.tune         # raises NotEnoughCapturesYet today
 ```
 
-## Discipline
-
-From `CLAUDE.md`:
-
-- **Tune NLMS parameters on real DJI captures, not synthetic audio.** Step
-  size μ in 0.01–0.05; filter length 1024 taps at 48 kHz; high-pass on
-  reference channel below 60 Hz.
-- **Never mute or scrub the reference channel.** TX1's job is to be a
-  high-SNR-of-noise pickup. The DJI's onboard NC corrupting it is the single
-  most common failure mode for ANC.
-- **The Parakeet swap is independent from the ANC work.** Validate the ANC +
-  DeepFilterNet pipeline on the OLD faster-whisper first to isolate the
-  noise-reduction win. Then swap ASR.
-- **Clip stereo audio at 32-bit float boundaries when shipping to the server.**
-  No clipping headroom loss between the DJI's 32-bit float internal recording
-  and the server's NLMS input.
-
-## Three absolute rules in code
+## Hard rules
 
 - **NO TIMEOUTS.** No `wait_for`, no `timeout=` on file I/O, no clock-bound
   killing of long transcribes. Long audio legitimately takes minutes.
 - **NO SILENT FAILURES.** Every failure path raises a typed exception with
-  explicit text. No `except: pass`. No `except Exception: pass`.
+  explicit text. No `except: pass`. Bad input shapes raise `ValueError` with
+  the offending shape printed.
 - **NO TRUNCATION.** Transcripts are emitted in full. Pagination (server-side
-  scrollback) handles HUD display, never `…`-cut.
+  scrollback) handles HUD display.
 
-CI grep gates run after each phase boundary:
+CI grep gates run at every phase boundary:
 
 ```bash
 rg "wait_for|timeout=" audio/                    # must be empty
 rg "except.*:\s*pass|except\s*:" audio/          # must be empty
-rg "\.{3}|…" audio/pipeline/ -t py               # only allowed in docstrings
 ```
+
+## Discipline
+
+- **Never tune on synthetic audio.** The self-tests use synthetic signals only
+  for math sanity, never for parameter selection. Real-data tuning happens in
+  Phase 8 against captured DJI samples.
+- **Learn the noise profile with the same mic that will capture speech.** The
+  May phone-recording is acceptable for prototyping; production profile should
+  be re-recorded with DJI TX2 at the workplace.
+- **The Parakeet swap is independent from the ANC work.** Validate
+  spectral_subtract + DFN on faster-whisper first to isolate the noise-
+  reduction win, then swap ASR.

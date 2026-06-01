@@ -1,20 +1,36 @@
 # DJI Mic 3 Capture Samples
 
-This directory holds three captures used for offline NLMS+DFN tuning and end-to-end
-WER validation:
+## Default workflow (single-mic learned-profile path)
+
+After the May 28 noise analysis showed the workplace machine has near-textbook
+stationary noise, the default pipeline shifted to single-mic learned-profile
+(see `audio/pipeline/README.md`). The captures needed are now:
 
 ```
-machine_alone-<timestamp>.wav        machine running, Adam silent and away
-voice_plus_machine-<timestamp>.wav   machine running, Adam reading paragraph at collar position
-voice_alone-<timestamp>.wav          away from machine, same paragraph
+noise-<timestamp>.wav                  ~30-60 s of machine noise alone, no voice (DJI TX2 mono)
+voice_plus_machine-<timestamp>.wav     ~30 s of machine + collar speech (DJI TX2 mono)
 ```
 
-Each capture is paired with a `*-settings.json` file that records the verified DJI
-receiver state at capture time.
+`noise.wav` is used by `audio/tools/learn_noise_profile.py` to produce the
+production noise profile at `audio/profiles/machine.npz`.
+`voice_plus_machine.wav` is the end-to-end validation capture.
 
-**Directory is empty in Phase 1–3.** Captures land when Adam is at the machine and
-runs Phase 2B's `verify_dji_settings.py` + `capture.py` (then the audio pipeline can
-be tuned in Phase 8 against real recordings, not synthetic stand-ins).
+## Fallback workflow (two-mic NLMS)
+
+If the single-mic path underperforms in practice (non-stationary noise,
+additional uncorrelated sources), fall back to the original three-set capture
+for two-mic NLMS:
+
+```
+machine_alone-<timestamp>.wav        machine running, Adam silent and away (STEREO TX1+TX2)
+voice_plus_machine-<timestamp>.wav   machine running, Adam reading paragraph at collar (STEREO)
+voice_alone-<timestamp>.wav          away from machine, same paragraph (STEREO)
+```
+
+Each capture is paired with a `*-settings.json` file from `verify_dji_settings.py`.
+
+**Directory is empty in Phase 1–3.** Captures land at H5 (when Adam is at the
+machine), per `docs/HOLDS.md`.
 
 ## Capture conditions to record alongside each set
 
