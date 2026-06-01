@@ -126,7 +126,12 @@ class G2BleClient(
             setNotificationCallback(char).with { _, data ->
                 val raw = data.value ?: return@with
                 val ev = EventParser.parse(raw)
-                _events.tryEmit(ev)
+                // 4th-pass F4: A-H4 (third pass) only covered ConnectionManager;
+                // the same silent-drop concern applies here. Log loudly on
+                // buffer overflow so a stuck downstream collector is visible.
+                if (!_events.tryEmit(ev)) {
+                    Log.w(TAG, "[$side] SharedFlow buffer overflow — dropped event ${ev::class.simpleName}")
+                }
             }
             enableNotifications(char)
                 .fail { _, status -> failLoudly("enableNotifications", status) }

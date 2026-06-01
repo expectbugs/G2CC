@@ -19,11 +19,13 @@ import com.g2cc.g2cc.net.ServerMessage
 import com.g2cc.g2cc.state.AppState
 import com.g2cc.g2cc.state.StateMachine
 import com.g2cc.g2cc.storage.Prefs
+import com.g2cc.g2cc.ble.ConnectionState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.time.Duration
@@ -44,7 +46,9 @@ import java.util.concurrent.atomic.AtomicReference
  *   - ConnectionManager.events → if DirectoryListReply → menu.directories = ...
  *   - ConnectionManager.events → if ConfirmOnHud → render + await tap (Phase 7)
  *
- * Phase 7 wires the confirm-on-hud round-trip + BLE ack via AckEmitter.
+ * Phase 7 wires the confirm-on-hud round-trip; the BLE ack is sent inline
+ * from ConfirmationFlow.onConfirmRequest after hud.render drains (the prior
+ * AckEmitter stub was obsoleted and deleted in the third-pass cleanup).
  * Phase 8 wires the audio capture path.
  */
 class G2Pipeline(
@@ -167,6 +171,72 @@ class G2Pipeline(
         rightCollectorJob?.cancel()
         leftCollectorJob = scope.launch { collectEventsDebounced(left.events) }
         rightCollectorJob = scope.launch { collectEventsDebounced(right.events) }
+        // 4th-pass F1 (Android): observe both lenses' ConnectionState. The prior
+        // implementation called connectTo(...) + returned without watching for
+        // async connect failures — if a saved address was stale (glasses off,
+        // out of range, mac changed), getRemoteDevice would succeed but Nordic
+        // would emit onDeviceFailedToConnect → state flow → ConnectionState.Error
+        // with no observer, leaving the pipeline stuck in "leftBle/rightBle
+        // installed" state forever. Now: if either side hits Error or
+        // Disconnected without ever reaching Ready, tear down + retry.
+        observeBleHealth(left, right)
+    }
+
+    private fun observeBleHealth(left: G2BleClient, right: G2BleClient) {
+        scope.launch {
+            var leftReady = false
+            var rightReady = false
+            // Per-side watcher; coalesces into the outer launch via the shared
+            // state vars. As soon as Ready fires, that side is considered
+            // healthy. If a side flips to Error / Disconnected BEFORE Ready,
+            // treat the install as failed and reset.
+            launch {
+                left.state.collect { s ->
+                    when (s) {
+                        is ConnectionState.Ready -> leftReady = true
+                        is ConnectionState.Error,
+                        is ConnectionState.Disconnected -> {
+                            if (!leftReady) onInstallFailure("L", s)
+                        }
+                        else -> { /* in-progress states; keep waiting */ }
+                    }
+                }
+            }
+            launch {
+                right.state.collect { s ->
+                    when (s) {
+                        is ConnectionState.Ready -> rightReady = true
+                        is ConnectionState.Error,
+                        is ConnectionState.Disconnected -> {
+                            if (!rightReady) onInstallFailure("R", s)
+                        }
+                        else -> { /* in-progress states; keep waiting */ }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun onInstallFailure(side: String, state: ConnectionState) {
+        Log.w(TAG, "[$side] connect failed before Ready (state=$state) — tearing down and retrying via scan")
+        // Tear down current install so scanAndConnect() can rebuild.
+        leftBle?.shutdownBle()
+        rightBle?.shutdownBle()
+        leftBle = null
+        rightBle = null
+        leftCollectorJob?.cancel(); leftCollectorJob = null
+        rightCollectorJob?.cancel(); rightCollectorJob = null
+        // Clear stale PairingState — directed-connect just failed against it,
+        // and the next scanAndConnect will fall through to scan + re-learn.
+        pairing.clear()
+        // Schedule the retry (don't recurse into scanAndConnect synchronously —
+        // we're inside a state.collect on the lens, holding its coroutine).
+        scope.launch {
+            // The state.collect coroutines will naturally drift away from the
+            // freshly-nulled leftBle/rightBle; nothing to cancel explicitly.
+            this@G2Pipeline.state.transition(AppState.CONNECTING)
+            scanAndConnect()
+        }
     }
 
     // AtomicLong + CAS gives us atomic check-then-set so two collectors firing

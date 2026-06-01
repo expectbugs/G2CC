@@ -68,7 +68,10 @@ class ConnectionManager(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private var ws: WebSocket? = null
+    // 4th-pass pre-existing: @Volatile so reads from the OkHttp dispatcher
+    // thread (onClosed/onFailure/onMessage) and from caller threads (send/
+    // sendBinary) see consistent updates.
+    @Volatile private var ws: WebSocket? = null
     private val wsGen = AtomicInteger(0)
 
     // Mutated from both the OkHttp dispatcher thread (onClosed / onFailure) and
@@ -80,7 +83,11 @@ class ConnectionManager(
     @Volatile private var endpointsTriedSinceSuccess = 0
     private var reconnectDelayMs = RECONNECT_BASE_MS
     private var consecutiveAuthFailures = 0
-    private var lastMessageReceivedAt = System.currentTimeMillis()
+    // @Volatile: written by onMessage (OkHttp dispatcher thread); read by the
+    // liveness-watchdog coroutine on Dispatchers.IO. Visibility-only — no
+    // atomicity needed since the value is a monotonically increasing timestamp
+    // and a single relaxed read+compare is fine.
+    @Volatile private var lastMessageReceivedAt = System.currentTimeMillis()
     private var lastAuthedAt: Long? = null
     private var offlineSince: Long? = null
     private var attemptCount = 0
@@ -234,7 +241,7 @@ class ConnectionManager(
                         offlineSince = null
                         lastAuthedAt = System.currentTimeMillis()
                         onConnected()
-                        Log.i(TAG, "auth success endpoint=${endpoints[currentEndpointIdx]}")
+                        Log.i(TAG, "auth success endpoint=${endpoints.getOrNull(currentEndpointIdx) ?: "<unknown>"}")
                     } else {
                         consecutiveAuthFailures++
                         onAuthFailure(consecutiveAuthFailures)

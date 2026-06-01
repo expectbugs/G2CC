@@ -75,16 +75,16 @@ class AudioStreamer(
                     }
                     is MicCapture.Event.Failure -> {
                         Log.e(TAG, "capture failure: ${event.reason}", event.cause)
-                        // Loud failure: flip back to idle by sending audio_end so server doesn't
-                        // wait forever for a tail of frames. The server's stt.transcribe will
-                        // surface "Audio too short" or similar to the HUD.
-                        // A-H1 follow-on: also call mic.stop() so MicCapture isn't left
-                        // holding AudioRecord resources — its own internal cleanup will
-                        // fire too, but explicit stop here makes the lifecycle clear.
-                        if (isStreaming) {
-                            connection.send(ClientMessage.AudioEnd)
-                            isStreaming = false
-                            mic.stop()
+                        // 4th-pass F1 (Android): synchronize this handler like the Frame
+                        // handler — a concurrent stop() could otherwise interleave between
+                        // the isStreaming read and the AudioEnd send, producing duplicate
+                        // AudioEnd messages (server-side protocol violation).
+                        synchronized(this@AudioStreamer) {
+                            if (isStreaming) {
+                                connection.send(ClientMessage.AudioEnd)
+                                isStreaming = false
+                                mic.stop()
+                            }
                         }
                     }
                     is MicCapture.Event.Stopped -> {
