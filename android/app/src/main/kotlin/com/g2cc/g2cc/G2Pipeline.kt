@@ -445,6 +445,35 @@ class G2Pipeline(
         postReadyWatchdogJob = null
     }
 
+    /** Called by BluetoothStateReceiver on STATE_ON. Drops any stale BLE
+     *  clients (their BluetoothDevice handles are invalid post-cycle) and
+     *  re-scans. Idempotent — if clients are already null, scanAndConnect
+     *  just runs from scratch. */
+    fun onBluetoothStateOn() {
+        stopHeartbeat()
+        stopPostReadyWatchdog()
+        leftBle?.shutdownBle(); rightBle?.shutdownBle()
+        leftBle = null; rightBle = null
+        leftCollectorJob?.cancel(); leftCollectorJob = null
+        rightCollectorJob?.cancel(); rightCollectorJob = null
+        scanAndConnect()
+    }
+
+    /** Called by BluetoothStateReceiver on STATE_OFF. Tears down so when
+     *  STATE_ON fires we get a clean slate. Pipeline notification will read
+     *  "scanning" while BT is off — accurate (BLE scan can't start) and not
+     *  worth a separate "BT off" status flavor. */
+    fun onBluetoothStateOff() {
+        stopHeartbeat()
+        stopPostReadyWatchdog()
+        bleScannerRef.getAndSet(null)?.stop()
+        leftBle?.shutdownBle(); rightBle?.shutdownBle()
+        leftBle = null; rightBle = null
+        leftCollectorJob?.cancel(); leftCollectorJob = null
+        rightCollectorJob?.cancel(); rightCollectorJob = null
+        _bleStatus.value = "BT off"
+    }
+
     private fun onInstallFailure(side: String, state: ConnectionState) {
         Log.w(TAG, "[$side] connect failed before Ready (state=$state) — tearing down and retrying via scan")
         stopHeartbeat()

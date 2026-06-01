@@ -36,6 +36,7 @@ import kotlinx.coroutines.launch
 class G2CCService : LifecycleService() {
 
     private lateinit var pipeline: G2Pipeline
+    private var btStateReceiver: BluetoothStateReceiver? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -46,6 +47,18 @@ class G2CCService : LifecycleService() {
         val prefs = Prefs(applicationContext)
         val pairing = PairingState(applicationContext)
         pipeline = G2Pipeline(applicationContext, prefs, pairing)
+
+        // Register the BT state receiver dynamically. Manifest declaration
+        // wouldn't work on Android 8+ for this implicit broadcast.
+        val receiver = BluetoothStateReceiver(pipeline)
+        val filter = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, filter)
+        }
+        btStateReceiver = receiver
 
         // React to state-machine transitions by updating the notification.
         lifecycleScope.launch {
@@ -100,6 +113,8 @@ class G2CCService : LifecycleService() {
     override fun onDestroy() {
         Log.i(TAG, "onDestroy")
         running = false
+        btStateReceiver?.let { runCatching { unregisterReceiver(it) } }
+        btStateReceiver = null
         if (::pipeline.isInitialized) pipeline.stop()
         super.onDestroy()
     }
