@@ -10,7 +10,7 @@ import com.g2cc.g2cc.net.DirectoryEntry
  * High-level HUD navigation:
  *
  *   IDLE → tap → MENU (top-level dispatch targets)
- *     → pick "Claude Code" → DIRECTORY_PICKER (scrollable /home/user/*)
+ *     → pick "Claude Code" → DIRECTORY_PICKER (scrollable /home/user/{name})
  *       → pick directory → server spawns CC → IDLE in that session
  *
  * When the swarm exists (Phase 9), additional top-level targets appear; the
@@ -53,7 +53,7 @@ class MenuController(private val hud: Hud, private val connection: ConnectionMan
         connection.send(ClientMessage.DispatchTargetSelect(targetId))
     }
 
-    /** Phase 6: render the /home/user/* directory list scrollably. */
+    /** Phase 6: render the /home/user/{name} directory list scrollably. */
     fun showDirectoryPicker() {
         if (directories.isEmpty()) {
             connection.send(ClientMessage.DirectoryList)
@@ -67,7 +67,7 @@ class MenuController(private val hud: Hud, private val connection: ConnectionMan
             }
         }.trimEnd()
         // The HUD natively scrolls multi-page content via the teleprompter
-        // primitive — full list of /home/user/* is reachable, NEVER truncated.
+        // primitive — full list of /home/user/{name} is reachable, NEVER truncated.
         hud.render(text)
     }
 

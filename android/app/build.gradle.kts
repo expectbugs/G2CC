@@ -7,6 +7,11 @@ plugins {
 android {
     namespace = "com.g2cc.g2cc"
     compileSdk = 35
+    // Explicit pin: AGP 8.7.x defaults to build-tools 34.0.0 (auto-install).
+    // Adam's /opt/android-sdk only has 35.0.0 installed AND is system-owned
+    // (non-writable for user → auto-install of an older buildTools fails).
+    // Match what's actually present.
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "com.g2cc.g2cc"
