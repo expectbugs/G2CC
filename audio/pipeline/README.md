@@ -42,14 +42,20 @@ Math sanity: `python -m pipeline.notch_filter --self-test`
 
 ### `spectral_subtract.py`
 
-Public API:
+Public API (canonical):
 
 ```python
-from pipeline.spectral_subtract import wiener_subtract, load_profile
+from pipeline.spectral_subtract import wiener_subtract_with_profile, load_profile
 profile = load_profile('profiles/machine.npz')
-audio = wiener_subtract(audio_mono, profile['sample_rate'], profile['noise_psd'],
-                        alpha=1.5, floor=0.05)
+audio = wiener_subtract_with_profile(audio_mono, sample_rate=profile['sample_rate'], profile=profile,
+                                     alpha=1.5, floor=0.05)
 ```
+
+The `_with_profile` wrapper passes the profile's STFT params + sample-rate
+expectation in, so an SR mismatch is caught loudly instead of silently
+applying wrong-bin gains. Direct calls to `wiener_subtract(audio, sr,
+noise_psd, ...)` are allowed for advanced / library use, but the caller is
+then responsible for SR-check + STFT-param alignment.
 
 Wiener filter with learned noise PSD: `G(f,t) = max(floor, (|Y|² - α·N)/|Y|²)`.
 `α` controls aggressiveness (1.5 conservative, 2.5 typical, 3.0 max-without-

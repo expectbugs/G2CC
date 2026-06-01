@@ -220,7 +220,20 @@ _engine: ParakeetEngine | None = None
 
 
 def get_engine(model_name: str = "nvidia/parakeet-tdt-0.6b-v2", device: str = "cuda") -> ParakeetEngine:
+    """Return the module-level singleton engine. First caller's model_name +
+    device wins. Subsequent callers with conflicting args raise loudly — used
+    to silently return the existing engine, which would hide configuration
+    bugs (e.g. one caller asks for CPU, gets CUDA because someone else got
+    there first)."""
     global _engine
     if _engine is None:
         _engine = ParakeetEngine(model_name=model_name, device=device)
+        return _engine
+    if _engine.model_name != model_name or _engine.device != device:
+        raise RuntimeError(
+            f'ParakeetEngine singleton already initialized with '
+            f'model={_engine.model_name!r} device={_engine.device!r}; '
+            f'cannot return one configured for model={model_name!r} device={device!r}. '
+            f'Caller bug: pick one config and use it consistently.'
+        )
     return _engine

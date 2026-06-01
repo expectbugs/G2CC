@@ -50,13 +50,18 @@ audio/venv/bin/python audio/tools/learn_noise_profile.py \
   /path/to/noise.wav --output audio/profiles/machine.npz
 
 # Step 3 (at inference time) — server-side pipeline calls:
-#   from pipeline.spectral_subtract import load_profile, wiener_subtract
+#   from pipeline.spectral_subtract import load_profile, wiener_subtract_with_profile
 #   from pipeline.notch_filter import apply_notches
+#   from pipeline.dfn_polish import polish
+#   from pipeline.parakeet_engine import get_engine
+#
 #   profile = load_profile('audio/profiles/machine.npz')
-#   audio = apply_notches(audio, profile['sample_rate'], profile['peak_freqs'])
-#   audio = wiener_subtract(audio, profile['sample_rate'], profile['noise_psd'])
-#   audio = polish(audio, profile['sample_rate'])
-#   text = transcribe(audio, profile['sample_rate'])
+#   sr = profile['sample_rate']                                # 48000 today
+#   audio = audio.astype(np.float32)                           # ensure float dtype
+#   audio = apply_notches(audio, sr, profile['peak_freqs'])
+#   audio = wiener_subtract_with_profile(audio, sr, profile)   # ← canonical: SR check baked in
+#   audio = polish(audio, sample_rate=48_000)                  # DFN3 is 48 kHz-native
+#   text = get_engine().transcribe_numpy(audio, sample_rate=sr).text
 ```
 
 ## Two-mic NLMS workflow (fallback only)

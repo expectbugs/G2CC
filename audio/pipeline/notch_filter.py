@@ -49,6 +49,14 @@ def apply_notches(
         raise ValueError(f'apply_notches expects np.ndarray, got {type(audio).__name__}')
     if audio.ndim != 1:
         raise ValueError(f'apply_notches expects mono 1-D, got shape {audio.shape}')
+    # 4th-pass F2: refuse non-float input. int16 PCM (-32768..32767) would
+    # pass through the filtfilt math intact, producing wildly un-normalized
+    # output (|out|.max ~1000 not ~1). Loud-fail per project rules.
+    if audio.dtype.kind != 'f':
+        raise ValueError(
+            f'apply_notches expects float dtype (float32 or float64), got {audio.dtype}. '
+            f'Convert int PCM with audio.astype(np.float32) / 32768.0 before calling.'
+        )
     if sample_rate <= 0:
         raise ValueError(f'sample_rate must be > 0, got {sample_rate}')
     if Q <= 0:

@@ -118,7 +118,12 @@ def _detect_peaks(
     """
     psd_db = 10.0 * np.log10(np.maximum(psd, 1e-12))
     # Local median over a sliding window — adapts to broadband shape. scipy's
-    # medfilt is vectorized and identical to the prior list-comprehension.
+    # medfilt is vectorized; behavior matches the prior reflective-pad loop on
+    # real machine PSDs (verified on the May profile: same 3 peaks). Note that
+    # medfilt zero-pads at edges where the loop reflected, so synthetic test
+    # cases that depend on edge handling at <50 Hz or >0.9*Nyquist may differ;
+    # those are also outside the keep-band (50 Hz–0.9·Nyquist) so they get
+    # filtered out below regardless.
     win = max(31, len(psd) // 64) | 1   # ensure odd
     local_med = signal.medfilt(psd_db, kernel_size=win)
 
@@ -261,12 +266,15 @@ def main() -> int:
             marker = '  ⚠ in speech-formant band' if SPEECH_FORMANT_MIN_HZ <= f <= SPEECH_FORMANT_MAX_HZ else ''
             print(f'    {f:7.1f} Hz{marker}')
     if risky:
-        print()
-        print(f'WARNING: {len(risky)} peak(s) lie in the speech-formant band')
-        print(f'  ({SPEECH_FORMANT_MIN_HZ:.0f}-{SPEECH_FORMANT_MAX_HZ:.0f} Hz). At Q=30, each notch carves')
-        print(f'  ~{int(max(risky) / 30)} Hz of bandwidth, which may clip sibilance / fricatives.')
-        print(f'  Verify by ear before using this profile in production, or pass')
-        print(f'  a higher --peak-prominence-db to drop these from detection.')
+        # 4th-pass F5: WARNING goes to stderr so it survives stdout
+        # redirection (log capture pipes). Pipeline-corrupting warnings should
+        # be on stderr per the loud-and-proud rule.
+        print(file=sys.stderr)
+        print(f'WARNING: {len(risky)} peak(s) lie in the speech-formant band', file=sys.stderr)
+        print(f'  ({SPEECH_FORMANT_MIN_HZ:.0f}-{SPEECH_FORMANT_MAX_HZ:.0f} Hz). At Q=30, each notch carves', file=sys.stderr)
+        print(f'  ~{int(max(risky) / 30)} Hz of bandwidth, which may clip sibilance / fricatives.', file=sys.stderr)
+        print(f'  Verify by ear before using this profile in production, or pass', file=sys.stderr)
+        print(f'  a higher --peak-prominence-db to drop these from detection.', file=sys.stderr)
     return 0
 
 

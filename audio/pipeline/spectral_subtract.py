@@ -88,6 +88,13 @@ def wiener_subtract(
         raise ValueError(f'wiener_subtract expects np.ndarray, got {type(audio).__name__}')
     if audio.ndim != 1:
         raise ValueError(f'wiener_subtract expects mono 1-D, got shape {audio.shape}')
+    # 4th-pass F2: refuse non-float input. Same reasoning as notch_filter — int
+    # PCM passes through with integer magnitudes, producing un-normalized output.
+    if audio.dtype.kind != 'f':
+        raise ValueError(
+            f'wiener_subtract expects float dtype (float32 or float64), got {audio.dtype}. '
+            f'Convert int PCM with audio.astype(np.float32) / 32768.0 before calling.'
+        )
     if not isinstance(noise_psd, np.ndarray):
         raise ValueError(f'noise_psd must be np.ndarray, got {type(noise_psd).__name__}')
     if noise_psd.ndim != 1:

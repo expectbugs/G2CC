@@ -50,15 +50,29 @@ class DfnPolisher:
         self._enhance = enhance
         log.info('DeepFilterNet loaded in %.1fs', time.time() - start)
 
+    # DeepFilterNet3 is a 48 kHz-native model; the model card and the
+    # `init_df()` defaults bind to 48 kHz internally. Anything else either
+    # silently time-distorts (low sample rate stretched out) or aliases.
+    EXPECTED_SAMPLE_RATE = 48_000
+
     def polish(self, mono: np.ndarray, sample_rate: int = 48_000) -> np.ndarray:
         """Polish a mono float32 array. Returns float32 of the same length.
 
-        Raises ValueError on bad input shape — no silent fallback.
+        Raises ValueError on bad input shape OR sample_rate mismatch — DFN3 is
+        a 48 kHz-native model and the prior implementation silently corrupted
+        non-48k input. Caller must resample upstream if needed.
         """
         if not isinstance(mono, np.ndarray):
             raise ValueError(f'polish expects np.ndarray, got {type(mono).__name__}')
         if mono.ndim != 1:
             raise ValueError(f'polish expects mono 1-D array, got shape {mono.shape}')
+        if sample_rate != self.EXPECTED_SAMPLE_RATE:
+            raise ValueError(
+                f'DeepFilterNet3 is 48 kHz-native; got sample_rate={sample_rate}. '
+                f'Resample to {self.EXPECTED_SAMPLE_RATE} Hz first (e.g. via '
+                f'scipy.signal.resample_poly), polish, then resample back if '
+                f'the downstream ASR expects another rate.'
+            )
         if mono.dtype != np.float32:
             mono = mono.astype(np.float32, copy=False)
 

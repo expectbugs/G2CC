@@ -10,19 +10,21 @@ highly stationary at ~3-second cycle, broadband + a few sharp tonals):
 
   ─── inference time ──────────────────────────────────────────────────────
 
-  speech recording (DJI TX2 mono)
+  speech recording (DJI TX2 mono, float32 — caller normalizes int PCM first)
        │
        ▼
   notch_filter.apply_notches(audio, sr, profile['peak_freqs'])  ← if peaks
        │
        ▼
-  spectral_subtract.wiener_subtract(audio, sr, profile['noise_psd'])
+  spectral_subtract.wiener_subtract_with_profile(audio, sr, profile)
+       │      ← canonical wrapper; passes expected_sample_rate from profile
+       │        so SR mismatch is caught loudly instead of silently
+       │        applying wrong-bin gains
+       ▼
+  dfn_polish.polish(audio, 48_000)            ← DFN3 is 48 kHz-native; loud-fails on mismatch
        │
        ▼
-  dfn_polish.polish(audio, sr)
-       │
-       ▼
-  parakeet_engine.transcribe(audio, sr)            ← Phase 8
+  parakeet_engine.get_engine().transcribe_numpy(audio, sample_rate=...)   ← Phase 8
 
 Modules:
   notch_filter      — IIR notch cascade for tonal harmonics (cheap, surgical).
