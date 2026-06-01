@@ -117,14 +117,10 @@ def _detect_peaks(
     Returns peak center frequencies (Hz), filtered to the speech-relevant range.
     """
     psd_db = 10.0 * np.log10(np.maximum(psd, 1e-12))
-    # Local median over a sliding window — adapts to broadband shape.
+    # Local median over a sliding window — adapts to broadband shape. scipy's
+    # medfilt is vectorized and identical to the prior list-comprehension.
     win = max(31, len(psd) // 64) | 1   # ensure odd
-    pad = win // 2
-    padded = np.pad(psd_db, pad, mode='reflect')
-    local_med = np.array(
-        [np.median(padded[i:i + win]) for i in range(len(psd_db))],
-        dtype=np.float64,
-    )
+    local_med = signal.medfilt(psd_db, kernel_size=win)
 
     bin_hz = freqs[1] - freqs[0] if len(freqs) > 1 else 1.0
     min_dist_bins = max(1, int(round(min_distance_hz / bin_hz)))
@@ -250,9 +246,27 @@ def main() -> int:
     print(f'  input rms:     {summary["rms"]:.4f}')
     print(f'  PSD bins:      {summary["psd_bins"]}')
     print(f'  tonal peaks:   {summary["peak_count"]}')
+    # Speech-formant band warning: peaks in 1500-8000 Hz overlap consonant
+    # energy (fricatives, sibilants, plosive bursts). A Q=30 notch at 5 kHz
+    # carves ~167 Hz of bandwidth, which clips sibilance. Flag so the user
+    # can verify by ear before relying on the profile in production.
+    SPEECH_FORMANT_MIN_HZ = 1500.0
+    SPEECH_FORMANT_MAX_HZ = 8000.0
+    risky = [
+        f for f in summary['peak_freqs_hz']
+        if SPEECH_FORMANT_MIN_HZ <= f <= SPEECH_FORMANT_MAX_HZ
+    ]
     if summary['peak_count']:
         for f in summary['peak_freqs_hz']:
-            print(f'    {f:7.1f} Hz')
+            marker = '  ⚠ in speech-formant band' if SPEECH_FORMANT_MIN_HZ <= f <= SPEECH_FORMANT_MAX_HZ else ''
+            print(f'    {f:7.1f} Hz{marker}')
+    if risky:
+        print()
+        print(f'WARNING: {len(risky)} peak(s) lie in the speech-formant band')
+        print(f'  ({SPEECH_FORMANT_MIN_HZ:.0f}-{SPEECH_FORMANT_MAX_HZ:.0f} Hz). At Q=30, each notch carves')
+        print(f'  ~{int(max(risky) / 30)} Hz of bandwidth, which may clip sibilance / fricatives.')
+        print(f'  Verify by ear before using this profile in production, or pass')
+        print(f'  a higher --peak-prominence-db to drop these from detection.')
     return 0
 
 

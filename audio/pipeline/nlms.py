@@ -123,11 +123,16 @@ def _self_test() -> int:
     stereo = np.stack([ref, pri], axis=1)
     cleaned = nlms_clean(stereo, sample_rate=sr, mu=0.025, taps=128)
 
-    # Energy in the 200 Hz band before/after.
+    # Energy in the 200 Hz band before/after. Use .sum() (not trapezoid) for
+    # consistency with the newer pipeline modules (spectral_subtract /
+    # notch_filter). trapezoid returns 0 for masks with a single point, which
+    # makes narrow-band power probes silently zero — sum stays correct.
     def band(x: np.ndarray, lo: float, hi: float) -> float:
         f, pxx = signal.welch(x, sr, nperseg=2048)
         m = (f >= lo) & (f <= hi)
-        return float(np.trapezoid(pxx[m], f[m]) + 1e-20)
+        if not np.any(m):
+            return 1e-20
+        return float(np.sum(pxx[m]) + 1e-20)
 
     pri_200 = band(pri, 150, 250)
     out_200 = band(cleaned, 150, 250)

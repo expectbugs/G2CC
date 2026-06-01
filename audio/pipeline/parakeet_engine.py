@@ -50,17 +50,19 @@ class TranscriptResult:
 
 
 def resample(pcm: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
-    """Linear-interpolation resample. Phase 8 may swap to scipy.signal.resample
-    if quality matters for cleaned-but-not-perfect ANC output."""
+    """Polyphase resample (anti-aliased). Critical for downsampling: linear
+    interpolation (the prior implementation) has no low-pass filter, so when
+    going 48 kHz → 16 kHz it folds content 8-24 kHz back into 0-8 kHz, putting
+    aliased trash right inside the formant range. scipy.signal.resample_poly
+    applies the proper Nyquist-rate filter."""
+    from math import gcd
+    from scipy import signal
     if from_rate == to_rate:
         return pcm
-    ratio = to_rate / from_rate
-    new_length = int(len(pcm) * ratio)
-    return np.interp(
-        np.linspace(0, len(pcm) - 1, new_length),
-        np.arange(len(pcm)),
-        pcm,
-    ).astype(np.float32)
+    g = gcd(int(from_rate), int(to_rate))
+    up = int(to_rate) // g
+    down = int(from_rate) // g
+    return signal.resample_poly(pcm, up=up, down=down).astype(np.float32, copy=False)
 
 
 class ParakeetEngine:
@@ -179,13 +181,18 @@ class ParakeetEngine:
     def _materialize_to_wav(self, audio: Any) -> Path:
         """Write `audio` to a temp WAV file (NeMo's `transcribe()` takes a path).
         Pass-through if already a path."""
+        import os
         import tempfile
         import soundfile as sf  # type: ignore[import-not-found]
 
         if isinstance(audio, (str, Path)):
             return Path(audio)
-        # numpy / bytes / BytesIO → write to a temp file.
-        tmp = Path(tempfile.mkstemp(prefix="g2cc-parakeet-", suffix=".wav")[1])
+        # numpy / bytes / BytesIO → write to a temp file. mkstemp returns
+        # (fd, path); we must close the fd or it leaks until process exit
+        # (one per transcription, hits the FD ulimit eventually).
+        fd, tmp_name = tempfile.mkstemp(prefix="g2cc-parakeet-", suffix=".wav")
+        os.close(fd)
+        tmp = Path(tmp_name)
         if isinstance(audio, np.ndarray):
             sf.write(str(tmp), audio, self.SAMPLE_RATE, subtype="FLOAT")
         elif isinstance(audio, (bytes, io.BytesIO)):
@@ -200,13 +207,12 @@ class ParakeetEngine:
         return tmp
 
     def _estimate_duration(self, audio_path: Path) -> float:
-        try:
-            import soundfile as sf  # type: ignore[import-not-found]
-            info = sf.info(str(audio_path))
-            return info.frames / max(1, info.samplerate)
-        except Exception as err:
-            log.warning("duration probe failed for %s: %s", audio_path, err)
-            return 0.0
+        # Loud > silent zero per the no-silent-failure rule. If soundfile.info
+        # raises, let it propagate — downstream code that uses duration for RTF
+        # computation will fail loudly instead of dividing by a fake zero.
+        import soundfile as sf  # type: ignore[import-not-found]
+        info = sf.info(str(audio_path))
+        return info.frames / max(1, info.samplerate)
 
 
 # Module-level singleton (matches whisper_engine.py:200-213).

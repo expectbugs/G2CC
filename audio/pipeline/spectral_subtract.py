@@ -55,22 +55,29 @@ def wiener_subtract(
     noverlap: int = DEFAULT_NOVERLAP,
     alpha: float = 1.5,
     floor: float = 0.05,
+    expected_sample_rate: int | None = None,
 ) -> np.ndarray:
     """Apply Wiener spectral subtraction with a fixed learned noise PSD.
 
     Args:
-      audio:       (N,) mono.
-      sample_rate: Hz.
-      noise_psd:   (nperseg/2 + 1,) noise power spectrum. Must match the STFT
-                   grid; learn_noise_profile.py saves this alongside its STFT
-                   params for exactly this reason.
-      nperseg:     STFT window length. Default 2048 (~43 ms at 48 kHz).
-      noverlap:    STFT overlap. Default 1024 (50%).
-      alpha:       over-subtraction factor on noise power. 1.5 is a mild
-                   default; raise to 2.0-2.5 if residual machine noise is
-                   audible after a real-data run.
-      floor:       spectral floor on the gain. 0.05 = -26 dB. Prevents zero
-                   output cells that create musical noise artifacts.
+      audio:                (N,) mono.
+      sample_rate:          Hz the audio is sampled at.
+      noise_psd:            (nperseg/2 + 1,) noise power spectrum. Must match
+                            the STFT grid; learn_noise_profile.py saves this
+                            alongside its STFT params for exactly this reason.
+      nperseg:              STFT window length. Default 2048 (~43 ms at 48 kHz).
+      noverlap:             STFT overlap. Default 1024 (50%).
+      alpha:                over-subtraction factor on noise power. 1.5 is a
+                            mild default; raise to 2.0-2.5 if residual machine
+                            noise is audible after a real-data run.
+      floor:                spectral floor on the gain. 0.05 = -26 dB. Prevents
+                            zero output cells that create musical noise.
+      expected_sample_rate: optional — the SR the profile was learned at.
+                            If provided AND != sample_rate, raises ValueError.
+                            Use wiener_subtract_with_profile() to get this
+                            check automatically; calling wiener_subtract
+                            directly is allowed for advanced use but the
+                            caller is then responsible for verifying SR.
 
     Returns:
       Cleaned audio, same length, float32.
@@ -97,6 +104,32 @@ def wiener_subtract(
         raise ValueError(f'floor must be in (0, 1), got {floor}')
     if sample_rate <= 0:
         raise ValueError(f'sample_rate must be > 0, got {sample_rate}')
+    # P-H1: refuse SR mismatch loudly. Without this guard a profile learned at
+    # 48 kHz silently applies its bin-by-bin gains to (e.g.) 8 kHz audio, where
+    # bin 100 maps to a totally different physical frequency — speech is
+    # destroyed without warning. wiener_subtract_with_profile() always passes
+    # expected_sample_rate=profile['sample_rate'] so this check fires whenever
+    # the canonical wrapper is used.
+    if expected_sample_rate is not None and expected_sample_rate != sample_rate:
+        raise ValueError(
+            f'SR mismatch: audio is at {sample_rate} Hz but the profile was '
+            f'learned at {expected_sample_rate} Hz. The noise PSD bins map to '
+            f'different physical frequencies at different sample rates — '
+            f'applying the profile here would silently corrupt the output. '
+            f'Either resample the audio to {expected_sample_rate} Hz first, '
+            f'or regenerate the profile at {sample_rate} Hz.'
+        )
+    # If audio is shorter than one STFT window, scipy auto-shrinks nperseg
+    # (with a UserWarning), which produces a STFT with fewer bins than noise_psd
+    # — the subsequent broadcast subtract raises a cryptic shape error that
+    # accuses the PSD of being wrong. Loud, specific failure instead:
+    if audio.shape[0] < nperseg:
+        raise ValueError(
+            f'audio is {audio.shape[0]} samples; need at least nperseg={nperseg} '
+            f'(~{1000 * nperseg / sample_rate:.1f} ms at {sample_rate} Hz) for '
+            f'one full STFT window. Pad with zeros or use a smaller nperseg if '
+            f'short-clip support is needed.'
+        )
 
     audio_f64 = audio.astype(np.float64, copy=False)
 
@@ -149,16 +182,41 @@ def load_profile(path: str | Path) -> dict:
         raise KeyError(
             f'profile {path} is missing required keys {missing}; got {list(data.files)}'
         )
+    # Use .item() for 0-d arrays — idiomatic and future-proof against numpy
+    # dtype quirks (str() on a 0-d unicode array could in principle ever return
+    # a repr like 'array(...)' rather than the bare string).
     return {
-        'sample_rate': int(data['sample_rate']),
-        'nperseg': int(data['nperseg']),
-        'noverlap': int(data['noverlap']),
+        'sample_rate': int(data['sample_rate'].item()),
+        'nperseg': int(data['nperseg'].item()),
+        'noverlap': int(data['noverlap'].item()),
         'noise_psd': np.asarray(data['noise_psd'], dtype=np.float64),
         'peak_freqs': np.asarray(data['peak_freqs'], dtype=np.float64)
             if 'peak_freqs' in data.files else np.array([], dtype=np.float64),
-        'source_file': str(data['source_file']) if 'source_file' in data.files else '',
-        'duration_s': float(data['duration_s']) if 'duration_s' in data.files else 0.0,
+        'source_file': data['source_file'].item() if 'source_file' in data.files else '',
+        'duration_s': float(data['duration_s'].item()) if 'duration_s' in data.files else 0.0,
     }
+
+
+def wiener_subtract_with_profile(audio: np.ndarray, sample_rate: int, profile: dict,
+                                 alpha: float = 1.5, floor: float = 0.05) -> np.ndarray:
+    """Canonical pipeline call site — applies Wiener subtraction with all the
+    profile-derived parameters bound automatically (STFT params + expected
+    sample rate check). Use this from the inference pipeline; wiener_subtract()
+    direct calls are for advanced / library use only.
+
+    Raises ValueError loudly on SR mismatch or any other input validation
+    failure surfaced by wiener_subtract.
+    """
+    return wiener_subtract(
+        audio,
+        sample_rate=sample_rate,
+        noise_psd=profile['noise_psd'],
+        nperseg=profile['nperseg'],
+        noverlap=profile['noverlap'],
+        alpha=alpha,
+        floor=floor,
+        expected_sample_rate=profile['sample_rate'],
+    )
 
 
 def _band_power(x: np.ndarray, sr: int, lo: float, hi: float) -> float:
