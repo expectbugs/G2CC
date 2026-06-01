@@ -105,15 +105,33 @@ class G2BleClient(
 
     override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
         val services = gatt.services
-        // Full UUIDs in the diagnostic — this goes to the server log via Diag,
-        // not just the notification, so the byte budget is fine.
-        val uuids = services.map { it.uuid.toString() }
-        Log.i(TAG, "[$side] discovered ${services.size} services: ${uuids.joinToString()}")
+        // Full enumeration: every service AND its characteristics with properties.
+        // This is the post-firmware-drift mapping we need to identify which
+        // service the new Write/Notify pair lives on.
+        val deepDump = services.joinToString(" || ") { svc ->
+            val chars = svc.characteristics.joinToString(",") { ch ->
+                val props = mutableListOf<String>()
+                val p = ch.properties
+                if (p and android.bluetooth.BluetoothGattCharacteristic.PROPERTY_READ != 0) props += "r"
+                if (p and android.bluetooth.BluetoothGattCharacteristic.PROPERTY_WRITE != 0) props += "w"
+                if (p and android.bluetooth.BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) props += "W"
+                if (p and android.bluetooth.BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) props += "n"
+                if (p and android.bluetooth.BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) props += "i"
+                "${ch.uuid}/${props.joinToString("")}"
+            }
+            "${svc.uuid}=[${chars.ifEmpty { "(no chars)" }}]"
+        }
+        Log.i(TAG, "[$side] deep service dump: $deepDump")
+        // Send deep dump as a SINGLE diag (independent of the failure-only diag)
+        // so it shows up exactly once per connection attempt regardless of the
+        // service-discovery outcome below.
+        _state.value = ConnectionState.Error(side, "DEEP DUMP: $deepDump")
 
         val service = gatt.getService(G2Constants.SERVICE)
         if (service == null) {
             // Firmware drift OR completely-different service family. Stash a
             // diagnostic for the bleStatus pipeline; Nordic disconnects on false.
+            val uuids = services.map { it.uuid.toString() }
             lastDiagnostic = "no G2 svc; svcs=[${uuids.joinToString()}]"
             Log.w(TAG, "[$side] G2 service ${G2Constants.SERVICE} not found; have: $uuids")
             // Promote to Error so observeBleHealth sees the diagnostic via state flow
