@@ -254,11 +254,21 @@ class G2BleClient(
      *  Calls `onComplete(true)` when all writes succeed, `onComplete(false)` on
      *  any failure. Used by Hud.render to know when the BLE write side of a
      *  display update has reached the glasses (within Nordic library's
-     *  best-effort definition of "reached"). */
+     *  best-effort definition of "reached").
+     *
+     *  `delaysAfterMs[i]` is the delay (ms) inserted AFTER packet i. Per
+     *  PROTOCOL_NOTES.md §"Teleprompter — the HUD text primitive" and the
+     *  i-soxi teleprompter.py example, the G2 firmware needs inter-packet
+     *  pacing (0.1s–0.5s between teleprompter packets) — without it the writes
+     *  reach the BLE stack faster than the glasses can process them, take-over
+     *  succeeds but content doesn't render. If shorter than packets.size,
+     *  remaining slots default to 0 ms (no delay). Allowed under the no-timeouts
+     *  rule: this is BLE transport-level pacing, not a clock kill. */
     @SuppressLint("MissingPermission")
     fun queueWrites(
         packets: List<ByteArray>,
         label: String = "queue",
+        delaysAfterMs: List<Long> = emptyList(),
         onComplete: (success: Boolean) -> Unit,
     ) {
         val char = writeChar ?: run {
@@ -273,7 +283,7 @@ class G2BleClient(
 
         var anyFailed = false
         val q = beginAtomicRequestQueue()
-        for (packet in packets) {
+        for ((idx, packet) in packets.withIndex()) {
             q.add(
                 writeCharacteristic(
                     char,
@@ -285,6 +295,10 @@ class G2BleClient(
                     Log.e(TAG, "[$side] $label write failed status=$status")
                 },
             )
+            val delay = delaysAfterMs.getOrNull(idx) ?: 0L
+            if (delay > 0L) {
+                q.add(sleep(delay))
+            }
         }
         q.done {
             onComplete(!anyFailed)

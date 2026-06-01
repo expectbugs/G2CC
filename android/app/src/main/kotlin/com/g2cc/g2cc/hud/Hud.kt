@@ -50,33 +50,51 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         // serialize; two concurrent render() calls would collide on the
         // same seq range. Phase 9 polish should add a render-level lock if
         // concurrent renders become a real scenario.
-        val packets = synchronized(counterLock) {
+        //
+        // delaysAfterMs mirrors the i-soxi teleprompter.py inter-packet sleeps:
+        //   display_config → 300 ms
+        //   init           → 500 ms  (longest — firmware switches into HUD mode)
+        //   content page   → 100 ms
+        //   marker         → 100 ms
+        //   sync_trigger   → 100 ms
+        // Without these delays the take-over succeeds but text never renders
+        // (confirmed 2026-06-01 on Adam's pair: ok=true + L=3 R=24 notifies but
+        // blank screen + "End Feature?" from R1 ring → flooded firmware).
+        val packets = ArrayList<ByteArray>()
+        val delays = ArrayList<Long>()
+        synchronized(counterLock) {
             seq = 0x10
             msgId = 0x20
-            buildList {
-                add(Teleprompter.buildDisplayConfig(nextSeqLocked(), nextMsgIdLocked()))
-                add(
-                    Teleprompter.buildInit(
-                        seq = nextSeqLocked(),
-                        msgId = nextMsgIdLocked(),
-                        totalLines = pages.size * LINES_PER_PAGE,
-                        mode = Teleprompter.ScrollMode.Manual,
-                    ),
-                )
-                for ((i, p) in pages.take(10).withIndex()) {
-                    add(Teleprompter.buildContentPage(nextSeqLocked(), nextMsgIdLocked(), i, p))
+
+            packets += Teleprompter.buildDisplayConfig(nextSeqLocked(), nextMsgIdLocked())
+            delays += 300L
+
+            packets += Teleprompter.buildInit(
+                seq = nextSeqLocked(),
+                msgId = nextMsgIdLocked(),
+                totalLines = pages.size * LINES_PER_PAGE,
+                mode = Teleprompter.ScrollMode.Manual,
+            )
+            delays += 500L
+
+            for ((i, p) in pages.take(10).withIndex()) {
+                packets += Teleprompter.buildContentPage(nextSeqLocked(), nextMsgIdLocked(), i, p)
+                delays += 100L
+            }
+            packets += Teleprompter.buildMarker(nextSeqLocked(), nextMsgIdLocked())
+            delays += 100L
+            if (pages.size > 10) {
+                for (i in 10 until minOf(12, pages.size)) {
+                    packets += Teleprompter.buildContentPage(nextSeqLocked(), nextMsgIdLocked(), i, pages[i])
+                    delays += 100L
                 }
-                add(Teleprompter.buildMarker(nextSeqLocked(), nextMsgIdLocked()))
-                if (pages.size > 10) {
-                    for (i in 10 until minOf(12, pages.size)) {
-                        add(Teleprompter.buildContentPage(nextSeqLocked(), nextMsgIdLocked(), i, pages[i]))
-                    }
-                }
-                add(Teleprompter.buildSyncTrigger(nextSeqLocked(), nextMsgIdLocked()))
-                if (pages.size > 12) {
-                    for (i in 12 until pages.size) {
-                        add(Teleprompter.buildContentPage(nextSeqLocked(), nextMsgIdLocked(), i, pages[i]))
-                    }
+            }
+            packets += Teleprompter.buildSyncTrigger(nextSeqLocked(), nextMsgIdLocked())
+            delays += 100L
+            if (pages.size > 12) {
+                for (i in 12 until pages.size) {
+                    packets += Teleprompter.buildContentPage(nextSeqLocked(), nextMsgIdLocked(), i, pages[i])
+                    delays += 100L
                 }
             }
         }
@@ -85,8 +103,8 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         // independent BLE devices, each gets its own queued write batch.
         // We aggregate completion: both must succeed for `onComplete(true)`.
         val gate = CompletionGate(onComplete)
-        left.queueWrites(packets, "L:render") { gate.left(it) }
-        right.queueWrites(packets, "R:render") { gate.right(it) }
+        left.queueWrites(packets, "L:render", delays) { gate.left(it) }
+        right.queueWrites(packets, "R:render", delays) { gate.right(it) }
 
         return pages.size
     }
