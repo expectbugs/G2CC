@@ -103,6 +103,13 @@ class G2Pipeline(
     private val heartbeatMsgId = java.util.concurrent.atomic.AtomicInteger(0xF000)
     private val heartbeatTickCount = java.util.concurrent.atomic.AtomicInteger(0)
 
+    // Post-Ready BLE watchdog. If a side drops post-Ready and Nordic's
+    // useAutoConnect(true) fails to bring it back within a grace window,
+    // tear down the BleManager and full-rescan. Catches stale GATT / bond
+    // edge cases and "glasses powered off long enough to drop bond". */
+    private var postReadyWatchdogJob: Job? = null
+    private val POST_READY_RECOVERY_MS = 45_000L
+
     /** Scan or directed-connect to the G2 lens pair, then install BLE clients.
      *  Idempotent — calling twice is a no-op if BLE clients are already installed.
      *
@@ -215,7 +222,7 @@ class G2Pipeline(
         scope.launch {
             var leftReady = false
             var rightReady = false
-            var helloRendered = false
+            var lastBothReady = false   // edge-tracking: did both go Ready last cycle?
             _bleStatus.value = "connecting L+R"
 
             fun updateStatus(side: String, s: ConnectionState) {
@@ -223,50 +230,85 @@ class G2Pipeline(
                 val rStr = if (rightReady) "R✓" else "R:${stateLabel(s.takeIf { side == "R" } ?: right.state.value)}"
                 _bleStatus.value = if (leftReady && rightReady) "ready" else "$lStr $rStr"
             }
-            fun maybeRenderHello() {
-                if (leftReady && rightReady && !helloRendered) {
-                    helloRendered = true
-                    Log.i(TAG, "Both lenses Ready — rendering HUD hello")
-                    // Visible BLE-paired confirmation. Phase 9 polish can replace
-                    // this with a richer first-frame; for H2 sanity this is the
-                    // milestone that proves the 7-packet auth handshake worked.
-                    val h = hud
-                    val l = leftBle
-                    val r = rightBle
-                    val conn = connection
-                    if (h == null) {
-                        conn?.send(ClientMessage.Diag("hud: NULL when ready! cannot render hello"))
-                    } else {
-                        val notifyBefore = "L=${l?.notifyCount?.get() ?: -1} R=${r?.notifyCount?.get() ?: -1}"
-                        val pageCount = h.render("G2CC paired\nL+R authed\n(idle)") { ok ->
-                            val lCount = l?.notifyCount?.get() ?: -1
-                            val rCount = r?.notifyCount?.get() ?: -1
-                            val lHex = l?.lastNotifyHex ?: "(no client)"
-                            val rHex = r?.lastNotifyHex ?: "(no client)"
-                            connection?.send(ClientMessage.Diag(
-                                "hud: hello-done ok=$ok | notify: $notifyBefore → L=$lCount R=$rCount | lastHex L=$lHex R=$rHex"
-                            ))
-                            // Kick off heartbeat once the render is on screen.
-                            if (ok) startHeartbeat()
-                        }
-                        conn?.send(ClientMessage.Diag("hud: hello-render pages=$pageCount | notify-before $notifyBefore"))
-                    }
+            /** Fires on every RISING edge of (leftReady && rightReady).
+             *  This includes both the initial pair-up AND every reconnect
+             *  after a BLE drop, so the HUD never sits blank past a
+             *  reconnect. Re-rendering on every Ready edge replays whatever
+             *  text was last on screen (or the hello frame if nothing has
+             *  been rendered yet). Heartbeat is always restarted from
+             *  scratch — the prior heartbeat coroutine self-exits on
+             *  leftBle/rightBle == null OR is killed by stopHeartbeat()
+             *  below, so we never stack two. */
+            fun onBothReadyEdge() {
+                val h = hud
+                val l = leftBle
+                val r = rightBle
+                val conn = connection
+                if (h == null) {
+                    conn?.send(ClientMessage.Diag("hud: NULL on Ready edge! cannot render"))
+                    return
+                }
+                stopPostReadyWatchdog()
+                stopHeartbeat()
+                val textToRender = h.lastRenderedText ?: "G2CC paired\nL+R authed\n(idle)"
+                val isReconnect = textToRender != "G2CC paired\nL+R authed\n(idle)" ||
+                                  heartbeatTickCount.get() > 0
+                val notifyBefore = "L=${l?.notifyCount?.get() ?: -1} R=${r?.notifyCount?.get() ?: -1}"
+                conn?.send(ClientMessage.Diag(
+                    "hud: ${if (isReconnect) "RECONNECT" else "initial"}-render | notify-before $notifyBefore"
+                ))
+                h.render(textToRender) { ok ->
+                    val lCount = l?.notifyCount?.get() ?: -1
+                    val rCount = r?.notifyCount?.get() ?: -1
+                    connection?.send(ClientMessage.Diag(
+                        "hud: render-done ok=$ok | notify: $notifyBefore → L=$lCount R=$rCount"
+                    ))
+                    if (ok) startHeartbeat()
                 }
             }
+            /** Fires on every FALLING edge of (leftReady && rightReady) —
+             *  i.e. we WERE both-ready and now at least one side dropped.
+             *  Stop heartbeat so it doesn't fire against a dead lens, and
+             *  rely on Nordic's autoConnect to bring the dropped side back.
+             *  If autoConnect fails (stale GATT / bond, MAC re-randomized,
+             *  glasses powered off long enough), the watchdog (see below)
+             *  will detect the persistent disconnect and force a re-scan. */
+            fun onDroppedEdge(side: String, reason: String) {
+                stopHeartbeat()
+                connection?.send(ClientMessage.Diag(
+                    "hud: $side dropped post-Ready ($reason) — heartbeat stopped, awaiting Nordic auto-reconnect"
+                ))
+            }
+            fun recomputeEdges() {
+                val bothNow = leftReady && rightReady
+                if (bothNow && !lastBothReady) onBothReadyEdge()
+                if (!bothNow && lastBothReady) {
+                    // The transition happened — figure out which side dropped.
+                    val side = if (!leftReady && !rightReady) "BOTH" else if (!leftReady) "L" else "R"
+                    onDroppedEdge(side, "leftReady=$leftReady rightReady=$rightReady")
+                }
+                lastBothReady = bothNow
+            }
 
-            // Per-side watcher; coalesces into the outer launch via the shared
-            // state vars. As soon as Ready fires, that side is considered
-            // healthy. If a side flips to Error / Disconnected BEFORE Ready,
-            // treat the install as failed and reset.
+            // Per-side watcher. Ready flips the ready flag true; Error /
+            // Disconnected flips it false. Both paths converge to
+            // recomputeEdges() which fires the right edge handler. The
+            // pre-Ready failure path still routes through onInstallFailure
+            // so a glasses-off scenario at first connect rebuilds via scan.
             launch {
                 left.state.collect { s ->
                     when (s) {
-                        is ConnectionState.Ready -> { leftReady = true; updateStatus("L", s); maybeRenderHello() }
+                        is ConnectionState.Ready -> {
+                            leftReady = true; updateStatus("L", s); recomputeEdges()
+                        }
                         is ConnectionState.Error,
                         is ConnectionState.Disconnected -> {
-                            if (!leftReady) {
+                            if (!lastBothReady && !leftReady) {
                                 _bleStatus.value = "L fail: ${left.lastDiagnostic}"
                                 onInstallFailure("L", s)
+                            } else {
+                                leftReady = false; updateStatus("L", s); recomputeEdges()
+                                startPostReadyWatchdog()
                             }
                         }
                         else -> { updateStatus("L", s) }
@@ -276,12 +318,17 @@ class G2Pipeline(
             launch {
                 right.state.collect { s ->
                     when (s) {
-                        is ConnectionState.Ready -> { rightReady = true; updateStatus("R", s); maybeRenderHello() }
+                        is ConnectionState.Ready -> {
+                            rightReady = true; updateStatus("R", s); recomputeEdges()
+                        }
                         is ConnectionState.Error,
                         is ConnectionState.Disconnected -> {
-                            if (!rightReady) {
+                            if (!lastBothReady && !rightReady) {
                                 _bleStatus.value = "R fail: ${right.lastDiagnostic}"
                                 onInstallFailure("R", s)
+                            } else {
+                                rightReady = false; updateStatus("R", s); recomputeEdges()
+                                startPostReadyWatchdog()
                             }
                         }
                         else -> { updateStatus("R", s) }
@@ -362,9 +409,46 @@ class G2Pipeline(
         heartbeatJob = null
     }
 
+    /** Start (or restart) the post-Ready BLE watchdog. Called on every
+     *  post-Ready drop. If we don't get back to both-Ready within
+     *  POST_READY_RECOVERY_MS, tear down + re-scan. Allowed under the
+     *  no-timeouts rule: this is a recovery deadline for an external
+     *  device, not a clock-kill on an operation. */
+    private fun startPostReadyWatchdog() {
+        postReadyWatchdogJob?.cancel()
+        postReadyWatchdogJob = scope.launch {
+            kotlinx.coroutines.delay(POST_READY_RECOVERY_MS)
+            val l = leftBle
+            val r = rightBle
+            val lReady = l?.state?.value is ConnectionState.Ready
+            val rReady = r?.state?.value is ConnectionState.Ready
+            if (lReady && rReady) {
+                connection?.send(ClientMessage.Diag("ble-wd: recovered before deadline — no action"))
+                return@launch
+            }
+            connection?.send(ClientMessage.Diag(
+                "ble-wd: ${POST_READY_RECOVERY_MS / 1000}s elapsed without both-Ready " +
+                "(L=${l?.state?.value?.let { stateLabel(it) } ?: "null"} " +
+                "R=${r?.state?.value?.let { stateLabel(it) } ?: "null"}) — forcing rescan"
+            ))
+            stopHeartbeat()
+            leftBle?.shutdownBle(); rightBle?.shutdownBle()
+            leftBle = null; rightBle = null
+            leftCollectorJob?.cancel(); leftCollectorJob = null
+            rightCollectorJob?.cancel(); rightCollectorJob = null
+            scanAndConnect()
+        }
+    }
+
+    private fun stopPostReadyWatchdog() {
+        postReadyWatchdogJob?.cancel()
+        postReadyWatchdogJob = null
+    }
+
     private fun onInstallFailure(side: String, state: ConnectionState) {
         Log.w(TAG, "[$side] connect failed before Ready (state=$state) — tearing down and retrying via scan")
         stopHeartbeat()
+        stopPostReadyWatchdog()
         // Tear down current install so scanAndConnect() can rebuild.
         leftBle?.shutdownBle()
         rightBle?.shutdownBle()
@@ -539,6 +623,7 @@ class G2Pipeline(
     fun stop() {
         bleScannerRef.getAndSet(null)?.stop()
         stopHeartbeat()
+        stopPostReadyWatchdog()
         // Tear down GATT connections cleanly so the BLE stack doesn't leak
         // open handles across service restart cycles (foreground service
         // reload-on-stuck per the watchdog).

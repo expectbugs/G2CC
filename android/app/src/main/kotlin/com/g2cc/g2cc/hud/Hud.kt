@@ -33,6 +33,12 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
     @Volatile var lastPage0: String? = null
         private set
 
+    /** Last raw render input text — used by G2Pipeline.observeBleHealth to
+     *  replay the current HUD content after a BLE drop+reconnect cycle. If
+     *  null, the caller falls back to the hello frame. */
+    @Volatile var lastRenderedText: String? = null
+        private set
+
     /** Render `text` on the HUD via the teleprompter primitive. Returns the
      *  number of pages produced (informational; UI may show "page 1 of N").
      *
@@ -43,6 +49,7 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
     fun render(text: String, onComplete: (success: Boolean) -> Unit = {}): Int {
         val pages = Teleprompter.formatPages(text)
         lastPage0 = pages.firstOrNull()
+        lastRenderedText = text
         Log.i(TAG, "render: ${text.length} chars → ${pages.size} pages")
 
         // Build the full packet bundle with locked counter access. Per
