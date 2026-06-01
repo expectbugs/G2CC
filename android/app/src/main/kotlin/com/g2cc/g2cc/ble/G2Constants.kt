@@ -10,7 +10,21 @@ import java.util.UUID
  * captures + proto definitions). NEVER add a UUID here without lineage —
  * per CLAUDE.md "Reverse-Engineered Protocol Discipline".
  *
- * Verified against i-soxi/even-g2-protocol commit b227335 on 2026-05-05.
+ * Originally verified against i-soxi/even-g2-protocol commit b227335 on
+ * 2026-05-05. **Firmware drift confirmed 2026-06-01** via deep characteristic
+ * dump captured on Adam's G2 pair (server log `[client-diag] DEEP: ...`).
+ *
+ * The drift: i-soxi described a single parent service `0x0000` containing
+ * characteristics 0x5401 (W), 0x5402 (n), 0x5450 (service decl), 0x6402
+ * (display), etc. Current firmware promoted each functional group to its own
+ * top-level service whose UUID is the OLD service-declaration suffix:
+ *   - Service 0x5450 now contains chars 0x5401 (W) + 0x5402 (n)  ← MAIN
+ *   - Service 0x6450 now contains chars 0x6401 (W) + 0x6402 (n)  ← Display
+ *   - Service 0x7450 now contains chars 0x7401 (W) + 0x7402 (n)  ← unknown
+ *   - Service 0x1001 now contains chars 0x0001 (W) + 0x0002 (n)  ← unknown
+ *   - Nordic UART (6e400001-...) also present — likely DFU / debug
+ * The characteristic suffixes (5401/5402) survived the refactor; only the
+ * parent SERVICE UUID moved.
  */
 object G2Constants {
 
@@ -21,23 +35,29 @@ object G2Constants {
     private fun uuid(suffixHex: Int): UUID =
         UUID.fromString(String.format("%s%04x", UUID_BASE_PREFIX, suffixHex))
 
-    /** PROTOCOL_NOTES.md §"BLE Services" suffix 0000 — main service container. */
-    val SERVICE: UUID = uuid(0x0000)
+    /** Suffix 0x5450 — main service container on current firmware.
+     *  Holds the canonical write (0x5401) + notify (0x5402) characteristics.
+     *  Pre-drift this was characteristic CHAR_SERVICE_DECL under service 0x0000. */
+    val SERVICE: UUID = uuid(0x5450)
 
     /** PROTOCOL_NOTES.md §"BLE Services" suffix 5401 — Write characteristic.
-     *  Phone → Glasses commands. Write Without Response. MTU 512. */
+     *  Phone → Glasses commands. Write Without Response. MTU 512.
+     *  Survived firmware drift; only parent service moved (was 0x0000, now 0x5450). */
     val CHAR_WRITE: UUID = uuid(0x5401)
 
     /** PROTOCOL_NOTES.md §"BLE Services" suffix 5402 — Notify characteristic.
-     *  Glasses → Phone responses + ack. CCCD enabled by writing 0x0100. */
+     *  Glasses → Phone responses + ack. CCCD enabled by writing 0x0100.
+     *  Survived firmware drift; parent service is now 0x5450. */
     val CHAR_NOTIFY: UUID = uuid(0x5402)
 
-    /** PROTOCOL_NOTES.md §"BLE Services" suffix 5450 — Service Declaration. */
-    val CHAR_SERVICE_DECL: UUID = uuid(0x5450)
+    /** Suffix 0x6450 — display-channel service container on current firmware.
+     *  Holds chars 0x6401 (W) + 0x6402 (n). Phase 6+ may need this for raw
+     *  display rendering separate from the main protocol. */
+    val SERVICE_DISPLAY: UUID = uuid(0x6450)
 
     /** PROTOCOL_NOTES.md §"BLE Services" suffix 6402 — Display rendering channel.
      *  Phase 5 does NOT use this (proto types undocumented for non-teleprompter
-     *  rendering); kept here as a constant for Phase 6+. */
+     *  rendering); kept here as a constant for Phase 6+. Parent service is now 0x6450. */
     val CHAR_DISPLAY: UUID = uuid(0x6402)
 
     /** PROTOCOL_NOTES.md §"Device naming — DUAL GLASS".

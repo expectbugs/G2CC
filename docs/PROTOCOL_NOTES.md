@@ -22,11 +22,37 @@ When the i-soxi repo updates (firmware drift, new features land), this file gets
 
 | UUID Suffix | Full UUID | Purpose | Properties |
 |-------------|-----------|---------|------------|
-| `0000` | `00002760-08c2-11e1-9073-0e8ac72e0000` | Main Service container | — |
-| `5401` | `00002760-08c2-11e1-9073-0e8ac72e5401` | **Write** (Phone → Glasses commands) | Write Without Response, MTU 512 |
-| `5402` | `00002760-08c2-11e1-9073-0e8ac72e5402` | **Notify** (Glasses → Phone responses) | Notify; CCCD enabled with `0x0100` |
-| `5450` | `00002760-08c2-11e1-9073-0e8ac72e5450` | Service Declaration | — |
-| `6402` | `00002760-08c2-11e1-9073-0e8ac72e6402` | **Display Rendering** (Phone → Glasses, 204-byte packets) | Write Without Response |
+| `5450` | `00002760-08c2-11e1-9073-0e8ac72e5450` | **Main Service container** (post-drift; see §"Firmware drift" below) | — |
+| `5401` | `00002760-08c2-11e1-9073-0e8ac72e5401` | **Write** (Phone → Glasses commands) — under svc `5450` | Write Without Response, MTU 512 |
+| `5402` | `00002760-08c2-11e1-9073-0e8ac72e5402` | **Notify** (Glasses → Phone responses) — under svc `5450` | Notify; CCCD enabled with `0x0100` |
+| `6450` | `00002760-08c2-11e1-9073-0e8ac72e6450` | Display Service container (post-drift) | — |
+| `6402` | `00002760-08c2-11e1-9073-0e8ac72e6402` | **Display Rendering** (Phone → Glasses, 204-byte packets) — under svc `6450` | Write Without Response |
+| `6401` | `00002760-08c2-11e1-9073-0e8ac72e6401` | Display-channel Write companion (post-drift; unknown purpose) | Write Without Response |
+| `7450` | `00002760-08c2-11e1-9073-0e8ac72e7450` | Unknown service container (post-drift; chars `7401/W` + `7402/n`) | — |
+| `1001` | `00002760-08c2-11e1-9073-0e8ac72e1001` | Unknown service container (post-drift; chars `0001/W` + `0002/n`) | — |
+| — | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | Nordic UART Service (NUS) — chars `6e400002 wW` + `6e400003 n`; likely DFU/debug | — |
+
+### Firmware drift — captured 2026-06-01
+
+The i-soxi reference (`even-g2-protocol` commit `b227335`, captured pre-2026) describes a SINGLE parent service `0x0000` containing all the functional characteristics (`5401`, `5402`, `5450`, `6402`, etc.) as siblings. Current G2 firmware (production Adam's pair, captured 2026-06-01) has **reorganized**: each functional group is now a top-level service whose UUID is the OLD service-declaration suffix.
+
+Specifically: service `0x0000` is **GONE**. The write/notify characteristics `5401`/`5402` survived but now live under parent service `0x5450` (which itself was previously a characteristic). The display characteristic `0x6402` lives under new parent `0x6450`. Two more service blocks (`0x7450`, `0x1001`) appeared with the same `xxx1` (W) + `xxx2` (n) pairing — purpose unknown.
+
+The G2 also now exposes Nordic's standard UART Service (`6e400001-...`) — possibly for firmware DFU or debug; not used by the wire protocol described in this doc.
+
+**Driver code update (commit pending):** `G2Constants.SERVICE` changed from `uuid(0x0000)` to `uuid(0x5450)`. The characteristic UUIDs `CHAR_WRITE` (0x5401) and `CHAR_NOTIFY` (0x5402) are unchanged — only their parent service moved.
+
+**Diagnostic capture (server log `[client-diag] DEEP: ...`):**
+```
+00001800-...=[2a00/r, 2a01/r, 2aa6/r]                                  # Generic Access (std)
+00001801-...=[2a05/i, 2b29/rw, 2b2a/r]                                 # Generic Attribute (std)
+0000180a-...=[2a29/r, 2a24/r, 2a25/r, 2a26/r, 2a27/r]                  # Device Information (std)
+00002760-...-1001=[0001/W, 0002/n]
+00002760-...-5450=[5401/W, 5402/n]                                     # <- new main location
+00002760-...-6450=[6401/W, 6402/n]
+00002760-...-7450=[7401/W, 7402/n]
+6e400001-...=[6e400002/wW, 6e400003/n]                                 # Nordic UART
+```
 
 ### ATT Handles (observed; may differ post-firmware)
 
@@ -304,7 +330,7 @@ When Phase 5 begins, the Kotlin `ble/G2BleClient.kt` will:
 
 1. **Scan** for advertisements with name pattern `Even G2_*_L_*` and `Even G2_*_R_*` (citation: this file §"Device naming").
 2. **Connect** to both lenses concurrently via Nordic Android-BLE-Library. **No `createBond()` call** (citation: this file §"Pairing model").
-3. **Discover services** by UUID `00002760-08c2-11e1-9073-0e8ac72e0000` (citation: this file §"BLE Services & Characteristics").
+3. **Discover services** by UUID `00002760-08c2-11e1-9073-0e8ac72e5450` (citation: this file §"BLE Services & Characteristics", post-drift main-service UUID).
 4. **Enable notifications** on `0x5402` by writing `0x0100` to its CCCD.
 5. **Run 7-packet auth** using the exact byte sequences from `teleprompter.py:70-114` (citation: this file §"Authentication").
 6. **Send display frames** as type-1/type-3 teleprompter messages to `0x5401`, using the wire format from §"Packet wire format" with CRC computed per the algorithm there.
