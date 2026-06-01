@@ -50,7 +50,14 @@ class G2CCService : LifecycleService() {
         // React to state-machine transitions by updating the notification.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                pipeline.state.flow.collect { current -> updateNotification(current) }
+                pipeline.state.flow.collect { current -> updateNotification(current, pipeline.bleStatus.value) }
+            }
+        }
+        // Also update the notification when BLE status changes so Adam can see
+        // pairing progress without the HUD (and without USB/adb logcat access).
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                pipeline.bleStatus.collect { ble -> updateNotification(pipeline.state.current, ble) }
             }
         }
 
@@ -111,13 +118,14 @@ class G2CCService : LifecycleService() {
         }
     }
 
-    private fun updateNotification(state: AppState) {
+    private fun updateNotification(state: AppState, bleStatus: String = "?") {
         val launchIntent = Intent(this, MainActivity::class.java)
         val pi = PendingIntent.getActivity(
             this, 0, launchIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val notif = baseNotification(state.label(this), pi).build()
+        val text = "${state.label(this)}  |  BLE: $bleStatus"
+        val notif = baseNotification(text, pi).build()
         val nm = getSystemService(android.app.NotificationManager::class.java) ?: return
         nm.notify(NOTIF_ID, notif)
     }

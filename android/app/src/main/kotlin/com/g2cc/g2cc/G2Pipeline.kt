@@ -25,6 +25,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
@@ -59,6 +62,14 @@ class G2Pipeline(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val state = StateMachine()
+
+    // Visible BLE state for the foreground-service notification + diagnostics.
+    // Updated from observeBleHealth as the per-lens ConnectionState flows
+    // change. Without this, the only signal of BLE state is the per-lens flows
+    // (not collected by anything except observeBleHealth itself) — Adam has no
+    // way to tell if pairing succeeded.
+    private val _bleStatus = MutableStateFlow("scanning")
+    val bleStatus: StateFlow<String> = _bleStatus.asStateFlow()
 
     var leftBle: G2BleClient? = null
     var rightBle: G2BleClient? = null
@@ -123,12 +134,14 @@ class G2Pipeline(
         }
 
         // Scan path (no saved pair OR directed-connect failed).
+        _bleStatus.value = "scanning"
         val scanner = BleScanner(context)
         bleScannerRef.set(scanner)
         scanner.start { event ->
             when (event) {
                 is BleScanner.Event.FoundPair -> {
                     bleScannerRef.set(null)            // scanner self-stopped; drop reference
+                    _bleStatus.value = "found pair"
                     val leftClient = G2BleClient(context, Side.Left)
                     val rightClient = G2BleClient(context, Side.Right)
                     leftClient.connectTo(event.left)
@@ -142,6 +155,7 @@ class G2Pipeline(
                 is BleScanner.Event.Failure -> {
                     bleScannerRef.set(null)            // scanner self-stopped on failure
                     Log.w(TAG, "scan failure: ${event.reason}")
+                    _bleStatus.value = "scan failed: ${event.reason}"
                     state.transition(AppState.ERROR)
                 }
             }
@@ -186,6 +200,25 @@ class G2Pipeline(
         scope.launch {
             var leftReady = false
             var rightReady = false
+            var helloRendered = false
+            _bleStatus.value = "connecting L+R"
+
+            fun updateStatus(side: String, s: ConnectionState) {
+                val lStr = if (leftReady) "L✓" else "L:${stateLabel(s.takeIf { side == "L" } ?: left.state.value)}"
+                val rStr = if (rightReady) "R✓" else "R:${stateLabel(s.takeIf { side == "R" } ?: right.state.value)}"
+                _bleStatus.value = if (leftReady && rightReady) "ready" else "$lStr $rStr"
+            }
+            fun maybeRenderHello() {
+                if (leftReady && rightReady && !helloRendered) {
+                    helloRendered = true
+                    Log.i(TAG, "Both lenses Ready — rendering HUD hello")
+                    // Visible BLE-paired confirmation. Phase 9 polish can replace
+                    // this with a richer first-frame; for H2 sanity this is the
+                    // milestone that proves the 7-packet auth handshake worked.
+                    hud?.render("G2CC paired\nL+R authed\n(idle)")
+                }
+            }
+
             // Per-side watcher; coalesces into the outer launch via the shared
             // state vars. As soon as Ready fires, that side is considered
             // healthy. If a side flips to Error / Disconnected BEFORE Ready,
@@ -193,28 +226,45 @@ class G2Pipeline(
             launch {
                 left.state.collect { s ->
                     when (s) {
-                        is ConnectionState.Ready -> leftReady = true
+                        is ConnectionState.Ready -> { leftReady = true; updateStatus("L", s); maybeRenderHello() }
                         is ConnectionState.Error,
                         is ConnectionState.Disconnected -> {
-                            if (!leftReady) onInstallFailure("L", s)
+                            if (!leftReady) {
+                                _bleStatus.value = "L failed: ${stateLabel(s)}"
+                                onInstallFailure("L", s)
+                            }
                         }
-                        else -> { /* in-progress states; keep waiting */ }
+                        else -> { updateStatus("L", s) }
                     }
                 }
             }
             launch {
                 right.state.collect { s ->
                     when (s) {
-                        is ConnectionState.Ready -> rightReady = true
+                        is ConnectionState.Ready -> { rightReady = true; updateStatus("R", s); maybeRenderHello() }
                         is ConnectionState.Error,
                         is ConnectionState.Disconnected -> {
-                            if (!rightReady) onInstallFailure("R", s)
+                            if (!rightReady) {
+                                _bleStatus.value = "R failed: ${stateLabel(s)}"
+                                onInstallFailure("R", s)
+                            }
                         }
-                        else -> { /* in-progress states; keep waiting */ }
+                        else -> { updateStatus("R", s) }
                     }
                 }
             }
         }
+    }
+
+    private fun stateLabel(s: ConnectionState): String = when (s) {
+        is ConnectionState.Idle -> "idle"
+        is ConnectionState.Scanning -> "scan"
+        is ConnectionState.Connecting -> "conn"
+        is ConnectionState.GattConnected -> "gatt"
+        is ConnectionState.Authenticating -> "auth"
+        is ConnectionState.Ready -> "ok"
+        is ConnectionState.Disconnected -> "disc"
+        is ConnectionState.Error -> "err"
     }
 
     private fun onInstallFailure(side: String, state: ConnectionState) {
