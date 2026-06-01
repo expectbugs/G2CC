@@ -84,8 +84,16 @@ try {
   process.exit(1)
 }
 
-// Graceful shutdown.
+// Graceful shutdown — idempotent guard so double-Ctrl+C doesn't trigger two
+// server.close() chains both calling process.exit (each watchdog.stop() and
+// stopDiscovery() are individually idempotent, but the close chain is not).
+let shuttingDown = false
 function shutdown(): void {
+  if (shuttingDown) {
+    console.log('[g2cc-server] (already shutting down)')
+    return
+  }
+  shuttingDown = true
   console.log('\n[g2cc-server] Shutting down...')
   watchdogInstance.stop()
   stopDiscovery()

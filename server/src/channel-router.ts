@@ -36,10 +36,24 @@ export class ChannelRouter {
     return `msg-${Date.now()}-${randomUUID().slice(0, 8)}`
   }
 
+  /** If a pending entry already exists for `messageId`, clear its timer and
+   *  resolve the prior awaiter with `superseded` before overwriting. Loud-fail
+   *  the collision so a duplicate-id bug surfaces instead of hanging the new
+   *  awaiter forever. */
+  private supersede(messageId: string, why: string): void {
+    const prior = this.pending.get(messageId)
+    if (!prior) return
+    if (prior.timer) clearTimeout(prior.timer)
+    this.pending.delete(messageId)
+    console.warn(`[channel-router] superseding pending entry for ${messageId} (${why}) — prior awaiter resolves unverified`)
+    prior.resolver('unverified', `superseded: ${why}`)
+  }
+
   /** Wait for an ack for the given messageId. Resolves with 'verified' if a
    *  matching BleAckMsg arrives within BLE_ACK_WINDOW_MS; 'unverified' otherwise.
    *  The promise NEVER rejects — `unverified` is a valid outcome, not an error. */
   awaitAck(messageId: string): Promise<{ status: 'verified' | 'unverified'; reason?: string }> {
+    this.supersede(messageId, 'awaitAck called twice')
     return new Promise((resolve) => {
       // setTimeout here is a STATUS-window guard, NOT an I/O timeout.
       // Per spec §10 + FORBIDDEN_PATTERN_AUDIT.md §A reasoning: the operation
@@ -65,6 +79,7 @@ export class ChannelRouter {
    *  text_delta / output messages). After BLE_ACK_WINDOW_MS the entry is
    *  cleared either way. */
   fireAndForget(messageId: string): void {
+    this.supersede(messageId, 'fireAndForget over existing entry')
     const timer = setTimeout(() => this.pending.delete(messageId), BLE_ACK_WINDOW_MS)
     this.pending.set(messageId, {
       resolver: () => { /* ignored */ },

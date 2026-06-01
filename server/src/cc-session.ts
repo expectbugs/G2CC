@@ -66,6 +66,12 @@ export class CCSession extends EventEmitter {
   constructor(config: CCSessionConfig) {
     super()
     this.config = config
+    // ws-handler attaches 8 listeners per session (text, text_delta, tool_use,
+    // tool_result, turn_complete, error, permission_request, process_died).
+    // Default cap of 10 is too tight; raise so legitimate wiring doesn't trigger
+    // the "MaxListenersExceededWarning" alarm. Any real listener leak above this
+    // still trips the warning.
+    this.setMaxListeners(30)
   }
 
   get requestCount(): number { return this._requestCount }
@@ -79,6 +85,17 @@ export class CCSession extends EventEmitter {
   // [V] --include-partial-messages verified from g2code Phase 0 testing (2026-04-15).
   // G2CC change: --effort max as a CLI flag (was env-only in g2code).
   async spawn(): Promise<void> {
+    // S-H2: guard against double-spawn. Without this, calling spawn() while the
+    // previous proc is still alive silently orphans it (the old subprocess keeps
+    // running, listeners no longer wired to the new pid, watchdog tracks only
+    // the latest — zombie that survives server shutdown). Loud and proud.
+    if (this.proc !== null && this.proc.exitCode === null) {
+      throw new Error(
+        `CCSession.spawn() called while previous process (pid=${this.proc.pid}) ` +
+        `is still alive. Caller must kill() or wait for process_died first.`,
+      )
+    }
+
     const effort = this.config.effort ?? 'max'
     const model = this.config.model ?? 'opus'
 
@@ -153,7 +170,10 @@ export class CCSession extends EventEmitter {
       this.emit('process_died', code)
     })
 
-    this.consecutiveFailures = 0
+    // S-H3: do NOT reset consecutiveFailures here. The watchdog owns this counter
+    // and only resets it after the proc has stayed alive for HEALTHY_LIFETIME_MS.
+    // Resetting on every successful spawn() (g2code's bug we inherited) makes the
+    // crash-loop guard unreachable for procs that crash within seconds of spawning.
     this._requestCount = 0
     console.log(`[cc-session] Spawned (pid=${this.proc.pid}, cwd=${this.config.projectPath}, effort=${effort}, model=${model})`)
   }
@@ -258,6 +278,10 @@ export class CCSession extends EventEmitter {
           costUsd: (data.total_cost_usd as number) || 0,
           usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, contextWindow: 200_000 },
         })
+        // Reset turn state so a stray second 'result' for the same prompt
+        // (CC --resume retries, etc.) doesn't re-prepend earlier text.
+        this.currentTurnTextParts = []
+        this.toolCallsSeen = []
         return
       }
 
@@ -311,6 +335,10 @@ export class CCSession extends EventEmitter {
         costUsd,
         usage,
       })
+      // Reset turn state so a stray second 'result' for the same prompt
+      // doesn't re-prepend earlier text. Defensive — sendPrompt() also resets.
+      this.currentTurnTextParts = []
+      this.toolCallsSeen = []
     }
 
     // [V] "control_request" handling verified from ARIA session_pool.py:359-370.
@@ -343,6 +371,10 @@ export class CCSession extends EventEmitter {
 function summarizeToolInput(input: Record<string, unknown> | undefined): string {
   if (!input) return ''
   if (input.file_path) return input.file_path as string
+  // 60-char preview is for the inline tool-use status line shown alongside the
+  // tool name (e.g. "Bash: git status -uno..."). NOT a truncation of user-facing
+  // tool RESULT content, which goes to scrollback in full. This is a display-
+  // summary cap, not a no-truncation-rule violation.
   if (input.command) return (input.command as string).slice(0, 60)
   if (input.pattern) return `"${input.pattern}"`
   return ''

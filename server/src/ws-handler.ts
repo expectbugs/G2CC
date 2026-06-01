@@ -134,6 +134,11 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
       if (!client.authenticated) return
       if (client.collectingAudio) {
         client.audioChunks.push(Buffer.from(raw as Buffer))
+      } else {
+        // Loud-fail per LOUD AND PROUD rule: a binary frame outside the
+        // audio_start/audio_end window indicates a misbehaving client or
+        // protocol drift. Used to be silently dropped (no log).
+        console.warn(`[ws] binary frame received outside audio window (collectingAudio=false) — dropping ${(raw as Buffer).length} bytes`)
       }
       return
     }
@@ -152,7 +157,14 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
       return
     }
 
-    void handleMessage(client, msg, config)
+    // Wrap handleMessage in .catch so any uncaught rejection surfaces (loud)
+    // instead of disappearing into the void. Per the no-silent-failure rule:
+    // a handler that throws synchronously before its inner try/catch (e.g. a
+    // sync entry.session.kill() throwing) used to silently vanish.
+    handleMessage(client, msg, config).catch((err: unknown) => {
+      console.error('[ws] handleMessage threw:', err)
+      sendMsg(client, { type: 'cc_error', error: `Handler crashed: ${err instanceof Error ? err.message : String(err)}` })
+    })
   })
 
   ws.on('close', (code: number, reason: Buffer) => {
@@ -170,7 +182,17 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     client.confirmCallbacks.clear()
     // Phase 7: in-flight Channel Router acks all fall to 'unverified'.
     client.router.onClientDisconnect()
-    console.log(`[ws] client closed (code=${code} reason="${String(reason)}")`)
+    // Kill all CC subprocesses owned by this client. The pool is per-client
+    // (created in handleConnection), so once the WebSocket closes there's no
+    // route for these CC processes to send their output anywhere. Leaving them
+    // alive orphans them past the WS close (g2code's bug we inherited).
+    // Explicit policy: kill on disconnect. The "persist + auto-resume on
+    // reconnect" alternative is documented in HOLDS.md but not implemented here.
+    for (const entry of client.pool.allEntries()) {
+      watchdog?.unregister(entry.id)
+      client.pool.closeSession(entry.id)
+    }
+    console.log(`[ws] client closed (code=${code} reason="${String(reason)}") — killed ${client.pool.count} sessions`)
   })
 
   return client
@@ -236,15 +258,21 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         break
       }
       try {
-        const { entry, resumed } = client.pool.getOrCreateByDirectory(msg.path, {
+        const { entry, resumed, wired } = client.pool.getOrCreateByDirectory(msg.path, {
           permissionMode: client.mode,
           effort: config.claude.effort,
           model: config.claude.model,
           systemPrompt: config.claude.systemPrompt,
         })
-        wireSessionEvents(client, entry)
-        await entry.session.spawn()
-        watchdog?.register(entry.id, entry.session, msg.path)
+        // S-H1 + S-H2: only wire listeners + spawn for FRESH entries. A reused
+        // entry already has both — calling wireSessionEvents would stack
+        // listeners (text fires 2x, 3x, ...) and calling spawn() would orphan
+        // the existing live subprocess as a zombie.
+        if (!wired) {
+          wireSessionEvents(client, entry)
+          await entry.session.spawn()
+          watchdog?.register(entry.id, entry.session, msg.path)
+        }
         client.pool.persistSessionMeta()
         client.dispatcher = new CCDispatcher(entry)
         client.currentPage = 0
@@ -265,12 +293,19 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'audio_start': {
+      // Validate format BEFORE accepting binary frames so a bogus shape
+      // (sampleRate=0 or channels=0) loud-fails rather than mis-routing.
+      const sr = msg.sampleRate ?? 16_000
+      const ch = msg.channels ?? 1
+      if (sr <= 0 || ch <= 0) {
+        sendMsg(client, { type: 'stt_error', error: `Invalid audio_start: sampleRate=${sr} channels=${ch} (must be > 0)` })
+        break
+      }
       client.audioChunks = []
       client.collectingAudio = true
-      // Bug-fix-pass-2 #8: capture format so we route correctly on audio_end.
       client.audioFormat = {
-        sampleRate: msg.sampleRate ?? 16_000,
-        channels: msg.channels ?? 1,
+        sampleRate: sr,
+        channels: ch,
         encoding: msg.encoding ?? 'int16',
         source: msg.source,
       }
@@ -299,6 +334,10 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'interrupt': {
+      // Clear turn-scoped state on the active entry so a permission_request
+      // that was queued for the now-interrupted turn doesn't leak forward.
+      const active = client.pool.getActive()
+      if (active) active.pendingPermissionId = null
       client.dispatcher?.interrupt()
       break
     }
@@ -314,10 +353,23 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
 
     case 'set_mode': {
       const prev = client.mode
-      client.mode = msg.mode
-      if (prev !== msg.mode) {
-        const active = client.pool.getActive()
-        if (active) await respawnActiveWithMode(client, active, msg.mode, config)
+      if (prev === msg.mode) break        // no-op
+      const active = client.pool.getActive()
+      if (!active) {
+        // No active session — safe to update locally; nothing to respawn.
+        client.mode = msg.mode
+        break
+      }
+      // Update local mode AFTER the respawn succeeds so a failure doesn't
+      // leave client.mode divergent from the underlying session's mode.
+      try {
+        await respawnActiveWithMode(client, active, msg.mode, config)
+        client.mode = msg.mode
+      } catch (err) {
+        // respawnActiveWithMode logs + sends cc_error internally for its known
+        // failure paths, but we still re-surface here in case something escapes.
+        console.error(`[ws] set_mode respawn failed for ${msg.mode}, keeping prev=${prev}:`, err)
+        sendMsg(client, { type: 'cc_error', error: `set_mode failed; staying in ${prev}: ${err instanceof Error ? err.message : String(err)}` })
       }
       break
     }
@@ -682,11 +734,14 @@ export function confirmOnHudWithDelivery(
   text: string,
 ): { response: Promise<'confirmed' | 'rejected'>; delivery: Promise<{ status: 'verified' | 'unverified'; reason?: string }> } {
   const requestId = `cfh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  // Register the delivery ack waiter BEFORE sendMsg so a fast inbound BleAck
+  // (e.g. WiFi loopback latency under load) can't fire before awaitAck binds.
+  // Same logic applies to confirmCallbacks: register the resolver first.
+  const delivery = client.router.awaitAck(requestId)
   const response = new Promise<'confirmed' | 'rejected'>((resolve) => {
     client.confirmCallbacks.set(requestId, resolve)
     sendMsg(client, { type: 'confirm_on_hud', requestId, text })
   })
-  const delivery = client.router.awaitAck(requestId)
   return { response, delivery }
 }
 
@@ -727,6 +782,9 @@ function startHeartbeat(client: WSClient): void {
  *  `confirmOnHudWithDelivery` instead. */
 export function confirmOnHud(client: WSClient, text: string): Promise<'confirmed' | 'rejected'> {
   const requestId = `cfh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  // Register both BEFORE sendMsg so a fast inbound BleAck or confirm response
+  // can't race past the resolvers. (See confirmOnHudWithDelivery for the same
+  // ordering concern.)
   client.router.fireAndForget(requestId)
   return new Promise<'confirmed' | 'rejected'>((resolve) => {
     client.confirmCallbacks.set(requestId, resolve)

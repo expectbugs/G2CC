@@ -36,6 +36,10 @@ export interface PoolEntry {
   lastActivity: Date
   contextPct: number
   pendingPermissionId: string | null
+  /** True iff this entry's CCSession was spawned with --resume. Tracked at
+   *  create-time so re-selecting a reused entry still reports the correct
+   *  "resumed prior conversation" status to the HUD. */
+  spawnedWithResume: boolean
 }
 
 export interface CreateOptions {
@@ -49,6 +53,14 @@ export class SessionPool extends EventEmitter {
   private sessions = new Map<string, PoolEntry>()
   private activeId: string | null = null
 
+  constructor() {
+    super()
+    // Pool fans 'background_alert' (+ future event types) out to clients; default
+    // EventEmitter cap is 10 but with multiple concurrent sessions + future events
+    // we want headroom. Raised explicitly so any genuine listener-leak still surfaces.
+    this.setMaxListeners(30)
+  }
+
   get count(): number { return this.sessions.size }
   get activeSessionId(): string | null { return this.activeId }
 
@@ -61,13 +73,16 @@ export class SessionPool extends EventEmitter {
     return this.sessions.get(id) ?? null
   }
 
+  /** 1-based position of the given session in iteration order. Returns -1 when
+   *  the id is not present. Use -1 (not 0) as the sentinel so callers can
+   *  distinguish "first session" from "not found". */
   indexOf(id: string): number {
     let idx = 0
     for (const key of this.sessions.keys()) {
       idx++
       if (key === id) return idx
     }
-    return 0
+    return -1
   }
 
   /** Create a fresh session in the given project directory. */
@@ -93,6 +108,7 @@ export class SessionPool extends EventEmitter {
       lastActivity: new Date(),
       contextPct: 0,
       pendingPermissionId: null,
+      spawnedWithResume: false,
     }
 
     this.sessions.set(id, entry)
@@ -124,6 +140,7 @@ export class SessionPool extends EventEmitter {
       lastActivity: new Date(),
       contextPct: 0,
       pendingPermissionId: null,
+      spawnedWithResume: true,
     }
 
     this.sessions.set(id, entry)
@@ -135,13 +152,19 @@ export class SessionPool extends EventEmitter {
    *  Looks up the directory in ~/.g2cc/sessions.json:
    *    - If a saved CC session ID exists → createResumeSession (--resume)
    *    - Otherwise → createSession (fresh)
-   *  This is the directory-picker landing point from the HUD. */
-  getOrCreateByDirectory(projectPath: string, options: CreateOptions = {}): { entry: PoolEntry; resumed: boolean } {
+   *  This is the directory-picker landing point from the HUD.
+   *
+   *  Returns `wired=true` when an existing live pool entry is reused. The caller
+   *  MUST skip wireSessionEvents() + spawn() in that case — otherwise listeners
+   *  accumulate (S-H1) and a second subprocess is spawned orphaning the first
+   *  (S-H2). `resumed` reflects whether the underlying CCSession was spawned
+   *  with --resume at create time, NOT whether this particular call re-spawned. */
+  getOrCreateByDirectory(projectPath: string, options: CreateOptions = {}): { entry: PoolEntry; resumed: boolean; wired: boolean } {
     // First, see if we already have a live pool entry for this path.
     for (const entry of this.sessions.values()) {
       if (entry.projectPath === projectPath) {
         this.activeId = entry.id
-        return { entry, resumed: false }
+        return { entry, resumed: entry.spawnedWithResume, wired: true }
       }
     }
 
@@ -151,11 +174,11 @@ export class SessionPool extends EventEmitter {
 
     if (match) {
       const entry = this.createResumeSession(projectPath, match.id, options)
-      return { entry, resumed: true }
+      return { entry, resumed: true, wired: false }
     }
 
     const entry = this.createSession(projectPath, options)
-    return { entry, resumed: false }
+    return { entry, resumed: false, wired: false }
   }
 
   switchTo(id: string): PoolEntry {
@@ -177,7 +200,19 @@ export class SessionPool extends EventEmitter {
       for (const e of this.sessions.values()) {
         if (!latest || e.lastActivity > latest.lastActivity) latest = e
       }
-      if (latest) this.activeId = latest.id
+      if (latest) {
+        this.activeId = latest.id
+        // If the newly-promoted active session has a pending permission, surface
+        // it to the client. Otherwise the HUD shows IDLE for a session that's
+        // actually awaiting user input.
+        if (latest.pendingPermissionId) {
+          this.emit('background_alert', {
+            sessionId: latest.id,
+            alertType: 'permission',
+            details: 'Newly active session has a pending permission_request',
+          })
+        }
+      }
     }
   }
 

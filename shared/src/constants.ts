@@ -85,6 +85,12 @@ export const AUTH_TIMEOUT_MS = 5_000
 
 export const WATCHDOG_INTERVAL_MS = 30_000   // health-check cadence (interval, not per-op timeout)
 export const CRASH_LOOP_MAX_FAILURES = 5
+// After a CC subprocess has stayed alive for this long, its consecutiveFailures
+// counter resets. Below this threshold, a death within the lifetime counts as
+// a crash and increments the counter. Fixes the bug where the prior code reset
+// the counter unconditionally on every successful spawn, making the crash-loop
+// guard unreachable for fast-flapping processes.
+export const HEALTHY_LIFETIME_MS = 60_000
 
 // ============================================================
 // Heartbeat / liveness (ported from g2aria/shared/src/constants.ts)
