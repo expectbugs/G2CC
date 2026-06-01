@@ -22,7 +22,12 @@ For every file in the G2CC tree, the source-of-truth in g2code/g2aria/aria it in
 | `index.ts` | `g2code/server/src/index.ts` | Port + extend | Fastify entry. Wire: `/setup` (multi-endpoint QR per setup-page), `/endpoints` (priority-sorted JSON for client refetch — pull pattern from g2aria), `/ws` (ws-handler), mDNS startup, `pool.on('background_alert', ...)` forwarding. |
 | `dispatch.ts` | NEW (no source) | New | Defines `interface Dispatcher` with `sendPrompt`, `interrupt`, event hooks. `CCDispatcher` class wraps `CCSession` (today's only implementation). Stub `SwarmCodeDispatcher` reserved for Phase 9. |
 | `directory-picker.ts` | NEW (no source) | New | Pure function over `fs.readdirSync('/home/user', {withFileTypes:true})`. Returns full sorted list of directory names. NO truncation; NO max-N cap. |
-| `logging.ts` (Phase 3A) | NEW | New | Centralized structured logger: spawn (argv+env), CC death (stderr tail + recent events from cc-session ring buffers), WebSocket close (reason+code), BLE-ack-falls-to-unverified (Phase 7). |
+<!-- Phase 3A planned a centralized `logging.ts` but it was never created.
+     Logging is inlined as `console.log` / `console.warn` / `console.error`
+     across the server modules (matches g2code's pattern). Sufficient for
+     current needs; revisit if cross-module structured logging is ever
+     required. -->
+
 
 ## Shared (TypeScript) — `/home/user/G2CC/shared/src/`
 

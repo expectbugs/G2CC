@@ -1,6 +1,6 @@
 # G2CC
 
-Direct-BLE G2 glasses + Claude Code dispatch + DJI two-mic ANC + Parakeet ASR.
+Direct-BLE G2 glasses + Claude Code dispatch + DJI single-mic learned-profile NR (+ NLMS fallback) + Parakeet ASR.
 
 Replaces the Even Hub seven-tap relaunch dance with a Pixel 10a foreground service that talks BLE to the Even G2 glasses and WebSocket to a home server. The server bridges to a Claude Code subprocess (vanilla CC today; swarm Code/Engineering specialist later). Audio path goes server-side: DJI Mic 3 (mono TX2) → spectral subtraction with learned noise profile → DeepFilterNet polish → NVIDIA Parakeet TDT 0.6B v2. Two-mic NLMS retained in-tree as fallback for non-stationary noise scenarios.
 

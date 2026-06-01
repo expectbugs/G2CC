@@ -4,7 +4,7 @@ System-wide rules in `~/.claude/CLAUDE.md` apply here too. This file holds G2CC-
 
 This project covers TWO joined initiatives Adam is implementing together:
 - **Part A — G2 Custom App.** Direct-BLE Android app that replaces the Even Hub companion-app dance. Talks BLE to the Even G2 glasses and WebSocket to the home server. Server bridges to a **Claude Code subprocess** (vanilla CC initially; swarm Code specialist when the swarm exists). See `g2_custom_app_spec.md` Part A and `/home/user/G2 Custom/PLAN.md`.
-- **Part B — Audio + STT Upgrade.** DJI Mic 3 stereo two-mic ANC + DeepFilterNet polish + Parakeet TDT 0.6B v2 ASR on the server. See `g2_custom_app_spec.md` Part B and `/home/user/aria/docs/stt_upgrade.md`.
+- **Part B — Audio + STT Upgrade.** DJI Mic 3 mono TX2 + learned-profile spectral subtraction (two-mic NLMS retained as fallback) + DeepFilterNet polish + Parakeet TDT 0.6B v2 ASR on the server. See `g2_custom_app_spec.md` Part B (with the §8 revision note) and `/home/user/aria/docs/stt_upgrade.md`.
 
 ## Dispatch-target architecture (load-bearing)
 
@@ -52,9 +52,8 @@ Do NOT pull `server/src/aria-client.ts` from g2aria — that's the ARIA dispatch
 - **App is sideloaded** — no Play Store distribution.
 
 ### Hardware
-- **DJI Mic 3:** receiver in **Stereo (dual-channel) mode**, **32-bit float Dual-File internal recording**, **Two-Level Noise Cancelling DISABLED on BOTH TX1 and TX2**, **auto-gain / compression OFF on both channels**. ANY of these wrong destroys two-mic ANC.
-- **TX1 (reference / noise mic):** magnet-mounted directly on the machine, contact with metal housing, facing into the noise source and away from Adam's voice.
-- **TX2 (speech mic):** clipped to Adam's collar in normal close-talk position.
+- **DJI Mic 3 (default — single-mic path):** TX2 only, clipped to Adam's collar in normal close-talk position. Mono recording, 32-bit float internal recording, Two-Level Noise Cancelling DISABLED on TX2, auto-gain / compression OFF.
+- **DJI Mic 3 (NLMS fallback only):** receiver in Stereo (dual-channel) mode, 32-bit float Dual-File internal recording, Two-Level Noise Cancelling DISABLED on BOTH TX1 and TX2, auto-gain / compression OFF on both. TX1 magnet-mounted on machine, TX2 on collar. ANY of these wrong destroys NLMS ANC. The default pipeline (spectral subtraction with learned PSD) skips TX1 entirely.
 - **Even G2 glasses:** Bluetooth 5.0+. Firmware-update windows are once or twice a year via the official Even Realities app — keep that fallback path intact.
 
 ## The Three Absolute Rules (apply to BOTH Android code AND server-side audio code)

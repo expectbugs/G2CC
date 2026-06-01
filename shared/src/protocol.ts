@@ -244,7 +244,10 @@ export interface DispatchTargetListMsg {
 export interface DispatchTargetSetMsg {
   type: 'dispatch_target_set'
   targetId: string
-  flow: DispatchTarget['flow']
+  /** Optional — matches the upstream DispatchTarget.flow which is also
+   *  optional. JSON.stringify drops undefined keys, so omission on the wire
+   *  is identical to nullability in the Kotlin counterpart's `String? = null`. */
+  flow?: DispatchTarget['flow']
 }
 
 export interface DirectoryListReplyMsg {

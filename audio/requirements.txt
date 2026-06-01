@@ -1,7 +1,9 @@
 # G2CC Audio pipeline dependencies — installed into /home/user/G2CC/audio/venv/
 #
-# Phase 2B (capture infrastructure) needs only sounddevice + soundfile + scipy + numpy + matplotlib.
-# Phase 3B (NLMS + DFN modules) adds padasip + deepfilternet.
+# Phase 2B (capture infrastructure) needs sounddevice + soundfile + scipy + numpy + matplotlib.
+# Phase 3B (spectral_subtract + notch_filter + nlms fallback + DFN polish) adds deepfilternet.
+#   (Math modules — spectral_subtract.py, notch_filter.py, nlms.py — are pure
+#    numpy/scipy; no extra dependency.)
 # Phase 8 (Parakeet swap) adds nemo_toolkit[asr] (large dep tree; verify driver compat first).
 #
 # Pin loosely; CUDA-bound packages (deepfilternet's torch backend, nemo) need to match
@@ -14,10 +16,13 @@ numpy>=2.0.0
 scipy>=1.14.0
 matplotlib>=3.9.0
 
-# Phase 3B — NLMS + DeepFilterNet polish
-# (NLMS is hand-rolled NumPy per spec §B2; padasip is optional second implementation
-# for cross-validation. DeepFilterNet ships its own torch.)
-padasip>=1.2.4
+# Phase 3B — noise reduction + DeepFilterNet polish
+# Default path uses scipy.signal STFT + Wiener subtraction (spectral_subtract.py)
+# + scipy iirnotch (notch_filter.py) — no extra dependency beyond numpy/scipy.
+# NLMS fallback (nlms.py) is hand-rolled NumPy per spec §B2.
+# padasip was an option for a second NLMS implementation but we hand-rolled
+# instead — removed to avoid an unused ~5 MB venv install.
+# DeepFilterNet ships its own torch (CUDA-bound).
 deepfilternet>=0.5.6
 
 # Phase 8 — Parakeet ASR via NeMo

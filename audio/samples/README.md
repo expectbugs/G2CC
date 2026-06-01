@@ -35,20 +35,34 @@ machine), per `docs/HOLDS.md`.
 ## Capture conditions to record alongside each set
 
 When capturing, document in `<sample-name>-settings.json` (the `verify_dji_settings.py`
-output already covers most of this):
+output covers most of this).
 
-- DJI receiver mode (must be Stereo / dual-channel)
-- 32-bit float Dual-File internal recording (must be ON)
-- Two-Level Noise Cancelling on TX1 (MUST be OFF)
-- Two-Level Noise Cancelling on TX2 (MUST be OFF)
-- Auto-gain / compression on both TX (MUST be OFF)
-- TX1 mounting (must be magneted to machine housing, contact with metal)
-- TX2 mounting (must be on collar, normal close-talk)
+### Default path (single-mic)
+
+- DJI TX2 only, mono recording
+- 32-bit float internal recording (ON)
+- Two-Level Noise Cancelling on TX2 (OFF)
+- Auto-gain / compression (OFF)
+- TX2 mounting on collar, normal close-talk
 - Machine cycle timing (e.g., "15-20 cycles per minute, audible cyclical thump")
 - Distance from Adam to machine
 - Room reverb characteristics (concrete floor, drywall, etc.)
 
-## Why the three-set discipline
+### Fallback path (two-mic NLMS)
+
+Add to the above:
+
+- DJI receiver mode set to Stereo / dual-channel
+- 32-bit float Dual-File internal recording
+- Two-Level Noise Cancelling on TX1 (OFF)
+- Auto-gain / compression on TX1 (OFF)
+- TX1 magnet-mounted on machine housing, metal contact
+
+## Why the three-set discipline (NLMS fallback only)
+
+The three-set capture below is for **the NLMS fallback workflow only**. The
+default single-mic path needs just two captures: `noise-*.wav` (to learn the
+profile) and `voice_plus_machine-*.wav` (to validate the cleaned output).
 
 **Per `g2_custom_app_spec.md` §B8 (Migration Notes):**
 
@@ -57,7 +71,8 @@ output already covers most of this):
 3. **voice_alone** — ground truth. Same paragraph, no machine. WER on `voice_alone` is the floor; WER on cleaned `voice_plus_machine` should approach it.
 
 If the three are not paired (different paragraphs, different sessions), the offline
-evaluation can't isolate ANC's contribution. **Capture all three back-to-back.**
+evaluation can't isolate NLMS's contribution. **Capture all three back-to-back** when
+exercising the fallback.
 
 ## Discipline rule (from CLAUDE.md)
 

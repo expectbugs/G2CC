@@ -625,14 +625,34 @@ sox input.wav pre.wav highpass 100
 
 ## B7. Recommended Pipelines
 
+> **REVISION (see §8 head note):** the workplace-recording recommendation below
+> is the original two-mic NLMS plan. The G2CC implementation defaults to
+> **single-mic spectral subtraction with a learned PSD** since the May 28
+> noise analysis showed near-textbook stationarity. The two-mic NLMS workflow
+> here is retained as the fallback path. Current canonical order:
+> `audio/pipeline/README.md`.
+
 ### Workplace recording (factory floor, machine present)
 
+#### Default (single-mic learned-profile — what G2CC ships with)
+
+1. **Profile capture** — DJI Mic 3 TX2 only (mono), 32-bit float, NC off, auto-gain off. Record ~30-60 s of machine noise alone with the machine running. Profile is learned once per workplace and re-used.
+2. **Speech capture** — same TX2 setup, recording machine + collar speech.
+3. **Notch** — IIR notch cascade at the tonal peak frequencies saved in the profile (free if no peaks). See `audio/pipeline/notch_filter.py`.
+4. **Spectral subtraction** — Wiener filter with the learned PSD (`audio/pipeline/spectral_subtract.py`). Default α=1.5, raise to 2.0-2.5 if residual machine noise audible.
+5. **Polish** — DeepFilterNet on the cleaned output.
+6. **ASR** — Parakeet TDT 0.6B v2 via NeMo.
+
+Expected outcome: 5-8 dB total noise reduction (validated on May recording holdout) with <0.6 dB speech impact at realistic +18 dB SNR. Combined with DeepFilterNet polish and Parakeet's noise robustness, WER should stay well under 7%.
+
+#### Fallback (two-mic NLMS — for non-stationary noise scenarios)
+
 1. **Capture** — DJI Mic 3 in Stereo mode, 32-bit float Dual-File recording, onboard NC disabled on both TX. TX1 magneted to machine, TX2 on collar.
-2. **Two-mic ANC** — NLMS adaptive filter via `padasip` (or hand-rolled NumPy). Reference = TX1, primary = TX2. Output = mono cleaned speech.
+2. **Two-mic ANC** — NLMS adaptive filter (hand-rolled NumPy in `audio/pipeline/nlms.py`). Reference = TX1, primary = TX2. Output = mono cleaned speech.
 3. **Polish** — DeepFilterNet on the cleaned speech for any residual ambient noise.
 4. **ASR** — Parakeet TDT 0.6B v2 via NeMo.
 
-Expected outcome: 15–25 dB SNR improvement on the speech channel from ANC alone. Combined with DeepFilterNet polish and Parakeet's noise robustness, WER should stay under 7% even when standing next to the machine.
+Expected outcome: 15–25 dB SNR improvement on the speech channel from NLMS alone. Use this when the workplace noise is non-stationary or includes uncorrelated sources the single-mic profile can't model.
 
 ### Mobile / single-mic recording (away from workplace, phone or laptop mic)
 
@@ -647,17 +667,24 @@ Expected outcome: clean voice memos, normal ambient. WER under model's clean bas
 
 ## B8. Migration Notes / Implementation Order
 
+> **REVISION (see §8 head note):** G2CC's noise-reduction default shifted from
+> two-mic NLMS to single-mic learned-PSD spectral subtraction. The order below
+> still applies — just with NLMS swapped for spectral subtraction as the
+> primary noise-reduction stage.
+
 - ARIA's current STT path uses faster-whisper large-v3 (chosen earlier for accuracy over speed).
 - Switching to Parakeet means a NeMo dependency added and the inference call rewritten — different API. **Estimate: half a day of integration work.**
-- Two-mic ANC requires the daemon to accept stereo input and run the NLMS filter before passing audio to ASR. New code path, but isolated and small. **Estimate: a few hours for a first working version, plus tuning time on real recordings.**
-- Adding DeepFilterNet as a preprocessing stage is independent of both ASR model and ANC. Useful as a polish step.
+- Single-mic noise reduction uses scipy STFT + Wiener subtraction; no extra dependency. NLMS fallback is also hand-rolled NumPy.
+- Adding DeepFilterNet as a preprocessing stage is independent of both ASR model and noise reduction. Useful as a polish step.
 
 ### Suggested order (isolates each intervention so the contribution of each is measurable)
 
-1. Set up DJI Mic 3 in stereo mode with onboard NC off. Capture sample recordings (machine alone, voice + machine, voice alone) to test against.
-2. Implement NLMS ANC against those recordings. Tune filter length and step size until the cleaned speech sounds usable.
-3. Layer DeepFilterNet on the ANC output. Evaluate WER with current faster-whisper to isolate the noise-reduction win.
+1. Set up DJI Mic 3 TX2 (mono, NC off, auto-gain off). Capture a noise-only recording and a voice+machine recording.
+2. Learn the noise profile via `audio/tools/learn_noise_profile.py` and apply spectral subtraction against the voice+machine recording. Confirm cleaned speech sounds usable.
+3. Layer DeepFilterNet on the spectral_subtract output. Evaluate WER with current faster-whisper to isolate the noise-reduction win.
 4. Swap ASR to Parakeet. Re-evaluate.
+
+If the single-mic path underperforms (non-stationary noise, additional sources), drop in NLMS fallback in step 2 and capture the three-set (machine_alone, voice_plus_machine, voice_alone) for tuning.
 
 Order matters — changing four things at once and not knowing which one moved the needle defeats the point.
 
