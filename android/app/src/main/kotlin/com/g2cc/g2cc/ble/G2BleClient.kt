@@ -46,6 +46,13 @@ class G2BleClient(
     private var writeChar: BluetoothGattCharacteristic? = null
     private var notifyChar: BluetoothGattCharacteristic? = null
 
+    /** Diagnostic: count of notification packets received, and hex of last one's
+     *  first 24 bytes. Read by G2Pipeline after Hud.render onComplete fires so
+     *  we can tell whether the glasses are responding to our writes at all. */
+    val notifyCount = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile var lastNotifyHex: String = "(none)"
+        private set
+
     init {
         connectionObserver = object : ConnectionObserver {
             override fun onDeviceConnecting(device: BluetoothDevice) {
@@ -169,6 +176,8 @@ class G2BleClient(
         notifyChar?.let { char ->
             setNotificationCallback(char).with { _, data ->
                 val raw = data.value ?: return@with
+                notifyCount.incrementAndGet()
+                lastNotifyHex = raw.take(24).joinToString("") { "%02x".format(it) }
                 val ev = EventParser.parse(raw)
                 // 4th-pass F4: A-H4 (third pass) only covered ConnectionManager;
                 // the same silent-drop concern applies here. Log loudly on

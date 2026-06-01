@@ -219,7 +219,25 @@ class G2Pipeline(
                     // Visible BLE-paired confirmation. Phase 9 polish can replace
                     // this with a richer first-frame; for H2 sanity this is the
                     // milestone that proves the 7-packet auth handshake worked.
-                    hud?.render("G2CC paired\nL+R authed\n(idle)")
+                    val h = hud
+                    val l = leftBle
+                    val r = rightBle
+                    val conn = connection
+                    if (h == null) {
+                        conn?.send(ClientMessage.Diag("hud: NULL when ready! cannot render hello"))
+                    } else {
+                        val notifyBefore = "L=${l?.notifyCount?.get() ?: -1} R=${r?.notifyCount?.get() ?: -1}"
+                        val pageCount = h.render("G2CC paired\nL+R authed\n(idle)") { ok ->
+                            val lCount = l?.notifyCount?.get() ?: -1
+                            val rCount = r?.notifyCount?.get() ?: -1
+                            val lHex = l?.lastNotifyHex ?: "(no client)"
+                            val rHex = r?.lastNotifyHex ?: "(no client)"
+                            connection?.send(ClientMessage.Diag(
+                                "hud: hello-done ok=$ok | notify: $notifyBefore → L=$lCount R=$rCount | lastHex L=$lHex R=$rHex"
+                            ))
+                        }
+                        conn?.send(ClientMessage.Diag("hud: hello-render pages=$pageCount | notify-before $notifyBefore"))
+                    }
                 }
             }
 
