@@ -159,6 +159,12 @@ sealed interface ClientMessage {
         val status: String,                             // 'verified' | 'unverified'
         val reason: String? = null,
     ) : ClientMessage
+
+    /** Free-form diagnostic line — server logs with `[client-diag]` prefix.
+     *  Used during hardware bring-up to surface phone-side state without
+     *  needing adb / logcat access. */
+    @Serializable @SerialName("diag")
+    data class Diag(val text: String) : ClientMessage
 }
 
 // ============================================================

@@ -68,6 +68,10 @@ class G2Pipeline(
     // change. Without this, the only signal of BLE state is the per-lens flows
     // (not collected by anything except observeBleHealth itself) — Adam has no
     // way to tell if pairing succeeded.
+    //
+    // Also: a coroutine started in start() forwards every change here to the
+    // server as a DiagMsg, so the notification doesn't have to be the only
+    // observable surface (it updates too fast for a human to read by eye).
     private val _bleStatus = MutableStateFlow("scanning")
     val bleStatus: StateFlow<String> = _bleStatus.asStateFlow()
 
@@ -421,6 +425,14 @@ class G2Pipeline(
             },
         )
         connection = cm
+        // Forward every bleStatus change to the server as a DiagMsg so we have
+        // a server-side scrolling log of BLE state during hardware bring-up
+        // (the notification cycles too fast to read by eye).
+        scope.launch {
+            bleStatus.collect { status ->
+                cm.send(ClientMessage.Diag("BLE: $status"))
+            }
+        }
         hud?.let {
             menu = MenuController(it, cm)
             confirmation = ConfirmationFlow(it, cm)

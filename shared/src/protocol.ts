@@ -178,6 +178,14 @@ export interface ConfirmOnHudResponseMsg {
   result: 'confirmed' | 'rejected'
 }
 
+/** Free-form diagnostic line from the phone to the server. Server logs it
+ *  with a `[client-diag]` prefix so we can observe phone-side state without
+ *  needing adb/logcat access. Used heavily during hardware bring-up. */
+export interface DiagMsg {
+  type: 'diag'
+  text: string
+}
+
 /** Channel Router ack — signal that a server-tagged outbound message
  *  was successfully delivered to the glasses HUD via BLE.
  *  status='verified' if BLE write callback confirmed; 'unverified'
@@ -213,6 +221,7 @@ export type ClientMessage =
   | RewindMsg
   | ConfirmOnHudResponseMsg
   | BleAckMsg
+  | DiagMsg
 
 // ============================================================
 // Server -> Client messages

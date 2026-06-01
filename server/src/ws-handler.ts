@@ -508,6 +508,11 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       break
     }
 
+    case 'diag': {
+      console.log(`[client-diag] ${msg.text}`)
+      break
+    }
+
     default: {
       // Exhaustive — TypeScript will surface unhandled message types at compile time.
       const exhaustive: never = msg
