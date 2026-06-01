@@ -310,9 +310,14 @@ class G2Pipeline(
      *  Empirical findings 2026-06-01:
      *  - sync_trigger every 5 s does NOT keep session alive. Glasses ack each
      *    one (notify counts climb) but still time out at 22 s.
-     *  - Trying content_page (re-send page 0 of last render with fresh
-     *    seq/msgId) — this is the strongest "I'm still actively teleprompting"
-     *    signal documented in the i-soxi proto (type=3 content).
+     *  - content_page (re-send page 0 with fresh seq/msgId) every 8 s also
+     *    does NOT keep session alive. R lens acks ~3 notifies per packet but
+     *    L lens goes silent (stuck at notify count=4 after initial render).
+     *    Still times out at ~22 s.
+     *  - **Trying full re-render every 15 s.** This is heavy (~2.6 s wire
+     *    time per cycle) but it's the EXACT sequence proven to create a
+     *    fresh teleprompter session. If anything keeps the session alive,
+     *    a full re-render will.
      *
      *  HB annotation: per CLAUDE.md "no-timeouts rule" exception list,
      *  heartbeat pacing is allowed (it's not a clock-kill on an operation).
@@ -321,26 +326,30 @@ class G2Pipeline(
         heartbeatJob?.cancel()
         heartbeatTickCount.set(0)
         heartbeatJob = scope.launch {
-            connection?.send(ClientMessage.Diag("hb: started (cadence=8s, packet=content_page[0])"))
+            connection?.send(ClientMessage.Diag("hb: started (cadence=15s, packet=FULL_RERENDER)"))
             try {
                 while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
-                    kotlinx.coroutines.delay(8_000L)
+                    kotlinx.coroutines.delay(15_000L)
                     val l = leftBle ?: break
                     val r = rightBle ?: break
-                    val page0 = hud?.lastPage0
-                    if (page0 == null) {
-                        connection?.send(ClientMessage.Diag("hb: no lastPage0 yet — skipping tick"))
+                    val h = hud
+                    val page0 = h?.lastPage0
+                    if (h == null || page0 == null) {
+                        connection?.send(ClientMessage.Diag("hb: no hud / lastPage0 yet — skipping tick"))
                         continue
                     }
-                    val seq = heartbeatSeq.getAndIncrement() and 0xFF
-                    val msgId = heartbeatMsgId.getAndIncrement() and 0xFFFF
-                    val pkt = com.g2cc.g2cc.ble.Teleprompter.buildContentPage(seq, msgId, 0, page0)
-                    l.sendPacket(pkt, "HB:L")
-                    r.sendPacket(pkt, "HB:R")
-                    val tick = heartbeatTickCount.incrementAndGet()
-                    connection?.send(ClientMessage.Diag(
-                        "hb: tick=$tick | notify L=${l.notifyCount.get()} R=${r.notifyCount.get()}"
-                    ))
+                    val notifyBefore = "L=${l.notifyCount.get()} R=${r.notifyCount.get()}"
+                    // Reconstruct the original text from the trimmed page-0
+                    // content. (lastPage0 has the wrapped/padded form; we
+                    // could store the raw text instead, but page0 itself is
+                    // a valid render input — re-rendering it produces the
+                    // same packets.)
+                    h.render("G2CC paired\nL+R authed\n(idle)") { ok ->
+                        val tick = heartbeatTickCount.incrementAndGet()
+                        connection?.send(ClientMessage.Diag(
+                            "hb: tick=$tick ok=$ok | notify $notifyBefore → L=${l.notifyCount.get()} R=${r.notifyCount.get()}"
+                        ))
+                    }
                 }
             } finally {
                 connection?.send(ClientMessage.Diag("hb: stopped after ${heartbeatTickCount.get()} ticks"))
