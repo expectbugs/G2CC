@@ -54,6 +54,7 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.G2CC"
+        android:usesCleartextTraffic="true"
         tools:targetApi="34">
 
         <activity
