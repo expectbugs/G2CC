@@ -37,6 +37,13 @@
     <!-- Battery-optimization exemption: required so the FG service survives
          aggressive doze. Surfaced as a one-time setup prompt. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Wake lock: FG service keeps the process alive but DOESN'T prevent
+         coroutine delays from being throttled by the scheduler / Doze.
+         Adam reported heartbeat tick gaps of 13-28s on a 10s cadence in
+         factory conditions — those gaps exceed the firmware's 22s
+         teleprompter session timeout, blanking the HUD. PARTIAL_WAKE_LOCK
+         keeps the CPU alive so delay() fires on schedule. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Auto-start service on boot (Adam mentioned reboot as a real-world scenario). -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

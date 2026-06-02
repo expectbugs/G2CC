@@ -627,9 +627,24 @@ class G2Pipeline(
             // Even App).
             val cadenceMs: Long = if (PHASE_Y_ENABLED) 15_000L else 10_000L
             diag("hb: started (mode=${if (PHASE_Y_ENABLED) "News-sync_trigger" else "teleprompter-full-rerender"}, cadence=${cadenceMs}ms)")
+            // Track expected-vs-actual delay so we can detect OS scheduler /
+            // Doze throttling. With wake lock held in G2CCService this
+            // should be ~0; if we still see gap drift, the wake lock isn't
+            // enough and we need AlarmManager-based scheduling.
+            var lastTickAtMs = System.currentTimeMillis()
             try {
                 while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
                     kotlinx.coroutines.delay(cadenceMs)
+                    // Detect scheduler throttling: if delay() came back
+                    // significantly later than cadenceMs, the OS suspended
+                    // our coroutine despite the wake lock. Log loudly so
+                    // we can SEE it in diag.
+                    val now = System.currentTimeMillis()
+                    val actualGap = now - lastTickAtMs
+                    lastTickAtMs = now
+                    if (actualGap > cadenceMs + 5_000L) {
+                        diag("hb: WARN delay throttled (expected ${cadenceMs}ms got ${actualGap}ms) — wake lock not holding?")
+                    }
                     val l1 = leftBle ?: break
                     val r1 = rightBle ?: break
                     val tick = heartbeatTickCount.incrementAndGet()

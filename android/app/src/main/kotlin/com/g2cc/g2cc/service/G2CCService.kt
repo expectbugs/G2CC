@@ -37,12 +37,37 @@ class G2CCService : LifecycleService() {
 
     private lateinit var pipeline: G2Pipeline
     private var btStateReceiver: BluetoothStateReceiver? = null
+    // Wake lock — held for the whole service lifetime. Without this,
+    // coroutine delay() can be throttled by the OS scheduler / Doze even
+    // though we're a foreground service (FG type prevents process kill,
+    // not CPU throttling). Adam's factory diag showed heartbeat tick
+    // gaps of 13-28s on a 10s cadence — those gaps exceeded the firmware
+    // teleprompter session timeout (22s) and blanked the HUD. Wake lock
+    // ensures delay() fires on schedule. Battery cost is real but
+    // acceptable since the FG service is already pinning the process.
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
         running = true
         Log.i(TAG, "onCreate")
         startInForeground()
+
+        // Acquire PARTIAL_WAKE_LOCK so coroutine delays fire on schedule.
+        // See field docstring above for the bug this addresses.
+        try {
+            val pm = getSystemService(android.os.PowerManager::class.java)
+            wakeLock = pm?.newWakeLock(
+                android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                "G2CC:HeartbeatWakeLock",
+            )?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            Log.i(TAG, "wake lock acquired: held=${wakeLock?.isHeld}")
+        } catch (e: Exception) {
+            Log.e(TAG, "wake lock acquisition failed; heartbeat may be throttled", e)
+        }
 
         val prefs = Prefs(applicationContext)
         val pairing = PairingState(applicationContext)
@@ -121,6 +146,13 @@ class G2CCService : LifecycleService() {
     override fun onDestroy() {
         Log.i(TAG, "onDestroy")
         running = false
+        // Release wake lock first so we don't hold it past the service lifetime.
+        try {
+            wakeLock?.let { if (it.isHeld) it.release() }
+        } catch (e: Exception) {
+            Log.w(TAG, "wake lock release failed", e)
+        }
+        wakeLock = null
         // 4th-pass review LOW: prior runCatching {} silently swallowed
         // unregisterReceiver's IllegalArgumentException (which fires if
         // onCreate threw before the receiver was registered). Log it
