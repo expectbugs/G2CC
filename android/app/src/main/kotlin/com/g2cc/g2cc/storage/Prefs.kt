@@ -23,6 +23,18 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_TOKEN, null)
         set(value) { sp.edit().putString(KEY_TOKEN, value).apply() }
 
+    /** 4th-pass review LOW: atomic setup-time save. Writes BOTH url + token
+     *  in a single edit + commit() (synchronous, durable before return).
+     *  Use this for the setup flow where partial persistence (url saved,
+     *  token not) would leave BootReceiver in an unstartable state if the
+     *  OS killed the process between the two field-setter apply() calls. */
+    fun saveServerAndToken(url: String?, token: String?): Boolean {
+        return sp.edit()
+            .putString(KEY_URL, url)
+            .putString(KEY_TOKEN, token)
+            .commit()
+    }
+
     fun clear() {
         sp.edit().clear().apply()
     }

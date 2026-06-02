@@ -103,12 +103,22 @@ class ConnectionManager(
     private var clientHbJob: Job? = null
     private var reconnectJob: Job? = null
 
+    // 4th-pass review LOW (BLE bug 10): `endpoints` + `currentEndpointIdx`
+    // mutations need atomicity so a concurrent rotation in onClosed/onFailure
+    // doesn't race with a swap-out from setEndpoints. Without the lock, the
+    // size-then-modulo read could land on a stale size after `endpoints`
+    // already shrunk. The getOrNull safety net catches the IOOBE but the
+    // diag log line for "rotating to endpoint X" reads "<unknown>".
+    private val endpointsLock = Any()
+
     fun setEndpoints(newEndpoints: List<String>) {
         if (newEndpoints.isEmpty()) return
-        if (newEndpoints == endpoints) return
-        endpoints = newEndpoints
-        currentEndpointIdx = min(currentEndpointIdx, endpoints.size - 1)
-        endpointsTriedSinceSuccess = 0
+        synchronized(endpointsLock) {
+            if (newEndpoints == endpoints) return
+            endpoints = newEndpoints
+            currentEndpointIdx = min(currentEndpointIdx, endpoints.size - 1)
+            endpointsTriedSinceSuccess = 0
+        }
     }
 
     fun connect() {
@@ -232,7 +242,9 @@ class ConnectionManager(
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
             if (isStale()) {
-                try { webSocket.close(4100, "stale") } catch (e: Exception) { /* expected during reconnect */ }
+                // 4th-pass review LOW (bug 14): expected exception, still log
+                // at DEBUG so audit-grep doesn't find a bare catch.
+                try { webSocket.close(4100, "stale") } catch (e: Exception) { Log.d(TAG, "close threw on stale onOpen", e) }
                 return
             }
             lastMessageReceivedAt = System.currentTimeMillis()
@@ -301,8 +313,9 @@ class ConnectionManager(
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            // Acknowledge the close handshake.
-            try { webSocket.close(code, reason) } catch (e: Exception) { /* expected */ }
+            // Acknowledge the close handshake. 4th-pass review LOW (bug 14):
+            // log expected exception at DEBUG so audit-grep stays clean.
+            try { webSocket.close(code, reason) } catch (e: Exception) { Log.d(TAG, "close in onClosing threw", e) }
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -318,12 +331,15 @@ class ConnectionManager(
             onDisconnected()
 
             // Rotate endpoints if we never reached success on this attempt.
-            if (!wasConnected && endpoints.size > 1) {
-                endpointsTriedSinceSuccess++
-                currentEndpointIdx = (currentEndpointIdx + 1) % endpoints.size
-            }
-            val completedFullRotation =
+            // 4th-pass review LOW: snap endpoints + idx under the lock so
+            // a concurrent setEndpoints can't shrink the list mid-modulo.
+            val completedFullRotation = synchronized(endpointsLock) {
+                if (!wasConnected && endpoints.size > 1) {
+                    endpointsTriedSinceSuccess++
+                    currentEndpointIdx = (currentEndpointIdx + 1) % endpoints.size
+                }
                 !wasConnected && endpointsTriedSinceSuccess >= endpoints.size
+            }
             scheduleReconnect(immediate = !completedFullRotation && !wasConnected)
             Log.i(TAG, "closed code=$code reason=\"$reason\" wasConnected=$wasConnected attempt=$attemptCount")
         }
@@ -338,11 +354,14 @@ class ConnectionManager(
             if (offlineSince == null) offlineSince = System.currentTimeMillis()
             attemptCount++
             onDisconnected()
-            if (endpoints.size > 1) {
-                endpointsTriedSinceSuccess++
-                currentEndpointIdx = (currentEndpointIdx + 1) % endpoints.size
+            val moreToTry = synchronized(endpointsLock) {
+                if (endpoints.size > 1) {
+                    endpointsTriedSinceSuccess++
+                    currentEndpointIdx = (currentEndpointIdx + 1) % endpoints.size
+                }
+                endpointsTriedSinceSuccess < endpoints.size
             }
-            scheduleReconnect(immediate = endpointsTriedSinceSuccess < endpoints.size)
+            scheduleReconnect(immediate = moreToTry)
         }
     }
 

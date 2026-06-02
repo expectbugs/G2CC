@@ -100,11 +100,25 @@ object EventParser {
         }
         val type = payload[1].toInt() and 0xFF
         return when (type) {
-            0x0B -> Event.Tap                                // Confirmed: `08 0b 10 01 6a 02 08 01`
+            0x0B -> decodeTap(payload)                       // Verify exact trailer to avoid false positives
             0x0C -> decodeScroll(payload)                    // Scroll family
             0x03 -> decodeInternalMenu(payload)              // Decorated 0x12345678-wrapped events
             else -> Event.Unknown(0x01.toByte() to 0x01.toByte(), payload.toHex())
         }
+    }
+
+    /** Decode tap (type=0x0b). 4th-pass review LOW (BLE bug 5): the byte
+     *  0x0B is a common protobuf field tag — defensive match on the FULL
+     *  observed trailer `6a 02 08 01` so a future firmware change that
+     *  reuses 0x0B for a different event doesn't silently misinterpret
+     *  as Tap. Falls through to Unknown if the trailer doesn't match. */
+    private fun decodeTap(payload: ByteArray): Event {
+        // Expected exact wire: `08 0b 10 01 6a 02 08 01` (8 bytes).
+        val expected = byteArrayOf(0x08, 0x0B, 0x10, 0x01, 0x6A, 0x02, 0x08, 0x01)
+        if (payload.size == expected.size && payload.contentEquals(expected)) {
+            return Event.Tap
+        }
+        return Event.Unknown(0x01.toByte() to 0x01.toByte(), payload.toHex())
     }
 
     /** Type 0x0c scroll family. Look at the `72 [len] [data]` sub-field. */

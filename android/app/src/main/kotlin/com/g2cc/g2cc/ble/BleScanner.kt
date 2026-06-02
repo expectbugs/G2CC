@@ -154,6 +154,13 @@ class BleScanner(private val context: Context) {
         // If a caller called `stop()` before the scan resolved, drop the pending callback
         // so it doesn't fire late.
         onResultRef.set(null)
+        // 4th-pass review LOW (BLE bug 3): clear seen state too. Without
+        // this, if the caller reuses the BleScanner instance after stop(),
+        // a stale leftover device would fire FoundPair on the first scan
+        // result. Currently G2Pipeline always creates a new BleScanner, so
+        // this is defense in depth — protects future code that reuses.
+        seenLeft.set(null)
+        seenRight.set(null)
         stopInternal()
     }
 

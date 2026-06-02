@@ -108,6 +108,11 @@ object G2Constants {
         val SETTINGS_BINARY = byteArrayOf(0xC4.toByte(), 0x00)   // encrypted/binary settings push
         val SETTINGS_JSON = byteArrayOf(0xC5.toByte(), 0x00)     // JSON config push (notification whitelist etc.)
         val DEVICE_INFO_QUERY = byteArrayOf(0x09.toByte(), 0x20) // WRITE side — phone queries glasses for firmware/serial
+        // Phase Y: News-style content delivery channel. Decoded from BTSnoop
+        // 2026-06-03 — the 329-write channel used by Even App News mode for
+        // article-push (f11 wrapper with title + body + metadata). See
+        // PROTOCOL_NOTES.md §"Service 0x01-20".
+        val NEWS_CONTENT = byteArrayOf(0x01.toByte(), 0x20)
     }
 
     /** PROTOCOL_NOTES.md §"Connection parameters" — informational; Nordic library

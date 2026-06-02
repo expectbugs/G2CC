@@ -65,6 +65,13 @@ def nlms_clean(
         raise ValueError(f'NLMS step size mu must be in (0, 1), got {mu}')
     if taps < 16 or taps > 8192:
         raise ValueError(f'NLMS filter length taps must be in [16, 8192], got {taps}')
+    # 4th-pass review LOW: NaN/Inf guard. If any input sample is non-finite
+    # (caller bug or corrupt DJI frame), the NLMS update poisons the filter
+    # coefficients permanently with NaN and every subsequent output sample
+    # is NaN. Surface loudly per "no silent failures".
+    if not np.isfinite(stereo).all():
+        n_bad = int(np.sum(~np.isfinite(stereo)))
+        raise ValueError(f'NLMS input contains {n_bad} non-finite samples (NaN or Inf); refusing to process')
 
     # Channels.
     ref = stereo[:, 0].copy()

@@ -14,23 +14,20 @@ package com.g2cc.g2cc.ble
  * factory environment. If 89c7f47 holds, we may not need this; if it
  * doesn't, this is the next escalation.
  *
- * ⚠️ **DO NOT WIRE WITHOUT FURTHER VALIDATION.** 4th-pass code review (HIGH
- * BLE bug 12) flagged a structural risk in these builders: the frame
- * length-prefix bytes (`0x1A 0x0C` etc.) are hardcoded for the EXACT byte
- * shape we observed in BTSnoop. If `msg_id` ever encodes as a 2+ byte varint
- * (i.e. msgId ≥ 128), the protobuf field offsets shift but the length prefix
- * doesn't, producing a malformed packet that the firmware will silently drop
- * or — worse — interpret as something else entirely.
+ * ⚠️ **Status: structurally correct, but firmware-acceptance unverified.**
  *
- * Before wiring: either
- *   (a) treat all payloads as fully opaque — hardcode the exact BTSnoop
- *       bytes verbatim with no msgId substitution (matches AuthSequence.kt
- *       pattern; auth packets work because they're verbatim replay), OR
- *   (b) properly decode the protobuf, rebuild from typed fields, with the
- *       length-prefix computed from the actual encoded size.
- * The current hybrid (parameterized msgId + literal frame) is the worst of
- * both worlds. Add unit tests round-tripping through a real protobuf decoder
- * before flipping the wire-in switch in G2Pipeline.
+ * 4th-pass review's HIGH "length-prefix doesn't shift" concern was a misread:
+ * the inner-block length prefix (e.g. `0x1A 0x0C`) covers the INNER BLOCK
+ * bytes, which are independent of the msgId varint. msgId can encode as 1,
+ * 2, or 3+ bytes and the inner-block length stays correct. EvenAppInitTest
+ * verifies this for small + large msgId values.
+ *
+ * The remaining unknown is whether the firmware ACCEPTS these specific
+ * byte sequences from us as it does from the Even App. The bytes are
+ * faithful to the observed BTSnoop; the framing is verified protobuf-valid;
+ * worst case is the firmware drops them silently. Wiring into G2Pipeline
+ * is therefore guarded behind a feature flag so we can fall back to
+ * teleprompter mode if Phase Y proves unstable in factory testing.
  *
  * Sequence observed in BTSnoop (R lens handle 65, T+27.8s to T+31.7s):
  *  1. CCCD subscribe to gh=2117 (0x0100) — enable secondary-notify channel

@@ -9,9 +9,12 @@ import com.g2cc.g2cc.ble.EventParser
 import com.g2cc.g2cc.ble.G2BleClient
 import com.g2cc.g2cc.ble.PairingState
 import com.g2cc.g2cc.ble.Side
+import com.g2cc.g2cc.ble.EvenAppInit
 import com.g2cc.g2cc.hud.ConfirmationFlow
 import com.g2cc.g2cc.hud.Hud
 import com.g2cc.g2cc.hud.MenuController
+import com.g2cc.g2cc.hud.NewsHud
+import com.g2cc.g2cc.hud.RootMenu
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.ConnectionManager
 import com.g2cc.g2cc.net.EndpointFetcher
@@ -82,6 +85,12 @@ class G2Pipeline(
     private var confirmation: ConfirmationFlow? = null
     private var connection: ConnectionManager? = null
     private var streamer: AudioStreamer? = null
+
+    // Phase Y additions — instantiated alongside Hud in installBleClients
+    // when PHASE_Y_ENABLED is true. Both null otherwise (current teleprompter
+    // path takes over). See PHASE_Y_ENABLED docstring below.
+    private var newsHud: NewsHud? = null
+    private var rootMenu: RootMenu? = null
     // AtomicReference so writes from the BLE handler thread (scan callback) are
     // visible from the main thread (stop()) without a torn-reference race.
     private val bleScannerRef = AtomicReference<BleScanner?>(null)
@@ -155,6 +164,19 @@ class G2Pipeline(
     // it as soon as BLE comes back. Always shadows Hud.lastRenderedText.
     @Volatile private var pendingHudText: String? = null
 
+    // === Phase Y feature flag ===
+    //
+    // When true, the pipeline takes the Even-App-style display path: after
+    // both lenses Ready, runs the multi-service init sequence from
+    // EvenAppInit, switches HUD content rendering to NewsHud (service
+    // 0x01-20 article-push), and uses RootMenu as the displayed content
+    // source. When false (DEFAULT), uses the teleprompter path that's been
+    // verified to work in 9e4efc9 — every previous APK Adam has installed.
+    //
+    // Flip to true ONLY after Phase Y has been smoke-tested. Keep at false
+    // by default until then so an autonomous build doesn't ship a regression.
+    private val PHASE_Y_ENABLED: Boolean = false
+
     // Pipeline start timestamp + run ID for diag correlation. Every diag()
     // emission is prefixed with [T+s] so we can tell when each event
     // happened on the client side (server-side timestamp can lag due to WS
@@ -176,6 +198,53 @@ class G2Pipeline(
      *  as the private diag() — timestamp + run-ID prefix — so all diag lines
      *  in the server log are correlatable. */
     fun emitDiag(text: String) = diag(text)
+
+    /** Placeholder root menu for Phase Y testing. Phase Ω will populate
+     *  this with real feature modules (CC dispatch, Aria, SMS, Email...).
+     *  For now: enough items to verify the menu renders + scrolls + taps. */
+    private fun buildPlaceholderRootMenu(): List<RootMenu.MenuItem> = listOf(
+        RootMenu.MenuItem.Action("Claude Code") {
+            diag("rootMenu: tap → Claude Code (placeholder)")
+        },
+        RootMenu.MenuItem.Action("Aria") {
+            diag("rootMenu: tap → Aria (placeholder)")
+        },
+        RootMenu.MenuItem.Action("SMS") {
+            diag("rootMenu: tap → SMS (placeholder)")
+        },
+        RootMenu.MenuItem.Action("Email") {
+            diag("rootMenu: tap → Email (placeholder)")
+        },
+        RootMenu.MenuItem.Action("Calendar") {
+            diag("rootMenu: tap → Calendar (placeholder)")
+        },
+        RootMenu.MenuItem.Action("Settings") {
+            diag("rootMenu: tap → Settings (placeholder)")
+        },
+    )
+
+    /** Phase Y init sequence run after both lenses Ready: send the
+     *  EvenAppInit packets to R lens (matches Even App: News init goes to
+     *  R only). On completion, render the root menu via NewsHud. */
+    private fun runPhaseYInit(onDone: (success: Boolean) -> Unit) {
+        val r = rightBle
+        if (r == null) {
+            onDone(false)
+            return
+        }
+        val initPackets = EvenAppInit.buildFullInitSequence(
+            startSeq = 0x40,           // safe range above auth (1-7) + teleprompter (0x10-0x1F) + news (0x20-0x3F)
+            startMsgId = 0x200,
+            r1MacBleOrder = null,      // skip R1 registration until we have the MAC
+        )
+        diag("phaseY: sending ${initPackets.size} EvenAppInit packets to R")
+        val packets = initPackets.map { it.first }
+        val delays = initPackets.map { it.second }
+        r.queueWrites(packets, "phaseY-init", delays) { ok ->
+            diag("phaseY: init complete ok=$ok")
+            onDone(ok)
+        }
+    }
 
     /** Scan or directed-connect to the G2 lens pair, then install BLE clients.
      *  Idempotent — calling twice is a no-op if BLE clients are already installed.
@@ -264,9 +333,19 @@ class G2Pipeline(
         rightBle = right
         val newHud = Hud(left, right)
         hud = newHud
-        connection?.let {
-            menu = MenuController(newHud, it)
-            confirmation = ConfirmationFlow(newHud, it)
+        // Phase Y: also instantiate NewsHud + RootMenu so the alternate
+        // display path is ready if PHASE_Y_ENABLED is on. Both live alongside
+        // the teleprompter Hud; only one is used per render depending on
+        // the flag. RootMenu's render callback feeds into NewsHud which
+        // writes to BLE via the News-style 0x01-20 path.
+        if (PHASE_Y_ENABLED) {
+            val nh = NewsHud(left, right)
+            newsHud = nh
+            rootMenu = RootMenu(rootItems = buildPlaceholderRootMenu()) { title, body ->
+                nh.render(title, body) { ok ->
+                    diag("phaseY: news-render '${title.take(20)}' ok=$ok body=${body.length}c")
+                }
+            }
         }
         // Cancel any prior collectors so a re-install (e.g. after BLE disconnect
         // + reconnect) doesn't stack a second pair, double-firing every onTap.
@@ -325,6 +404,29 @@ class G2Pipeline(
                 }
                 stopPostReadyWatchdog()
                 stopHeartbeat()
+                // Phase Y branch: run EvenAppInit then render RootMenu via
+                // NewsHud. Skips the teleprompter path entirely.
+                if (PHASE_Y_ENABLED) {
+                    val rm = rootMenu
+                    val nh = newsHud
+                    if (rm == null || nh == null) {
+                        diag("phaseY: rootMenu/newsHud NULL — falling back to teleprompter path")
+                    } else {
+                        runPhaseYInit { initOk ->
+                            if (!initOk) {
+                                diag("phaseY: init failed — heartbeat NOT started; rely on watchdog rescan")
+                                return@runPhaseYInit
+                            }
+                            sessionHasRenderedOnce.set(true)
+                            pendingHudText = null
+                            // Render the root menu — this populates lastTitle/lastBody
+                            // on NewsHud so reconnect paths can replay.
+                            rm.render()
+                            startHeartbeat()
+                        }
+                        return
+                    }
+                }
                 // Priority: most recent server intent > Hud's last cached
                 // render > hello frame. pendingHudText is populated by
                 // ServerMessage.Output even when hud was null — so this
@@ -655,6 +757,8 @@ class G2Pipeline(
                 is EventParser.Event.Tap -> {
                     val prev = lastTapAt.get()
                     if (now - prev >= EVENT_DEBOUNCE_MS && lastTapAt.compareAndSet(prev, now)) {
+                        // Phase Y: route taps to RootMenu when active.
+                        if (PHASE_Y_ENABLED && rootMenu?.onTap() == true) return@collect
                         onTap()
                     }
                 }
@@ -668,18 +772,24 @@ class G2Pipeline(
                     val prev = lastScrollUpAt.get()
                     if (now - prev >= EVENT_DEBOUNCE_MS) {
                         lastScrollUpAt.compareAndSet(prev, now)
-                        // Firmware-native scroll handles teleprompter pages; no app action.
+                        // Phase Y: route scroll-up to RootMenu (prev item).
+                        if (PHASE_Y_ENABLED) rootMenu?.onScrollPrev()
+                        // Firmware-native scroll handles teleprompter pages; no app action otherwise.
                     }
                 }
                 is EventParser.Event.ScrollDown -> {
                     val prev = lastScrollDownAt.get()
                     if (now - prev >= EVENT_DEBOUNCE_MS) {
                         lastScrollDownAt.compareAndSet(prev, now)
+                        // Phase Y: route scroll-down to RootMenu (next item).
+                        if (PHASE_Y_ENABLED) rootMenu?.onScrollNext()
                     }
                 }
                 is EventParser.Event.ScrollFocus -> {
-                    // Ring detected motion start — could be used for menu wake.
-                    // No app action yet; Phase Ω menu system will hook this.
+                    // Ring detected motion start. Phase Y: ensure RootMenu
+                    // re-renders (e.g. if the firmware had cleared the
+                    // display); cheap no-op otherwise.
+                    if (PHASE_Y_ENABLED) rootMenu?.render()
                 }
                 is EventParser.Event.InternalMenuEvent -> {
                     // Glasses' internal-menu event (decorated 0x12345678 channel).

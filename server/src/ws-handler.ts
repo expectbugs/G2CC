@@ -336,11 +336,15 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'prompt': {
+      // 4th-pass review LOW: bump app-activity timestamp so a long CC turn
+      // doesn't get the client kicked for app-side silence.
+      client.lastAppActivityMs = Date.now()
       handlePrompt(client, msg.text)
       break
     }
 
     case 'command': {
+      client.lastAppActivityMs = Date.now()
       handlePrompt(client, msg.command)
       break
     }
@@ -530,6 +534,9 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'confirm_on_hud_response': {
+      // 4th-pass review LOW: user tapped confirm/reject — clear app-activity
+      // signal so a long confirmation window doesn't trigger app-silence kick.
+      client.lastAppActivityMs = Date.now()
       const cb = client.confirmCallbacks.get(msg.requestId)
       if (cb) {
         client.confirmCallbacks.delete(msg.requestId)
@@ -541,6 +548,9 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'ble_ack': {
+      // 4th-pass review LOW: any BLE ack from the phone is an app-activity
+      // signal (phone is alive + processing).
+      client.lastAppActivityMs = Date.now()
       client.router.onAck(msg.messageId, msg.status, msg.reason)
       break
     }

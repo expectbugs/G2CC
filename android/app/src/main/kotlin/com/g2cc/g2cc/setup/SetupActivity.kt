@@ -91,8 +91,15 @@ class SetupActivity : AppCompatActivity() {
             toast(R.string.setup_missing_fields)
             return
         }
-        prefs.serverUrl = url
-        prefs.authToken = token
+        // 4th-pass review LOW: atomic + durable write. Setup is a one-shot
+        // critical persistence — partial save (url only, token missing) would
+        // leave BootReceiver permanently unable to start the service. Using
+        // commit() makes the write synchronous + atomic across both fields.
+        if (!prefs.saveServerAndToken(url, token)) {
+            android.util.Log.e("SetupActivity", "saveServerAndToken returned false — disk write failed")
+            toast(R.string.setup_missing_fields)
+            return
+        }
         toast(R.string.setup_saved)
         finish()
     }
