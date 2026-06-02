@@ -254,6 +254,13 @@ class G2Pipeline(
                 val isReconnect = textToRender != "G2CC paired\nL+R authed\n(idle)" ||
                                   heartbeatTickCount.get() > 0
                 val notifyBefore = "L=${l?.notifyCount?.get() ?: -1} R=${r?.notifyCount?.get() ?: -1}"
+                // One-shot diag: show actual MTU + PHY so we can see whether
+                // the BLE-stability requests (2M PHY, LOW_POWER priority) were
+                // accepted by the glasses or fell back to defaults.
+                conn?.send(ClientMessage.Diag(
+                    "ble-link: L mtu=${l?.lastMtu ?: -1} phy=${l?.lastPhy ?: "?"} ${l?.lastConnParams ?: "?"} | " +
+                    "R mtu=${r?.lastMtu ?: -1} phy=${r?.lastPhy ?: "?"} ${r?.lastConnParams ?: "?"}"
+                ))
                 conn?.send(ClientMessage.Diag(
                     "hud: ${if (isReconnect) "RECONNECT" else "initial"}-render | notify-before $notifyBefore"
                 ))

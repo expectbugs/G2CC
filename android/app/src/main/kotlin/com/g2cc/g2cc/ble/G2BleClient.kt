@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -53,6 +54,16 @@ class G2BleClient(
     @Volatile var lastNotifyHex: String = "(none)"
         private set
 
+    /** Diagnostic: actual MTU + PHY negotiated. Surfaced by G2Pipeline so we
+     *  can see whether the glasses accepted our 2M PHY / MTU 512 / LOW_POWER
+     *  requests or fell back to defaults. */
+    @Volatile var lastMtu: Int = -1
+        private set
+    @Volatile var lastPhy: String = "(unknown)"
+        private set
+    @Volatile var lastConnParams: String = "(unknown)"
+        private set
+
     init {
         connectionObserver = object : ConnectionObserver {
             override fun onDeviceConnecting(device: BluetoothDevice) {
@@ -91,7 +102,15 @@ class G2BleClient(
     fun connectTo(device: BluetoothDevice) {
         connect(device)
             .useAutoConnect(true)        // Nordic library handles reconnect on disconnect
-            .retry(3, 200)               // 3 attempts, 200ms apart on initial connect failure
+            // Phase D resilience: more aggressive retry config so a body-block
+            // (BLE 2.4 GHz is heavily absorbed by the human body — walking
+            // with the phone in the pocket and glasses on the face puts the
+            // body in the line of sight) doesn't give up before the body
+            // moves out of the way. Was retry(3, 200) = 600 ms total; now
+            // retry(10, 500) = 5 s total. Combined with useAutoConnect's
+            // background passive scan, recovery should be near-instant once
+            // line-of-sight resumes.
+            .retry(10, 500)
             .enqueue()
     }
 
@@ -169,8 +188,41 @@ class G2BleClient(
     override fun initialize() {
         // PROTOCOL_NOTES.md §"BLE Services" — request MTU 512 for write packets.
         requestMtu(G2Constants.ConnectionParams.MTU)
-            .with { _, mtu -> Log.i(TAG, "[$side] MTU negotiated=$mtu") }
+            .with { _, mtu ->
+                Log.i(TAG, "[$side] MTU negotiated=$mtu")
+                lastMtu = mtu
+            }
             .enqueue()
+
+        // Phase D resilience: request LOW_POWER connection priority. Default
+        // BALANCED uses 30-50 ms interval + 5 s supervision timeout; LOW_POWER
+        // uses 100-125 ms + 6 s. Larger interval = less air time per second
+        // = more resilient to body-absorption (2.4 GHz is heavily attenuated
+        // by water). Symptom this addresses: walking with phone in pocket
+        // caused constant disconnect/reconnect under the default profile.
+        // The peripheral can reject the request — we capture what was
+        // actually negotiated via onConnectionUpdated below.
+        requestConnectionPriority(android.bluetooth.BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
+            .with { _, interval, latency, supervision ->
+                Log.i(TAG, "[$side] conn-params updated: interval=$interval latency=$latency supervision=$supervision")
+                lastConnParams = "intv=$interval lat=$latency sup=$supervision"
+            }
+            .enqueue()
+
+        // Request 2M PHY. Pixel 10a + BT 5.3 supports it; the G2 may or may
+        // not. If the peripheral rejects, we fall back to 1M silently —
+        // setPreferredPhy is a hint. 2M PHY doubles data rate = half the
+        // air time per packet = less vulnerable to interference / blockage.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            setPreferredPhy(
+                android.bluetooth.BluetoothDevice.PHY_LE_2M_MASK,
+                android.bluetooth.BluetoothDevice.PHY_LE_2M_MASK,
+                android.bluetooth.BluetoothDevice.PHY_OPTION_NO_PREFERRED,
+            ).with { _, txPhy, rxPhy ->
+                Log.i(TAG, "[$side] PHY negotiated tx=$txPhy rx=$rxPhy")
+                lastPhy = "tx=$txPhy rx=$rxPhy"
+            }.enqueue()
+        }
 
         // Enable notifications on 0x5402.
         notifyChar?.let { char ->
