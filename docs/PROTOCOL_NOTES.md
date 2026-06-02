@@ -353,4 +353,98 @@ These are not blockers for the planned scope but should be verified before relyi
 
 ---
 
-*Last updated 2026-05-05. Update when the i-soxi clone SHA changes or when Phase 5/6 reverse-engineers new behavior.*
+## BTSnoop intel — Even App News session (captured 2026-06-02)
+
+Adam captured ~9 minutes of Even App News usage on his Pixel 10a in his factory environment. The capture covered initial pairing, sustained News browsing with ring scroll, and clean shutdown. **Zero glasses disconnects during this capture** (the R1 ring did drop twice and auto-recover). This section preserves the load-bearing findings.
+
+### Connection inventory observed
+
+| Handle | Address | Device | Notes |
+|--------|---------|--------|-------|
+| 64 | d8:ae:e7:c1:fa:4d | G2 Left lens | Mostly idle — 41 writes / 37 notifs over 514s |
+| 65 | e4:87:77:65:cd:50 | G2 Right lens | Active — 469 writes / 270 notifs over 514s. **R is the primary/display lens.** |
+| 66 / 67 | db:d9:68:35:f0:b8 | R1 Ring (direct to phone) | 19+14 writes / 22+15 notifs — battery/firmware queries only |
+
+Final negotiated link parameters per lens (both):
+- MTU 247 (we requested 512, capped at 247)
+- PHY 1M tx + 1M rx (2M rejected by glasses — they don't support BLE 5.0 2M)
+- Interval 84 (105ms) latency 4 supervision 600 (6000ms) — peripheral preference
+- Initial connect uses interval 12-39 then upgrades to long-interval/high-latency
+
+### Keepalive pattern (the load-bearing finding)
+
+**One `sync_trigger` packet (service `0x80-00` type `0x0E`, 16 bytes total) per lens per 15s cycle.** Cadence is exactly 15.00s ± 10ms across 500+ seconds. Both lenses get a keepalive (not just R) — L gets the same packet on the same cadence. The pair is staggered ~2s (L → wait 2s → R → wait 13s → loop) to avoid radio scheduling collision.
+
+Wire format (matches existing `Teleprompter.buildSyncTrigger`):
+```
+aa 21 [seq] 08 01 01 80 00 08 0e 10 [msg_id_varint] 6a 00 [crc-LE]
+```
+
+**Counterintuitive lesson:** more keepalive traffic destabilized the session. Our prior approach (full 14-page re-render every 4-15s) was 50-300× more BLE wire time than the Even App and made things worse, not better. The firmware appears to interpret high-bandwidth writes as "interactive update in progress" and skips its normal session-extend logic.
+
+### Init flow observed (steps the Even App does before display)
+
+This is the elaborate sequence that may be why their session is more durable than ours under stress. **Not all yet implemented in G2CC** — placeholder builders live in `EvenAppInit.kt` for Phase Y integration.
+
+After CCCD subscribes (handles 2117, 2085, 2149, 2181) and the 7-packet auth handshake:
+1. Service `0x09-20` Device Info query (response: firmware "2.2.2.202" / "2.2.2.208" per lens — different firmwares per side!)
+2. Service `0x03-20` App Enumeration (179 bytes listing "DocuLens", "Reddit Feed", "Display Config" — the glasses' INTERNAL feature catalog)
+3. Service `0x0D-20` Configuration query
+4. Service `0x0C-20` Tasks one-shot
+5. Service `0x07-20` Dashboard one-shot
+6. Service `0x0E-20` Display Config — LARGE (230-byte payload defining display regions, fragmented across multiple ATT writes)
+7. Service `0x30-20` unknown small init
+8. Service `0x10-20` unknown small init
+9. Service `0x91-20` **R1 Registration** — tells the glasses the ring's MAC address. Re-sent each time R1 reconnects (the glasses help manage the ring connection)
+10. Service `0x09-20` Device Info follow-up
+11. Service `0x01-20` Heartbeat/Liveness setup
+12. Service `0x81-20` **Display Trigger** — wake/activate the display
+13. Service `0xC5-00` Settings JSON push (`{"calendar_enable":true,...,"name":"FairEmail"}`) — notification whitelist
+14. Service `0xC4-00` Settings Binary push (encrypted version of above)
+15. Service `0x20-20` Commit — finalize the init transaction
+
+Then sustained: sync_trigger heartbeat (above) + intermittent display updates (News article scrolls).
+
+### Ring event channel (service `0x01-01`)
+
+The R1 ring's input events arrive on the R lens's notify characteristic (0x5402) under service ID `0x01-01`. The ring → phone direct BLE connection is for battery/firmware ONLY; navigation goes ring → glasses → phone.
+
+Three event types:
+
+| Type byte (after `08`) | Meaning | Pattern |
+|------------------------|---------|---------|
+| `0x0b` | TAP / SELECT | Always exactly `08 0b 10 01 6a 02 08 01` — fires at end of scroll session |
+| `0x0c` | SCROLL family | `08 0c 10 [msg_id] 72 [len] [event]` — empty event (`72 00`) = wake/focus, non-empty = scroll notch |
+| `0x03` | Internal menu event | Decorated with magic `0x12345678` + counter — glasses' internal UI events; not for our menu |
+
+**Scroll direction encoding unconfirmed.** Adam's capture had mostly downward scrolls through news; the f1/f2 sub-fields vary but a controlled up-then-down capture would resolve. Current `EventParser.decodeScroll` emits `Event.ScrollDown` provisionally. Going wrong-direction is recoverable; dropping events is not.
+
+**Double-tap** is handled by the glasses firmware natively (shows "End Feature?" dialog) and does NOT reach the phone in normal modes. Kept in the `Event` hierarchy for future custom display modes that disable the native handler.
+
+### Notify service catalog (responses we receive)
+
+| Service | Direction | Purpose |
+|---------|-----------|---------|
+| `0x01-00` | Glasses → Phone | Generic ack for our control writes |
+| `0x01-01` | Glasses → Phone | **Ring input events (the one that matters)** |
+| `0x09-00` | Glasses → Phone | Device Info responses (firmware version) |
+| `0x09-01` | Glasses → Phone | Device Info follow-up responses |
+| `0x0e-00` | Glasses → Phone | Display Config responses + acks for our display writes |
+| `0x0d-00`, `0x0d-01` | Glasses → Phone | Configuration responses |
+| `0x80-00`, `0x80-01` | Glasses → Phone | Auth control responses |
+| `0x91-00` | Glasses → Phone | **R1 ring state notifications** — connect/disconnect events; payload includes ring MAC |
+| `0xC4-00`, `0xC5-00` | Glasses → Phone | Settings push acks |
+
+### Firmware drift status
+
+The expected i-soxi main service `00002760-...-0000` is GONE on Adam's firmware. The functional characteristics survived but moved to new parent services:
+- `0x5401` (Write) + `0x5402` (Notify) now under parent service `0x5450` (was a child characteristic in i-soxi)
+- `0x6401` + `0x6402` under parent service `0x6450`
+- Plus `0x7450` + `0x1001` parent services with similar `xxx1/xxx2` write/notify pairs (purpose unknown)
+- Nordic UART Service also present (probably DFU)
+
+`G2Constants.SERVICE` is updated to point at `0x5450` post-drift.
+
+---
+
+*Last updated 2026-06-02. Update when the i-soxi clone SHA changes or when Phase 5/6/Y reverse-engineers new behavior.*

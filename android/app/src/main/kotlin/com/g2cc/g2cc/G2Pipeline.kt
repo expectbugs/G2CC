@@ -125,6 +125,14 @@ class G2Pipeline(
     // every full-rebuild as a brand-new install. Reset only by stop().
     private val sessionHasRenderedOnce = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    // Pending HUD content. Display-independence audit finding #3 (CRITICAL):
+    // when ServerMessage.Output arrives but HUD is unavailable (hud null,
+    // BLE down, body-blocked), we previously dropped the text on the floor.
+    // CC server-side scrollback holds it but the client never auto-replays.
+    // This buffer holds the most recent intent so onBothReadyEdge can show
+    // it as soon as BLE comes back. Always shadows Hud.lastRenderedText.
+    @Volatile private var pendingHudText: String? = null
+
     // Pipeline start timestamp + run ID for diag correlation. Every diag()
     // emission is prefixed with [T+s] so we can tell when each event
     // happened on the client side (server-side timestamp can lag due to WS
@@ -287,7 +295,13 @@ class G2Pipeline(
                 }
                 stopPostReadyWatchdog()
                 stopHeartbeat()
-                val textToRender = h.lastRenderedText ?: "G2CC paired\nL+R authed\n(idle)"
+                // Priority: most recent server intent > Hud's last cached
+                // render > hello frame. pendingHudText is populated by
+                // ServerMessage.Output even when hud was null — so this
+                // path replays content that arrived during a HUD outage.
+                val textToRender = pendingHudText
+                    ?: h.lastRenderedText
+                    ?: "G2CC paired\nL+R authed\n(idle)"
                 // Reconnect path: this pipeline has rendered before in THIS
                 // session (across BLE client rebuilds), OR there's
                 // session-state evidence (heartbeat ticked, or text differs
@@ -606,9 +620,17 @@ class G2Pipeline(
                         lastScrollDownAt.compareAndSet(prev, now)
                     }
                 }
+                is EventParser.Event.ScrollFocus -> {
+                    // Ring detected motion start — could be used for menu wake.
+                    // No app action yet; Phase Ω menu system will hook this.
+                }
+                is EventParser.Event.InternalMenuEvent -> {
+                    // Glasses' internal-menu event (decorated 0x12345678 channel).
+                    // Already handled by firmware; not for our menu.
+                }
                 is EventParser.Event.Unknown -> {
-                    // Phase 5 hardware testing refines EventParser → these become Tap/DoubleTap.
-                    // Logged at DEBUG by EventParser itself; no further action here.
+                    // Auth acks, display config responses, etc. EventParser
+                    // logs them at DEBUG; no further action here.
                 }
                 is EventParser.Event.Malformed -> {
                     Log.w(TAG, "malformed BLE event: ${event.reason}")
@@ -752,6 +774,13 @@ class G2Pipeline(
             }
             is ServerMessage.Output -> {
                 if (state.current != AppState.STREAMING) state.transition(AppState.STREAMING)
+                // Always capture latest intent BEFORE the optional render.
+                // Display-independence audit fix: if HUD is currently
+                // unavailable (BLE down, body-blocked, hud null), the next
+                // both-Ready edge replays this. Without the buffer, server
+                // output during a HUD outage was permanently lost
+                // client-side even though server scrollback retained it.
+                pendingHudText = msg.text
                 hud?.render(msg.text)
             }
             is ServerMessage.TextDelta -> {
@@ -769,11 +798,20 @@ class G2Pipeline(
                 state.transition(AppState.AWAITING_CONFIRMATION)
                 val flow = confirmation
                 if (flow == null) {
-                    // Loud-and-proud: ConfirmationFlow not constructed (BLE clients
-                    // not yet installed). Server-side promise will reject when this
-                    // socket closes; for now log so the gap is observable.
-                    Log.w(TAG, "confirm_on_hud arrived but ConfirmationFlow not initialized")
-                    hud?.render("CONFIRM?\n${msg.text}\n\n(BLE not connected — cannot confirm)")
+                    // Display-independence audit fix (CRITICAL finding #1):
+                    // server's CC subprocess is blocked on this confirmation
+                    // promise. If we don't reply, the promise hangs forever
+                    // (per the no-timeouts rule the server can't bail itself
+                    // out). Auto-reject immediately so CC unblocks instead of
+                    // wedging the entire subprocess on a phone that has no
+                    // way to render the prompt. Audit + diag so it's not
+                    // silent. Phone-side fallback gesture (audit finding #2,
+                    // NOTABLE) can override this later with an "approve"
+                    // path that doesn't depend on the HUD.
+                    Log.w(TAG, "confirm_on_hud arrived but ConfirmationFlow not initialized — auto-rejecting to unblock CC")
+                    diag("confirm: auto-rejected (HUD unavailable) requestId=${msg.requestId}")
+                    connection?.send(ClientMessage.ConfirmOnHudResponse(msg.requestId, "rejected"))
+                    state.transition(AppState.IDLE)
                 } else {
                     flow.onConfirmRequest(msg)
                 }
