@@ -593,60 +593,67 @@ class G2Pipeline(
         heartbeatJob?.cancel()
         heartbeatTickCount.set(0)
         heartbeatJob = scope.launch {
-            // BTSnoop capture from Even App (2026-06-02) revealed the actual
-            // keepalive pattern they use: ONE sync_trigger packet (16 bytes,
-            // service 0x80-00 type=0x0E) sent to EACH lens at exactly 15s
-            // cadence, STAGGERED so L is sent ~2s before R. No content
-            // packets, no full re-render, no display_config — just the
-            // sync_trigger. Their session stays alive for the entire app
-            // session under this minimal load. We were sending ~17 packets
-            // every 4-10s with full pacing delays — vastly more BLE wire
-            // time, which paradoxically destabilized the link AND didn't
-            // produce a more persistent session.
+            // REGRESSION FIX (2026-06-03): the Even-App-style sync_trigger-only
+            // keepalive (89c7f47) was WRONG for our display path. The Even
+            // App uses News-style content (0x01-20) which has firmware
+            // session semantics that survive on sync_trigger alone. We use
+            // teleprompter (0x06-20) for HUD content (PHASE_Y_ENABLED=false),
+            // and the teleprompter session dies ~22s after the last full
+            // render even when sync_trigger keeps the BLE link alive. So
+            // the HUD was going blank ~22s after each render and never
+            // coming back (heartbeat fired but didn't recreate the session).
             //
-            // New strategy: copy theirs exactly.
-            //   1. 15s cadence (NOT 4s, NOT 10s — 15s is what works)
-            //   2. Both lenses get a keepalive
-            //   3. Stagger L→R by 2s to avoid per-interval radio collision
-            diag("hb: started (Even-App style: sync_trigger to L+R staggered, 15s cadence)")
+            // Fix: heartbeat branches based on PHASE_Y_ENABLED:
+            //   - false (teleprompter, current default): full re-render via
+            //     hud.render(lastText, fastReRender=true). Re-establishes
+            //     the teleprompter session every cycle. ~0.8s per cycle.
+            //     This is what the working v0.0.1-aae90de did.
+            //   - true (Phase Y News mode): sync_trigger-only at 15s
+            //     staggered L+R per Even App pattern.
+            //
+            // Either way: cadence is 10s for teleprompter (need to refresh
+            // before the 22s firmware timeout), 15s for News (matches
+            // Even App).
+            val cadenceMs: Long = if (PHASE_Y_ENABLED) 15_000L else 10_000L
+            diag("hb: started (mode=${if (PHASE_Y_ENABLED) "News-sync_trigger" else "teleprompter-full-rerender"}, cadence=${cadenceMs}ms)")
             try {
                 while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
-                    // 4th-pass review MEDIUM (BLE bug 1): re-snapshot clients
-                    // AFTER each delay() to avoid writing to a stale L/R that
-                    // was torn down + rebuilt by the post-Ready watchdog
-                    // mid-cycle. If `leftBle` or `rightBle` is nulled
-                    // between iterations, this iteration bails cleanly.
+                    kotlinx.coroutines.delay(cadenceMs)
                     val l1 = leftBle ?: break
                     val r1 = rightBle ?: break
-                    val seq = nextHeartbeatSeq()
-                    val msgId = heartbeatMsgId.getAndIncrement() and 0xFFFF
-                    val pkt = com.g2cc.g2cc.ble.Teleprompter.buildSyncTrigger(seq, msgId)
-                    val lBefore = l1.notifyCount.get()
-                    val rBefore = r1.notifyCount.get()
-                    l1.sendPacket(pkt, "HB:L")
-                    kotlinx.coroutines.delay(2_000L)
-                    // Re-snapshot R after the 2s gap — clients may have been
-                    // rebuilt by a watchdog or BT-state-on handler.
-                    val r2 = rightBle
-                    if (r2 == null || r2 !== r1) {
-                        diag("hb: R changed mid-cycle (was=${r1.hashCode()} now=${r2?.hashCode() ?: "null"}) — skipping R send this tick")
-                    } else {
-                        r2.sendPacket(pkt, "HB:R")
-                    }
                     val tick = heartbeatTickCount.incrementAndGet()
-                    // Wait the rest of the 15s window before the next pair.
-                    kotlinx.coroutines.delay(13_000L)
-                    // Re-snapshot for the diag read — if clients were
-                    // rebuilt during the 13s wait, the lAfter/rAfter from
-                    // the OLD clients is stale. Use whatever's current.
-                    val lNow = leftBle
-                    val rNow = rightBle
-                    val lAfter = lNow?.notifyCount?.get() ?: -1
-                    val rAfter = rNow?.notifyCount?.get() ?: -1
-                    val l1Same = lNow === l1
-                    val r1Same = rNow === r1
-                    val sameTag = if (l1Same && r1Same) "" else " (clients-rebuilt-during-tick)"
-                    diag("hb: tick=$tick | notify L=$lBefore→$lAfter R=$rBefore→$rAfter$sameTag")
+
+                    if (PHASE_Y_ENABLED) {
+                        // News-style: sync_trigger to L+R staggered 2s.
+                        val seq = nextHeartbeatSeq()
+                        val msgId = heartbeatMsgId.getAndIncrement() and 0xFFFF
+                        val pkt = com.g2cc.g2cc.ble.Teleprompter.buildSyncTrigger(seq, msgId)
+                        val lBefore = l1.notifyCount.get()
+                        val rBefore = r1.notifyCount.get()
+                        l1.sendPacket(pkt, "HB:L")
+                        kotlinx.coroutines.delay(2_000L)
+                        val r2 = rightBle
+                        if (r2 != null && r2 === r1) r2.sendPacket(pkt, "HB:R")
+                        diag("hb: tick=$tick (sync_trigger) | notify L=$lBefore→${l1.notifyCount.get()} R=$rBefore→${(r2 ?: r1).notifyCount.get()}")
+                    } else {
+                        // Teleprompter: full re-render via Hud.render.
+                        // Re-establishes the firmware-side teleprompter
+                        // session that times out ~22s after last render.
+                        val h = hud
+                        if (h == null) {
+                            diag("hb: tick=$tick — hud null, skipping render")
+                            continue
+                        }
+                        val textToRender = pendingHudText ?: h.lastRenderedText
+                            ?: "G2CC paired\nL+R authed\n(idle)"
+                        val rBefore = r1.notifyCount.get()
+                        val renderStartMs = System.currentTimeMillis()
+                        h.render(textToRender, fastReRender = true) { ok ->
+                            val durMs = System.currentTimeMillis() - renderStartMs
+                            val rAfter = r1.notifyCount.get()
+                            diag("hb: tick=$tick ok=$ok dur=${durMs}ms | R notify $rBefore→$rAfter (rΔ=${rAfter - rBefore})")
+                        }
+                    }
                 }
             } finally {
                 diag("hb: stopped after ${heartbeatTickCount.get()} ticks")
