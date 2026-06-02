@@ -421,6 +421,39 @@ Three event types:
 
 **Double-tap** is handled by the glasses firmware natively (shows "End Feature?" dialog) and does NOT reach the phone in normal modes. Kept in the `Event` hierarchy for future custom display modes that disable the native handler.
 
+### Service `0x01-20` — News-style content delivery (decoded 2026-06-03)
+
+The Even App's busiest write channel (329 writes to R lens vs 0 to L in the 9-min News session). Initially suspected to be a hidden session keepalive, **decoded as content delivery** — News articles streamed to the glasses for HUD display. NOT required for session aliveness (sync_trigger on 0x80-00 alone is sufficient).
+
+Packet structure for type=9 (article-push, 89% of all 0x01-20 traffic):
+```
+f1 = msg_type (9 = article-push)
+f2 = msg_id (incrementing)
+f11 = article wrapper [
+    f6 = headline (UTF-8 string)
+    f7 = timestamp (Unix epoch ms)
+    f8 = source name (e.g. "Forbes", "Yahoo")
+    f9 = body text (UTF-8)
+]
+```
+
+Each article is fragmented into 230-byte writes (MTU 247 minus 17 header). The first packet carries the full article-wrapper header; continuation packets carry only `f12`/`f13`/`f14` text-fragment fields with byte offsets.
+
+Other observed types on 0x01-20:
+- type=2 (msg_id 26-35 at init): small one-shot setup packets, payload looks like region/style config
+- type=7: appears once, small
+- type=9: the bulk — article pushes
+
+Burst pattern: 13 bursts in the capture, sizes 1/29/14/9/24/56/81... correlated to ring-scroll-to-new-article events (not 1:1 with ring notifies; ring scroll triggers a phone-side HTTP fetch, then the article body streams via 0x01-20).
+
+### Architectural implication for Phase Y display takeover
+
+Two distinct content-display paths exist in the firmware:
+- **`0x06-20` Teleprompter** — scripted text playback (what G2CC uses today; the "End Feature?" mode; structurally more fragile)
+- **`0x01-20` News-style content push** — UTF-8 article delivery using a structured wrapper (what News uses; the most-stable Even mode per Adam's testing)
+
+Phase Y should switch G2CC from teleprompter to News-style content. For Claude Code output (text streams, not full news articles), we can use a simplified f11 wrapper with just f6 (title/header line) and f9 (body text). Other fields (f7 timestamp, f8 source) are likely optional metadata for the source-line display.
+
 ### Notify service catalog (responses we receive)
 
 | Service | Direction | Purpose |
