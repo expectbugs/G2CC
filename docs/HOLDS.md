@@ -8,6 +8,8 @@ work).
 
 ## Hardware-test gates (Adam runs these on physical hardware)
 
+> **STATUS UPDATE 2026-06-03**: H1 and H2 RESOLVED. Phase D zero-touch resilience completed at commit `1fd3124` (PARTIAL_WAKE_LOCK fix). Adam's 37-min factory test: zero disconnects, zero glitches while in pocket carrying mesh and fixing machines. H4 (DJI), H5 (Parakeet), H6 (NeMo), H7 (sustained use) remain pending. C1 (EventParser tap/scroll bytes) RESOLVED in commit `719443a` from BTSnoop intel.
+
 ### H1. Phase 4 — 8-hour foreground service survival test
 
 **Trigger:** Adam sideloads the APK to the Pixel 10a and carries it for a

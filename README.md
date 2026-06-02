@@ -4,6 +4,16 @@ Direct-BLE G2 glasses + Claude Code dispatch + DJI single-mic learned-profile NR
 
 Replaces the Even Hub seven-tap relaunch dance with a Pixel 10a foreground service that talks BLE to the Even G2 glasses and WebSocket to a home server. The server bridges to a Claude Code subprocess (vanilla CC today; swarm Code/Engineering specialist later). Audio path goes server-side: DJI Mic 3 (mono TX2) → spectral subtraction with learned noise profile → DeepFilterNet polish → NVIDIA Parakeet TDT 0.6B v2. Two-mic NLMS retained in-tree as fallback for non-stationary noise scenarios.
 
+## Current state (2026-06-03)
+
+**Phase D zero-touch resilience: DONE.** Adam ran the latest APK (`1fd3124`) for 37 minutes in his factory pocket while moving around — zero disconnects, zero glitches. The product premise is achieved.
+
+**Next phases queued**: Phase Y main-menu takeover (scaffolded, gated behind `PHASE_Y_ENABLED=false`), Phase Z Even-App-uninstall verification, Phase Ω feature modules (Claude Code dispatch, Aria, SMS, Email, Calendar).
+
+**For fresh Claude Code sessions picking up the project**: read `HANDOFF.md` first, then `CHANGELOG.md`, then `docs/PROTOCOL_NOTES.md`. The handoff has the full project state, architecture, what works, what doesn't, and recommended next-phase priority.
+
+**For latest APK**: see the most recent entry in CHANGELOG.md or the GitHub releases page.
+
 ## Layout
 
 ```
