@@ -463,11 +463,22 @@ class G2Pipeline(
                 diag(
                     "hud: ${if (isReconnect) "RECONNECT" else "initial"}-render | notify-before $notifyBefore"
                 )
-                h.render(textToRender, fastReRender = isReconnect) { ok ->
+                // 2026-06-03 regression fix: use FULL pacing on reconnect.
+                // Adam reported "comes back blank with End Feature?" on ~half
+                // of reconnects — fast-rerender's cut-down delays
+                // (100/200/30ms vs 300/500/100ms) race past the firmware's
+                // mode-switch when the firmware fully exited teleprompter
+                // during the BLE drop. Take-over succeeds (we see End
+                // Feature?) but content stream gets flooded. The original
+                // "End Feature? but blank" bug from project start was fixed
+                // by the slow pacing; reconnects need the same treatment.
+                // Heartbeat still uses fastReRender=true (firmware is
+                // definitely in HUD mode there).
+                h.render(textToRender, fastReRender = false) { ok ->
                     val lCount = l?.notifyCount?.get() ?: -1
                     val rCount = r?.notifyCount?.get() ?: -1
                     diag(
-                        "hud: render-done ok=$ok | notify: $notifyBefore → L=$lCount R=$rCount"
+                        "hud: render-done ok=$ok mode=${if (isReconnect) "RECONNECT-slow" else "initial-slow"} | notify: $notifyBefore → L=$lCount R=$rCount"
                     )
                     if (ok) {
                         sessionHasRenderedOnce.set(true)
