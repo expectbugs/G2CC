@@ -50,15 +50,23 @@ class G2CCService : LifecycleService() {
 
         // Register the BT state receiver dynamically. Manifest declaration
         // wouldn't work on Android 8+ for this implicit broadcast.
-        val receiver = BluetoothStateReceiver(pipeline)
-        val filter = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(receiver, filter)
+        // 4th-pass-final review MEDIUM: wrap in try/catch — some OEM ROMs
+        // can throw on registerReceiver under shutdown / restricted profiles.
+        // Degrade gracefully (no BT-state observer) rather than crashing the
+        // FG service mid-onCreate.
+        try {
+            val receiver = BluetoothStateReceiver(pipeline)
+            val filter = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(receiver, filter)
+            }
+            btStateReceiver = receiver
+        } catch (e: Exception) {
+            Log.e(TAG, "registerReceiver(BluetoothStateReceiver) failed; BT toggle won't trigger rescan", e)
         }
-        btStateReceiver = receiver
 
         // React to state-machine transitions by updating the notification.
         lifecycleScope.launch {

@@ -47,8 +47,11 @@ class DfnPolisher:
         # 4th-pass review HIGH: previously init_df() ran with no device arg,
         # so DFN auto-detected (often CPU) while self.device claimed 'cuda'.
         # Move the model to self.device explicitly so the field doesn't lie.
-        # init_df()'s positional 4th arg is a torch.device per DFN's source.
-        model, df_state, _ = init_df()
+        #
+        # 4th-pass-final review CRITICAL: DFN's init_df() returns 3 values on
+        # v0.5.6 but 4+ values on master / future releases (model, df_state,
+        # suffix, epoch). Star-unpack so we tolerate both API shapes.
+        model, df_state, *_ = init_df()
         target_device = torch.device(self.device)
         try:
             model = model.to(target_device)

@@ -217,8 +217,14 @@ export class CCSession extends EventEmitter {
   // [V] control_response APPROVE format verified from ARIA session_pool.py:361-368.
   // [U] DENY format unverified — ARIA always approves. Phase 7 may need to verify
   // when implementing the confirm_on_hud reject path through CC's permission gates.
+  // 4th-pass-final review HIGH: throws when proc is dead instead of silently
+  // dropping. Without this, the HUD reports approval-sent but CC never got
+  // it; the watchdog respawn loses the request entirely. Caller must catch
+  // + surface a cc_error so the user knows their tap was lost.
   respondToPermission(requestId: string, approved: boolean): void {
-    if (!this.proc?.stdin?.writable) return
+    if (!this.proc?.stdin?.writable) {
+      throw new Error(`respondToPermission(${requestId}): CC stdin not writable (process dead?)`)
+    }
     const resp = JSON.stringify({
       type: 'control_response',
       response: {

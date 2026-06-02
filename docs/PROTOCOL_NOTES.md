@@ -454,6 +454,100 @@ Two distinct content-display paths exist in the firmware:
 
 Phase Y should switch G2CC from teleprompter to News-style content. For Claude Code output (text streams, not full news articles), we can use a simplified f11 wrapper with just f6 (title/header line) and f9 (body text). Other fields (f7 timestamp, f8 source) are likely optional metadata for the source-line display.
 
+### Settings/file-push channel pair `0xc4-00` + `0xc5-00` (decoded 2026-06-03)
+
+Settings are pushed to the glasses' internal filesystem using a TWO-CHANNEL handshake. Channel `0xc5-00` carries the actual file content (typically JSON); channel `0xc4-00` carries metadata + control + ack. **Both live on a SEPARATE pair of GATT handles from the main G2 protocol:** writes go to GATT handle `2178` (not `2114`), notifies arrive on `2180` (not `2116`). Same AA-framed envelope as everywhere else.
+
+#### `0xc5-00` — file content (JSON, fragmented if >230 bytes per AA frame)
+
+Two JSON schemas observed multiplexed on this channel:
+
+**Schema A — Notification whitelist** (sent ONCE at app connect, file path `user/notify_whitelist.json`):
+
+```json
+{
+  "calendar_enable": true,
+  "call_enable": true,
+  "msg_enable": true,
+  "ios_mail_enable": true,
+  "app": {
+    "enable": true,
+    "list": [
+      {"id": "com.android.even_calendar", "name": "Calendar"},
+      {"id": "com.android.even_phone",    "name": "Phone"},
+      {"id": "com.android.even_sms",      "name": "Messages"},
+      {"id": "eu.faircode.email",         "name": "FairEmail"},
+      {"id": "com.google.android.gm",     "name": "Gmail"}
+    ]
+  }
+}
+```
+
+**Schema B — Per-notification event** (sent each time a forwarded notification fires, into the same `user/notify_whitelist.json` path — Even App appears to misuse path-as-message-queue):
+
+```json
+{"android_notification": {
+   "msg_id": 43974, "action": 0, "app_identifier": "net.dinglisch.android.taskerm",
+   "title": "Running Tasks", "subtitle": "",
+   "message": "ARIA Health Check|ARIA Location",
+   "time_s": 1780368900, "date": "20260601T215500",
+   "display_name": "Tasker"}}
+```
+
+Field semantics: `action: 0`=add (remove/clear not observed). `app_identifier` matches a `list[].id` in Schema A. `message` uses `|` as line separator. `date` is `YYYYMMDDTHHMMSS` (likely UTC). Tasker notifications fire whether Tasker's package is in the whitelist or not — the whitelist may be advisory.
+
+**Known Even App bugs in this channel** (worth knowing because our impl should be more careful, not match): (1) the field name often arrives as `dilay_name`/`dplay_name` instead of `display_name` when the key straddles the 230-byte fragment cut; (2) ~30% of short pushes silently truncate the last string value at the cut and close with `}}` (invalid JSON like `..."display_name":"Taske}}`).
+
+#### `0xc4-00` — file-push metadata + handshake control
+
+**93-byte metadata write** (Phase A of each push):
+
+| Offset | Size | Field | Meaning |
+|--------|------|-------|---------|
+| 0 | u8 | `mode` | 0=create (first push of this path), 1=overwrite |
+| 1 | 4 B | (reserved) | always `00 00 00 00` |
+| 5 | u32 LE | `size` | bytes of c5-00 payload that will follow, +2 |
+| 9 | u32 | `digest` | content-derived 4-byte hash. **Algorithm undetermined** — not zlib CRC32, MD5[:4], SHA1[:4], Adler32, or CRC-32C |
+| 13 | 64 B | `path` | NUL-terminated ASCII path on the glasses' filesystem, fixed 64-byte slot. Only value observed: `user/notify_whitelist.json` |
+| 77 | 16 B | (padding) | zeros |
+
+**1-byte control writes:** `0x01`=BEGIN (payload incoming on c5), `0x02`=END (payload complete).
+**2-byte notify reply (GATT 2180):** `0x0000`=ready/acked-meta, `0x0100`=got-payload, `0x0200`=committed/done.
+
+**Frame entropy = 2.43 bits/byte → NOT encrypted.** Sparse binary record + ASCII path string.
+
+**Handshake sequence per file push:**
+```
+Phone → c4 [93 B meta]              ← N c4 [00 00]  (ready)
+Phone → c4 [01]                     (BEGIN)
+Phone → c5 [frag 1..N of payload]   ← N c5 [01 00]  (got payload)
+Phone → c4 [02]                     (END)
+        ← N c4 [02 00]              (committed)
+```
+
+#### G2CC implications
+
+For our app: we likely don't need to replicate notification forwarding initially (we have Claude Code subprocess output as the primary content source). But if/when we want to push glasses-resident settings (timezone, language, app list, etc.), the same file-push pattern probably applies — `path` hints at a small filesystem on the glasses and other paths likely accept other JSON schemas. For Phase Z (Even-App-independence), we'd need to push the notification whitelist ourselves if we want phone-notification mirroring.
+
+### `0x91-00` — R1 ring identity nudge (notify GATT 2116, main R-lens channel)
+
+Edge-trigger "ring identity changed, recheck state" notification. Payload (always 16 bytes):
+
+```
+field 1 varint        = 1                    (always; event-class tag)
+field 2 varint        = msg_id               (shares R-lens monotonic msg_id counter)
+field 3 length-delim  {
+    field 1 bytes(6)  = ring BLE MAC LE      (always Adam's R1: db:d9:68:35:f0:b8)
+    field 2 varint    = 1                    (always; peer-type / registered-flag)
+}
+```
+
+Raw example: `08 01 10 18 1a 0a 0a 06 b8 f0 35 68 d9 db 10 01`
+
+**Connection-event type (connect vs disconnect) is NOT encoded in the payload** — field 2 is constant `1` across both connect-time and disconnect-time events; only `msg_id` distinguishes them. Correlation with the ring's own L2CAP events in the BTSnoop: notification 1 fired 0.6 s BEFORE the ring's first CONN_COMPLETE; notifications 2 and 3 fired 1.2 s and 1.8 s AFTER subsequent ring DISCONNs.
+
+**G2CC implication:** don't try to derive ring-connected vs ring-disconnected state from `0x91-00` payload bytes — it's just a "poke" meaning "your view of ring state may be stale". Real ring state needs a side-channel query (or tracking the ring's own L2CAP link).
+
 ### Notify service catalog (responses we receive)
 
 | Service | Direction | Purpose |

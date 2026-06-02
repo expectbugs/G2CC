@@ -23,7 +23,7 @@ matplotlib>=3.9.0
 # padasip was an option for a second NLMS implementation but we hand-rolled
 # instead — removed to avoid an unused ~5 MB venv install.
 # DeepFilterNet ships its own torch (CUDA-bound).
-deepfilternet>=0.5.6
+deepfilternet>=0.5.6,<0.6   # 4th-pass-final review: upper bound — init_df() return shape + enhance() tensor contract differ across major DFN releases
 
 # Phase 8 — Parakeet ASR via NeMo
 # UNCOMMENT after Phase 0/8 driver/toolkit re-verification. NeMo pulls PyTorch + the

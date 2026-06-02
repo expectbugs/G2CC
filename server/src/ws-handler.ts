@@ -50,6 +50,12 @@ export interface WSClient {
   authTimer: ReturnType<typeof setTimeout> | null
   audioChunks: Buffer[]
   collectingAudio: boolean
+  // 4th-pass-final review MEDIUM: in-flight STT pipeline tracker. Set true
+  // when audio_end fires and we kick off handleAudio (async), cleared when
+  // handleAudio returns. Blocks audio_start while a transcription is still
+  // running so a rapid record/end/record can't produce misattributed
+  // stt_result for the NEW recording from the OLD one in flight.
+  sttInFlight: boolean
   pool: SessionPool
   /** Active dispatcher target ID — defaults to the first target ('cc'). */
   selectedTargetId: string
@@ -96,6 +102,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     authTimer: null,
     audioChunks: [],
     collectingAudio: false,
+    sttInFlight: false,
     pool,
     selectedTargetId: 'cc',
     dispatcher: null,
@@ -313,6 +320,14 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         console.warn(`[ws] audio_start while already collecting — discarding ${prevBytes} bytes of in-progress audio`)
         sendMsg(client, { type: 'stt_error', error: `overlapping audio_start; previous ${prevBytes} bytes discarded` })
       }
+      // 4th-pass-final review MEDIUM: also reject if a previous STT is
+      // still in flight. Without this, rapid record/end/record produces
+      // an stt_result for the PRIOR audio that the client interprets as
+      // the NEW recording's result.
+      if (client.sttInFlight) {
+        sendMsg(client, { type: 'stt_error', error: `audio_start rejected: previous transcription still in flight; wait for stt_result before starting again` })
+        break
+      }
       client.audioChunks = []
       client.collectingAudio = true
       client.audioFormat = {
@@ -331,7 +346,12 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       const format = client.audioFormat ?? { sampleRate: 16_000, channels: 1, encoding: 'int16' as const }
       client.audioChunks = []
       client.audioFormat = null
-      void handleAudio(client, pcmBuffer, format, config)
+      // 4th-pass-final review MEDIUM: mark in-flight + clear on completion
+      // so the audio_start guard above can block rapid double-record.
+      client.sttInFlight = true
+      void handleAudio(client, pcmBuffer, format, config).finally(() => {
+        client.sttInFlight = false
+      })
       break
     }
 
@@ -359,10 +379,24 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'permission_response': {
+      client.lastAppActivityMs = Date.now()
       const active = client.pool.getActive()
       if (active?.pendingPermissionId) {
-        active.session.respondToPermission(active.pendingPermissionId, msg.approved)
-        active.pendingPermissionId = null
+        try {
+          active.session.respondToPermission(active.pendingPermissionId, msg.approved)
+          active.pendingPermissionId = null
+        } catch (err) {
+          // 4th-pass-final review HIGH: respondToPermission now throws when
+          // CC stdin is dead. Surface the failure loudly so the user knows
+          // the tap was lost — better than silent success that does
+          // nothing.
+          console.error(`[ws] permission_response failed:`, err)
+          sendMsg(client, {
+            type: 'cc_error',
+            error: `Permission tap could not be sent: ${err instanceof Error ? err.message : String(err)}`,
+          })
+          active.pendingPermissionId = null   // clear it anyway; CC won't honor
+        }
       }
       break
     }
@@ -374,6 +408,18 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       if (!active) {
         // No active session — safe to update locally; nothing to respawn.
         client.mode = msg.mode
+        break
+      }
+      // 4th-pass-final review MEDIUM: refuse set_mode while a permission
+      // request is pending. respawning would orphan the request: the HUD's
+      // approve/reject tap would target the dead session's requestId,
+      // silently swallowed by the new CCSession. User would think their
+      // tap worked when it didn't.
+      if (active.pendingPermissionId !== null) {
+        sendMsg(client, {
+          type: 'cc_error',
+          error: `set_mode rejected: a permission request is currently pending (${active.pendingPermissionId}). Approve or reject first, then change mode.`,
+        })
         break
       }
       // Update local mode AFTER the respawn succeeds so a failure doesn't
@@ -471,8 +517,18 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         }
       }
       if (existing) {
+        // 4th-pass-final review MEDIUM: warn loudly if the user asked for
+        // a SPECIFIC historical session but we're switching to a different
+        // live one. The user thinks they're resuming a particular session;
+        // they're actually getting "the live one for this dir" which may
+        // have different state. Better to log than silently mismatch.
+        if (existing.session.ccSessionId && existing.session.ccSessionId !== msg.sessionId) {
+          console.warn(`[ws] session_resume requested ${msg.sessionId} but live entry has ccSessionId ${existing.session.ccSessionId} — switching to live`)
+        }
         client.pool.switchTo(existing.id)
         client.dispatcher = new CCDispatcher(existing)
+        client.currentPage = 0
+        client.pool.persistSessionMeta()
         sendMsg(client, {
           type: 'session_info',
           sessionId: existing.id,

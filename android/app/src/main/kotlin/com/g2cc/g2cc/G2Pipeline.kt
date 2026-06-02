@@ -414,7 +414,17 @@ class G2Pipeline(
                     } else {
                         runPhaseYInit { initOk ->
                             if (!initOk) {
-                                diag("phaseY: init failed — heartbeat NOT started; rely on watchdog rescan")
+                                // 4th-pass-final review HIGH: previously this
+                                // just logged and returned, leaving us with
+                                // no heartbeat AND no watchdog (we'd stopped
+                                // both above). Glasses would time out in 22s
+                                // with zero recovery. Now: start the
+                                // post-Ready watchdog so the 5s deadline
+                                // triggers a force-rescan if init keeps
+                                // failing. Diag includes the failure context
+                                // so we can debug.
+                                diag("phaseY: init failed — starting recovery watchdog")
+                                startPostReadyWatchdog()
                                 return@runPhaseYInit
                             }
                             sessionHasRenderedOnce.set(true)
@@ -693,6 +703,10 @@ class G2Pipeline(
     fun onBluetoothStateOn() {
         stopHeartbeat()
         stopPostReadyWatchdog()
+        // 4th-pass-final review MEDIUM: clear pendingHudText too — stale
+        // server-output from before the BT cycle shouldn't replay over the
+        // fresh reconnect. Source-of-truth is Hud.lastRenderedText.
+        pendingHudText = null
         leftBle?.shutdownBle(); rightBle?.shutdownBle()
         leftBle = null; rightBle = null
         leftCollectorJob?.cancel(); leftCollectorJob = null
@@ -708,6 +722,7 @@ class G2Pipeline(
     fun onBluetoothStateOff() {
         stopHeartbeat()
         stopPostReadyWatchdog()
+        pendingHudText = null
         bleScannerRef.getAndSet(null)?.stop()
         leftBle?.shutdownBle(); rightBle?.shutdownBle()
         leftBle = null; rightBle = null
@@ -770,8 +785,11 @@ class G2Pipeline(
                 }
                 is EventParser.Event.ScrollUp -> {
                     val prev = lastScrollUpAt.get()
-                    if (now - prev >= EVENT_DEBOUNCE_MS) {
-                        lastScrollUpAt.compareAndSet(prev, now)
+                    // 4th-pass-final review MEDIUM: dispatch INSIDE the
+                    // CAS-success branch (mirror Tap pattern) so concurrent
+                    // L+R collectors can't double-fire the scroll handler
+                    // on a single ring event.
+                    if (now - prev >= EVENT_DEBOUNCE_MS && lastScrollUpAt.compareAndSet(prev, now)) {
                         // Phase Y: route scroll-up to RootMenu (prev item).
                         if (PHASE_Y_ENABLED) rootMenu?.onScrollPrev()
                         // Firmware-native scroll handles teleprompter pages; no app action otherwise.
@@ -779,8 +797,7 @@ class G2Pipeline(
                 }
                 is EventParser.Event.ScrollDown -> {
                     val prev = lastScrollDownAt.get()
-                    if (now - prev >= EVENT_DEBOUNCE_MS) {
-                        lastScrollDownAt.compareAndSet(prev, now)
+                    if (now - prev >= EVENT_DEBOUNCE_MS && lastScrollDownAt.compareAndSet(prev, now)) {
                         // Phase Y: route scroll-down to RootMenu (next item).
                         if (PHASE_Y_ENABLED) rootMenu?.onScrollNext()
                     }
@@ -914,6 +931,8 @@ class G2Pipeline(
         stopHeartbeat()
         stopPostReadyWatchdog()
         sessionHasRenderedOnce.set(false)
+        // 4th-pass-final review MEDIUM: clear pendingHudText on hard stop.
+        pendingHudText = null
         // Tear down GATT connections cleanly so the BLE stack doesn't leak
         // open handles across service restart cycles (foreground service
         // reload-on-stuck per the watchdog).

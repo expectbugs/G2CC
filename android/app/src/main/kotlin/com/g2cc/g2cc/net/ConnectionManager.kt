@@ -127,12 +127,20 @@ class ConnectionManager(
         // directly — OkHttp's WebSocket doesn't expose readyState. Use our
         // `_connected` flag, which flips true on auth_result success.)
         if (ws != null && _connected.value) return
-        wsGen.incrementAndGet()
-        val myGen = wsGen.get()
-        val endpoint = endpoints.getOrNull(currentEndpointIdx) ?: run {
+        // 4th-pass-final review HIGH: read (endpoints, idx) pair inside the
+        // same lock that gates setEndpoints/onClosed/onFailure rotations.
+        // Without this lock, a concurrent setEndpoints could shrink the
+        // list between the `endpoints` deref and the `currentEndpointIdx`
+        // read, returning null/wrong endpoint despite well-formed state.
+        // This DEFEATED the prior endpointsLock fix.
+        val endpoint = synchronized(endpointsLock) {
+            endpoints.getOrNull(currentEndpointIdx)
+        } ?: run {
             Log.w(TAG, "connect: no endpoints configured")
             return
         }
+        wsGen.incrementAndGet()
+        val myGen = wsGen.get()
         val request = Request.Builder().url(endpoint).build()
         val listener = G2CCListener(myGen)
         Log.i(TAG, "connect[$myGen] -> $endpoint")
@@ -280,7 +288,13 @@ class ConnectionManager(
                         // lifetime — subsequent stucks have no escape.
                         reloadAttempted = false
                         onConnected()
-                        Log.i(TAG, "auth success endpoint=${endpoints.getOrNull(currentEndpointIdx) ?: "<unknown>"}")
+                        // 4th-pass-final review LOW: read endpoint inside the
+                        // lock so concurrent setEndpoints can't make this log
+                        // misreport.
+                        val authedEndpoint = synchronized(endpointsLock) {
+                            endpoints.getOrNull(currentEndpointIdx)
+                        } ?: "<unknown>"
+                        Log.i(TAG, "auth success endpoint=$authedEndpoint")
                     } else {
                         consecutiveAuthFailures++
                         onAuthFailure(consecutiveAuthFailures)

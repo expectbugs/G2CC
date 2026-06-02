@@ -46,7 +46,10 @@ import com.g2cc.g2cc.ble.Varint
  *  - NO TIMEOUTS: pacing delays between packets are inter-packet only
  *  - LOUD failures via the BLE write status callback
  */
-class NewsHud(private val left: G2BleClient, private val right: G2BleClient) {
+class NewsHud(
+    @Suppress("unused") private val left: G2BleClient,  // kept for symmetry + future fragmented-render paths
+    private val right: G2BleClient,
+) {
 
     /** Last rendered (title, body) — read by the reconnect path to replay
      *  the same content after a BLE drop+recover cycle. */
@@ -59,14 +62,21 @@ class NewsHud(private val left: G2BleClient, private val right: G2BleClient) {
     private var seq: Int = 0x20            // start above auth (1-7) + teleprompter range (0x10-0x1F)
     private var msgId: Int = 0x80
 
-    /** Render (title, body) on the HUD. Both lenses get the same content;
-     *  per BTSnoop, the Even App News writes to R only — we mirror to BOTH
-     *  for now until we confirm R-only is sufficient in the News-style
-     *  display path. Calls onComplete after BLE writes drain. */
+    /** Render (title, body) on the HUD. Per BTSnoop, the Even App News
+     *  writes to R only — we follow that pattern (L is kept alive via
+     *  heartbeat only, doesn't receive teleprompter/news content).
+     *
+     *  4th-pass-final review HIGH: this used to call sendPacket(...) then
+     *  immediately gate.left/right(true), reporting success BEFORE any BLE
+     *  write status callback could fire. Fix: route through queueWrites so
+     *  the BLE library's actual completion status feeds CompletionGate.
+     *  Upstream callers can now trust ok=true as proof of enqueue success.
+     *
+     *  Also fixed (review MEDIUM): lastTitle/lastBody now updated only
+     *  AFTER size validation passes — previously a too-large render would
+     *  poison the replay cache so every reconnect retried the failing
+     *  content. */
     fun render(title: String, body: String, onComplete: (success: Boolean) -> Unit = {}) {
-        lastTitle = title
-        lastBody = body
-
         val (s, m) = synchronized(seqLock) {
             val r = seq to msgId
             seq = (seq + 1) and 0xFF
@@ -78,7 +88,8 @@ class NewsHud(private val left: G2BleClient, private val right: G2BleClient) {
         val packet = buildArticlePush(seq = s, msgId = m, title = title, body = body)
         Log.i(TAG, "render title='${title.take(40)}' body=${body.length}c → ${packet.size}B packet")
 
-        // Check single-packet limit — fail loud if exceeded.
+        // Check single-packet limit — fail loud if exceeded. Don't poison
+        // lastTitle/lastBody since we never sent the content.
         if (packet.size > MAX_SINGLE_PACKET_BYTES) {
             Log.w(TAG, "render content too large: ${packet.size}B > ${MAX_SINGLE_PACKET_BYTES}B; " +
                 "single-packet path can't deliver. Phase Y polish must add fragmentation.")
@@ -86,14 +97,18 @@ class NewsHud(private val left: G2BleClient, private val right: G2BleClient) {
             return
         }
 
-        // Send to both lenses. Even App sends News content to R only; we
-        // mirror to both as a conservative start. Adjust to R-only if
-        // empirically L-also-OK or L-also-needed.
-        val gate = CompletionGate(onComplete)
-        left.sendPacket(packet, "L:news")
-        gate.left(true)                     // sendPacket is fire-and-forget; treat as success
-        right.sendPacket(packet, "R:news")
-        gate.right(true)
+        // Cache only AFTER size validation. Replay path won't get stuck
+        // on perpetually-too-large content.
+        lastTitle = title
+        lastBody = body
+
+        // R-only: matches Even App News behavior (L not written to).
+        // queueWrites gives us a proper completion callback tied to the
+        // BLE library's status, instead of the prior fire-and-forget
+        // sendPacket + manufactured-true.
+        right.queueWrites(listOf(packet), "R:news", emptyList()) { ok ->
+            onComplete(ok)
+        }
     }
 
     /** Build a single News-style article-push packet:
@@ -116,31 +131,6 @@ class NewsHud(private val left: G2BleClient, private val right: G2BleClient) {
         val payload = byteArrayOf(0x08, 0x09, 0x10) + Varint.encode(msgId) + f11
 
         return G2Frame.command(seq, G2Constants.Services.NEWS_CONTENT, payload)
-    }
-
-    /** Aggregate L+R completion (same shape as Hud.CompletionGate). */
-    private class CompletionGate(private val onComplete: (Boolean) -> Unit) {
-        private val lock = Any()
-        private var leftDone = false; private var leftOk = false
-        private var rightDone = false; private var rightOk = false
-
-        fun left(ok: Boolean) {
-            val result: Boolean? = synchronized(lock) {
-                if (leftDone) return
-                leftDone = true; leftOk = ok
-                if (rightDone) (leftOk && rightOk) else null
-            }
-            if (result != null) onComplete(result)
-        }
-
-        fun right(ok: Boolean) {
-            val result: Boolean? = synchronized(lock) {
-                if (rightDone) return
-                rightDone = true; rightOk = ok
-                if (leftDone) (leftOk && rightOk) else null
-            }
-            if (result != null) onComplete(result)
-        }
     }
 
     companion object {
