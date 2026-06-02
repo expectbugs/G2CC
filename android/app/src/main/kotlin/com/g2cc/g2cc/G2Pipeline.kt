@@ -433,10 +433,10 @@ class G2Pipeline(
         heartbeatJob?.cancel()
         heartbeatTickCount.set(0)
         heartbeatJob = scope.launch {
-            diag("hb: started (cadence=15s, packet=FULL_RERENDER)")
+            diag("hb: started (cadence=10s, packet=FULL_RERENDER)")
             try {
                 while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
-                    kotlinx.coroutines.delay(15_000L)
+                    kotlinx.coroutines.delay(10_000L)
                     val l = leftBle ?: break
                     val r = rightBle ?: break
                     val h = hud
@@ -445,17 +445,43 @@ class G2Pipeline(
                         diag("hb: no hud / lastPage0 yet — skipping tick")
                         continue
                     }
-                    val notifyBefore = "L=${l.notifyCount.get()} R=${r.notifyCount.get()}"
-                    // Reconstruct the original text from the trimmed page-0
-                    // content. (lastPage0 has the wrapped/padded form; we
-                    // could store the raw text instead, but page0 itself is
-                    // a valid render input — re-rendering it produces the
-                    // same packets.)
-                    h.render("G2CC paired\nL+R authed\n(idle)") { ok ->
+                    // Snapshot before this render so we can measure both how
+                    // long the render took AND how many R notifies arrived
+                    // during it (= proxy for "is the firmware actually
+                    // processing our packets?").
+                    val renderStartMs = System.currentTimeMillis()
+                    val rNotifyBefore = r.notifyCount.get()
+                    val lNotifyBefore = l.notifyCount.get()
+                    h.render("G2CC paired\nL+R authed\n(idle)", fastReRender = true) { ok ->
                         val tick = heartbeatTickCount.incrementAndGet()
+                        val durMs = System.currentTimeMillis() - renderStartMs
+                        val rNotifyAfter = r.notifyCount.get()
+                        val lNotifyAfter = l.notifyCount.get()
+                        val rDelta = rNotifyAfter - rNotifyBefore
                         diag(
-                            "hb: tick=$tick ok=$ok | notify $notifyBefore → L=${l.notifyCount.get()} R=${r.notifyCount.get()}"
+                            "hb: tick=$tick ok=$ok dur=${durMs}ms | " +
+                            "notify L=$lNotifyBefore→$lNotifyAfter R=$rNotifyBefore→$rNotifyAfter (rΔ=$rDelta)"
                         )
+                        // If the render completed but R sent NO notifies during
+                        // it, the firmware-side session is probably dead —
+                        // schedule an immediate re-render instead of waiting
+                        // for the next 10 s tick. This is the most aggressive
+                        // recovery short of tearing down BLE.
+                        if (ok && rDelta == 0) {
+                            diag("hb: R silent during render — session likely dead, scheduling immediate retry")
+                            scope.launch {
+                                kotlinx.coroutines.delay(500L)
+                                val h2 = hud
+                                val r2 = rightBle
+                                if (h2 != null && r2 != null) {
+                                    val retryStart = System.currentTimeMillis()
+                                    val rBefore2 = r2.notifyCount.get()
+                                    h2.render("G2CC paired\nL+R authed\n(idle)", fastReRender = true) { ok2 ->
+                                        diag("hb: retry-render ok=$ok2 dur=${System.currentTimeMillis() - retryStart}ms rΔ=${r2.notifyCount.get() - rBefore2}")
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             } finally {
