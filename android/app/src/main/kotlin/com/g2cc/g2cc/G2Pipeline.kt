@@ -432,11 +432,23 @@ class G2Pipeline(
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatTickCount.set(0)
+        var lastTickAtMs = System.currentTimeMillis()
         heartbeatJob = scope.launch {
-            diag("hb: started (cadence=10s, packet=FULL_RERENDER)")
+            diag("hb: started (cadence=4s, packet=FULL_RERENDER)")
             try {
                 while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
-                    kotlinx.coroutines.delay(10_000L)
+                    kotlinx.coroutines.delay(4_000L)
+                    // Detect coroutine suspension by the OS scheduler / Doze:
+                    // if more than 10 s elapsed since the previous tick AT
+                    // ALL (delay supposed to be 4 s), Android probably
+                    // throttled us. Log it loudly so we know when this is
+                    // happening.
+                    val now = System.currentTimeMillis()
+                    val gapMs = now - lastTickAtMs
+                    if (gapMs > 10_000L) {
+                        diag("hb: WARNING coroutine gap=${gapMs}ms (expected ~4s + render time) — OS throttling?")
+                    }
+                    lastTickAtMs = now
                     val l = leftBle ?: break
                     val r = rightBle ?: break
                     val h = hud
