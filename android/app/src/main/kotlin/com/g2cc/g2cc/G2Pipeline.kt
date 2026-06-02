@@ -15,6 +15,7 @@ import com.g2cc.g2cc.hud.Hud
 import com.g2cc.g2cc.hud.MenuController
 import com.g2cc.g2cc.hud.NewsHud
 import com.g2cc.g2cc.hud.RootMenu
+import com.g2cc.g2cc.hud.SttConfirmationFlow
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.ConnectionManager
 import com.g2cc.g2cc.net.EndpointFetcher
@@ -83,6 +84,7 @@ class G2Pipeline(
     private var hud: Hud? = null
     private var menu: MenuController? = null
     private var confirmation: ConfirmationFlow? = null
+    private var sttConfirmation: SttConfirmationFlow? = null
     private var connection: ConnectionManager? = null
     private var streamer: AudioStreamer? = null
 
@@ -164,6 +166,20 @@ class G2Pipeline(
     // it as soon as BLE comes back. Always shadows Hud.lastRenderedText.
     @Volatile private var pendingHudText: String? = null
 
+    // Phase Ω: tracks whether the most recent DispatchTargetSelect/DirectoryList
+    // was initiated by the RootMenu flow. When true, the next DirectoryListReply
+    // replaces the menu's current "Loading directories…" frame with a list of
+    // real Action items. When false, DirectoryListReply still feeds MenuController
+    // (the legacy teleprompter-mode menu) for backwards compat. Set true by the
+    // Claude Code action; cleared once the reply lands or a CcError aborts.
+    @Volatile private var menuAwaitingDirectoryList: Boolean = false
+
+    // Phase Ω: tracks whether the next SessionInfo should land in the menu's
+    // current frame (replacing a "Spawning…" placeholder). Set true when the
+    // user taps a directory entry in the menu's directory submenu; cleared
+    // when SessionInfo or CcError arrives.
+    @Volatile private var menuAwaitingSessionInfo: Boolean = false
+
     // === Phase Y feature flag ===
     //
     // When true, the pipeline takes the Even-App-style display path: after
@@ -199,12 +215,18 @@ class G2Pipeline(
      *  in the server log are correlatable. */
     fun emitDiag(text: String) = diag(text)
 
-    /** Placeholder root menu for Phase Y testing. Phase Ω will populate
-     *  this with real feature modules (CC dispatch, Aria, SMS, Email...).
-     *  For now: enough items to verify the menu renders + scrolls + taps. */
-    private fun buildPlaceholderRootMenu(): List<RootMenu.MenuItem> = listOf(
+    /** Build the root menu. "Claude Code" is the first real feature module
+     *  (Phase Ω) — wires through to the dispatch-target/directory-picker/
+     *  CC-spawn flow that already exists server-side. Other items remain
+     *  placeholders pending their own feature module implementations.
+     *
+     *  Note: this menu is only instantiated when PHASE_Y_ENABLED=true (see
+     *  installBleClients). With the flag off the menu code is dead — Phase Ω
+     *  validates the architecture against real server endpoints, but the
+     *  user-visible activation waits on Phase Y's display-path switch. */
+    private fun buildRootMenuItems(): List<RootMenu.MenuItem> = listOf(
         RootMenu.MenuItem.Action("Claude Code") {
-            diag("rootMenu: tap → Claude Code (placeholder)")
+            startCcDispatchFromMenu()
         },
         RootMenu.MenuItem.Action("Aria") {
             diag("rootMenu: tap → Aria (placeholder)")
@@ -222,6 +244,51 @@ class G2Pipeline(
             diag("rootMenu: tap → Settings (placeholder)")
         },
     )
+
+    /** Tapping a directory entry in the menu's directory submenu fires this —
+     *  sends DirectorySelect(path) which the server responds to with a
+     *  SessionInfo (success) or CcError (failure). Replaces the current
+     *  frame with a "Spawning…" placeholder so the user sees the request
+     *  is in flight; dispatchInbound's SessionInfo/CcError handlers update
+     *  the frame to success/error. */
+    private fun selectDirectoryFromMenu(path: String, displayName: String) {
+        val rm = rootMenu
+        val cm = connection
+        if (rm == null || cm == null) {
+            diag("rootMenu: directory_select — rootMenu=${rm != null} connection=${cm != null} — abort")
+            return
+        }
+        diag("rootMenu: tap → directory '$displayName' ($path) — requesting CC spawn")
+        menuAwaitingSessionInfo = true
+        cm.send(ClientMessage.DirectorySelect(path))
+        rm.replaceCurrentFrame("Claude Code", listOf(
+            RootMenu.MenuItem.Action("(spawning $displayName…)") {},
+        ))
+    }
+
+    /** Phase Ω: first feature-module wiring. Tapping "Claude Code" in the
+     *  root menu fires this — sends DispatchTargetSelect("cc") which the
+     *  server responds to with both DispatchTargetSet AND DirectoryListReply
+     *  (the auto-push behavior is ws-handler.ts:253-255). Pushes a transient
+     *  "Loading directories…" frame so the user gets immediate feedback;
+     *  dispatchInbound replaces it with the real list when the reply lands. */
+    private fun startCcDispatchFromMenu() {
+        val rm = rootMenu
+        val cm = connection
+        if (rm == null || cm == null) {
+            diag("rootMenu: CC dispatch — rootMenu=${rm != null} connection=${cm != null} — abort")
+            return
+        }
+        diag("rootMenu: tap → Claude Code — requesting dispatch + directory list")
+        menuAwaitingDirectoryList = true
+        cm.send(ClientMessage.DispatchTargetSelect("cc"))
+        rm.pushSubmenu("Claude Code", listOf(
+            RootMenu.MenuItem.Action("(loading directories…)") {
+                // Tap on the loading row is a no-op visually; user can use
+                // "← Back" (auto-prepended by pushSubmenu) to abort.
+            },
+        ))
+    }
 
     /** Phase Y init sequence run after both lenses Ready: send the
      *  EvenAppInit packets to R lens (matches Even App: News init goes to
@@ -341,7 +408,7 @@ class G2Pipeline(
         if (PHASE_Y_ENABLED) {
             val nh = NewsHud(left, right)
             newsHud = nh
-            rootMenu = RootMenu(rootItems = buildPlaceholderRootMenu()) { title, body ->
+            rootMenu = RootMenu(rootItems = buildRootMenuItems()) { title, body ->
                 nh.render(title, body) { ok ->
                     diag("phaseY: news-render '${title.take(20)}' ok=$ok body=${body.length}c")
                 }
@@ -437,11 +504,14 @@ class G2Pipeline(
                         return
                     }
                 }
-                // Priority: most recent server intent > Hud's last cached
-                // render > hello frame. pendingHudText is populated by
-                // ServerMessage.Output even when hud was null — so this
-                // path replays content that arrived during a HUD outage.
-                val textToRender = pendingHudText
+                // Priority: STT confirmation prompt (user is waiting on the
+                // gate) > most recent server intent (pendingHudText) > Hud's
+                // last cached render > hello frame. The STT confirmation
+                // prompt takes precedence because losing it would discard
+                // the user's recent recording silently — they'd see CC's
+                // last output and not realize a transcript was waiting.
+                val textToRender = sttConfirmation?.getPendingPrompt()
+                    ?: pendingHudText
                     ?: h.lastRenderedText
                     ?: "G2CC paired\nL+R authed\n(idle)"
                 // Reconnect path: this pipeline has rendered before in THIS
@@ -856,12 +926,19 @@ class G2Pipeline(
         }
     }
 
-    /** Single-tap dispatch:
-     *   - confirm pending → confirmed
-     *   - recording → stop + send for transcription
-     *   - else → start recording */
+    /** Single-tap dispatch — priority order:
+     *   1. server-initiated confirm-on-hud pending → confirmed
+     *   2. STT confirmation pending → send transcript as Prompt (Phase 8)
+     *   3. streaming → stop recording (audio_end will fire to server)
+     *   4. AWAITING_TRANSCRIPT (recording stopped, STT in flight) → ignore
+     *   5. idle → start recording */
     fun onTap() {
         if (confirmation?.onTap() == true) return
+        if (sttConfirmation?.onTap() == true) {
+            // Confirmed; CC will start streaming output to the HUD shortly.
+            state.transition(AppState.STREAMING)
+            return
+        }
         val s = streamer ?: run {
             Log.w(TAG, "onTap: streamer not initialized")
             return
@@ -869,20 +946,37 @@ class G2Pipeline(
         if (s.isStreaming) {
             s.stop()
             state.transition(AppState.AWAITING_TRANSCRIPT)
-        } else {
-            s.start()
-            state.transition(AppState.AWAITING_TRANSCRIPT)
+            return
         }
+        // Guard against starting a new recording while a transcription is in
+        // flight from a previous stop. Without this, an impatient double-tap
+        // (or two single taps in quick succession after audio_end) would
+        // start audio_start again, which the server then rejects with
+        // "previous transcription still in flight" — confusing UX. Better
+        // to no-op the tap loudly via diag.
+        if (state.current == AppState.AWAITING_TRANSCRIPT) {
+            diag("onTap: ignored (awaiting STT result; tap again after transcript arrives)")
+            return
+        }
+        s.start()
+        state.transition(AppState.AWAITING_TRANSCRIPT)
     }
 
-    /** Double-tap dispatch:
-     *   - confirm pending → rejected + reopen audio (per spec §6 step 5)
-     *   - recording → cancel
-     *   - else → show menu */
+    /** Double-tap dispatch — priority order:
+     *   1. server-initiated confirm-on-hud pending → rejected + reopen audio
+     *   2. STT confirmation pending → discard transcript (Phase 8)
+     *      Caveat: firmware may eat double-tap in teleprompter mode; see
+     *      SttConfirmationFlow class docs.
+     *   3. streaming → cancel recording
+     *   4. else → show menu (only reachable when firmware lets the event through) */
     fun onDoubleTap() {
         if (confirmation?.onDoubleTap() == true) {
             streamer?.start()
             state.transition(AppState.AWAITING_TRANSCRIPT)
+            return
+        }
+        if (sttConfirmation?.onDoubleTap() == true) {
+            state.transition(AppState.IDLE)
             return
         }
         val s = streamer
@@ -929,6 +1023,7 @@ class G2Pipeline(
             onDisconnected = {
                 state.transition(AppState.CONNECTING)
                 confirmation?.onDisconnected()
+                sttConfirmation?.onDisconnected()
             },
             onAuthFailure = { count ->
                 Log.w(TAG, "auth failure #$count")
@@ -951,6 +1046,7 @@ class G2Pipeline(
         hud?.let {
             menu = MenuController(it, cm)
             confirmation = ConfirmationFlow(it, cm)
+            sttConfirmation = SttConfirmationFlow.forProduction(it, cm)
         }
         // Phase 8: wire mic capture path. Streaming starts on user gesture
         // (or Tasker intent); the streamer just owns the audio_start/end +
@@ -991,6 +1087,30 @@ class G2Pipeline(
             }
             is ServerMessage.DirectoryListReply -> {
                 menu?.directories = msg.entries
+                // Phase Ω: if the RootMenu flow requested this, replace the
+                // current "(loading directories…)" frame with real Actions
+                // — one per directory entry. Tapping an entry sends
+                // DirectorySelect and pushes a "Spawning…" frame; the
+                // matching SessionInfo or CcError replaces that one.
+                if (menuAwaitingDirectoryList) {
+                    menuAwaitingDirectoryList = false
+                    val rm = rootMenu
+                    if (rm != null) {
+                        diag("rootMenu: directory_list_reply (${msg.entries.size} entries) — populating submenu")
+                        val items: List<RootMenu.MenuItem> = msg.entries.map { entry ->
+                            RootMenu.MenuItem.Action(entry.name) {
+                                selectDirectoryFromMenu(entry.path, entry.name)
+                            }
+                        }
+                        if (items.isEmpty()) {
+                            rm.replaceCurrentFrame("Claude Code", listOf(
+                                RootMenu.MenuItem.Action("(no directories under /home/user)") {},
+                            ))
+                        } else {
+                            rm.replaceCurrentFrame("Pick directory", items)
+                        }
+                    }
+                }
             }
             is ServerMessage.Output -> {
                 if (state.current != AppState.STREAMING) state.transition(AppState.STREAMING)
@@ -1020,6 +1140,23 @@ class G2Pipeline(
             }
             is ServerMessage.SessionInfo -> {
                 Log.i(TAG, "session_info project=${msg.projectPath} resumed=${msg.resumed} ccId=${msg.ccSessionId}")
+                // Phase Ω: if the menu flow triggered this spawn, replace the
+                // current "Spawning…" frame with a success confirmation. The
+                // menu stays mounted (still consuming taps) — Phase Y polish
+                // will decide how prompts get back into CC from here.
+                if (menuAwaitingSessionInfo) {
+                    menuAwaitingSessionInfo = false
+                    val projectName = msg.projectPath.substringAfterLast('/').ifEmpty { msg.projectPath }
+                    val verb = if (msg.resumed) "Resumed" else "Started"
+                    rootMenu?.replaceCurrentFrame("Claude Code", listOf(
+                        RootMenu.MenuItem.Action("✓ $verb $projectName") {
+                            // Tap on success row does nothing yet — Phase Y
+                            // polish wires it to a "send prompt" action or
+                            // similar once the audio path is end-to-end.
+                        },
+                    ))
+                    diag("rootMenu: session_info — replaced spawning frame with success ($projectName, resumed=${msg.resumed})")
+                }
             }
             is ServerMessage.ConfirmOnHud -> {
                 state.transition(AppState.AWAITING_CONFIRMATION)
@@ -1046,6 +1183,18 @@ class G2Pipeline(
             is ServerMessage.CcError -> {
                 state.transition(AppState.ERROR)
                 hud?.render("ERROR: ${msg.error}")
+                // Phase Ω: if the menu flow triggered this, replace the
+                // current frame with the error so the user isn't left
+                // staring at "Spawning…" / "(loading directories…)" forever.
+                // Clear both flags — either could have been live.
+                if (menuAwaitingDirectoryList || menuAwaitingSessionInfo) {
+                    menuAwaitingDirectoryList = false
+                    menuAwaitingSessionInfo = false
+                    rootMenu?.replaceCurrentFrame("Claude Code", listOf(
+                        RootMenu.MenuItem.Action("✗ ${msg.error.take(80)}") {},
+                    ))
+                    diag("rootMenu: cc_error — replaced pending frame with error '${msg.error.take(120)}'")
+                }
             }
             is ServerMessage.SttError -> {
                 hud?.render("STT ERROR: ${msg.error}")
@@ -1065,7 +1214,24 @@ class G2Pipeline(
             is ServerMessage.ToolUse -> Log.i(TAG, "tool_use: ${msg.tool} ${msg.description}")
             is ServerMessage.BackgroundAlertMsg -> Log.i(TAG, "bg_alert: ${msg.alertType} session=${msg.sessionId} ${msg.details ?: ""}")
             is ServerMessage.PermissionRequest -> Log.i(TAG, "permission_request: id=${msg.requestId} tool=${msg.tool}")
-            is ServerMessage.SttResult -> Log.i(TAG, "stt_result: \"${msg.text}\"")
+            is ServerMessage.SttResult -> {
+                Log.i(TAG, "stt_result: \"${msg.text}\"")
+                val flow = sttConfirmation
+                if (flow != null) {
+                    flow.onSttResult(msg.text)
+                    state.transition(AppState.AWAITING_CONFIRMATION)
+                } else {
+                    // Server transcribed but the client lacks a confirmation
+                    // flow (HUD not initialized — happens before installBleClients
+                    // has wired things up). Render directly so the transcript
+                    // isn't silently dropped, and fall back to IDLE so the user
+                    // can re-record if needed. No auto-send-to-CC because the
+                    // user explicitly asked for a confirmation gate.
+                    Log.w(TAG, "stt_result arrived without SttConfirmationFlow — rendering raw, no auto-send")
+                    hud?.render("STT (unconfirmed): \"${msg.text}\"")
+                    state.transition(AppState.IDLE)
+                }
+            }
             is ServerMessage.SessionList -> Log.i(TAG, "session_list: ${msg.sessions.size} saved")
             is ServerMessage.ActiveSessionList -> Log.i(TAG, "active_session_list: ${msg.sessions.size} active")
             is ServerMessage.RewindResult -> Log.i(TAG, "rewind_result: success=${msg.success} ${msg.summary}")

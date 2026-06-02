@@ -34,7 +34,7 @@ import { validateToken } from './auth.js'
 import { type CCUsage } from './cc-session.js'
 import { SessionPool, type PoolEntry } from './session-pool.js'
 import { Watchdog } from './watchdog.js'
-import { transcribe } from './stt.js'
+import { transcribe, transcribeDji } from './stt.js'
 import { markdownToPlaintext, formatToolUse } from './output-parser.js'
 import { listProjectDirectories } from './directory-picker.js'
 import { CCDispatcher, DISPATCH_TARGETS, type Dispatcher, getDispatchTarget } from './dispatch.js'
@@ -784,20 +784,38 @@ async function handleAudio(
     return
   }
 
-  // Bug-fix-pass-2 #8: route based on the phone-announced format. The legacy
-  // path (16 kHz mono int16) goes through the existing transcribe pipeline
-  // (preprocessAudio + faster-whisper / Parakeet). The DJI stereo float path
-  // (48 kHz / 2 ch / float32) needs the NLMS + DFN server-side pipeline,
-  // which is gated on Phase 8 captures landing. Until then we LOUDLY refuse
-  // rather than misinterpret stereo float bytes as int16 PCM (which would
-  // produce gibberish silently).
+  // Route based on the phone-announced format:
+  //   - DJI USB path (48 kHz / 2 ch / float32 / source='dji-usb'): full noise
+  //     pipeline (notch → wiener → parakeet) via pipeline.dji_pipeline_cli.
+  //   - Legacy phone-mic (16 kHz / 1 ch / int16): preprocessAudio + faster-whisper
+  //     or Parakeet via the existing transcribe() path. Phone mic is the
+  //     "no DJI plugged in" fallback for dev iteration; production target is DJI.
+  const isDji = format.source === 'dji-usb' &&
+    format.encoding === 'float32' &&
+    format.channels === 2 &&
+    format.sampleRate === 48_000
   const isLegacyShape = format.encoding === 'int16' &&
     format.channels === 1 &&
     format.sampleRate === 16_000
+
+  if (isDji) {
+    try {
+      const text = await transcribeDji(pcmBuffer, format, config)
+      if (!text.trim()) {
+        sendMsg(client, { type: 'stt_error', error: 'No speech detected' })
+        return
+      }
+      sendMsg(client, { type: 'stt_result', text })
+    } catch (err) {
+      sendMsg(client, { type: 'stt_error', error: `Transcription failed: ${err}` })
+    }
+    return
+  }
+
   if (!isLegacyShape) {
     const reason = `Audio format ${format.encoding}/${format.channels}ch/${format.sampleRate}Hz` +
-      ` not yet routable — server NLMS+DFN pipeline gated on Phase 8 capture work.` +
-      ` See docs/HOLDS.md §H5/H6.`
+      ` src=${format.source ?? '?'} not routable. Expected dji-usb (48k/2ch/float32) ` +
+      `or phone-mic (16k/1ch/int16).`
     console.warn(`[ws] ${reason}`)
     sendMsg(client, { type: 'stt_error', error: reason })
     return

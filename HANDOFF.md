@@ -1,6 +1,6 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
-**Last updated: 2026-06-03, end-of-day after Phase D completion (wake-lock fix landed in commit `1fd3124`).**
+**Last updated: 2026-06-02, after STT confirmation flow landed. The critical-path loop (tap → DJI mic → STT → HUD confirmation gate → Prompt → CC → HUD) is now end-to-end code-complete. Hardware validation + Phase Y activation are the remaining unknowns.**
 
 This document is the single entry point for a fresh CC session picking up G2CC. Read this first, then read the files in the "Required reading" section below, then start work.
 
@@ -79,7 +79,7 @@ For the Phase Y / Phase Ω scaffolding already written (NOT yet wired in by defa
 - **R lens**: display + teleprompter content + ring event channel. The "primary" lens from the phone's POV.
 - **Phone**: foreground service (`G2CCService`) holding wake lock, runs `G2Pipeline` which owns BLE + WebSocket + audio capture.
 - **Server**: Node + Fastify + WebSocket on `:7300`. Per-client `SessionPool` holds Claude Code subprocesses keyed by working directory. Watchdog restarts dead subprocesses with `--resume`.
-- **Audio path**: DJI TX2 → phone USB-C (NOT IMPLEMENTED YET — currently uses phone mic) → WS to server → Python pipeline (spectral_subtract + dfn_polish + Parakeet ASR) → text → CC stdin → CC streaming response → WS → phone → HUD.
+- **Audio path**: DJI TX2 → phone USB-C → WS to server (48 kHz/2ch/float32, source=`dji-usb`) → `pipeline.dji_pipeline_cli` (downmix → notch → wiener → Parakeet) → text → SttConfirmationFlow (HUD shows full transcript, user taps to confirm or 2-taps to discard) → ClientMessage.Prompt → CC stdin → CC streaming response → WS → phone → HUD. DFN polish skipped pending numpy-2 compat from upstream. Phone-mic fallback (16 kHz/1ch/int16) still works for dev-without-DJI iteration.
 
 ## What works today (verified on hardware)
 
@@ -101,7 +101,7 @@ For the Phase Y / Phase Ω scaffolding already written (NOT yet wired in by defa
 Phase Y main-menu takeover is built but gated behind `PHASE_Y_ENABLED = false` in `G2Pipeline.kt`. Flipping the flag activates:
 - News-style content rendering via service `0x01-20` (NewsHud.kt)
 - Multi-service init flow (EvenAppInit.kt) — Display Wake + Display Trigger + Commit + R1 Registration etc.
-- RootMenu navigation (placeholder items: CC / Aria / SMS / Email / Calendar / Settings)
+- RootMenu navigation. **"Claude Code" is now a real feature module (Phase Ω)** — tapping it sends `dispatch_target_select("cc")`, the directory list populates as a submenu, tapping a directory spawns CC and shows "✓ Started <project>". Aria / SMS / Email / Calendar / Settings remain `diag("placeholder")` stubs.
 - Ring scroll/tap routed to RootMenu
 
 **Risk of flipping**: untested in real hardware. Could regress the now-working teleprompter path. Recommend testing in a dev branch first.
@@ -127,12 +127,18 @@ When user picks "Claude Code" from the menu, server presents a directory picker 
 
 ## Recommended next-phase priority order
 
-1. **Phase Ω first feature module: real Claude Code dispatch** (Phase Y can wait). Wire RootMenu's "Claude Code" item to actually trigger the existing directory-picker → CC-spawn flow. This validates the menu architecture with a working feature instead of placeholder diag stubs.
-2. **R1 ring direction encoding**: trivial 30-second hardware test from Adam. Capture controlled scroll up/down, finalize `EventParser.decodeScroll` to distinguish.
-3. **DJI noise profile**: Adam runs `verify_dji_settings.py` then captures noise.wav via phone USB-C, scp's to server, `learn_noise_profile.py noise.wav --output audio/profiles/machine.npz --force`.
-4. **Parakeet bring-up**: NeMo install (~3GB), model load test, single-file transcribe test, then integrate into the audio path.
-5. **Phase Z (Even App removal)**: force-stop + uninstall Even App, see what breaks (likely: R1 ring registration since glasses learned it from Even App; we'd need to push our own via service `0x91-20`).
-6. **Phase Y display-path switch**: try flipping the flag once everything else stabilizes. Might reduce wire load further but isn't urgent given current stability.
+(Refocused after Adam confirmed "DJI only, Parakeet only, menu yes, confirmation gate yes — just reprioritize CC-on-glasses-with-voice over SMS/Email".)
+
+1. ~~**Phase Ω first feature module: real Claude Code dispatch**~~ — DONE code-only. Activation gated on Phase Y display-path switch.
+2. ~~**Parakeet bring-up**~~ — DONE: NeMo 2.7.3 installed in `audio/venv`, smoke test passed, `config.stt.engine=parakeet` default.
+3. ~~**Server-side DJI audio routing**~~ — DONE: `transcribeDji` + `dji_pipeline_cli.py` + `handleAudio` routing. Pipeline runs notch → wiener → parakeet against the prototype phone-recording noise profile.
+4. ~~**STT confirmation flow**~~ — DONE: `SttConfirmationFlow.kt`, wired in `G2Pipeline`, 14 unit tests. Reject gesture (double-tap) may be firmware-eaten in teleprompter mode — needs hardware verification; fallback path is ring-scroll-navigable "Discard" menu item.
+5. **Phase Y display-path switch + hardware shakedown** (load-bearing): flip `PHASE_Y_ENABLED=true` and test on glasses. The full critical-path loop (menu → CC dispatch → DJI capture → STT → confirmation → Prompt → CC output → HUD) is now pre-wired; activation reveals whether the architecture holds up against real hardware. Verifies the firmware-eats-double-tap question too.
+6. **R1 ring direction encoding** (hardware, Adam): 30 s controlled scroll up/down capture, finalize `EventParser.decodeScroll`.
+7. **DJI noise profile** (hardware, Adam): `verify_dji_settings.py` then capture machine noise via DJI TX2, `learn_noise_profile.py noise.wav --output audio/profiles/machine.npz --force`. Replaces the prototype phone-recording profile.
+8. **Phase Z (Even App removal)**: force-stop + uninstall Even App, identify+fix what breaks (likely R1 ring registration via service `0x91-20`).
+9. **DFN polish re-enable**: watch for next major `deepfilternet` release with numpy-2 compatibility; re-add to `audio/requirements.txt` and re-verify `init_df()` return shape + `enhance()` tensor contract.
+10. Aria / SMS / Email feature modules — explicitly DEPRIORITIZED below the CC-on-glasses-with-voice critical path.
 
 ## Things NOT to do
 

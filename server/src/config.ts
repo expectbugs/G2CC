@@ -64,7 +64,12 @@ function defaultConfig(): G2CCConfig {
     host: '0.0.0.0',
     authToken: randomUUID(),
     stt: {
-      engine: 'faster-whisper',  // Phase 8 changes to 'parakeet'
+      // Default engine flipped to parakeet 2026-06-02 after NeMo 2.7.3 install
+      // + smoke test (espeak synthesis → exact transcription match). Reference
+      // WER on LibriSpeech test-clean is 1.69%; cold model load ~5-10s, warm
+      // inference ~0.5s for short utterances. faster-whisper remains an
+      // available fallback if Parakeet misbehaves on a real DJI capture.
+      engine: 'parakeet',
       language: 'en',
       pythonPath: defaultPythonPath(),
       whisperModel: 'large-v3',

@@ -56,6 +56,25 @@ export function isLikelyHallucination(text: string): boolean {
   return HALLUCINATION_DENYLIST.has(normalize(text))
 }
 
+/** Extract the transcript from a Python CLI's stdout when the CLI uses the
+ *  ___G2CC_RESULT_BEGIN___ / ___G2CC_RESULT_END___ sentinels. Loud-fails if
+ *  the sentinels are missing — caller's catch surfaces it to the client.
+ *  NeMo / tqdm noise on stdout outside the sentinels is discarded. */
+const RESULT_BEGIN = '___G2CC_RESULT_BEGIN___'
+const RESULT_END = '___G2CC_RESULT_END___'
+export function extractSentinelResult(stdout: string): string {
+  const beginIdx = stdout.indexOf(RESULT_BEGIN)
+  const endIdx = stdout.indexOf(RESULT_END)
+  if (beginIdx < 0 || endIdx < 0 || endIdx < beginIdx) {
+    throw new Error(
+      `CLI output missing transcript sentinels (begin=${beginIdx}, end=${endIdx}); ` +
+      `stdout tail: ${JSON.stringify(stdout.slice(-200))}`,
+    )
+  }
+  const inner = stdout.substring(beginIdx + RESULT_BEGIN.length, endIdx)
+  return inner.trim()
+}
+
 /** Transcribe raw PCM audio to text.
  *  Input: 16 kHz, signed 16-bit LE, mono PCM (from G2 mic or DJI fallback path).
  *  Throws if the result is a known hallucination — caller surfaces stt_error.
@@ -117,6 +136,63 @@ async function transcribeFasterWhisper(wavPath: string, config: G2CCConfig): Pro
   return result
 }
 
+/** Phase 8: DJI Mic 3 path — 48 kHz / 2 ch / float32 audio through the full
+ *  noise pipeline (notch → wiener → parakeet). Bypasses the legacy
+ *  16 kHz/mono/int16 preprocessAudio() entirely.
+ *
+ *  Input: raw interleaved float32 PCM bytes as announced by audio_start.
+ *  Output: transcript string (post-pipeline).
+ *
+ *  Writes an IEEE-float WAV to /tmp and shells out to
+ *  `pipeline.dji_pipeline_cli` in the project venv. The Python CLI handles:
+ *    - stereo→mono downmix
+ *    - resample to noise profile rate (48 kHz)
+ *    - notch_filter at profile['peak_freqs']
+ *    - spectral_subtract with profile['noise_psd']
+ *    - parakeet transcribe (resamples internally to 16 kHz)
+ *
+ *  Hallucination denylist still applies; Parakeet's empirical failure
+ *  modes on DJI captures get added once Adam runs the H5 hardware gate. */
+export async function transcribeDji(
+  pcmBuffer: Buffer,
+  format: { sampleRate: number; channels: number; encoding: string },
+  config: G2CCConfig,
+): Promise<string> {
+  if (format.encoding !== 'float32') {
+    throw new Error(`transcribeDji expects float32, got ${format.encoding}`)
+  }
+  // Wrap raw float32 bytes in a proper IEEE-float WAV header so the Python
+  // soundfile decoder can read it without ambiguity. bitsPerSample=32,
+  // audioFormat=3.
+  const wavBuffer = pcmToWav(pcmBuffer, format.sampleRate, 32, format.channels, 3)
+  const tmpPath = join('/tmp', `g2cc-dji-${Date.now()}.wav`)
+  writeFileSync(tmpPath, wavBuffer)
+  try {
+    const { pythonPath } = config.stt
+    const { stdout } = await execFileAsync(
+      pythonPath,
+      ['-m', 'pipeline.dji_pipeline_cli', tmpPath],
+      {
+        encoding: 'utf-8',
+        maxBuffer: 16 * 1024 * 1024,
+        cwd: '/home/user/G2CC/audio',
+      },
+    )
+    const result = extractSentinelResult(stdout)
+    console.log(`[stt] dji-pipeline result (${result.length} chars): "${result}"`)
+    if (isLikelyHallucination(result)) {
+      console.warn(`[stt] Rejected hallucination: "${result}"`)
+      throw new Error('No speech detected (likely background noise)')
+    }
+    return result
+  } finally {
+    if (existsSync(tmpPath)) {
+      try { unlinkSync(tmpPath) }
+      catch (err) { console.warn(`[stt] tmpfile cleanup failed (${tmpPath}): ${err}`) }
+    }
+  }
+}
+
 /** Phase 8: Parakeet TDT 0.6B v2 via pipeline/parakeet_engine.py.
  *
  *  Calls the project-scoped venv's python with `-m pipeline.parakeet_cli <wav>`.
@@ -137,7 +213,7 @@ async function transcribeParakeet(wavPath: string, config: G2CCConfig): Promise<
       cwd: '/home/user/G2CC/audio',     // so `-m pipeline.parakeet_cli` resolves
     },
   )
-  const result = stdout.trim()
+  const result = extractSentinelResult(stdout)
   console.log(`[stt] parakeet result (${result.length} chars): "${result}"`)
 
   // Hallucination denylist: empirical, mostly Whisper-specific YouTube outros.

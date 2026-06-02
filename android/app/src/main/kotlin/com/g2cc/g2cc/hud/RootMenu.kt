@@ -139,6 +139,51 @@ class RootMenu(
         render()
     }
 
+    /** Push a new submenu frame programmatically (not from a tap). Used by
+     *  feature modules that respond to async server events — e.g. CC dispatch
+     *  receives a DirectoryListReply and needs to push a directory submenu.
+     *
+     *  Mirrors the on-tap Submenu enter logic: synthesizes a "← Back" Action
+     *  at index 0 so the user can bail out without a gesture we can't
+     *  reliably receive (ring double-tap fires firmware's "End Feature?").
+     *
+     *  Re-renders on push so the HUD reflects the new frame immediately. */
+    fun pushSubmenu(title: String, items: List<MenuItem>) {
+        val backItem = MenuItem.Action("← Back") { popFrame() }
+        val withBack = listOf(backItem) + items
+        stack += Frame(title = title, items = withBack, highlightIndex = 0)
+        Log.i(TAG, "pushSubmenu '$title' (${items.size} items, depth now ${stack.size - 1})")
+        render()
+    }
+
+    /** Replace the contents of the current frame in place. Used to swap a
+     *  transient "Loading…" frame for a populated one (e.g. directory list
+     *  arrives), or to swap a populated frame for a "Done ✓" confirmation
+     *  after a feature module completes its async work. Highlight resets to
+     *  index 0.
+     *
+     *  Does NOT add a back item — replaceCurrentFrame is for in-place swap,
+     *  not depth change. If the original frame had a back item, the caller
+     *  is responsible for keeping one in `items` (typically a no-op since
+     *  the new content lives in the SAME submenu, where back was already
+     *  available from the parent's push). */
+    fun replaceCurrentFrame(title: String, items: List<MenuItem>) {
+        val current = currentFrame
+        stack[stack.size - 1] = Frame(title = title, items = items, highlightIndex = 0)
+        Log.i(TAG, "replaceCurrentFrame '${current.title}' → '$title' (${items.size} items)")
+        render()
+    }
+
+    /** Pop all frames back to the root. Useful after a feature module
+     *  completes — leaves the user back at the top-level menu rather than
+     *  stranded in a submenu they can't recover from. */
+    fun popToRoot() {
+        if (stack.size <= 1) return       // already at root
+        while (stack.size > 1) stack.removeAt(stack.size - 1)
+        Log.i(TAG, "popToRoot — depth now 0")
+        render()
+    }
+
     /** Force-render the current state. Useful at startup AND when the
      *  display path comes back online after a reconnect. */
     fun render() {

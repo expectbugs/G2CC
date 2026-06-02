@@ -23,10 +23,19 @@ matplotlib>=3.9.0
 # padasip was an option for a second NLMS implementation but we hand-rolled
 # instead — removed to avoid an unused ~5 MB venv install.
 # DeepFilterNet ships its own torch (CUDA-bound).
-deepfilternet>=0.5.6,<0.6   # 4th-pass-final review: upper bound — init_df() return shape + enhance() tensor contract differ across major DFN releases
+# deepfilternet>=0.5.6,<0.6
+#   ^ TEMPORARILY DISABLED 2026-06-02: deepfilternet 0.5.6 pins numpy<2.0, conflicts
+#     with scipy 1.17 / sounddevice / soundfile / NeMo which all want numpy>=2.x.
+#     DFN is the optional polish step at the END of the noise pipeline
+#     (notch → wiener → DFN → parakeet). Pipeline works without it; SNR is a few
+#     dB lower than with-DFN, but not load-bearing.
+#     Re-enable when DFN ships a numpy-2-compatible release (the next major after
+#     0.5.6) and re-verify init_df() return shape + enhance() tensor contract.
+#     Issue tracking: TODO in audio/pipeline/dfn_polish.py.
 
 # Phase 8 — Parakeet ASR via NeMo
-# UNCOMMENT after Phase 0/8 driver/toolkit re-verification. NeMo pulls PyTorch + the
-# full NVIDIA speech stack; install size ~3 GB. Conflicts with the existing
-# /home/user/aria/venv/ are why this is project-scoped here.
-# nemo_toolkit[asr]>=2.0.0
+# CUDA stack re-verified 2026-06-02: driver 595.71.05 (cu13.2 max), nvcc 12.9,
+# RTX 3090 (compute 8.6), 19 GB VRAM free. NeMo pulls PyTorch + the full NVIDIA
+# speech stack; install size ~3 GB. Project-scoped venv keeps it isolated from
+# /home/user/aria/venv/.
+nemo_toolkit[asr]>=2.0.0
