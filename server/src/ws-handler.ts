@@ -509,7 +509,12 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'diag': {
-      console.log(`[client-diag] ${msg.text}`)
+      // Server-side ISO timestamp + client-side embedded [runId T+s] prefix
+      // give us a full timeline: when the client emitted (T+s within its
+      // run) AND when the server received (ISO wall clock, captures WS
+      // latency). Critical for distinguishing test runs in `tail -f`.
+      const now = new Date().toISOString()
+      console.log(`${now} [client-diag] ${msg.text}`)
       break
     }
 

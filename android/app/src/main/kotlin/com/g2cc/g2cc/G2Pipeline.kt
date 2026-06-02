@@ -125,6 +125,28 @@ class G2Pipeline(
     // every full-rebuild as a brand-new install. Reset only by stop().
     private val sessionHasRenderedOnce = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    // Pipeline start timestamp + run ID for diag correlation. Every diag()
+    // emission is prefixed with [T+s] so we can tell when each event
+    // happened on the client side (server-side timestamp can lag due to WS
+    // buffering / network delay). The runId is a short random ID stamped
+    // at pipeline construction so we can tell multiple test runs apart in
+    // the same server log.
+    private val pipelineStartMs: Long = System.currentTimeMillis()
+    private val runId: String = "%04x".format((pipelineStartMs and 0xFFFF).toInt())
+
+    /** Emit a diag with timestamp + run-ID prefix. All client-side
+     *  diagnostics should go through this rather than connection?.send()
+     *  directly so we always get consistent timestamping. */
+    private fun diag(text: String) {
+        val ts = "%.1f".format((System.currentTimeMillis() - pipelineStartMs) / 1000.0)
+        connection?.send(ClientMessage.Diag("[$runId T+${ts}s] $text"))
+    }
+
+    /** Public diag entry-point for receivers / external callers. Same format
+     *  as the private diag() — timestamp + run-ID prefix — so all diag lines
+     *  in the server log are correlatable. */
+    fun emitDiag(text: String) = diag(text)
+
     /** Scan or directed-connect to the G2 lens pair, then install BLE clients.
      *  Idempotent — calling twice is a no-op if BLE clients are already installed.
      *
@@ -260,7 +282,7 @@ class G2Pipeline(
                 val r = rightBle
                 val conn = connection
                 if (h == null) {
-                    conn?.send(ClientMessage.Diag("hud: NULL on Ready edge! cannot render"))
+                    diag("hud: NULL on Ready edge! cannot render")
                     return
                 }
                 stopPostReadyWatchdog()
@@ -278,19 +300,19 @@ class G2Pipeline(
                 // One-shot diag: show actual MTU + PHY so we can see whether
                 // the BLE-stability requests (2M PHY, LOW_POWER priority) were
                 // accepted by the glasses or fell back to defaults.
-                conn?.send(ClientMessage.Diag(
+                diag(
                     "ble-link: L mtu=${l?.lastMtu ?: -1} phy=${l?.lastPhy ?: "?"} ${l?.lastConnParams ?: "?"} | " +
                     "R mtu=${r?.lastMtu ?: -1} phy=${r?.lastPhy ?: "?"} ${r?.lastConnParams ?: "?"}"
-                ))
-                conn?.send(ClientMessage.Diag(
+                )
+                diag(
                     "hud: ${if (isReconnect) "RECONNECT" else "initial"}-render | notify-before $notifyBefore"
-                ))
+                )
                 h.render(textToRender, fastReRender = isReconnect) { ok ->
                     val lCount = l?.notifyCount?.get() ?: -1
                     val rCount = r?.notifyCount?.get() ?: -1
-                    connection?.send(ClientMessage.Diag(
+                    diag(
                         "hud: render-done ok=$ok | notify: $notifyBefore → L=$lCount R=$rCount"
-                    ))
+                    )
                     if (ok) {
                         sessionHasRenderedOnce.set(true)
                         startHeartbeat()
@@ -313,9 +335,9 @@ class G2Pipeline(
                 // GATT status codes per BluetoothGatt source.
                 val lr = left.lastDisconnectReason
                 val rr = right.lastDisconnectReason
-                connection?.send(ClientMessage.Diag(
+                diag(
                     "hud: $side dropped post-Ready ($reason) — Lreason=0x${"%02x".format(lr)} Rreason=0x${"%02x".format(rr)} — heartbeat stopped, awaiting Nordic auto-reconnect"
-                ))
+                )
             }
             fun recomputeEdges() {
                 val bothNow = leftReady && rightReady
@@ -411,7 +433,7 @@ class G2Pipeline(
         heartbeatJob?.cancel()
         heartbeatTickCount.set(0)
         heartbeatJob = scope.launch {
-            connection?.send(ClientMessage.Diag("hb: started (cadence=15s, packet=FULL_RERENDER)"))
+            diag("hb: started (cadence=15s, packet=FULL_RERENDER)")
             try {
                 while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
                     kotlinx.coroutines.delay(15_000L)
@@ -420,7 +442,7 @@ class G2Pipeline(
                     val h = hud
                     val page0 = h?.lastPage0
                     if (h == null || page0 == null) {
-                        connection?.send(ClientMessage.Diag("hb: no hud / lastPage0 yet — skipping tick"))
+                        diag("hb: no hud / lastPage0 yet — skipping tick")
                         continue
                     }
                     val notifyBefore = "L=${l.notifyCount.get()} R=${r.notifyCount.get()}"
@@ -431,13 +453,13 @@ class G2Pipeline(
                     // same packets.)
                     h.render("G2CC paired\nL+R authed\n(idle)") { ok ->
                         val tick = heartbeatTickCount.incrementAndGet()
-                        connection?.send(ClientMessage.Diag(
+                        diag(
                             "hb: tick=$tick ok=$ok | notify $notifyBefore → L=${l.notifyCount.get()} R=${r.notifyCount.get()}"
-                        ))
+                        )
                     }
                 }
             } finally {
-                connection?.send(ClientMessage.Diag("hb: stopped after ${heartbeatTickCount.get()} ticks"))
+                diag("hb: stopped after ${heartbeatTickCount.get()} ticks")
             }
         }
     }
@@ -461,14 +483,14 @@ class G2Pipeline(
             val lReady = l?.state?.value is ConnectionState.Ready
             val rReady = r?.state?.value is ConnectionState.Ready
             if (lReady && rReady) {
-                connection?.send(ClientMessage.Diag("ble-wd: recovered before deadline — no action"))
+                diag("ble-wd: recovered before deadline — no action")
                 return@launch
             }
-            connection?.send(ClientMessage.Diag(
+            diag(
                 "ble-wd: ${POST_READY_RECOVERY_MS / 1000}s elapsed without both-Ready " +
                 "(L=${l?.state?.value?.let { stateLabel(it) } ?: "null"} " +
                 "R=${r?.state?.value?.let { stateLabel(it) } ?: "null"}) — forcing rescan"
-            ))
+            )
             stopHeartbeat()
             leftBle?.shutdownBle(); rightBle?.shutdownBle()
             leftBle = null; rightBle = null
@@ -673,7 +695,7 @@ class G2Pipeline(
         // (the notification cycles too fast to read by eye).
         scope.launch {
             bleStatus.collect { status ->
-                cm.send(ClientMessage.Diag("BLE: $status"))
+                diag("BLE: $status")
             }
         }
         hud?.let {
@@ -760,7 +782,7 @@ class G2Pipeline(
                 // forward to the diag stream so we can debug from the server
                 // log, but DON'T take over the HUD or transition AppState.
                 Log.w(TAG, "server error (not user-facing): ${msg.message}")
-                connection?.send(ClientMessage.Diag("server-err: ${msg.message}"))
+                diag("server-err: ${msg.message}")
             }
             // Bug fix #6: log loudly instead of silently dropping.
             is ServerMessage.Status -> Log.i(TAG, "status: mode=${msg.mode} ctx=${msg.contextPct}% processing=${msg.isProcessing}")

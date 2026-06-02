@@ -35,12 +35,12 @@ class BluetoothStateReceiver(
         when (state) {
             BluetoothAdapter.STATE_ON -> {
                 Log.i(TAG, "Bluetooth STATE_ON — re-running scanAndConnect")
-                pipeline.send(com.g2cc.g2cc.net.ClientMessage.Diag("bt-state: ON — rescanning"))
+                pipeline.emitDiag("bt-state: ON — rescanning")
                 pipeline.onBluetoothStateOn()
             }
             BluetoothAdapter.STATE_OFF -> {
                 Log.i(TAG, "Bluetooth STATE_OFF — tearing down BLE pipeline")
-                pipeline.send(com.g2cc.g2cc.net.ClientMessage.Diag("bt-state: OFF — tearing down BLE"))
+                pipeline.emitDiag("bt-state: OFF — tearing down BLE")
                 pipeline.onBluetoothStateOff()
             }
             BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_TURNING_ON -> {
