@@ -46,11 +46,15 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
      *  succeeded; `onComplete(false)` if either side reported a failure.
      *  Phase 7 fix #3: ConfirmationFlow uses this to send BleAckMsg with the
      *  delivery status. */
-    fun render(text: String, onComplete: (success: Boolean) -> Unit = {}): Int {
+    fun render(
+        text: String,
+        fastReRender: Boolean = false,
+        onComplete: (success: Boolean) -> Unit = {},
+    ): Int {
         val pages = Teleprompter.formatPages(text)
         lastPage0 = pages.firstOrNull()
         lastRenderedText = text
-        Log.i(TAG, "render: ${text.length} chars → ${pages.size} pages")
+        Log.i(TAG, "render: ${text.length} chars → ${pages.size} pages (fast=$fastReRender)")
 
         // Build the full packet bundle with locked counter access. Per
         // i-soxi/docs/teleprompter.md §"Message Sequence" the order is:
@@ -66,14 +70,21 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         // concurrent renders become a real scenario.
         //
         // delaysAfterMs mirrors the i-soxi teleprompter.py inter-packet sleeps:
-        //   display_config → 300 ms
-        //   init           → 500 ms  (longest — firmware switches into HUD mode)
-        //   content page   → 100 ms
-        //   marker         → 100 ms
-        //   sync_trigger   → 100 ms
+        //   display_config → 300 ms (fast: 100 ms)
+        //   init           → 500 ms (longest — firmware switches into HUD mode; fast: 200 ms)
+        //   content page   → 100 ms (fast: 30 ms)
+        //   marker         → 100 ms (fast: 30 ms)
+        //   sync_trigger   → 100 ms (fast: 30 ms)
         // Without these delays the take-over succeeds but text never renders
         // (confirmed 2026-06-01 on Adam's pair: ok=true + L=3 R=24 notifies but
         // blank screen + "End Feature?" from R1 ring → flooded firmware).
+        // Fast mode (re-renders against an already-HUD-mode firmware) cuts
+        // ~60% off the wall-clock recovery window after a BLE reconnect.
+        val d_displayConfig = if (fastReRender) 100L else 300L
+        val d_init          = if (fastReRender) 200L else 500L
+        val d_page          = if (fastReRender) 30L  else 100L
+        val d_marker        = if (fastReRender) 30L  else 100L
+        val d_sync          = if (fastReRender) 30L  else 100L
         val packets = ArrayList<ByteArray>()
         val delays = ArrayList<Long>()
         synchronized(counterLock) {
@@ -81,7 +92,7 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
             msgId = 0x20
 
             packets += Teleprompter.buildDisplayConfig(nextSeqLocked(), nextMsgIdLocked())
-            delays += 300L
+            delays += d_displayConfig
 
             packets += Teleprompter.buildInit(
                 seq = nextSeqLocked(),
@@ -89,26 +100,26 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
                 totalLines = pages.size * LINES_PER_PAGE,
                 mode = Teleprompter.ScrollMode.Manual,
             )
-            delays += 500L
+            delays += d_init
 
             for ((i, p) in pages.take(10).withIndex()) {
                 packets += Teleprompter.buildContentPage(nextSeqLocked(), nextMsgIdLocked(), i, p)
-                delays += 100L
+                delays += d_page
             }
             packets += Teleprompter.buildMarker(nextSeqLocked(), nextMsgIdLocked())
-            delays += 100L
+            delays += d_marker
             if (pages.size > 10) {
                 for (i in 10 until minOf(12, pages.size)) {
                     packets += Teleprompter.buildContentPage(nextSeqLocked(), nextMsgIdLocked(), i, pages[i])
-                    delays += 100L
+                    delays += d_page
                 }
             }
             packets += Teleprompter.buildSyncTrigger(nextSeqLocked(), nextMsgIdLocked())
-            delays += 100L
+            delays += d_sync
             if (pages.size > 12) {
                 for (i in 12 until pages.size) {
                     packets += Teleprompter.buildContentPage(nextSeqLocked(), nextMsgIdLocked(), i, pages[i])
-                    delays += 100L
+                    delays += d_page
                 }
             }
         }

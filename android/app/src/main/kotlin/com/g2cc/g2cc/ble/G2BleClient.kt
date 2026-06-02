@@ -203,20 +203,25 @@ class G2BleClient(
             }
             .enqueue()
 
-        // Phase D resilience: request LOW_POWER connection priority. Default
-        // BALANCED uses 30-50 ms interval + 5 s supervision timeout; LOW_POWER
-        // uses 100-125 ms + 6 s. Larger interval = less air time per second
-        // = more resilient to body-absorption (2.4 GHz is heavily attenuated
-        // by water). Symptom this addresses: walking with phone in pocket
-        // caused constant disconnect/reconnect under the default profile.
-        // The peripheral can reject the request — we capture what was
-        // actually negotiated via onConnectionUpdated below.
-        requestConnectionPriority(android.bluetooth.BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
+        // Phase D resilience iter 2: switched LOW_POWER → BALANCED. LOW_POWER
+        // negotiated `latency=2` meaning the peripheral could skip up to 2
+        // intervals = ~372 ms between packets. During movement (which Adam
+        // reported as still-janky even with phone in hand), that long quiet
+        // window means a body block landing mid-window propagates as a full
+        // packet loss. BALANCED uses ~30-50 ms interval + latency=0, giving
+        // steady-state packet flow with much more retry opportunity per
+        // second — better empirical match for an active user.
+        requestConnectionPriority(android.bluetooth.BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
             .with { _, interval, latency, supervision ->
                 Log.i(TAG, "[$side] conn-params updated: interval=$interval latency=$latency supervision=$supervision")
                 lastConnParams = "intv=$interval lat=$latency sup=$supervision"
             }
             .enqueue()
+        // Defense in depth: also override onConnectionUpdated so we capture
+        // ALL parameter updates, not just the one that completes the
+        // requestConnectionPriority callback. The G2 firmware sometimes
+        // updates params after auth completes (the callback for our request
+        // may have already fired with stale values).
 
         // Request 2M PHY. Pixel 10a + BT 5.3 supports it; the G2 may or may
         // not. If the peripheral rejects, we fall back to 1M silently —

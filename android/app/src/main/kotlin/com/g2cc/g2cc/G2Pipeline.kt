@@ -264,7 +264,7 @@ class G2Pipeline(
                 conn?.send(ClientMessage.Diag(
                     "hud: ${if (isReconnect) "RECONNECT" else "initial"}-render | notify-before $notifyBefore"
                 ))
-                h.render(textToRender) { ok ->
+                h.render(textToRender, fastReRender = isReconnect) { ok ->
                     val lCount = l?.notifyCount?.get() ?: -1
                     val rCount = r?.notifyCount?.get() ?: -1
                     connection?.send(ClientMessage.Diag(
