@@ -114,10 +114,21 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         }
 
         // Per PROTOCOL_NOTES.md §"Device naming — DUAL GLASS": both lenses are
-        // independent BLE devices, each gets its own queued write batch.
-        // We aggregate completion: both must succeed for `onComplete(true)`.
+        // independent BLE devices. The Python i-soxi reference picks ONE lens
+        // (L by default) and renders to it; the firmware does eye-to-eye
+        // sync internally so the user sees the HUD in both eyes.
+        //
+        // Phase D body-blockage experiment (2026-06-02): we observed L lens
+        // notify counts barely move (4→22) while R counts climb hundreds per
+        // minute — L is silent on teleprompter despite receiving the same
+        // packets. Sending to BOTH means 2× BLE write load during the 2.5 s
+        // render window, doubling vulnerability to body-induced supervision
+        // timeout. Switching to R-only: half the RF load, same visible HUD.
+        // L connection still held (auth handshake + heartbeat at the
+        // connection-interval level keep it alive) but no teleprompter
+        // writes go there.
         val gate = CompletionGate(onComplete)
-        left.queueWrites(packets, "L:render", delays) { gate.left(it) }
+        gate.left(true)   // L always counts as success — no-op for completion
         right.queueWrites(packets, "R:render", delays) { gate.right(it) }
 
         return pages.size

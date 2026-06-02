@@ -282,8 +282,15 @@ class G2Pipeline(
              *  will detect the persistent disconnect and force a re-scan. */
             fun onDroppedEdge(side: String, reason: String) {
                 stopHeartbeat()
+                // Include the BLE-level disconnect reason from each side so we
+                // can decode the failure: 0x08 = supervision timeout (body
+                // block / out of range), 0x13 = remote user terminated, 0x16
+                // = local user terminated, 0x22 = LL response timeout, etc.
+                // GATT status codes per BluetoothGatt source.
+                val lr = left.lastDisconnectReason
+                val rr = right.lastDisconnectReason
                 connection?.send(ClientMessage.Diag(
-                    "hud: $side dropped post-Ready ($reason) — heartbeat stopped, awaiting Nordic auto-reconnect"
+                    "hud: $side dropped post-Ready ($reason) — Lreason=0x${"%02x".format(lr)} Rreason=0x${"%02x".format(rr)} — heartbeat stopped, awaiting Nordic auto-reconnect"
                 ))
             }
             fun recomputeEdges() {

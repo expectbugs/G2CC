@@ -63,6 +63,11 @@ class G2BleClient(
         private set
     @Volatile var lastConnParams: String = "(unknown)"
         private set
+    /** Last BLE disconnect reason code (Android BluetoothGatt status — e.g.
+     *  0x08 = supervision timeout, 0x16 = connection terminated by local
+     *  host, 0x13 = remote user terminated). -1 = no disconnect seen yet. */
+    @Volatile var lastDisconnectReason: Int = -1
+    @Volatile var lastDisconnectAtMs: Long = 0L
 
     init {
         connectionObserver = object : ConnectionObserver {
@@ -79,6 +84,8 @@ class G2BleClient(
             override fun onDeviceFailedToConnect(device: BluetoothDevice, reason: Int) {
                 _state.value = ConnectionState.Error(side,
                     "failed to connect to ${device.address} reason=$reason")
+                lastDisconnectReason = reason
+                lastDisconnectAtMs = System.currentTimeMillis()
                 Log.w(TAG, "[$side] failed to connect: reason=$reason")
             }
 
@@ -93,6 +100,8 @@ class G2BleClient(
 
             override fun onDeviceDisconnected(device: BluetoothDevice, reason: Int) {
                 _state.value = ConnectionState.Disconnected(side, "reason=$reason")
+                lastDisconnectReason = reason
+                lastDisconnectAtMs = System.currentTimeMillis()
                 Log.w(TAG, "[$side] disconnected ${device.address} reason=$reason")
             }
         }
