@@ -721,8 +721,14 @@ class G2Pipeline(
                 hud?.render("STT ERROR: ${msg.error}")
             }
             is ServerMessage.Error -> {
-                state.transition(AppState.ERROR)
-                hud?.render("ERROR: ${msg.message}")
+                // ServerMessage.Error carries protocol-level errors (auth race,
+                // unknown msg type, etc.) that mean nothing to the user wearing
+                // the glasses — rendering "ERROR: Not authenticated" to the HUD
+                // during a transient reconnect is just noise. Log loudly +
+                // forward to the diag stream so we can debug from the server
+                // log, but DON'T take over the HUD or transition AppState.
+                Log.w(TAG, "server error (not user-facing): ${msg.message}")
+                connection?.send(ClientMessage.Diag("server-err: ${msg.message}"))
             }
             // Bug fix #6: log loudly instead of silently dropping.
             is ServerMessage.Status -> Log.i(TAG, "status: mode=${msg.mode} ctx=${msg.contextPct}% processing=${msg.isProcessing}")

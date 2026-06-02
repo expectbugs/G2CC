@@ -149,6 +149,16 @@ class ConnectionManager(
             Log.w(TAG, "send(${msg::class.simpleName}) before socket ready — message dropped")
             return
         }
+        // Drop non-Auth messages sent before the server confirmed our Auth.
+        // Without this guard, any diag emission (BT state change, BLE link
+        // update, post-Ready watchdog log) firing in the brief window between
+        // socket-open and AuthResult triggers the server's "Not authenticated"
+        // error, which the phone then renders to the HUD verbatim. Auth itself
+        // must always go through — that's what gets us to _connected=true.
+        if (!_connected.value && msg !is ClientMessage.Auth) {
+            Log.w(TAG, "send(${msg::class.simpleName}) before WS auth — dropping")
+            return
+        }
         try {
             val text = WsJson.codec.encodeToString(ClientMessage.serializer(), msg)
             // OkHttp's WebSocket.send() returns false when the message couldn't
