@@ -1,4 +1,4 @@
-# G2CC
+# G2CC — G2 Control Center
 
 Direct-BLE G2 glasses + Claude Code dispatch + DJI single-mic learned-profile NR (+ NLMS fallback) + Parakeet ASR.
 

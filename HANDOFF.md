@@ -1,4 +1,4 @@
-# G2CC — Handoff for fresh Claude Code sessions
+# G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
 **Last updated: 2026-06-03, end-of-day after Phase D completion (wake-lock fix landed in commit `1fd3124`).**
 

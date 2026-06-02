@@ -1,4 +1,4 @@
-# G2CC — Claude Code Rules
+# G2CC (G2 Control Center) — Claude Code Rules
 
 System-wide rules in `~/.claude/CLAUDE.md` apply here too. This file holds G2CC-specific rules. Authoritative build spec: `g2_custom_app_spec.md` (Part A: G2 app, Part B: audio pipeline + STT). If this file conflicts with the spec, the spec wins.
 

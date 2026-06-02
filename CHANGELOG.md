@@ -1,4 +1,4 @@
-# G2CC Changelog
+# G2CC (G2 Control Center) Changelog
 
 Reverse-chronological. Each entry covers a published APK / server build, with the WHY and lessons learned (not just the WHAT — git log has the WHAT).
 
