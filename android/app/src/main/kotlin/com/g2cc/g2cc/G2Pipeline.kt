@@ -432,69 +432,42 @@ class G2Pipeline(
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatTickCount.set(0)
-        var lastTickAtMs = System.currentTimeMillis()
         heartbeatJob = scope.launch {
-            diag("hb: started (cadence=4s, packet=FULL_RERENDER)")
+            // BTSnoop capture from Even App (2026-06-02) revealed the actual
+            // keepalive pattern they use: ONE sync_trigger packet (16 bytes,
+            // service 0x80-00 type=0x0E) sent to EACH lens at exactly 15s
+            // cadence, STAGGERED so L is sent ~2s before R. No content
+            // packets, no full re-render, no display_config — just the
+            // sync_trigger. Their session stays alive for the entire app
+            // session under this minimal load. We were sending ~17 packets
+            // every 4-10s with full pacing delays — vastly more BLE wire
+            // time, which paradoxically destabilized the link AND didn't
+            // produce a more persistent session.
+            //
+            // New strategy: copy theirs exactly.
+            //   1. 15s cadence (NOT 4s, NOT 10s — 15s is what works)
+            //   2. Both lenses get a keepalive
+            //   3. Stagger L→R by 2s to avoid per-interval radio collision
+            diag("hb: started (Even-App style: sync_trigger to L+R staggered, 15s cadence)")
             try {
                 while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
-                    kotlinx.coroutines.delay(4_000L)
-                    // Detect coroutine suspension by the OS scheduler / Doze:
-                    // if more than 10 s elapsed since the previous tick AT
-                    // ALL (delay supposed to be 4 s), Android probably
-                    // throttled us. Log it loudly so we know when this is
-                    // happening.
-                    val now = System.currentTimeMillis()
-                    val gapMs = now - lastTickAtMs
-                    if (gapMs > 10_000L) {
-                        diag("hb: WARNING coroutine gap=${gapMs}ms (expected ~4s + render time) — OS throttling?")
-                    }
-                    lastTickAtMs = now
                     val l = leftBle ?: break
                     val r = rightBle ?: break
-                    val h = hud
-                    val page0 = h?.lastPage0
-                    if (h == null || page0 == null) {
-                        diag("hb: no hud / lastPage0 yet — skipping tick")
-                        continue
-                    }
-                    // Snapshot before this render so we can measure both how
-                    // long the render took AND how many R notifies arrived
-                    // during it (= proxy for "is the firmware actually
-                    // processing our packets?").
-                    val renderStartMs = System.currentTimeMillis()
-                    val rNotifyBefore = r.notifyCount.get()
-                    val lNotifyBefore = l.notifyCount.get()
-                    h.render("G2CC paired\nL+R authed\n(idle)", fastReRender = true) { ok ->
-                        val tick = heartbeatTickCount.incrementAndGet()
-                        val durMs = System.currentTimeMillis() - renderStartMs
-                        val rNotifyAfter = r.notifyCount.get()
-                        val lNotifyAfter = l.notifyCount.get()
-                        val rDelta = rNotifyAfter - rNotifyBefore
-                        diag(
-                            "hb: tick=$tick ok=$ok dur=${durMs}ms | " +
-                            "notify L=$lNotifyBefore→$lNotifyAfter R=$rNotifyBefore→$rNotifyAfter (rΔ=$rDelta)"
-                        )
-                        // If the render completed but R sent NO notifies during
-                        // it, the firmware-side session is probably dead —
-                        // schedule an immediate re-render instead of waiting
-                        // for the next 10 s tick. This is the most aggressive
-                        // recovery short of tearing down BLE.
-                        if (ok && rDelta == 0) {
-                            diag("hb: R silent during render — session likely dead, scheduling immediate retry")
-                            scope.launch {
-                                kotlinx.coroutines.delay(500L)
-                                val h2 = hud
-                                val r2 = rightBle
-                                if (h2 != null && r2 != null) {
-                                    val retryStart = System.currentTimeMillis()
-                                    val rBefore2 = r2.notifyCount.get()
-                                    h2.render("G2CC paired\nL+R authed\n(idle)", fastReRender = true) { ok2 ->
-                                        diag("hb: retry-render ok=$ok2 dur=${System.currentTimeMillis() - retryStart}ms rΔ=${r2.notifyCount.get() - rBefore2}")
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    val seq = heartbeatSeq.getAndIncrement() and 0xFF
+                    val msgId = heartbeatMsgId.getAndIncrement() and 0xFFFF
+                    val pkt = com.g2cc.g2cc.ble.Teleprompter.buildSyncTrigger(seq, msgId)
+                    // L first, then R 2s later (per Even App pattern).
+                    val lBefore = l.notifyCount.get()
+                    val rBefore = r.notifyCount.get()
+                    l.sendPacket(pkt, "HB:L")
+                    kotlinx.coroutines.delay(2_000L)
+                    r.sendPacket(pkt, "HB:R")
+                    val tick = heartbeatTickCount.incrementAndGet()
+                    // Wait the rest of the 15s window before the next pair.
+                    kotlinx.coroutines.delay(13_000L)
+                    val lAfter = l.notifyCount.get()
+                    val rAfter = r.notifyCount.get()
+                    diag("hb: tick=$tick | notify L=$lBefore→$lAfter R=$rBefore→$rAfter")
                 }
             } finally {
                 diag("hb: stopped after ${heartbeatTickCount.get()} ticks")
