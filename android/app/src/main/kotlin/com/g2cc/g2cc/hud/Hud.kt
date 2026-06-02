@@ -138,8 +138,16 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         // L connection still held (auth handshake + heartbeat at the
         // connection-interval level keep it alive) but no teleprompter
         // writes go there.
+        //
+        // 4th-pass review MEDIUM (BLE bug 6): gate.left(true) is a
+        // DELIBERATE "we didn't send to L, treat as N/A success" — NOT a
+        // claim that delivery to L was verified. Read with bug-6 context:
+        // the success boolean returned to onComplete reflects R only.
+        // Heartbeat & observeBleHealth still monitor L's actual liveness
+        // via the per-lens ConnectionState flow, so L going dead is caught
+        // there (not silenced here).
         val gate = CompletionGate(onComplete)
-        gate.left(true)   // L always counts as success — no-op for completion
+        gate.left(true)   // R-only render — L not written to, see comment above
         right.queueWrites(packets, "R:render", delays) { gate.right(it) }
 
         return pages.size

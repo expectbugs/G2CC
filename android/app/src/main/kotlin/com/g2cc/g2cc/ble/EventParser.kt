@@ -116,9 +116,18 @@ object EventParser {
             return Event.Unknown(0x01.toByte() to 0x01.toByte(), payload.toHex())
         }
         idx++  // past 0x10
-        // Skip varint (msg_id)
+        // Skip varint (msg_id). 4th-pass review MEDIUM (BLE bug 4): the
+        // prior loop could exit at `idx == payload.size` with all bytes
+        // having continuation set (truncated varint), then the unconditional
+        // `idx++` pushed idx PAST size and we silently fell through to
+        // ScrollFocus — masking a malformed packet as a benign event.
+        // Now: verify the loop exited cleanly on a non-continuation byte
+        // OR emit Event.Malformed loudly.
         while (idx < payload.size && (payload[idx].toInt() and 0x80) != 0) idx++
-        idx++  // past last varint byte
+        if (idx >= payload.size) {
+            return Event.Malformed("scroll: unterminated varint (truncated payload)", payload.toHex())
+        }
+        idx++  // past last varint byte (the one without continuation set)
         if (idx >= payload.size) return Event.ScrollFocus  // no sub-field = wake/focus event
         if (payload[idx] != 0x72.toByte()) {
             return Event.Unknown(0x01.toByte() to 0x01.toByte(), payload.toHex())

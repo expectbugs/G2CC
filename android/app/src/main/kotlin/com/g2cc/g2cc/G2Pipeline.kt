@@ -91,6 +91,12 @@ class G2Pipeline(
     // onTap/onDoubleTap from the OLD flow.
     private var leftCollectorJob: Job? = null
     private var rightCollectorJob: Job? = null
+    // 4th-pass review HIGH (BLE bug 8): observeBleHealth also leaks its outer
+    // launch + the two nested per-side state.collect launches on every
+    // installBleClients call. Each post-Ready watchdog rescan stacked another
+    // observer pair. Stored here so installBleClients can cancel the prior
+    // observer set before launching a new one.
+    private var bleHealthJob: Job? = null
 
     // Heartbeat job — keeps the teleprompter HUD session alive against the
     // ~10-second firmware idle timeout (confirmed 2026-06-01: render
@@ -99,9 +105,25 @@ class G2Pipeline(
     // lightest known teleprompter-flow packet. Allowed under the no-timeouts
     // rule (annotated as HB pacing, not a clock-kill).
     private var heartbeatJob: Job? = null
-    private val heartbeatSeq = java.util.concurrent.atomic.AtomicInteger(0xF0)
+    // 4th-pass review MEDIUM (BLE bug 2): heartbeat seq must NEVER overlap
+    // auth seq range (1-7). Previously started at 0xF0 and masked to 8 bits,
+    // so after ~16 ticks (4 min) it wrapped 0xFF→0x00 and could hit 0x01-0x07
+    // while an auth re-handshake was in progress, risking auth packet
+    // rejection for "replay". New range: [0x10, 0xFF] with wrap to 0x10.
+    private val heartbeatSeq = java.util.concurrent.atomic.AtomicInteger(0x10)
     private val heartbeatMsgId = java.util.concurrent.atomic.AtomicInteger(0xF000)
     private val heartbeatTickCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Next heartbeat seq in the safe range [0x10, 0xFF], wrapping back to
+     *  0x10 instead of 0x00 to avoid auth-seq collision (1-7 reserved). */
+    private fun nextHeartbeatSeq(): Int {
+        val v = heartbeatSeq.getAndIncrement()
+        // Use the low 8 bits with a floor of 0x10. AtomicInteger overflow at
+        // 0x7FFFFFFF is fine because we always normalize here, so the raw
+        // counter can grow unbounded.
+        val masked = v and 0xFF
+        return if (masked < 0x10) (masked + 0x10) else masked
+    }
 
     // Post-Ready BLE watchdog. If a side drops post-Ready and Nordic's
     // useAutoConnect(true) fails to bring it back within a grace window,
@@ -250,6 +272,14 @@ class G2Pipeline(
         // + reconnect) doesn't stack a second pair, double-firing every onTap.
         leftCollectorJob?.cancel()
         rightCollectorJob?.cancel()
+        // 4th-pass review HIGH (BLE bug 8): cancel the prior observeBleHealth
+        // before launching a new one. Without this, a force-rescan from the
+        // post-Ready watchdog stacks observers — each one still holds a
+        // closure on the OLD G2BleClient (its state flow continues to drive
+        // ready flags + heartbeat starts), but G2Pipeline.leftBle/rightBle
+        // fields point at the NEW clients. Result: double-fire Ready edges,
+        // heartbeat against null/dead clients, confused diag stream.
+        bleHealthJob?.cancel()
         leftCollectorJob = scope.launch { collectEventsDebounced(left.events) }
         rightCollectorJob = scope.launch { collectEventsDebounced(right.events) }
         // 4th-pass F1 (Android): observe both lenses' ConnectionState. The prior
@@ -264,7 +294,7 @@ class G2Pipeline(
     }
 
     private fun observeBleHealth(left: G2BleClient, right: G2BleClient) {
-        scope.launch {
+        bleHealthJob = scope.launch {
             var leftReady = false
             var rightReady = false
             var lastBothReady = false   // edge-tracking: did both go Ready last cycle?
@@ -329,6 +359,10 @@ class G2Pipeline(
                     )
                     if (ok) {
                         sessionHasRenderedOnce.set(true)
+                        // Clear the outage-buffer now that its content has
+                        // been delivered. Future reconnects fall through to
+                        // Hud.lastRenderedText for the source-of-truth replay.
+                        pendingHudText = null
                         startHeartbeat()
                     }
                 }
@@ -465,23 +499,42 @@ class G2Pipeline(
             diag("hb: started (Even-App style: sync_trigger to L+R staggered, 15s cadence)")
             try {
                 while (kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == true) {
-                    val l = leftBle ?: break
-                    val r = rightBle ?: break
-                    val seq = heartbeatSeq.getAndIncrement() and 0xFF
+                    // 4th-pass review MEDIUM (BLE bug 1): re-snapshot clients
+                    // AFTER each delay() to avoid writing to a stale L/R that
+                    // was torn down + rebuilt by the post-Ready watchdog
+                    // mid-cycle. If `leftBle` or `rightBle` is nulled
+                    // between iterations, this iteration bails cleanly.
+                    val l1 = leftBle ?: break
+                    val r1 = rightBle ?: break
+                    val seq = nextHeartbeatSeq()
                     val msgId = heartbeatMsgId.getAndIncrement() and 0xFFFF
                     val pkt = com.g2cc.g2cc.ble.Teleprompter.buildSyncTrigger(seq, msgId)
-                    // L first, then R 2s later (per Even App pattern).
-                    val lBefore = l.notifyCount.get()
-                    val rBefore = r.notifyCount.get()
-                    l.sendPacket(pkt, "HB:L")
+                    val lBefore = l1.notifyCount.get()
+                    val rBefore = r1.notifyCount.get()
+                    l1.sendPacket(pkt, "HB:L")
                     kotlinx.coroutines.delay(2_000L)
-                    r.sendPacket(pkt, "HB:R")
+                    // Re-snapshot R after the 2s gap — clients may have been
+                    // rebuilt by a watchdog or BT-state-on handler.
+                    val r2 = rightBle
+                    if (r2 == null || r2 !== r1) {
+                        diag("hb: R changed mid-cycle (was=${r1.hashCode()} now=${r2?.hashCode() ?: "null"}) — skipping R send this tick")
+                    } else {
+                        r2.sendPacket(pkt, "HB:R")
+                    }
                     val tick = heartbeatTickCount.incrementAndGet()
                     // Wait the rest of the 15s window before the next pair.
                     kotlinx.coroutines.delay(13_000L)
-                    val lAfter = l.notifyCount.get()
-                    val rAfter = r.notifyCount.get()
-                    diag("hb: tick=$tick | notify L=$lBefore→$lAfter R=$rBefore→$rAfter")
+                    // Re-snapshot for the diag read — if clients were
+                    // rebuilt during the 13s wait, the lAfter/rAfter from
+                    // the OLD clients is stale. Use whatever's current.
+                    val lNow = leftBle
+                    val rNow = rightBle
+                    val lAfter = lNow?.notifyCount?.get() ?: -1
+                    val rAfter = rNow?.notifyCount?.get() ?: -1
+                    val l1Same = lNow === l1
+                    val r1Same = rNow === r1
+                    val sameTag = if (l1Same && r1Same) "" else " (clients-rebuilt-during-tick)"
+                    diag("hb: tick=$tick | notify L=$lBefore→$lAfter R=$rBefore→$rAfter$sameTag")
                 }
             } finally {
                 diag("hb: stopped after ${heartbeatTickCount.get()} ticks")
@@ -521,6 +574,7 @@ class G2Pipeline(
             leftBle = null; rightBle = null
             leftCollectorJob?.cancel(); leftCollectorJob = null
             rightCollectorJob?.cancel(); rightCollectorJob = null
+        bleHealthJob?.cancel(); bleHealthJob = null
             scanAndConnect()
         }
     }
@@ -541,6 +595,7 @@ class G2Pipeline(
         leftBle = null; rightBle = null
         leftCollectorJob?.cancel(); leftCollectorJob = null
         rightCollectorJob?.cancel(); rightCollectorJob = null
+        bleHealthJob?.cancel(); bleHealthJob = null
         scanAndConnect()
     }
 
@@ -556,6 +611,7 @@ class G2Pipeline(
         leftBle = null; rightBle = null
         leftCollectorJob?.cancel(); leftCollectorJob = null
         rightCollectorJob?.cancel(); rightCollectorJob = null
+        bleHealthJob?.cancel(); bleHealthJob = null
         _bleStatus.value = "BT off"
     }
 
@@ -570,6 +626,7 @@ class G2Pipeline(
         rightBle = null
         leftCollectorJob?.cancel(); leftCollectorJob = null
         rightCollectorJob?.cancel(); rightCollectorJob = null
+        bleHealthJob?.cancel(); bleHealthJob = null
         // Clear stale PairingState — directed-connect just failed against it,
         // and the next scanAndConnect will fall through to scan + re-learn.
         pairing.clear()
@@ -756,6 +813,7 @@ class G2Pipeline(
         rightBle = null
         leftCollectorJob?.cancel(); leftCollectorJob = null
         rightCollectorJob?.cancel(); rightCollectorJob = null
+        bleHealthJob?.cancel(); bleHealthJob = null
         connection?.shutdown()
         connection = null
         scope.cancel()
@@ -774,14 +832,21 @@ class G2Pipeline(
             }
             is ServerMessage.Output -> {
                 if (state.current != AppState.STREAMING) state.transition(AppState.STREAMING)
-                // Always capture latest intent BEFORE the optional render.
-                // Display-independence audit fix: if HUD is currently
-                // unavailable (BLE down, body-blocked, hud null), the next
-                // both-Ready edge replays this. Without the buffer, server
-                // output during a HUD outage was permanently lost
-                // client-side even though server scrollback retained it.
-                pendingHudText = msg.text
-                hud?.render(msg.text)
+                // 4th-pass review HIGH (BLE bug 7) fix: only buffer in
+                // pendingHudText when the HUD is actually unavailable. If we
+                // unconditionally set it on every Output, a later
+                // ConfirmationFlow render updates Hud.lastRenderedText but
+                // NOT pendingHudText — and on reconnect we'd replay the
+                // stale Output, hiding the confirmation prompt the server is
+                // waiting on (wedges per no-timeouts rule). The pendingHud
+                // buffer is now purely a "missed update during outage" queue.
+                val h = hud
+                if (h != null) {
+                    h.render(msg.text)
+                } else {
+                    pendingHudText = msg.text
+                    diag("hud-buffer: queued ${msg.text.length}-char Output while HUD unavailable")
+                }
             }
             is ServerMessage.TextDelta -> {
                 // Phase 6 doesn't yet stream incremental updates to the HUD —

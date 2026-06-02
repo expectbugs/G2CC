@@ -71,7 +71,8 @@ def _decode_to_audio(input_path: Path, target_sample_rate: int) -> tuple[np.ndar
                 'ffmpeg', '-y', '-i', str(input_path),
                 '-ac', '1',                                # mono mixdown
                 '-ar', str(target_sample_rate),            # resample
-                '-sample_fmt', 's16',                      # 16-bit PCM
+                '-sample_fmt', 'flt',                      # 32-bit float (CLAUDE.md: preserve 32-bit float boundaries; s16 was throwing away ~16 bits of dynamic range that matters for quiet-floor PSD bins)
+                '-c:a', 'pcm_f32le',                       # explicit float codec
                 '-vn',                                     # no video stream
                 str(tmp_path),
             ],
@@ -190,6 +191,11 @@ def learn_profile(
 
     peak_freqs = _detect_peaks(noise_psd, freqs, peak_prominence_db, peak_min_distance_hz)
 
+    # 4th-pass review MEDIUM: np.savez auto-appends .npz if missing, but
+    # we kept reporting the un-appended path — and subsequent load_profile()
+    # calls would 404. Normalize upfront so the reported path matches the
+    # actual disk file.
+    output_path = output_path.with_suffix('.npz') if output_path.suffix != '.npz' else output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         output_path,
@@ -232,7 +238,17 @@ def main() -> int:
                    help='Tonal peak threshold dB above local median (default %(default)s).')
     p.add_argument('--peak-min-distance-hz', type=float, default=DEFAULT_PEAK_MIN_DISTANCE_HZ,
                    help='Minimum spacing between detected peaks Hz (default %(default)s).')
+    p.add_argument('--force', action='store_true',
+                   help='Allow overwriting an existing profile at --output. Without this flag, refuse to clobber.')
     args = p.parse_args()
+
+    # 4th-pass review MEDIUM: refuse to clobber an existing production
+    # profile silently. Normalize the output path same way learn_profile()
+    # will, then check.
+    output_check = args.output.with_suffix('.npz') if args.output.suffix != '.npz' else args.output
+    if output_check.exists() and not args.force:
+        print(f'ERROR: {output_check} already exists. Use --force to overwrite.', file=sys.stderr)
+        sys.exit(1)
 
     summary = learn_profile(
         input_path=args.input,

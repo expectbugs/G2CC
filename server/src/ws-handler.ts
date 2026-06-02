@@ -304,6 +304,15 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         sendMsg(client, { type: 'stt_error', error: `Invalid audio_start: sampleRate=${sr} channels=${ch} (must be > 0)` })
         break
       }
+      // 4th-pass review MEDIUM: loud-fail when audio_start arrives while
+      // we're already collecting. The previous reset was silent — N bytes
+      // of audio just vanished. Violates LOUD AND PROUD. Could happen on
+      // race conditions, double-tap during recording, or buggy clients.
+      if (client.collectingAudio && client.audioChunks.length > 0) {
+        const prevBytes = client.audioChunks.reduce((n, c) => n + c.length, 0)
+        console.warn(`[ws] audio_start while already collecting — discarding ${prevBytes} bytes of in-progress audio`)
+        sendMsg(client, { type: 'stt_error', error: `overlapping audio_start; previous ${prevBytes} bytes discarded` })
+      }
       client.audioChunks = []
       client.collectingAudio = true
       client.audioFormat = {
@@ -442,6 +451,34 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       const match = saved.find(s => s.id === msg.sessionId)
       if (!match) {
         sendMsg(client, { type: 'error', message: `Session ${msg.sessionId} not found in history` })
+        break
+      }
+      // 4th-pass review MEDIUM (server): pre-scan for a live pool entry on
+      // the same projectPath. Without this, picking a resume entry while
+      // another live session exists for the same cwd spawns a SECOND CC
+      // subprocess pointing at the same project — competing writers on the
+      // same ~/.claude/projects/... state, MAX_CONCURRENT_SESSIONS hit
+      // sooner. Mirrors the guard at session-pool.ts:166.
+      let existing: ReturnType<typeof client.pool.allEntries>[number] | undefined
+      for (const entry of client.pool.allEntries()) {
+        if (entry.projectPath === match.project && entry.session.isAlive()) {
+          existing = entry
+          break
+        }
+      }
+      if (existing) {
+        client.pool.switchTo(existing.id)
+        client.dispatcher = new CCDispatcher(existing)
+        sendMsg(client, {
+          type: 'session_info',
+          sessionId: existing.id,
+          projectPath: match.project,
+          mode: client.mode,
+          poolSize: client.pool.count,
+          poolIndex: client.pool.indexOf(existing.id),
+          resumed: true,
+          ccSessionId: existing.session.ccSessionId ?? undefined,
+        })
         break
       }
       try {

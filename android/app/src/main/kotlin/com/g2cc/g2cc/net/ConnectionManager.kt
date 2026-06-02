@@ -182,6 +182,17 @@ class ConnectionManager(
             Log.w(TAG, "sendBinary(${payload.size}B) before socket ready — frame dropped")
             return
         }
+        // 4th-pass review HIGH: same pre-auth guard as send(). Without this,
+        // text send() drops AudioStart mid-handshake but sendBinary keeps
+        // pushing PCM frames — server receives binary it can't decode
+        // (missing format announcement), then AudioEnd. Net result: one
+        // recording silently corrupted per WS-reconnect race. Drop binary
+        // pre-auth so the audio_start/binary/audio_end triple stays
+        // consistent: all-or-nothing.
+        if (!_connected.value) {
+            Log.w(TAG, "sendBinary(${payload.size}B) before WS auth — frame dropped")
+            return
+        }
         try {
             val accepted = w.send(okio.ByteString.of(*payload))
             if (!accepted) {
@@ -250,6 +261,12 @@ class ConnectionManager(
                         attemptCount = 0
                         offlineSince = null
                         lastAuthedAt = System.currentTimeMillis()
+                        // 4th-pass review HIGH: reset reloadAttempted on
+                        // every successful auth. Without this, after the
+                        // first STUCK_RELOAD_MS fire the last-resort
+                        // recovery is permanently disarmed for the process
+                        // lifetime — subsequent stucks have no escape.
+                        reloadAttempted = false
                         onConnected()
                         Log.i(TAG, "auth success endpoint=${endpoints.getOrNull(currentEndpointIdx) ?: "<unknown>"}")
                     } else {

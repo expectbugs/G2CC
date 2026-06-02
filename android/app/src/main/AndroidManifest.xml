@@ -28,6 +28,11 @@
     <!-- Foreground service (Phase 4 active — survives doze). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Required for mic capture from FG service on Android 14+ (API 34+).
+         Without this the FG service throws SecurityException when AudioRecord
+         opens. Pixel 10a targets API 34+; this is a hard blocker for any
+         recording. Fix from 4th-pass code review (CRITICAL). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <!-- Battery-optimization exemption: required so the FG service survives
          aggressive doze. Surfaced as a one-time setup prompt. -->
@@ -72,12 +77,16 @@
             android:exported="false"
             android:label="@string/setup_title" />
 
-        <!-- Foreground service: connectedDevice type. Sticky so Android
-             restarts it if killed (subject to battery-opt exemption). -->
+        <!-- Foreground service: connectedDevice|microphone type. Sticky so
+             Android restarts it if killed (subject to battery-opt exemption).
+             Including `microphone` so AudioRecord works from within the FG
+             service on Android 14+ (without it, opening the mic throws
+             SecurityException). Even though we don't always record, the FG
+             type bitmask is fixed at startup. -->
         <service
             android:name=".service.G2CCService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|microphone" />
 
         <!-- BootReceiver: re-launches the service after a reboot. -->
         <receiver

@@ -14,6 +14,24 @@ package com.g2cc.g2cc.ble
  * factory environment. If 89c7f47 holds, we may not need this; if it
  * doesn't, this is the next escalation.
  *
+ * ⚠️ **DO NOT WIRE WITHOUT FURTHER VALIDATION.** 4th-pass code review (HIGH
+ * BLE bug 12) flagged a structural risk in these builders: the frame
+ * length-prefix bytes (`0x1A 0x0C` etc.) are hardcoded for the EXACT byte
+ * shape we observed in BTSnoop. If `msg_id` ever encodes as a 2+ byte varint
+ * (i.e. msgId ≥ 128), the protobuf field offsets shift but the length prefix
+ * doesn't, producing a malformed packet that the firmware will silently drop
+ * or — worse — interpret as something else entirely.
+ *
+ * Before wiring: either
+ *   (a) treat all payloads as fully opaque — hardcode the exact BTSnoop
+ *       bytes verbatim with no msgId substitution (matches AuthSequence.kt
+ *       pattern; auth packets work because they're verbatim replay), OR
+ *   (b) properly decode the protobuf, rebuild from typed fields, with the
+ *       length-prefix computed from the actual encoded size.
+ * The current hybrid (parameterized msgId + literal frame) is the worst of
+ * both worlds. Add unit tests round-tripping through a real protobuf decoder
+ * before flipping the wire-in switch in G2Pipeline.
+ *
  * Sequence observed in BTSnoop (R lens handle 65, T+27.8s to T+31.7s):
  *  1. CCCD subscribe to gh=2117 (0x0100) — enable secondary-notify channel
  *  2. CCCD subscribe to gh=2085 (0x0100)

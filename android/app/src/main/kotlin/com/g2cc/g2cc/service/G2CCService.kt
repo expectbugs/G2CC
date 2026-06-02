@@ -113,7 +113,17 @@ class G2CCService : LifecycleService() {
     override fun onDestroy() {
         Log.i(TAG, "onDestroy")
         running = false
-        btStateReceiver?.let { runCatching { unregisterReceiver(it) } }
+        // 4th-pass review LOW: prior runCatching {} silently swallowed
+        // unregisterReceiver's IllegalArgumentException (which fires if
+        // onCreate threw before the receiver was registered). Log it
+        // explicitly — quiet swallows violate LOUD AND PROUD.
+        btStateReceiver?.let { rcv ->
+            try {
+                unregisterReceiver(rcv)
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "btStateReceiver unregister failed (likely never registered)", e)
+            }
+        }
         btStateReceiver = null
         if (::pipeline.isInitialized) pipeline.stop()
         super.onDestroy()
@@ -127,7 +137,15 @@ class G2CCService : LifecycleService() {
         )
         val notification = baseNotification(getString(R.string.fg_state_idle), pi).build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            // Combined connectedDevice + microphone. Per 4th-pass review
+            // (CRITICAL): Android 14+ SecurityException-s if AudioRecord
+            // opens from a FG service without microphone declared in the
+            // type bitmask. Even if we don't start recording until later,
+            // the type is fixed at startForeground and can't be upgraded
+            // mid-flight without redeclaring.
+            val typeMask = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            startForeground(NOTIF_ID, notification, typeMask)
         } else {
             startForeground(NOTIF_ID, notification)
         }

@@ -109,7 +109,8 @@ class ParakeetEngine:
     ) -> TranscriptResult:
         """Transcribe audio. Accepts:
           - file path (str or Path)
-          - 1-D float32 numpy array (mono, expected 16 kHz)
+          - 1-D float32 numpy array (mono, **MUST be at SAMPLE_RATE — caller is
+            responsible for resampling, use transcribe_numpy() if unsure**)
           - bytes / BytesIO (any format soundfile/ffmpeg can decode)
 
         Returns TranscriptResult with the same shape as Whisper's. NeMo
@@ -119,7 +120,28 @@ class ParakeetEngine:
         Raises ValueError on unsupported input — loud, no silent fallback.
         Per the no-timeouts rule, this method does NOT enforce any clock-bound
         cap on inference duration. Long audio legitimately takes minutes.
+
+        4th-pass review HIGH: numpy arrays at the WRONG sample rate previously
+        passed silently — `_materialize_to_wav` wrote at SAMPLE_RATE (16 kHz)
+        regardless, producing 3× time-scaled audio if the caller passed
+        48 kHz. The canonical entry point for numpy IS `transcribe_numpy()`
+        which resamples; this method is now strict about what it accepts as
+        numpy to prevent the silent corruption.
         """
+        # NumPy SR enforcement at the boundary. If caller passes raw numpy,
+        # they're claiming it's already at SAMPLE_RATE. If they're not sure,
+        # they should route through transcribe_numpy() which knows how to
+        # resample. Documentation alone wasn't enough (see review).
+        if isinstance(audio, np.ndarray):
+            if audio.dtype != np.float32:
+                raise ValueError(
+                    f"transcribe(numpy) requires float32; got {audio.dtype}. "
+                    "Use transcribe_numpy() if you have a different dtype."
+                )
+            if audio.ndim != 1:
+                raise ValueError(
+                    f"transcribe(numpy) requires mono 1-D; got shape {audio.shape}."
+                )
         with self._lock:
             self._ensure_model()
             assert self._model is not None
@@ -180,7 +202,12 @@ class ParakeetEngine:
 
     def _materialize_to_wav(self, audio: Any) -> Path:
         """Write `audio` to a temp WAV file (NeMo's `transcribe()` takes a path).
-        Pass-through if already a path."""
+        Pass-through if already a path.
+
+        4th-pass review MEDIUM: tempfile is unlink'd in the caller's `finally`
+        ONLY when this method returns successfully. If sf.write raises (disk
+        full, unsupported dtype, etc.), the empty tempfile leaks. Now: clean
+        up locally on any in-method exception, then re-raise."""
         import os
         import tempfile
         import soundfile as sf  # type: ignore[import-not-found]
@@ -193,17 +220,23 @@ class ParakeetEngine:
         fd, tmp_name = tempfile.mkstemp(prefix="g2cc-parakeet-", suffix=".wav")
         os.close(fd)
         tmp = Path(tmp_name)
-        if isinstance(audio, np.ndarray):
-            sf.write(str(tmp), audio, self.SAMPLE_RATE, subtype="FLOAT")
-        elif isinstance(audio, (bytes, io.BytesIO)):
-            data, sr = sf.read(io.BytesIO(audio) if isinstance(audio, bytes) else audio, dtype="float32")
-            if data.ndim > 1:
-                data = data.mean(axis=1)        # downmix to mono
-            if sr != self.SAMPLE_RATE:
-                data = resample(data, sr, self.SAMPLE_RATE)
-            sf.write(str(tmp), data, self.SAMPLE_RATE, subtype="FLOAT")
-        else:
-            raise ValueError(f"Parakeet input not supported: {type(audio).__name__}")
+        try:
+            if isinstance(audio, np.ndarray):
+                sf.write(str(tmp), audio, self.SAMPLE_RATE, subtype="FLOAT")
+            elif isinstance(audio, (bytes, io.BytesIO)):
+                data, sr = sf.read(io.BytesIO(audio) if isinstance(audio, bytes) else audio, dtype="float32")
+                if data.ndim > 1:
+                    data = data.mean(axis=1)        # downmix to mono
+                if sr != self.SAMPLE_RATE:
+                    data = resample(data, sr, self.SAMPLE_RATE)
+                sf.write(str(tmp), data, self.SAMPLE_RATE, subtype="FLOAT")
+            else:
+                raise ValueError(f"Parakeet input not supported: {type(audio).__name__}")
+        except Exception:
+            # 4th-pass review MEDIUM: caller's `finally` only fires after
+            # this method returns; if we raise mid-write, the tempfile leaks.
+            tmp.unlink(missing_ok=True)
+            raise
         return tmp
 
     def _estimate_duration(self, audio_path: Path) -> float:

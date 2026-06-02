@@ -45,7 +45,13 @@ enum class AppState {
         IDLE -> target in setOf(MENU, AWAITING_TRANSCRIPT, STREAMING, ERROR, CONNECTING)
         MENU -> target in setOf(IDLE, DIRECTORY_PICKER)
         DIRECTORY_PICKER -> target in setOf(IDLE, MENU)
-        AWAITING_TRANSCRIPT -> target in setOf(AWAITING_CONFIRMATION, ERROR, IDLE)
+        // 4th-pass review MEDIUM: STREAMING added. Server-pushed Output
+        // during AWAITING_TRANSCRIPT (CC subprocess started streaming
+        // response while we were still waiting on transcription) was
+        // silently rejected, leaving the notification text wrong
+        // ("Transcribing" while text is actually streaming on the HUD).
+        // Direct STREAMING is a legitimate transition from AWAITING_TRANSCRIPT.
+        AWAITING_TRANSCRIPT -> target in setOf(AWAITING_CONFIRMATION, ERROR, IDLE, STREAMING)
         AWAITING_CONFIRMATION -> target in setOf(STREAMING, AWAITING_TRANSCRIPT, IDLE)
         STREAMING -> target in setOf(IDLE, MENU, ERROR)
         ERROR -> target in setOf(IDLE, CONNECTING)

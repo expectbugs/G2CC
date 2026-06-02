@@ -41,14 +41,27 @@ class DfnPolisher:
         # of the hot import path so other tools (capture, sanity_listen) don't
         # pay the load cost.
         from df.enhance import enhance, init_df       # type: ignore
+        import torch                                  # noqa: WPS433
         log.info('Loading DeepFilterNet on %s ...', self.device)
         start = time.time()
-        model, df_state, _ = init_df()              # default DFN3 model
+        # 4th-pass review HIGH: previously init_df() ran with no device arg,
+        # so DFN auto-detected (often CPU) while self.device claimed 'cuda'.
+        # Move the model to self.device explicitly so the field doesn't lie.
+        # init_df()'s positional 4th arg is a torch.device per DFN's source.
+        model, df_state, _ = init_df()
+        target_device = torch.device(self.device)
+        try:
+            model = model.to(target_device)
+        except Exception as e:
+            log.error('DFN model.to(%s) failed: %s — model stays on %s',
+                      target_device, e, next(model.parameters()).device)
+            raise
         self._model = model
         self._df_state = df_state
         # Stash enhance for use; importing inside _ensure_model keeps it lazy.
         self._enhance = enhance
-        log.info('DeepFilterNet loaded in %.1fs', time.time() - start)
+        actual_device = next(model.parameters()).device
+        log.info('DeepFilterNet loaded in %.1fs on %s', time.time() - start, actual_device)
 
     # DeepFilterNet3 is a 48 kHz-native model; the model card and the
     # `init_df()` defaults bind to 48 kHz internally. Anything else either
@@ -81,7 +94,10 @@ class DfnPolisher:
             assert self._model is not None and self._df_state is not None
             # DeepFilterNet's enhance() expects torch tensors of shape (1, n_samples).
             import torch                              # noqa: WPS433 — lazy to avoid hot import
-            t = torch.from_numpy(mono).unsqueeze(0)
+            # 4th-pass review HIGH: tensor MUST be on the same device as the
+            # model. Without .to(device), a CUDA model would either eat a
+            # hidden HtoD memcpy on every call or raise device-mismatch.
+            t = torch.from_numpy(mono).unsqueeze(0).to(next(self._model.parameters()).device)
             out = self._enhance(self._model, self._df_state, t)
             return out.squeeze(0).cpu().numpy().astype(np.float32, copy=False)
 

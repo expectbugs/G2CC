@@ -97,13 +97,22 @@ class ConfirmationFlow(
         return true
     }
 
-    /** Called when the WebSocket disconnects. Drops any pending request loudly
-     *  — the server-side promise will surface "Disconnected before confirmation"
-     *  per ws-handler.ts. */
+    /** Called when the WebSocket disconnects OR the BLE link drops
+     *  irrecoverably. Sends explicit `rejected` to the server so the
+     *  server-side promise (which is blocking CC under no-timeouts)
+     *  resolves immediately instead of hanging.
+     *
+     *  4th-pass review MEDIUM (BLE bug 11): previously this just logged and
+     *  set `_active=false` without notifying the server. The doc claimed
+     *  "ws-handler.ts onClose path" handles it, but that only fires on the
+     *  CONNECTION close — if the connection is alive but the BLE HUD is
+     *  permanently down, the server stays blocked. Now: explicit rejected
+     *  response, defense in depth alongside ws-handler.ts close handling. */
     fun onDisconnected() {
         val msg = pending.getAndSet(null) ?: return
         _active.value = false
-        Log.w(TAG, "confirm DROPPED (disconnected) id=${msg.requestId}")
+        Log.w(TAG, "confirm DROPPED (disconnected) id=${msg.requestId} — sending rejected to unblock server")
+        connection.send(ClientMessage.ConfirmOnHudResponse(msg.requestId, "rejected"))
     }
 
     companion object {
