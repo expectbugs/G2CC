@@ -106,9 +106,24 @@ class G2Pipeline(
     // Post-Ready BLE watchdog. If a side drops post-Ready and Nordic's
     // useAutoConnect(true) fails to bring it back within a grace window,
     // tear down the BleManager and full-rescan. Catches stale GATT / bond
-    // edge cases and "glasses powered off long enough to drop bond". */
+    // edge cases and "glasses powered off long enough to drop bond".
+    //
+    // Iter 2 (2026-06-02): was 45_000 — way too long. With 5s BLE
+    // supervision timeout already burned by the time we get the
+    // Disconnected event, an additional 45s wait pushed total recovery
+    // to ~60s after body-block (matches Adam's "took over a minute"
+    // report). Nordic's passive autoConnect is slow; if it hasn't
+    // recovered within 5s of the supervision timeout firing, it
+    // probably won't for tens of seconds. Force-rescan aggressively.
     private var postReadyWatchdogJob: Job? = null
-    private val POST_READY_RECOVERY_MS = 45_000L
+    private val POST_READY_RECOVERY_MS = 5_000L
+
+    // Session-scoped "has this pipeline EVER successfully rendered the HUD?"
+    // flag. Outlives individual BLE client rebuilds (post-Ready watchdog
+    // force-rescans null leftBle/rightBle and creates new clients) so the
+    // next Ready edge can take the fast-render path instead of treating
+    // every full-rebuild as a brand-new install. Reset only by stop().
+    private val sessionHasRenderedOnce = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** Scan or directed-connect to the G2 lens pair, then install BLE clients.
      *  Idempotent — calling twice is a no-op if BLE clients are already installed.
@@ -251,8 +266,14 @@ class G2Pipeline(
                 stopPostReadyWatchdog()
                 stopHeartbeat()
                 val textToRender = h.lastRenderedText ?: "G2CC paired\nL+R authed\n(idle)"
-                val isReconnect = textToRender != "G2CC paired\nL+R authed\n(idle)" ||
-                                  heartbeatTickCount.get() > 0
+                // Reconnect path: this pipeline has rendered before in THIS
+                // session (across BLE client rebuilds), OR there's
+                // session-state evidence (heartbeat ticked, or text differs
+                // from the default hello frame). Each of these alone proves
+                // we're not in a fresh post-install state.
+                val isReconnect = sessionHasRenderedOnce.get() ||
+                                  heartbeatTickCount.get() > 0 ||
+                                  textToRender != "G2CC paired\nL+R authed\n(idle)"
                 val notifyBefore = "L=${l?.notifyCount?.get() ?: -1} R=${r?.notifyCount?.get() ?: -1}"
                 // One-shot diag: show actual MTU + PHY so we can see whether
                 // the BLE-stability requests (2M PHY, LOW_POWER priority) were
@@ -270,7 +291,10 @@ class G2Pipeline(
                     connection?.send(ClientMessage.Diag(
                         "hud: render-done ok=$ok | notify: $notifyBefore → L=$lCount R=$rCount"
                     ))
-                    if (ok) startHeartbeat()
+                    if (ok) {
+                        sessionHasRenderedOnce.set(true)
+                        startHeartbeat()
+                    }
                 }
             }
             /** Fires on every FALLING edge of (leftReady && rightReady) —
@@ -667,6 +691,7 @@ class G2Pipeline(
         bleScannerRef.getAndSet(null)?.stop()
         stopHeartbeat()
         stopPostReadyWatchdog()
+        sessionHasRenderedOnce.set(false)
         // Tear down GATT connections cleanly so the BLE stack doesn't leak
         // open handles across service restart cycles (foreground service
         // reload-on-stuck per the watchdog).
