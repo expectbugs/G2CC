@@ -50,12 +50,14 @@ export interface WSClient {
   authTimer: ReturnType<typeof setTimeout> | null
   audioChunks: Buffer[]
   collectingAudio: boolean
-  // 4th-pass-final review MEDIUM: in-flight STT pipeline tracker. Set true
-  // when audio_end fires and we kick off handleAudio (async), cleared when
-  // handleAudio returns. Blocks audio_start while a transcription is still
-  // running so a rapid record/end/record can't produce misattributed
-  // stt_result for the NEW recording from the OLD one in flight.
-  sttInFlight: boolean
+  // In-flight STT pipeline counter. Incremented when audio_end fires AND we
+  // actually launch handleAudio with non-empty audio; decremented in the
+  // matching .finally. Blocks audio_start while ANY transcription is still
+  // running, even if a second audio_end (e.g. a duplicate or no-prior-start)
+  // would have completed near-instantly via the <100 byte early return —
+  // the prior boolean toggle let those instant returns clear the flag
+  // mid-transcription (R2-CRITICAL).
+  sttInFlightCount: number
   pool: SessionPool
   /** Active dispatcher target ID — defaults to the first target ('cc'). */
   selectedTargetId: string
@@ -102,7 +104,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     authTimer: null,
     audioChunks: [],
     collectingAudio: false,
-    sttInFlight: false,
+    sttInFlightCount: 0,
     pool,
     selectedTargetId: 'cc',
     dispatcher: null,
@@ -320,11 +322,13 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         console.warn(`[ws] audio_start while already collecting — discarding ${prevBytes} bytes of in-progress audio`)
         sendMsg(client, { type: 'stt_error', error: `overlapping audio_start; previous ${prevBytes} bytes discarded` })
       }
-      // 4th-pass-final review MEDIUM: also reject if a previous STT is
-      // still in flight. Without this, rapid record/end/record produces
-      // an stt_result for the PRIOR audio that the client interprets as
-      // the NEW recording's result.
-      if (client.sttInFlight) {
+      // Reject if a previous STT is still in flight. Without this, rapid
+      // record/end/record produces an stt_result for the PRIOR audio that
+      // the client interprets as the NEW recording's result. R2-CRITICAL:
+      // switched from boolean toggle to counter so a near-instant
+      // <100-byte handleAudio early-return on a stray audio_end doesn't
+      // clear the flag mid-transcription.
+      if (client.sttInFlightCount > 0) {
         sendMsg(client, { type: 'stt_error', error: `audio_start rejected: previous transcription still in flight; wait for stt_result before starting again` })
         break
       }
@@ -341,16 +345,28 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'audio_end': {
+      // R2-HIGH: reject audio_end without preceding audio_start. Previously
+      // a stray audio_end (duplicate from the phone, cancellation message)
+      // would mutate sttInFlightCount + run a zero-byte handleAudio that
+      // returns instantly, corrupting the in-flight tracker.
+      if (!client.collectingAudio) {
+        console.warn(`[ws] audio_end without prior audio_start — ignoring`)
+        sendMsg(client, { type: 'stt_error', error: 'audio_end without prior audio_start' })
+        break
+      }
       client.collectingAudio = false
       const pcmBuffer = Buffer.concat(client.audioChunks)
       const format = client.audioFormat ?? { sampleRate: 16_000, channels: 1, encoding: 'int16' as const }
       client.audioChunks = []
       client.audioFormat = null
-      // 4th-pass-final review MEDIUM: mark in-flight + clear on completion
-      // so the audio_start guard above can block rapid double-record.
-      client.sttInFlight = true
+      // Counter-based in-flight tracking (R2-CRITICAL): the handler increments
+      // on entry and the .finally decrements. Only callers that actually go
+      // async with non-trivial work need protection — but we count every
+      // launched handleAudio uniformly so the audio_start guard is robust
+      // against any future fast-path early-returns inside handleAudio.
+      client.sttInFlightCount++
       void handleAudio(client, pcmBuffer, format, config).finally(() => {
-        client.sttInFlight = false
+        client.sttInFlightCount = Math.max(0, client.sttInFlightCount - 1)
       })
       break
     }

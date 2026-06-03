@@ -119,10 +119,42 @@ class SttConfirmationFlowTest {
     }
 
     @Test
+    fun onDisconnected_whenPending_rendersLostMessage() {
+        // R1-HIGH1 regression: previously, onDisconnected cleared pending but
+        // left the stale "tap = send" prompt on HUD. The next user tap then
+        // morphed into a new recording with zero visible feedback. After fix,
+        // the HUD shows an explicit "transcript lost" message so the next
+        // tap is unambiguously a fresh recording start.
+        val s = Spy()
+        s.flow.onSttResult("something")
+        val rendersBefore = s.renders.size
+        s.flow.onDisconnected()
+        assertEquals("must render exactly one lost-message frame", rendersBefore + 1, s.renders.size)
+        val lostRender = s.renders.last()
+        assertTrue("lost-message must mention transcript loss",
+            lostRender.lowercase().contains("lost") || lostRender.lowercase().contains("re-record"))
+        assertFalse(s.flow.isPending())
+    }
+
+    @Test
     fun onDisconnected_whenNotPending_noOp() {
         val s = Spy()
         s.flow.onDisconnected()             // must not throw / NPE
         assertFalse(s.flow.isPending())
+        assertEquals("no render when nothing was pending", 0, s.renders.size)
+    }
+
+    @Test
+    fun afterDisconnect_subsequentTap_returnsFalse() {
+        // The stale-prompt + new-recording race only manifests in the caller
+        // (G2Pipeline); from the flow's perspective, the contract is that
+        // onTap returns false after disconnect, letting the caller take the
+        // audio-toggle path. This guards the contract.
+        val s = Spy()
+        s.flow.onSttResult("anything")
+        s.flow.onDisconnected()
+        assertFalse(s.flow.onTap())
+        assertEquals(0, s.prompts.size)
     }
 
     @Test

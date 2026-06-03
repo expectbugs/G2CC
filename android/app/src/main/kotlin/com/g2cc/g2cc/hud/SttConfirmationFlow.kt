@@ -100,13 +100,21 @@ class SttConfirmationFlow(
     }
 
     /** Called when the WebSocket disconnects. The pending transcript is
-     *  discarded loudly — the user will need to re-record once the
-     *  connection comes back. (The prompt could survive the disconnect
-     *  if we wanted, but Prompt requires an active dispatcher and the
-     *  user's intent may not match a new session on reconnect.) */
+     *  discarded loudly AND a visible "lost" message replaces the
+     *  confirmation prompt on HUD — otherwise the prompt keeps showing
+     *  "tap = send" while pending is empty, so the user's next tap morphs
+     *  into a new recording with zero visible feedback (R1-HIGH1).
+     *
+     *  The prompt could survive the disconnect if we wanted, but Prompt
+     *  requires an active dispatcher and the user's intent may not match
+     *  a new session on reconnect. Conservative discard is safer. */
     fun onDisconnected() {
         val text = pending.getAndSet(null) ?: return
         Log.w(TAG, "STT confirmation DROPPED on WS disconnect — ${text.length}c discarded; user re-records on reconnect")
+        // Replace the stale "tap = send" prompt so the next tap is unambiguous.
+        // Updates Hud.lastRenderedText so reconnect re-renders this message,
+        // not the stale prompt.
+        renderHud("(transcript lost on reconnect)\n\nTap to start a new recording.")
     }
 
     private fun formatPrompt(text: String): String =

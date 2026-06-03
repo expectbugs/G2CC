@@ -400,6 +400,21 @@ class G2Pipeline(
         rightBle = right
         val newHud = Hud(left, right)
         hud = newHud
+        // R1-CRITICAL fix: wire HUD-dependent flows now that hud is non-null.
+        // start() runs BEFORE scanAndConnect() in the service lifecycle, so
+        // its `hud?.let { ... }` block was skipped — leaving menu /
+        // confirmation / sttConfirmation null forever and the Phase 8 STT
+        // confirmation gate (this commit's headline feature) inert in
+        // production. Re-wire here and on every BLE rebuild (post-Ready
+        // force-rescan, BT-cycle reconnect) so the flows track the live Hud.
+        val cm = connection
+        if (cm != null) {
+            menu = MenuController(newHud, cm)
+            confirmation = ConfirmationFlow(newHud, cm)
+            sttConfirmation = SttConfirmationFlow.forProduction(newHud, cm)
+        } else {
+            Log.w(TAG, "installBleClients: connection null — start() must run first; flows remain unset")
+        }
         // Phase Y: also instantiate NewsHud + RootMenu so the alternate
         // display path is ready if PHASE_Y_ENABLED is on. Both live alongside
         // the teleprompter Hud; only one is used per render depending on
@@ -1043,11 +1058,10 @@ class G2Pipeline(
                 diag("BLE: $status")
             }
         }
-        hud?.let {
-            menu = MenuController(it, cm)
-            confirmation = ConfirmationFlow(it, cm)
-            sttConfirmation = SttConfirmationFlow.forProduction(it, cm)
-        }
+        // HUD-dependent flows (menu, confirmation, sttConfirmation) are wired
+        // inside installBleClients() because start() always runs BEFORE the
+        // first BLE pair-up — hud is null here. See R1-CRITICAL note in
+        // installBleClients.
         // Phase 8: wire mic capture path. Streaming starts on user gesture
         // (or Tasker intent); the streamer just owns the audio_start/end +
         // binary-frame plumbing.
@@ -1096,18 +1110,31 @@ class G2Pipeline(
                     menuAwaitingDirectoryList = false
                     val rm = rootMenu
                     if (rm != null) {
+                        // R1-MEDIUM1: if the user tapped "← Back" out of the
+                        // loading frame before the reply arrived, we're at
+                        // depth 0 (root). Replacing the root frame with
+                        // directory entries would clobber the entire G2CC
+                        // root menu. Ignore the reply in that case.
+                        if (rm.depth == 0) {
+                            diag("rootMenu: directory_list_reply arrived after user backed out of CC flow — ignoring")
+                            return
+                        }
                         diag("rootMenu: directory_list_reply (${msg.entries.size} entries) — populating submenu")
                         val items: List<RootMenu.MenuItem> = msg.entries.map { entry ->
                             RootMenu.MenuItem.Action(entry.name) {
                                 selectDirectoryFromMenu(entry.path, entry.name)
                             }
                         }
+                        // R1-HIGH3: preserve a back-out gesture across the
+                        // replace — without addBack=true the user has no
+                        // way to escape this frame (firmware eats
+                        // double-tap, and popToRoot isn't wired to a tap).
                         if (items.isEmpty()) {
                             rm.replaceCurrentFrame("Claude Code", listOf(
                                 RootMenu.MenuItem.Action("(no directories under /home/user)") {},
-                            ))
+                            ), addBack = true)
                         } else {
-                            rm.replaceCurrentFrame("Pick directory", items)
+                            rm.replaceCurrentFrame("Pick directory", items, addBack = true)
                         }
                     }
                 }
@@ -1146,16 +1173,27 @@ class G2Pipeline(
                 // will decide how prompts get back into CC from here.
                 if (menuAwaitingSessionInfo) {
                     menuAwaitingSessionInfo = false
-                    val projectName = msg.projectPath.substringAfterLast('/').ifEmpty { msg.projectPath }
-                    val verb = if (msg.resumed) "Resumed" else "Started"
-                    rootMenu?.replaceCurrentFrame("Claude Code", listOf(
-                        RootMenu.MenuItem.Action("✓ $verb $projectName") {
-                            // Tap on success row does nothing yet — Phase Y
-                            // polish wires it to a "send prompt" action or
-                            // similar once the audio path is end-to-end.
-                        },
-                    ))
-                    diag("rootMenu: session_info — replaced spawning frame with success ($projectName, resumed=${msg.resumed})")
+                    val rm = rootMenu
+                    if (rm != null) {
+                        // R1-MEDIUM1: if user backed out of the spawning
+                        // frame before SessionInfo landed, don't clobber root.
+                        if (rm.depth == 0) {
+                            diag("rootMenu: session_info arrived after user backed out — ignoring")
+                            return
+                        }
+                        val projectName = msg.projectPath.substringAfterLast('/').ifEmpty { msg.projectPath }
+                        val verb = if (msg.resumed) "Resumed" else "Started"
+                        // R1-HIGH3: addBack=true so the user can navigate out
+                        // of the success confirmation back to the root menu.
+                        rm.replaceCurrentFrame("Claude Code", listOf(
+                            RootMenu.MenuItem.Action("✓ $verb $projectName") {
+                                // Tap on success row does nothing yet — Phase Y
+                                // polish wires it to a "send prompt" action or
+                                // similar once the audio path is end-to-end.
+                            },
+                        ), addBack = true)
+                        diag("rootMenu: session_info — replaced spawning frame with success ($projectName, resumed=${msg.resumed})")
+                    }
                 }
             }
             is ServerMessage.ConfirmOnHud -> {
@@ -1190,10 +1228,19 @@ class G2Pipeline(
                 if (menuAwaitingDirectoryList || menuAwaitingSessionInfo) {
                     menuAwaitingDirectoryList = false
                     menuAwaitingSessionInfo = false
-                    rootMenu?.replaceCurrentFrame("Claude Code", listOf(
-                        RootMenu.MenuItem.Action("✗ ${msg.error.take(80)}") {},
-                    ))
-                    diag("rootMenu: cc_error — replaced pending frame with error '${msg.error.take(120)}'")
+                    val rm = rootMenu
+                    if (rm != null && rm.depth > 0) {
+                        // R1-HIGH2: NO TRUNCATION on user-facing strings — pass
+                        // the full error text; firmware scrolls if it overflows.
+                        // R1-HIGH3: addBack=true so the user can dismiss the
+                        // error and return to the root menu.
+                        rm.replaceCurrentFrame("Claude Code", listOf(
+                            RootMenu.MenuItem.Action("✗ ${msg.error}") {},
+                        ), addBack = true)
+                        diag("rootMenu: cc_error — replaced pending frame with error (${msg.error.length} chars)")
+                    } else {
+                        diag("rootMenu: cc_error arrived after user backed out — flags cleared, no replace")
+                    }
                 }
             }
             is ServerMessage.SttError -> {

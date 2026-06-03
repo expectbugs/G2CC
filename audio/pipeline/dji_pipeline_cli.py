@@ -74,12 +74,38 @@ def main() -> int:
 
     # Decode + downmix to mono. soundfile auto-converts to float32.
     data, sr = sf.read(str(wav_path), dtype='float32')
+
+    # R3-MEDIUM1: explicit empty-input guard so the failure mode is
+    # deterministic + non-zero exit + clear stderr rather than scipy /
+    # NeMo blowing up internally on a zero-length array. Server's
+    # execFileAsync surfaces the exit code + stderr to ws-handler.
+    if data.size == 0:
+        print(f'dji_pipeline_cli: wav decoded to 0 samples ({wav_path}); refusing to transcribe empty audio', file=sys.stderr)
+        return 4
+
     if data.ndim > 1:
-        # Mean-downmix. For Stereo+NLMS fallback (TX1 ref, TX2 speech) this
-        # would be wrong — but that path runs a different pipeline (nlms.py
-        # before this). The default single-mic path expects mono content,
-        # often arriving as duplicated-stereo from the DJI receiver in mono mode.
-        data = data.mean(axis=1).astype(np.float32, copy=False)
+        # R3-MEDIUM2: pick the channel that's safe in BOTH plausible
+        # DJI Mic 3 receiver configs, rather than averaging:
+        #   - Mono mode (project default per CLAUDE.md, single TX2 collar
+        #     mic): DJI duplicates TX2 to both USB channels OR delivers
+        #     1 channel that Android promotes to stereo by duplication.
+        #     Either way both channels carry the same TX2 signal.
+        #   - Stereo mode (NLMS fallback config, TX1=machine ref, TX2=collar):
+        #     conventional DJI layout has TX1 on LEFT, TX2 on RIGHT.
+        # Picking RIGHT (index 1) gets TX2 in either config; averaging would
+        # silently fold the noise reference into the speech under the latter
+        # (a violation of LOUD AND PROUD per the project rules). The NLMS
+        # pipeline (audio/pipeline/nlms.py) is the correct entry point for
+        # the stereo TX1+TX2 case — this CLI's downmix is single-mic only.
+        if data.shape[1] != 2:
+            print(
+                f'dji_pipeline_cli: WARN unexpected channel count {data.shape[1]}; '
+                f'picking channel 0 (averaging would silently mix unknown channels)',
+                file=sys.stderr,
+            )
+            data = data[:, 0].astype(np.float32, copy=False)
+        else:
+            data = data[:, 1].astype(np.float32, copy=False)
 
     if not args.no_denoise:
         profile_path = Path(args.profile)

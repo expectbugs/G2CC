@@ -184,6 +184,41 @@ class RootMenuTest {
     }
 
     @Test
+    fun replaceCurrentFrame_withAddBack_prependsBackAndPopsCleanly() {
+        // R1-HIGH3: Phase Ω callers need to keep the back-out gesture across
+        // a replace. addBack=true synthesizes the same "← Back" that
+        // pushSubmenu prepends, so a one-deep submenu's Back still works
+        // after the contents have been swapped from "loading" → "results".
+        val (menu, _) = build()
+        menu.pushSubmenu("Sub", listOf(
+            RootMenu.MenuItem.Action("(loading…)") {},
+        ))
+        menu.replaceCurrentFrame("Results", listOf(
+            RootMenu.MenuItem.Action("entry-A") {},
+            RootMenu.MenuItem.Action("entry-B") {},
+        ), addBack = true)
+        // Highlight resets to index 0 — which is now the synthetic Back.
+        assertEquals("← Back", menu.highlightedLabel)
+        assertEquals(1, menu.depth)
+        // Tapping it pops back to root, restoring the parent frame.
+        menu.onTap()
+        assertEquals(0, menu.depth)
+        assertEquals("Claude Code", menu.highlightedLabel)
+    }
+
+    @Test
+    fun replaceCurrentFrame_addBackFalseByDefault() {
+        // Verifies default is addBack=false so the existing API contract
+        // (Phase Y polish callers that don't want a back item, e.g.
+        // root-frame replacements) remains intact.
+        val (menu, _) = build()
+        menu.pushSubmenu("X", listOf(RootMenu.MenuItem.Action("a") {}))
+        menu.replaceCurrentFrame("Y", listOf(RootMenu.MenuItem.Action("b") {}))
+        // Single item; no synthetic back was added.
+        assertEquals("b", menu.highlightedLabel)
+    }
+
+    @Test
     fun popToRoot_returnsAllTheWayUp() {
         val (menu, _) = build()
         menu.pushSubmenu("A", listOf(RootMenu.MenuItem.Action("aa") {}))

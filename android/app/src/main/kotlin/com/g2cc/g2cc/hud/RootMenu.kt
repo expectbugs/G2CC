@@ -162,15 +162,25 @@ class RootMenu(
      *  after a feature module completes its async work. Highlight resets to
      *  index 0.
      *
-     *  Does NOT add a back item — replaceCurrentFrame is for in-place swap,
-     *  not depth change. If the original frame had a back item, the caller
-     *  is responsible for keeping one in `items` (typically a no-op since
-     *  the new content lives in the SAME submenu, where back was already
-     *  available from the parent's push). */
-    fun replaceCurrentFrame(title: String, items: List<MenuItem>) {
+     *  If [addBack] is true (default false), prepend a synthetic "← Back"
+     *  action that pops this frame — same shape as [pushSubmenu]'s
+     *  synthesized back. Pass true when replacing a frame that was pushed
+     *  with [pushSubmenu] (so the user keeps a navigation-out gesture
+     *  through the replacement), false for in-place swaps that should
+     *  inherit the existing items' back-handling. The previous default of
+     *  always-false stranded users in Phase Ω feature flows because the
+     *  loading-frame's synthetic back was lost on every replace
+     *  (R1-HIGH3). */
+    fun replaceCurrentFrame(title: String, items: List<MenuItem>, addBack: Boolean = false) {
         val current = currentFrame
-        stack[stack.size - 1] = Frame(title = title, items = items, highlightIndex = 0)
-        Log.i(TAG, "replaceCurrentFrame '${current.title}' → '$title' (${items.size} items)")
+        val finalItems = if (addBack) {
+            val backItem = MenuItem.Action("← Back") { popFrame() }
+            listOf(backItem) + items
+        } else {
+            items
+        }
+        stack[stack.size - 1] = Frame(title = title, items = finalItems, highlightIndex = 0)
+        Log.i(TAG, "replaceCurrentFrame '${current.title}' → '$title' (${finalItems.size} items, addBack=$addBack)")
         render()
     }
 
