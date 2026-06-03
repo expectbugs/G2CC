@@ -4,6 +4,81 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-81bd233 — 2026-06-03 — **Probe v2 + EvenHub channel discovered**
+
+The architectural breakthrough after the menu-driven UX hit hardware reality. Probe v2 is a comprehensive BLE protocol shell — discovers every service + characteristic, subscribes to every notify-capable char, logs full untruncated payloads, streams every event to the home server's diag log live, and saves a local backup file.
+
+Adam's test: launched probe v2, connected (auth completes), Even App fully closed, ring-selected DocuLens from the G2 main menu. Glasses displayed "Starting DocuLens" for ~10s, then went blank.
+
+**The finding**: in the entire 60-second test, exactly ONE notify fired on a service we'd never seen before — **`0xe0-01`**, at `12:56:47.325`, immediately after Adam tapped DocuLens. Payload `08 11 a2 01 03 08 99 59` (8 bytes protobuf inside an AA-frame). This is the firmware's launch-handshake message asking the host to acknowledge a Hub app starting. We didn't respond → timeout.
+
+`0xe0-XX` is the **EvenHub channel**:
+- `0xe0-00` = control/query (host WRITES here to drive a Hub-app session)
+- `0xe0-01` = response (firmware notifies host here)
+- `0xe0-20` = data/payload (bulk content)
+
+Matches the openCFW research hint (whose broader claims were refuted but the directional service-prefix fact is now empirically confirmed).
+
+What this means for the project:
+- Hub-SDK apps DO NOT structurally require the Even App at runtime
+- They require any authenticated BLE host that knows the launch protocol
+- Our direct-BLE driver CAN be that host once we learn what to write to `0xe0-00`
+
+Full evidence and decoded payload in `docs/EVENHUB_FINDING.md`. Service tree, timeline, and the 31 service-tagged notifies from the test in `docs/PROBE_V2_LOG_EXCERPT.txt`.
+
+**Next experiment** (waiting on Adam): BTSnoop capture of the Even App's normal DocuLens launch flow → diff against the probe log → identify the exact bytes the Even App writes to `0xe0-00` / `0xe0-20` during a successful launch.
+
+## v0.0.1-9c999b2 — 2026-06-03 — **Probe v1 (proof: DocuLens accepts non-EvenApp hosts)**
+
+First probe APK. Subscribed to `0x5402` + `0x6402` only, truncated notify hex to 24 bytes, on-screen log only (no file save, no server stream).
+
+Adam tested in two stages:
+1. Even App closed, NO probe running, selected DocuLens → "Connection Lost — Please reconnect glasses to the app"
+2. Even App closed, probe running (authenticated BLE session), selected DocuLens → "Starting DocuLens" for ~10s, then blank
+
+Critical conclusion: the "Connection Lost" message just means "no BLE host is responding". With our probe providing a valid session, the firmware proceeded to "Starting DocuLens" and waited for us to drive the launch. We didn't know how — leading to probe v2 with better instrumentation.
+
+## v0.0.1-9aa792a — 2026-06-03 — **Phase Y reverted (News mode is a sub-feature)**
+
+Adam tested `PHASE_Y_ENABLED=true` (commit `655a32d`) on hardware: app did NOT come up on glasses at all. Architectural finding: News mode (`0x01-20`) is a SUB-feature of the default HUD, content delivery into the HUD's running feature loop — not a self-contained display takeover the way Teleprompter (`0x06-20`) is. Reverted `PHASE_Y_ENABLED=false`. The `NewsHud` / `EvenAppInit` / Phase Y code stays in-tree but is dormant.
+
+This finding (plus Adam's subsequent hardware test showing teleprompter mode consumes ring inputs as font-size/scroll-bar controls) ended the "direct-BLE display + direct-BLE inputs via firmware features" plan. The pivot to investigating Hub-SDK app architecture started here.
+
+## v0.0.1-064950e — 2026-06-03 — **Menu-driven UX (didn't work in teleprompter)**
+
+Built RootMenu wired to teleprompter HUD: tap selects, scroll navigates, "Record prompt" inside CC submenu, STT confirmation as submenu. Adam tested: text shows up but UI is centered (not menu-shaped), tap controls font size (not selection), scroll moves scrollbar (not highlight). Teleprompter mode is a firmware UI feature — it owns inputs locally and doesn't forward them. The Phase Ω menu code became dead weight overnight.
+
+This is what motivated the architectural pivot to investigate alternative takeover modes.
+
+## v0.0.1-b56bd3c — 2026-06-02 — **2nd-pass review fixes (3 CRITICAL, 7 HIGH, 3 MEDIUM, 1 found-by-test)**
+
+3-agent parallel review of the previous fix commit. Found another round of bugs INCLUDING one CRITICAL that the 1st-pass fix introduced (installBleClients regression). See commit message for full list. Highlights:
+- `installBleClients` discards pending state on every BLE rebuild — fixed via `takePendingForHandoff()`
+- `SttError` left state in AWAITING_TRANSCRIPT, locking user out — added `state.transition(IDLE)`
+- WS-disconnect `transition(CONNECTING)` was REJECTED from MENU/AWAITING states — switched to `forceSet`
+- WS-disconnect didn't stop streamer; `stop()` didn't release AudioRecord
+- Output during BLE rebuild silently lost — null hud during teardown so pendingHudText catches it
+- Short DJI recordings crashed `spectral_subtract` — zero-pad to one STFT window
+- Hard `sampleRate === 48_000` requirement unrouted non-48k DJI — loosened
+- Channel-pick was unverified hardware guess — replaced with energy-diff detection + refuse divergent stereo
+- `getattr(hyp, "text", None) or str(hyp)` dumped Hypothesis repr for empty text — explicit None check
+
+## v0.0.1-0e22b2f — 2026-06-02 — **1st-pass review fixes (2 CRITICAL, 4 HIGH, 3 MEDIUM)**
+
+3-agent parallel review of `7d82c1a`. Headline CRITICALs:
+- `SttConfirmationFlow` (and pre-existing `menu` / `confirmation`) were never instantiated in production — `start()` runs BEFORE `scanAndConnect()`, so `hud?.let { ... }` block always skipped. Moved wiring into `installBleClients()`.
+- `sttInFlight` race: stray short `audio_end` cleared the flag mid-transcription. Switched to counter; added `audio_end without prior audio_start` reject.
+
+Plus HIGH-severity: WS-disconnect during STT silent drop, CcError truncation, replaceCurrentFrame Back loss, menuAwaitingDirectoryList race. MEDIUM: empty WAV guard, stereo silent downmix.
+
+## v0.0.1-7d82c1a — 2026-06-02 — **Phase Ω + Parakeet + DJI audio + STT confirmation flow**
+
+Major feature commit. Closed the critical-path loop code-side: glasses tap → DJI mic → WS → notch+wiener noise pipeline → Parakeet ASR → STT confirmation gate → user tap → Prompt → CC → streaming output → HUD.
+
+Phase Ω (RootMenu CC dispatch): wired the "Claude Code" menu item to real dispatch flow. Parakeet bring-up: NeMo 2.7.3 + PyTorch 2.12.0+cu130 installed. DJI server-side routing: `pcm-wav.ts` extended for IEEE-float WAVs, `transcribeDji` + `dji_pipeline_cli.py` chain. STT confirmation flow: `SttConfirmationFlow.kt` with menu-driven Confirm/Re-record/Cancel.
+
+Discovered while building: MicCapture/AudioStreamer already supported DJI USB-C — the prior handoff's "DJI path NOT IMPLEMENTED YET" note was stale.
+
 ## Unreleased — STT confirmation flow
 
 User-facing gate between transcription and Prompt. Closes the loop: tap to record → tap to stop → STT returns → full transcript on HUD → tap to send to CC, double-tap to discard.
