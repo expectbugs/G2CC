@@ -3,6 +3,7 @@ package com.g2cc.g2cc.probe
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -11,6 +12,7 @@ import android.text.method.ScrollingMovementMethod
 import android.util.TypedValue
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -18,113 +20,126 @@ import androidx.activity.ComponentActivity
 import androidx.core.content.ContextCompat
 import com.g2cc.g2cc.ble.BleScanner
 import com.g2cc.g2cc.ble.ConnectionState
-import com.g2cc.g2cc.ble.G2BleClient
 import com.g2cc.g2cc.ble.PairingState
 import com.g2cc.g2cc.ble.Side
+import com.g2cc.g2cc.net.ClientMessage
+import com.g2cc.g2cc.net.ConnectionManager
+import com.g2cc.g2cc.net.ServerMessage
+import com.g2cc.g2cc.service.G2CCService
+import com.g2cc.g2cc.storage.Prefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import java.io.File
+import java.io.PrintWriter
 import java.text.SimpleDateFormat
+import java.time.Duration
 import java.util.Date
 import java.util.Locale
 
 /**
- * Standalone activity for testing the `0x6402` raw display + `0x01-01` raw
- * input hypothesis.
+ * Comprehensive BLE probe / protocol-shell activity (v2).
  *
- * Background: after the Phase Y hardware test failed (News mode is a sub-
- * feature of the default HUD, not a self-contained takeover) and Adam's
- * report that teleprompter mode consumes ring inputs as font-size/scroll
- * controls, we need a path to take over the glasses fully. The `0x6402`
- * characteristic is documented as "Display Rendering, 204-byte packets,
- * unknown structure" — if we can write to it directly WITHOUT activating
- * Teleprompter (which captures all inputs), AND ring events on `0x01-01`
- * notify continue to reach us, we have raw display + raw input.
+ * Captures EVERY notify event on EVERY characteristic the G2 firmware
+ * exposes, with full untruncated payloads. Logs to three sinks:
  *
- * This activity does NOT use the foreground service. It's a one-shot
- * experimental flow:
- *   1. Adam taps Connect
- *   2. Scan (or use saved-pair address) → BLE connect both lenses
- *   3. Run the 7-packet auth handshake (reused from production G2BleClient)
- *   4. After both lenses Ready, run a probe sequence on the R lens:
- *      - Send a series of writes to 0x6402 with different sizes / patterns
- *      - Subscribe to all notifies on 0x5402 + 0x6402
- *      - 30-second observation window so Adam can try ring scroll/tap
- *   5. All BLE events + probe activity log live to the on-screen TextView
+ *  1. **On-screen TextView** (scrollable, monospace) — live view while
+ *     phone is in hand
+ *  2. **Local file** at
+ *     `/Android/data/com.g2cc.g2cc/files/probe-logs/probe-<timestamp>.log`
+ *     — accessible from phone Files app, persists across sessions
+ *  3. **Home server diag stream** via WebSocket. Every log line is sent
+ *     as `ClientMessage.Diag("[probe-...]")` and lands in
+ *     `/tmp/g2cc-server.log` server-side, where Claude reads it without
+ *     manual transfer
  *
- * Adam observes:
- *   - Did anything appear on the glasses for each probe?
- *   - Did ring scroll/tap events log during the observation window?
+ * Stops [G2CCService] on start so the probe owns the BLE connection
+ * exclusively (the main service and probe would otherwise contend).
  *
- * No foreground service, no audio, no menu, no Phase Ω. Just BLE +
- * controlled writes + logging. Clean revert: uninstall this APK, reinstall
- * the real G2CC.
+ * No timeouts, no audio, no menu — pure observation + targeted writes.
  */
 class ProbeActivity : ComponentActivity() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
     private lateinit var statusText: TextView
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
     private lateinit var connectBtn: Button
-    private lateinit var probeBtn: Button
     private lateinit var disconnectBtn: Button
+    private lateinit var saveBtn: Button
+    private lateinit var listCharsBtn: Button
+
+    private lateinit var prefs: Prefs
     private lateinit var pairing: PairingState
 
-    private var leftBle: G2BleClient? = null
-    private var rightBle: G2BleClient? = null
+    private var leftBle: BleProbeClient? = null
+    private var rightBle: BleProbeClient? = null
     private var scanner: BleScanner? = null
+    private var connection: ConnectionManager? = null
+
     private var leftStateJob: Job? = null
     private var rightStateJob: Job? = null
-    private var leftEventJob: Job? = null
-    private var rightEventJob: Job? = null
-    private var leftDisplayJob: Job? = null
-    private var rightDisplayJob: Job? = null
-    private var probeJob: Job? = null
+    private var leftNotifyJob: Job? = null
+    private var rightNotifyJob: Job? = null
+
+    private var logFile: File? = null
+    private var logWriter: PrintWriter? = null
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    private val fileTimeFmt = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+
+    private var leftReady = false
+    private var rightReady = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        prefs = Prefs(this)
         pairing = PairingState(applicationContext)
-        setContentView(buildUi())
-        log("ProbeActivity ready. Tap Connect to start.")
-        log("Saved pair: L=${pairing.leftAddress ?: "(none)"} R=${pairing.rightAddress ?: "(none)"}")
-        if (!hasRequiredPermissions()) {
-            log("WARN: BLE permissions not granted yet — grant via the main G2CC app first, then re-launch Probe.")
+
+        // Stop the main G2CC service if running, so the probe owns BLE.
+        try {
+            stopService(Intent(this, G2CCService::class.java))
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "stopService failed", e)
         }
+
+        setContentView(buildUi())
+        openLogFile()
+        log("ProbeActivity v2 ready")
+        log("Server URL: ${prefs.serverUrl ?: "(NOT CONFIGURED — set in main G2CC app first)"}")
+        log("Auth token: ${if (prefs.authToken != null) "(present)" else "(missing)"}")
+        log("Saved pair: L=${pairing.leftAddress ?: "(none)"} R=${pairing.rightAddress ?: "(none)"}")
+        log("Log file: ${logFile?.absolutePath ?: "(none)"}")
+        if (!hasRequiredPermissions()) {
+            log("WARN: BLE/audio permissions not granted; run main G2CC app once to grant them")
+        }
+        startWsIfConfigured()
     }
 
     private fun buildUi(): ViewGroup {
         val outer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK)
-            setPadding(24, 24, 24, 24)
+            setPadding(16, 16, 16, 16)
         }
         statusText = TextView(this).apply {
             text = "Status: Disconnected"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            setPadding(0, 0, 0, 16)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setPadding(0, 0, 0, 12)
         }
         outer.addView(statusText)
 
-        val buttonRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         connectBtn = Button(this).apply {
             text = "Connect"
             setOnClickListener { startConnect() }
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        probeBtn = Button(this).apply {
-            text = "Probe"
-            isEnabled = false
-            setOnClickListener { startProbeSequence() }
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         disconnectBtn = Button(this).apply {
@@ -133,41 +148,128 @@ class ProbeActivity : ComponentActivity() {
             setOnClickListener { disconnect() }
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        buttonRow.addView(connectBtn)
-        buttonRow.addView(probeBtn)
-        buttonRow.addView(disconnectBtn)
-        outer.addView(buttonRow)
+        row1.addView(connectBtn)
+        row1.addView(disconnectBtn)
+        outer.addView(row1)
 
+        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        saveBtn = Button(this).apply {
+            text = "Save Log Now"
+            setOnClickListener { flushLog(); log("Log flushed: ${logFile?.absolutePath}") }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        listCharsBtn = Button(this).apply {
+            text = "Dump Chars"
+            isEnabled = false
+            setOnClickListener { dumpCharsToLog() }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        row2.addView(saveBtn)
+        row2.addView(listCharsBtn)
+        outer.addView(row2)
+
+        // Log view — horizontal+vertical scroll so long hex lines don't wrap awkwardly.
         logScroll = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
                 1f,
             )
-            setPadding(0, 16, 0, 0)
+            setPadding(0, 12, 0, 0)
         }
+        val hScroll = HorizontalScrollView(this)
         logText = TextView(this).apply {
-            setTextColor(Color.argb(255, 200, 230, 200))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(Color.argb(255, 180, 240, 180))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             typeface = android.graphics.Typeface.MONOSPACE
             movementMethod = ScrollingMovementMethod()
         }
-        logScroll.addView(logText)
+        hScroll.addView(logText)
+        logScroll.addView(hScroll)
         outer.addView(logScroll)
         return outer
     }
 
+    // ============================================================
+    // Logging
+    // ============================================================
+
+    private fun openLogFile() {
+        try {
+            val dir = File(getExternalFilesDir(null), "probe-logs")
+            if (!dir.exists()) dir.mkdirs()
+            val name = "probe-${fileTimeFmt.format(Date())}.log"
+            val f = File(dir, name)
+            logFile = f
+            logWriter = PrintWriter(f.outputStream().bufferedWriter())
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "openLogFile failed", e)
+            logFile = null
+            logWriter = null
+        }
+    }
+
+    private fun flushLog() {
+        logWriter?.flush()
+    }
+
     private fun log(s: String) {
         val ts = timeFmt.format(Date())
+        val line = "[$ts] $s"
+        // On-screen
         runOnUiThread {
-            logText.append("[$ts] $s\n")
+            logText.append(line + "\n")
             logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
         }
+        // Local file
+        try {
+            logWriter?.println(line)
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "file log failed", e)
+        }
+        // Server diag — async via connection manager
+        try {
+            connection?.send(ClientMessage.Diag("[probe] $line"))
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "diag send failed", e)
+        }
+        // logcat for adb fallback
+        android.util.Log.i(TAG, line)
     }
 
     private fun setStatus(s: String) {
         runOnUiThread { statusText.text = "Status: $s" }
     }
+
+    // ============================================================
+    // WebSocket to home server
+    // ============================================================
+
+    private fun startWsIfConfigured() {
+        val url = prefs.serverUrl
+        val token = prefs.authToken
+        if (url == null || token == null) {
+            log("WS not started — server URL or auth token missing in prefs")
+            return
+        }
+        val cm = ConnectionManager(
+            initialEndpoints = listOf(url),
+            authToken = token,
+            httpClient = defaultHttpClient(),
+            onMessage = { msg: ServerMessage ->
+                android.util.Log.i(TAG, "ws server msg: ${msg::class.simpleName}")
+            },
+            onConnected = { log("WS connected to $url") },
+            onDisconnected = { log("WS disconnected") },
+            onAuthFailure = { count -> log("WS auth failure #$count") },
+        )
+        connection = cm
+        cm.connect()
+    }
+
+    // ============================================================
+    // Permissions / connect flow
+    // ============================================================
 
     private fun hasRequiredPermissions(): Boolean {
         val perms = mutableListOf<String>()
@@ -183,7 +285,7 @@ class ProbeActivity : ComponentActivity() {
         connectBtn.isEnabled = false
         disconnectBtn.isEnabled = true
         if (pairing.hasPair) {
-            log("Using saved pair addresses: L=${pairing.leftAddress} R=${pairing.rightAddress}")
+            log("Using saved pair: L=${pairing.leftAddress} R=${pairing.rightAddress}")
             connectByAddress(pairing.leftAddress!!, pairing.rightAddress!!)
         } else {
             log("No saved pair — starting scan")
@@ -220,25 +322,17 @@ class ProbeActivity : ComponentActivity() {
         val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager).adapter
         val leftDev = adapter.getRemoteDevice(leftAddr)
         val rightDev = adapter.getRemoteDevice(rightAddr)
-        val lc = G2BleClient(this, Side.Left)
-        val rc = G2BleClient(this, Side.Right)
+        val lc = BleProbeClient(this, Side.Left)
+        val rc = BleProbeClient(this, Side.Right)
         leftBle = lc
         rightBle = rc
-        // Watch state for both lenses. When both reach Ready, enable Probe.
         leftStateJob = scope.launch { lc.state.collect { onLensState(Side.Left, it) } }
         rightStateJob = scope.launch { rc.state.collect { onLensState(Side.Right, it) } }
-        // Watch ring events — every parsed Event prints with class name + raw notify hex.
-        leftEventJob = scope.launch { lc.events.collect { log("[L 5402] event ${it::class.simpleName} | lastNotifyHex=${lc.lastNotifyHex}") } }
-        rightEventJob = scope.launch { rc.events.collect { log("[R 5402] event ${it::class.simpleName} | lastNotifyHex=${rc.lastNotifyHex}") } }
-        // Watch display-char notifies if any.
-        leftDisplayJob = scope.launch { lc.displayNotifies.collect { log("[L 6402] notify ${it.size}B ${hex(it)}") } }
-        rightDisplayJob = scope.launch { rc.displayNotifies.collect { log("[R 6402] notify ${it.size}B ${hex(it)}") } }
+        leftNotifyJob = scope.launch { lc.notifies.collect { onNotify(Side.Left, it) } }
+        rightNotifyJob = scope.launch { rc.notifies.collect { onNotify(Side.Right, it) } }
         lc.connectTo(leftDev)
         rc.connectTo(rightDev)
     }
-
-    private var leftReady = false
-    private var rightReady = false
 
     private fun onLensState(side: Side, s: ConnectionState) {
         val label = when (s) {
@@ -255,10 +349,10 @@ class ProbeActivity : ComponentActivity() {
         if (s is ConnectionState.Ready) {
             if (side == Side.Left) leftReady = true else rightReady = true
             if (leftReady && rightReady) {
-                setStatus("Both lenses Auth'd. Tap Probe to run sequence.")
-                val rc = rightBle
-                log("Display char availability: L=${leftBle?.isDisplayCharAvailable} R=${rc?.isDisplayCharAvailable}")
-                runOnUiThread { probeBtn.isEnabled = true }
+                setStatus("Auth'd. Notify subscriptions active on every char with notify property.")
+                runOnUiThread { listCharsBtn.isEnabled = true }
+                // Auto-dump char tree on Ready so the log starts with a map.
+                dumpCharsToLog()
             } else {
                 setStatus("${if (leftReady) "L✓" else "L?"} ${if (rightReady) "R✓" else "R?"}")
             }
@@ -268,89 +362,68 @@ class ProbeActivity : ComponentActivity() {
         }
     }
 
-    private fun startProbeSequence() {
-        probeBtn.isEnabled = false
-        probeJob?.cancel()
-        probeJob = scope.launch(Dispatchers.Default) {
-            runProbeSequence()
-            withContext(Dispatchers.Main) {
-                setStatus("Probe done. Try ring scroll/tap; watch log.")
-                probeBtn.isEnabled = true
-            }
-        }
+    private fun onNotify(side: Side, n: BleProbeClient.RawNotify) {
+        // Log the FULL byte payload as hex. Also include a parsed header
+        // if it's an AA-framed packet for easier reading.
+        val hex = n.bytes.joinToString("") { "%02x".format(it) }
+        val parsed = parseAaFrameHeader(n.bytes)
+        val suffix = if (parsed != null) " | $parsed" else ""
+        log("[$side notify ${shortUuid(n.charUuid)}] ${n.bytes.size}B  $hex$suffix")
     }
 
-    private suspend fun runProbeSequence() {
-        val rc = rightBle
-        if (rc == null) {
-            log("Probe abort: right lens null")
-            return
-        }
-        if (!rc.isDisplayCharAvailable) {
-            log("WARN: R lens display char (0x6402) NOT available — probe writes will no-op")
-            log("Service-discovery dump for R: ${rc.lastDiagnostic}")
-            // Still run the observation window so we can see if ring events come through.
-        }
-        log("=== Probe sequence start ===")
-        // Brief settle so the log starts with no ambient writes mixed in.
-        delay(2_000)
-        val patterns = listOf(
-            "A_zeros_32"   to ByteArray(32) { 0x00 },
-            "B_ffs_32"     to ByteArray(32) { 0xFF.toByte() },
-            "C_alt_64"     to ByteArray(64) { i -> if (i % 2 == 0) 0xAA.toByte() else 0x55.toByte() },
-            "D_zeros_204"  to ByteArray(204) { 0x00 },
-            "E_aa_frame"   to buildAaFrameProbe(),
-            "F_ramp_128"   to ByteArray(128) { i -> (i and 0xFF).toByte() },
-        )
-        for ((label, bytes) in patterns) {
-            log("--- Probe $label (${bytes.size}B): ${hex(bytes.take(16).toByteArray())}${if (bytes.size > 16) "…" else ""}")
-            val ok = rc.sendDisplayPacket(bytes, label)
-            log("Probe $label enqueued=$ok")
-            delay(3_000)        // give Adam time to observe
-        }
-        log("=== Probe writes done — opening 30s ring-input observation window ===")
-        log("Now try ring scroll up, scroll down, and tap. All notifies will log.")
-        delay(30_000)
-        log("=== Observation window closed ===")
+    private fun dumpCharsToLog() {
+        val l = leftBle
+        val r = rightBle
+        log("=== Char dump (L) ===")
+        if (l != null) for (line in l.discoveryDump.lines()) log("[L] $line")
+        log("=== Char dump (R) ===")
+        if (r != null) for (line in r.discoveryDump.lines()) log("[R] $line")
     }
 
-    /** A test packet shaped like the standard AA-framed envelope, in case
-     *  0x6402 uses the same wire format as 0x5401. Service ID set to
-     *  0x0000 so it doesn't activate any known feature. */
-    private fun buildAaFrameProbe(): ByteArray {
-        // Header: AA 21 [seq] [len+2] [pkt_tot=1] [pkt_ser=1] [svc_hi=00] [svc_lo=00]
-        // Payload: 16 bytes of 0x42 ("test marker")
-        val payload = ByteArray(16) { 0x42 }
-        val header = byteArrayOf(
-            0xAA.toByte(),
-            0x21,
-            0x99.toByte(),
-            (payload.size + 2).toByte(),
-            0x01,
-            0x01,
-            0x00,
-            0x00,
-        )
-        // CRC: skip the proper computation for this experimental probe — just
-        // append two arbitrary bytes. If the firmware validates CRC, this will
-        // be rejected (which is itself useful diagnostic info).
-        return header + payload + byteArrayOf(0xDE.toByte(), 0xAD.toByte())
+    // ============================================================
+    // Parsing helpers
+    // ============================================================
+
+    /** If `bytes` looks like an AA-framed packet, return a short
+     *  diagnostic string. Otherwise null. */
+    private fun parseAaFrameHeader(b: ByteArray): String? {
+        if (b.size < 8) return null
+        if (b[0] != 0xAA.toByte()) return null
+        val type = b[1].toInt() and 0xFF
+        val typeLabel = when (type) {
+            0x21 -> "CMD"
+            0x12 -> "RSP"
+            else -> "T${"%02x".format(type)}"
+        }
+        val seq = b[2].toInt() and 0xFF
+        val len = b[3].toInt() and 0xFF
+        val pktTot = b[4].toInt() and 0xFF
+        val pktSer = b[5].toInt() and 0xFF
+        val svcHi = b[6].toInt() and 0xFF
+        val svcLo = b[7].toInt() and 0xFF
+        val service = "%02x-%02x".format(svcHi, svcLo)
+        return "$typeLabel seq=${"%02x".format(seq)} len=${"%02x".format(len)} ${pktTot}/${pktSer} svc=$service"
     }
 
-    private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
+    /** Last 4 hex chars of a UUID for short logging. */
+    private fun shortUuid(u: java.util.UUID): String {
+        val full = u.toString()
+        return full.substringAfterLast("-").take(4) + "/" + full.substring(4, 8)
+    }
+
+    // ============================================================
+    // Lifecycle
+    // ============================================================
 
     @SuppressLint("MissingPermission")
     private fun disconnect() {
         log("Disconnect requested")
-        probeJob?.cancel()
         scanner?.stop()
         scanner = null
         leftStateJob?.cancel(); leftStateJob = null
         rightStateJob?.cancel(); rightStateJob = null
-        leftEventJob?.cancel(); leftEventJob = null
-        rightEventJob?.cancel(); rightEventJob = null
-        leftDisplayJob?.cancel(); leftDisplayJob = null
-        rightDisplayJob?.cancel(); rightDisplayJob = null
+        leftNotifyJob?.cancel(); leftNotifyJob = null
+        rightNotifyJob?.cancel(); rightNotifyJob = null
         leftBle?.shutdownBle()
         rightBle?.shutdownBle()
         leftBle = null
@@ -358,18 +431,38 @@ class ProbeActivity : ComponentActivity() {
         leftReady = false
         rightReady = false
         setStatus("Disconnected")
-        connectBtn.isEnabled = true
-        probeBtn.isEnabled = false
-        disconnectBtn.isEnabled = false
+        runOnUiThread {
+            connectBtn.isEnabled = true
+            disconnectBtn.isEnabled = false
+            listCharsBtn.isEnabled = false
+        }
+        flushLog()
+        log("Log saved: ${logFile?.absolutePath}")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         disconnect()
+        try {
+            connection?.shutdown()
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "ws shutdown failed", e)
+        }
+        connection = null
+        try {
+            logWriter?.flush()
+            logWriter?.close()
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "log file close failed", e)
+        }
         scope.cancel()
     }
 
     companion object {
         const val TAG = "G2CCProbe"
+        fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .readTimeout(Duration.ofSeconds(10))
+            .build()
     }
 }
