@@ -186,12 +186,15 @@ class G2Pipeline(
     // both lenses Ready, runs the multi-service init sequence from
     // EvenAppInit, switches HUD content rendering to NewsHud (service
     // 0x01-20 article-push), and uses RootMenu as the displayed content
-    // source. When false (DEFAULT), uses the teleprompter path that's been
-    // verified to work in 9e4efc9 — every previous APK Adam has installed.
+    // source. When false, uses the teleprompter path that was verified to
+    // work in the Phase D 37-min factory test.
     //
-    // Flip to true ONLY after Phase Y has been smoke-tested. Keep at false
-    // by default until then so an autonomous build doesn't ship a regression.
-    private val PHASE_Y_ENABLED: Boolean = false
+    // FLIPPED TO TRUE 2026-06-03 for hardware shakedown. If the News-style
+    // display path or sync_trigger-only heartbeat regresses the working
+    // teleprompter behavior on Adam's actual glasses, revert this to false
+    // and re-release. The teleprompter path code stays in-tree as the
+    // fallback — flipping the flag is the single revert point.
+    private val PHASE_Y_ENABLED: Boolean = true
 
     // Pipeline start timestamp + run ID for diag correlation. Every diag()
     // emission is prefixed with [T+s] so we can tell when each event
