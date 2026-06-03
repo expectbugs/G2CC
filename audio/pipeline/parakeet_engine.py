@@ -162,7 +162,18 @@ class ParakeetEngine:
                 if not hyps:
                     raise RuntimeError("Parakeet returned empty hypothesis list")
                 hyp = hyps[0]
-                text = getattr(hyp, "text", None) or str(hyp)
+                # R2-pass-2 finding: `getattr(...) or str(hyp)` treats an
+                # EMPTY-STRING `text` as falsy and falls back to the
+                # Hypothesis repr — for silent audio (e.g. a short clip after
+                # zero-pad) Parakeet legitimately returns text='', which the
+                # server's `if (!text.trim())` check is supposed to convert
+                # to stt_error "No speech detected". Without this fix the
+                # Hypothesis class internals (dec_state, lm_state, etc.)
+                # would get sent to CC as the prompt. Use an explicit None
+                # check to preserve the empty-string semantics.
+                text = getattr(hyp, "text", None)
+                if text is None:
+                    text = str(hyp)
 
                 elapsed = time.time() - start
                 duration = self._estimate_duration(audio_path)

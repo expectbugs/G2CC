@@ -261,9 +261,12 @@ class G2Pipeline(
         diag("rootMenu: tap → directory '$displayName' ($path) — requesting CC spawn")
         menuAwaitingSessionInfo = true
         cm.send(ClientMessage.DirectorySelect(path))
+        // R6-MEDIUM: addBack=true so user can bail out if spawn is slow or
+        // wedged (per no-timeouts rule there is no server-side cap, so the
+        // user needs an explicit escape).
         rm.replaceCurrentFrame("Claude Code", listOf(
             RootMenu.MenuItem.Action("(spawning $displayName…)") {},
-        ))
+        ), addBack = true)
     }
 
     /** Phase Ω: first feature-module wiring. Tapping "Claude Code" in the
@@ -409,9 +412,24 @@ class G2Pipeline(
         // force-rescan, BT-cycle reconnect) so the flows track the live Hud.
         val cm = connection
         if (cm != null) {
+            // R4-CRITICAL1: if a server-initiated confirm-on-hud was pending
+            // on the OLD ConfirmationFlow, the server is blocked forever
+            // (no-timeouts rule). Reject it explicitly before we drop the
+            // old instance so the CC subprocess unblocks. Cheap on first
+            // install (pending will be null).
+            confirmation?.onDisconnected()
+            // R4-CRITICAL2: preserve the user's pending STT transcript
+            // across BLE rebuild. Without this, every post-Ready watchdog
+            // rescan / BT-cycle silently discards a transcript the user is
+            // about to confirm.
+            val priorSttPending = sttConfirmation?.takePendingForHandoff()
             menu = MenuController(newHud, cm)
             confirmation = ConfirmationFlow(newHud, cm)
             sttConfirmation = SttConfirmationFlow.forProduction(newHud, cm)
+            if (priorSttPending != null) {
+                diag("installBleClients: re-applying ${priorSttPending.length}c STT pending to new flow")
+                sttConfirmation?.onSttResult(priorSttPending)
+            }
         } else {
             Log.w(TAG, "installBleClients: connection null — start() must run first; flows remain unset")
         }
@@ -802,9 +820,10 @@ class G2Pipeline(
             stopHeartbeat()
             leftBle?.shutdownBle(); rightBle?.shutdownBle()
             leftBle = null; rightBle = null
+            hud = null     // R4-HIGH6: same reasoning as onBluetoothStateOn.
             leftCollectorJob?.cancel(); leftCollectorJob = null
             rightCollectorJob?.cancel(); rightCollectorJob = null
-        bleHealthJob?.cancel(); bleHealthJob = null
+            bleHealthJob?.cancel(); bleHealthJob = null
             scanAndConnect()
         }
     }
@@ -827,6 +846,13 @@ class G2Pipeline(
         pendingHudText = null
         leftBle?.shutdownBle(); rightBle?.shutdownBle()
         leftBle = null; rightBle = null
+        // R4-HIGH6: null the hud reference so any ServerMessage.Output arriving
+        // during the rebuild window falls into the pendingHudText buffer
+        // instead of being silently lost on writes to a dead Hud.
+        // sttConfirmation is kept alive — its pending transcript is preserved
+        // via takePendingForHandoff() in installBleClients, so the STT prompt
+        // re-renders on the new Hud after BLE comes back.
+        hud = null
         leftCollectorJob?.cancel(); leftCollectorJob = null
         rightCollectorJob?.cancel(); rightCollectorJob = null
         bleHealthJob?.cancel(); bleHealthJob = null
@@ -844,6 +870,7 @@ class G2Pipeline(
         bleScannerRef.getAndSet(null)?.stop()
         leftBle?.shutdownBle(); rightBle?.shutdownBle()
         leftBle = null; rightBle = null
+        hud = null         // R4-HIGH6: same reasoning as onBluetoothStateOn.
         leftCollectorJob?.cancel(); leftCollectorJob = null
         rightCollectorJob?.cancel(); rightCollectorJob = null
         bleHealthJob?.cancel(); bleHealthJob = null
@@ -859,6 +886,7 @@ class G2Pipeline(
         rightBle?.shutdownBle()
         leftBle = null
         rightBle = null
+        hud = null         // R4-HIGH6: same reasoning as onBluetoothStateOn.
         leftCollectorJob?.cancel(); leftCollectorJob = null
         rightCollectorJob?.cancel(); rightCollectorJob = null
         bleHealthJob?.cancel(); bleHealthJob = null
@@ -1036,7 +1064,20 @@ class G2Pipeline(
                 scope.launch { refreshEndpoints(cmRef = connection ?: return@launch) }
             },
             onDisconnected = {
-                state.transition(AppState.CONNECTING)
+                // R4-HIGH3: AppState.canTransitionTo does NOT allow
+                // CONNECTING from MENU / AWAITING_TRANSCRIPT /
+                // AWAITING_CONFIRMATION / STREAMING. A normal WS-drop from
+                // any of those states would leave the machine wedged in
+                // the old state forever (onConnected's IDLE transition
+                // also rejects). Use forceSet so disconnect is unambiguous
+                // regardless of prior state.
+                state.forceSet(AppState.CONNECTING)
+                // R5-HIGH1 / R4-HIGH4: stop the mic if recording is in
+                // flight. Without this, AudioRecord keeps reading frames
+                // that connection.sendBinary silently drops (battery drain),
+                // and on reconnect the new socket has no audio_start so the
+                // eventual audio_end is rejected as "without prior audio_start".
+                streamer?.stop()
                 confirmation?.onDisconnected()
                 sttConfirmation?.onDisconnected()
             },
@@ -1076,6 +1117,13 @@ class G2Pipeline(
         sessionHasRenderedOnce.set(false)
         // 4th-pass-final review MEDIUM: clear pendingHudText on hard stop.
         pendingHudText = null
+        // R4-HIGH5: explicitly stop the audio streamer so AudioRecord is
+        // released. scope.cancel() only kills coroutines; AudioRecord is a
+        // system handle and persists across coroutine cancellation. Without
+        // this, a service-restart (STUCK_RELOAD_MS) leaves the mic pinned
+        // and the new MicCapture init fails.
+        streamer?.stop()
+        streamer = null
         // Tear down GATT connections cleanly so the BLE stack doesn't leak
         // open handles across service restart cycles (foreground service
         // reload-on-stuck per the watchdog).
@@ -1234,8 +1282,14 @@ class G2Pipeline(
                         // the full error text; firmware scrolls if it overflows.
                         // R1-HIGH3: addBack=true so the user can dismiss the
                         // error and return to the root menu.
+                        // R6-MEDIUM: collapse newlines / CRs so the error
+                        // doesn't break RootMenu's body-rendering invariant
+                        // (each MenuItem.label occupies exactly one body line;
+                        // an embedded \n would leave subsequent lines un-
+                        // prefixed and break highlight tracking on HUD).
+                        val sanitized = msg.error.replace('\r', ' ').replace('\n', ' ')
                         rm.replaceCurrentFrame("Claude Code", listOf(
-                            RootMenu.MenuItem.Action("✗ ${msg.error}") {},
+                            RootMenu.MenuItem.Action("✗ $sanitized") {},
                         ), addBack = true)
                         diag("rootMenu: cc_error — replaced pending frame with error (${msg.error.length} chars)")
                     } else {
@@ -1244,7 +1298,15 @@ class G2Pipeline(
                 }
             }
             is ServerMessage.SttError -> {
-                hud?.render("STT ERROR: ${msg.error}")
+                hud?.render("STT ERROR: ${msg.error}\n\nTap to try again.")
+                // R5-CRITICAL: without this transition the state stays in
+                // AWAITING_TRANSCRIPT after every stt_error (audio too short,
+                // transcription failed, hallucination, no speech detected).
+                // The R2-CRITICAL onTap guard ("ignored: awaiting STT result")
+                // then silently swallows every subsequent tap — user is
+                // locked out of recording until WS reconnects. Move back to
+                // IDLE so the next tap restarts the recording cycle.
+                state.transition(AppState.IDLE)
             }
             is ServerMessage.Error -> {
                 // ServerMessage.Error carries protocol-level errors (auth race,

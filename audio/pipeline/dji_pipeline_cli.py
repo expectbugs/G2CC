@@ -84,28 +84,52 @@ def main() -> int:
         return 4
 
     if data.ndim > 1:
-        # R3-MEDIUM2: pick the channel that's safe in BOTH plausible
-        # DJI Mic 3 receiver configs, rather than averaging:
-        #   - Mono mode (project default per CLAUDE.md, single TX2 collar
-        #     mic): DJI duplicates TX2 to both USB channels OR delivers
-        #     1 channel that Android promotes to stereo by duplication.
-        #     Either way both channels carry the same TX2 signal.
-        #   - Stereo mode (NLMS fallback config, TX1=machine ref, TX2=collar):
-        #     conventional DJI layout has TX1 on LEFT, TX2 on RIGHT.
-        # Picking RIGHT (index 1) gets TX2 in either config; averaging would
-        # silently fold the noise reference into the speech under the latter
-        # (a violation of LOUD AND PROUD per the project rules). The NLMS
-        # pipeline (audio/pipeline/nlms.py) is the correct entry point for
-        # the stereo TX1+TX2 case — this CLI's downmix is single-mic only.
+        # R6-HIGH: revised approach after the first-pass fix made an
+        # unverified hardware assumption ("TX1 on LEFT, TX2 on RIGHT" was a
+        # guess). The safe behaviour for the single-mic pipeline (the only
+        # one this CLI serves) is:
+        #   - If both channels carry effectively the same signal (DJI in
+        #     Mono mode duplicating TX2, OR phone replicating the only
+        #     channel during USB Audio Class negotiation), pick channel 0 —
+        #     no information is lost.
+        #   - If channels differ significantly (likely the operator has the
+        #     DJI receiver in Stereo / Dual-File mode = TX1 noise reference
+        #     + TX2 speech, which is the NLMS-pipeline config), LOUD-FAIL
+        #     rather than silently averaging (which pollutes speech with
+        #     the noise reference) or silently picking one channel (whose
+        #     mapping to TX1 vs TX2 we cannot verify without hardware tests).
+        #     The operator switches DJI to Mono mode and re-records.
+        # Threshold chosen at 1% of full-scale max — well above ADC noise
+        # but well below any sane TX1+TX2 differential.
         if data.shape[1] != 2:
             print(
                 f'dji_pipeline_cli: WARN unexpected channel count {data.shape[1]}; '
-                f'picking channel 0 (averaging would silently mix unknown channels)',
+                f'picking channel 0',
                 file=sys.stderr,
             )
             data = data[:, 0].astype(np.float32, copy=False)
         else:
-            data = data[:, 1].astype(np.float32, copy=False)
+            ch0 = data[:, 0]
+            ch1 = data[:, 1]
+            diff_rms = float(np.sqrt(np.mean((ch0 - ch1) ** 2)))
+            max_rms = float(max(
+                np.sqrt(np.mean(ch0 ** 2)),
+                np.sqrt(np.mean(ch1 ** 2)),
+                1e-9,
+            ))
+            relative_diff = diff_rms / max_rms
+            if relative_diff > 0.01:
+                print(
+                    f'dji_pipeline_cli: REFUSING stereo input — channels differ '
+                    f'(relative RMS diff {relative_diff:.3f} > 0.01 threshold). '
+                    f'Likely DJI receiver in Stereo/Dual-File mode (TX1+TX2 '
+                    f'separate). This CLI is single-mic only — switch DJI to '
+                    f'Mono mode (records TX2 only) and re-try, or route through '
+                    f'the NLMS pipeline (audio/pipeline/nlms.py).',
+                    file=sys.stderr,
+                )
+                return 5
+            data = ch0.astype(np.float32, copy=False)
 
     if not args.no_denoise:
         profile_path = Path(args.profile)
@@ -127,12 +151,33 @@ def main() -> int:
         if sr != profile['sample_rate']:
             data = resample(data, sr, profile['sample_rate'])
             sr = profile['sample_rate']
+        # R5-HIGH2: zero-pad short clips up to one full STFT window so
+        # spectral_subtract doesn't raise ValueError on quick utterances
+        # ("yes", "stop") that the >100-byte audio-too-short check at
+        # ws-handler.ts passes through. Pad in time domain; trim back to
+        # original length after wiener so downstream consumers (Parakeet)
+        # see the original duration. nperseg is 2048 at 48 kHz = 43 ms;
+        # any utterance shorter than that gets transparent zero-padding.
+        nperseg = int(profile['nperseg'])
+        original_len = data.shape[0]
+        padded = False
+        if original_len < nperseg:
+            pad_count = nperseg - original_len
+            data = np.concatenate([data, np.zeros(pad_count, dtype=np.float32)])
+            padded = True
+            print(
+                f'dji_pipeline_cli: input {original_len} samples (<{nperseg} '
+                f'= nperseg) — zero-padded to one STFT window',
+                file=sys.stderr,
+            )
         peak_freqs = profile.get('peak_freqs', np.array([]))
         if len(peak_freqs) > 0:
             data = notch_filter.apply_notches(data, sr, peak_freqs)
         data = spectral_subtract.wiener_subtract_with_profile(
             data, sr, profile, alpha=args.alpha,
         )
+        if padded:
+            data = data[:original_len]
 
     # DFN polish would go here once numpy 2 compat lands — see
     # audio/requirements.txt for the temporary disable note.

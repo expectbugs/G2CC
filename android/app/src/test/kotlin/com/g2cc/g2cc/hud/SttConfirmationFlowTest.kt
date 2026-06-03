@@ -192,4 +192,40 @@ class SttConfirmationFlowTest {
         assertEquals(1, s.prompts.size)
         assertEquals("better try", s.prompts.last())
     }
+
+    @Test
+    fun takePendingForHandoff_returnsRawAndClears() {
+        // R4-CRITICAL2: BLE rebuild hands off the user's pending transcript
+        // from the OLD SttConfirmationFlow to the NEW one. The accessor
+        // returns the raw (un-formatted) text and atomically clears pending.
+        val s = Spy()
+        s.flow.onSttResult("the quick brown fox")
+        val handoff = s.flow.takePendingForHandoff()
+        assertEquals("the quick brown fox", handoff)
+        assertFalse("must clear pending after handoff", s.flow.isPending())
+    }
+
+    @Test
+    fun takePendingForHandoff_whenNotPending_returnsNull() {
+        val s = Spy()
+        assertEquals(null, s.flow.takePendingForHandoff())
+    }
+
+    @Test
+    fun takePendingForHandoff_thenOnSttResult_restoresPendingOnNewInstance() {
+        // Simulate the full hand-off path: take the raw text from one
+        // instance, then push it into another via onSttResult.
+        val oldSpy = Spy()
+        oldSpy.flow.onSttResult("preserved across rebuild")
+        val raw = oldSpy.flow.takePendingForHandoff()
+        assertEquals("preserved across rebuild", raw)
+
+        val newSpy = Spy()
+        if (raw != null) newSpy.flow.onSttResult(raw)
+        assertTrue(newSpy.flow.isPending())
+        // And confirming via the new instance sends the right text.
+        newSpy.flow.onTap()
+        assertEquals(1, newSpy.prompts.size)
+        assertEquals("preserved across rebuild", newSpy.prompts.last())
+    }
 }

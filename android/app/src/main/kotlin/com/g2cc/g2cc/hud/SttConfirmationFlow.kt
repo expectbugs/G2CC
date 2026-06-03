@@ -99,6 +99,16 @@ class SttConfirmationFlow(
         return formatPrompt(text)
     }
 
+    /** Return the raw pending transcript (not formatted) so it can be handed
+     *  off to a fresh SttConfirmationFlow when BLE rebuilds. R4-CRITICAL2:
+     *  installBleClients re-creates the flow whenever Hud is replaced; without
+     *  this hand-off, the user's transcript is silently discarded on every
+     *  BLE rescan. Caller pattern:
+     *      val prior = oldFlow?.takePendingForHandoff()
+     *      newFlow = SttConfirmationFlow.forProduction(...)
+     *      if (prior != null) newFlow.onSttResult(prior) */
+    fun takePendingForHandoff(): String? = pending.getAndSet(null)
+
     /** Called when the WebSocket disconnects. The pending transcript is
      *  discarded loudly AND a visible "lost" message replaces the
      *  confirmation prompt on HUD — otherwise the prompt keeps showing
@@ -125,10 +135,26 @@ class SttConfirmationFlow(
 
         /** Production wiring helper — connects the functional callbacks to
          *  the real Hud + ConnectionManager. Tests construct the class
-         *  directly with lambdas. */
+         *  directly with lambdas.
+         *
+         *  R5-MEDIUM1: route Hud.render's onComplete to a loud Log.w so a
+         *  failed BLE write (degraded link, MTU mismatch, transient stack
+         *  bug) surfaces in logcat. The user-visible failure mode is
+         *  "prompt invisible, tap silently confirms" — this won't fix that
+         *  race but it gives Adam a debugging trail. */
         fun forProduction(hud: Hud, connection: ConnectionManager): SttConfirmationFlow =
             SttConfirmationFlow(
-                renderHud = { text -> hud.render(text) },
+                renderHud = { text ->
+                    hud.render(text) { ok ->
+                        if (!ok) {
+                            android.util.Log.w(
+                                TAG,
+                                "BLE write failed for STT prompt — user may not see it; " +
+                                "next tap would still confirm the pending transcript",
+                            )
+                        }
+                    }
+                },
                 sendPrompt = { text -> connection.send(ClientMessage.Prompt(text)) },
             )
     }

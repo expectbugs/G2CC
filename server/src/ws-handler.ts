@@ -313,11 +313,15 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         sendMsg(client, { type: 'stt_error', error: `Invalid audio_start: sampleRate=${sr} channels=${ch} (must be > 0)` })
         break
       }
-      // 4th-pass review MEDIUM: loud-fail when audio_start arrives while
-      // we're already collecting. The previous reset was silent — N bytes
-      // of audio just vanished. Violates LOUD AND PROUD. Could happen on
-      // race conditions, double-tap during recording, or buggy clients.
-      if (client.collectingAudio && client.audioChunks.length > 0) {
+      // Loud-fail when audio_start arrives while we're already collecting.
+      // The previous reset was silent — N bytes of audio just vanished.
+      // Violates LOUD AND PROUD. Could happen on race conditions, double-
+      // tap during recording, or buggy clients. R5-MEDIUM2: previously
+      // also required audioChunks.length > 0, which silently swallowed
+      // the zero-byte case (back-to-back audio_starts with no binary
+      // frames between them) — those still corrupt audioFormat below
+      // and deserve the same loud signal.
+      if (client.collectingAudio) {
         const prevBytes = client.audioChunks.reduce((n, c) => n + c.length, 0)
         console.warn(`[ws] audio_start while already collecting — discarding ${prevBytes} bytes of in-progress audio`)
         sendMsg(client, { type: 'stt_error', error: `overlapping audio_start; previous ${prevBytes} bytes discarded` })
@@ -801,15 +805,20 @@ async function handleAudio(
   }
 
   // Route based on the phone-announced format:
-  //   - DJI USB path (48 kHz / 2 ch / float32 / source='dji-usb'): full noise
-  //     pipeline (notch → wiener → parakeet) via pipeline.dji_pipeline_cli.
-  //   - Legacy phone-mic (16 kHz / 1 ch / int16): preprocessAudio + faster-whisper
-  //     or Parakeet via the existing transcribe() path. Phone mic is the
-  //     "no DJI plugged in" fallback for dev iteration; production target is DJI.
+  //   - DJI USB path (any rate >= 8 kHz / 2 ch / float32 / source='dji-usb'):
+  //     full noise pipeline (notch → wiener → parakeet) via
+  //     pipeline.dji_pipeline_cli. The pipeline resamples to the noise
+  //     profile's rate (48 kHz) internally — we don't require the phone to
+  //     announce 48 kHz exactly because some USB Audio Class enumerations
+  //     don't surface 48 kHz as a top-level sampleRate (R5-HIGH3).
+  //   - Legacy phone-mic (16 kHz / 1 ch / int16): preprocessAudio +
+  //     faster-whisper or Parakeet via the existing transcribe() path.
+  //     Phone mic is the "no DJI plugged in" fallback for dev iteration;
+  //     production target is DJI.
   const isDji = format.source === 'dji-usb' &&
     format.encoding === 'float32' &&
     format.channels === 2 &&
-    format.sampleRate === 48_000
+    format.sampleRate >= 8_000
   const isLegacyShape = format.encoding === 'int16' &&
     format.channels === 1 &&
     format.sampleRate === 16_000
