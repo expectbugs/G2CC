@@ -84,6 +84,21 @@
             android:exported="false"
             android:label="@string/setup_title" />
 
+        <!-- Probe activity — separate launcher icon ("G2CC Probe") for the
+             raw-display + raw-input experiment. Does NOT start any
+             foreground service. Standalone BLE connect + auth + probe writes
+             to 0x6402 + notify capture. Removable by deleting this <activity>
+             block and the Kotlin source under com/g2cc/g2cc/probe/. -->
+        <activity
+            android:name=".probe.ProbeActivity"
+            android:exported="true"
+            android:label="G2CC Probe">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!-- Foreground service: connectedDevice|microphone type. Sticky so
              Android restarts it if killed (subject to battery-opt exemption).
              Including `microphone` so AudioRecord works from within the FG

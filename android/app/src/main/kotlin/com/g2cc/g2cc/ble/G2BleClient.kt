@@ -46,6 +46,17 @@ class G2BleClient(
 
     private var writeChar: BluetoothGattCharacteristic? = null
     private var notifyChar: BluetoothGattCharacteristic? = null
+    // Probe support — display-service char (0x6402 under parent 0x6450).
+    // Discovered opportunistically; null if the firmware doesn't expose it
+    // on this connection. Probe activity calls [sendDisplayPacket] / collects
+    // [displayNotifies] to test raw-display + raw-input hypotheses without
+    // touching the existing teleprompter path.
+    private var displayChar: BluetoothGattCharacteristic? = null
+    private val _displayNotifies = MutableSharedFlow<ByteArray>(extraBufferCapacity = 32)
+    val displayNotifies: SharedFlow<ByteArray> = _displayNotifies.asSharedFlow()
+    /** True after a successful service-discovery that found 0x6402. Probes
+     *  using [sendDisplayPacket] will no-op (and Log.w) until this is true. */
+    val isDisplayCharAvailable: Boolean get() = displayChar != null
 
     /** Diagnostic: count of notification packets received, and hex of last one's
      *  first 24 bytes. Read by G2Pipeline after Hud.render onComplete fires so
@@ -190,6 +201,20 @@ class G2BleClient(
             _state.value = ConnectionState.Error(side, lastDiagnostic)
             return false
         }
+        // Probe support: opportunistically look up the display char on its
+        // parent service (0x6450). NOT required for normal operation — failure
+        // is non-fatal, just logged.
+        val displaySvc = gatt.getService(G2Constants.SERVICE_DISPLAY)
+        if (displaySvc != null) {
+            displayChar = displaySvc.getCharacteristic(G2Constants.CHAR_DISPLAY)
+            if (displayChar == null) {
+                Log.i(TAG, "[$side] display service 6450 found, but char 6402 missing")
+            } else {
+                Log.i(TAG, "[$side] display char 6402 discovered (probe mode capable)")
+            }
+        } else {
+            Log.i(TAG, "[$side] display service 6450 not found (firmware may not expose it)")
+        }
         lastDiagnostic = "svc+chars ok"
         return true
     }
@@ -256,11 +281,56 @@ class G2BleClient(
                 .fail { _, status -> failLoudly("enableNotifications", status) }
                 .enqueue()
         }
+        // Probe support: subscribe to 0x6402 notify if the char exists and
+        // advertises notify property. The probe activity collects from
+        // displayNotifies to see what the display char emits when activated.
+        displayChar?.let { char ->
+            val hasNotify = (char.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
+            if (hasNotify) {
+                setNotificationCallback(char).with { _, data ->
+                    val raw = data.value ?: return@with
+                    if (!_displayNotifies.tryEmit(raw)) {
+                        Log.w(TAG, "[$side] displayNotifies SharedFlow buffer overflow — dropped")
+                    }
+                }
+                enableNotifications(char)
+                    .fail { _, status -> Log.w(TAG, "[$side] enableNotifications(6402) status=$status") }
+                    .enqueue()
+                Log.i(TAG, "[$side] subscribed to 0x6402 notify (probe mode)")
+            } else {
+                Log.i(TAG, "[$side] 0x6402 char does not advertise notify property; write-only")
+            }
+        }
     }
 
     override fun onServicesInvalidated() {
         writeChar = null
         notifyChar = null
+        displayChar = null
+    }
+
+    /** Probe-only: write a raw payload to characteristic 0x6402 (display
+     *  channel) WITHOUT the AA-frame envelope or any feature activation.
+     *  Used by ProbeActivity to test whether the display channel accepts
+     *  arbitrary writes. No-op + Log.w if the char wasn't discovered.
+     *
+     *  Returns true on enqueue success — actual delivery surfaces via
+     *  the BluetoothGatt callback chain (no return value here). */
+    @SuppressLint("MissingPermission")
+    fun sendDisplayPacket(packet: ByteArray, label: String = "probe"): Boolean {
+        val char = displayChar ?: run {
+            Log.w(TAG, "[$side] sendDisplayPacket($label) — 0x6402 not available; firmware may have moved or hidden it")
+            return false
+        }
+        writeCharacteristic(
+            char,
+            packet,
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
+        ).fail { _, status ->
+            Log.e(TAG, "[$side] sendDisplayPacket($label) status=$status (${packet.size} bytes)")
+        }.enqueue()
+        Log.i(TAG, "[$side] sendDisplayPacket($label) — ${packet.size} bytes enqueued")
+        return true
     }
 
     /** Run the 7-packet auth handshake. Each write checks status; failures
