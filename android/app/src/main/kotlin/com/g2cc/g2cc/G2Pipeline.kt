@@ -186,15 +186,23 @@ class G2Pipeline(
     // both lenses Ready, runs the multi-service init sequence from
     // EvenAppInit, switches HUD content rendering to NewsHud (service
     // 0x01-20 article-push), and uses RootMenu as the displayed content
-    // source. When false, uses the teleprompter path that was verified to
-    // work in the Phase D 37-min factory test.
+    // source.
     //
-    // FLIPPED TO TRUE 2026-06-03 for hardware shakedown. If the News-style
-    // display path or sync_trigger-only heartbeat regresses the working
-    // teleprompter behavior on Adam's actual glasses, revert this to false
-    // and re-release. The teleprompter path code stays in-tree as the
-    // fallback — flipping the flag is the single revert point.
-    private val PHASE_Y_ENABLED: Boolean = true
+    // Tried true on 2026-06-03 — app did NOT come up on Adam's glasses at
+    // all. Architectural insight from that test: News mode in the Even App
+    // is a SUB-feature of the default HUD (it's content delivery INTO the
+    // running HUD feature), not a self-contained display takeover. The
+    // `0x01-20` channel + `sync_trigger` keepalive + `EvenAppInit` sequence
+    // were designed to be layered on top of the firmware's default HUD
+    // loop, not to replace it. Teleprompter (0x06-20) is the only known
+    // self-contained takeover that lets us drive every pixel.
+    //
+    // Reverted to false. The teleprompter path that closed Phase D
+    // (37-min factory pocket test, zero disconnects) is the right
+    // foundation. Re-using RootMenu / NewsHud / EvenAppInit code as a
+    // Phase Y takeover is not viable without a different protocol path;
+    // that work moves to a future research thread.
+    private val PHASE_Y_ENABLED: Boolean = false
 
     // Pipeline start timestamp + run ID for diag correlation. Every diag()
     // emission is prefixed with [T+s] so we can tell when each event
