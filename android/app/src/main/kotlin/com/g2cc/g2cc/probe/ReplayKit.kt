@@ -54,6 +54,22 @@ object ReplayKit {
     )
 
     /**
+     * Display-activation prelude for a COLD (phone-initiated) launch — verbatim
+     * from the 2026-06-03 *phone-launch* BTSnoop, i.e. the writes the Even Hub
+     * app sends to ready the display before its cold `e0-20` launch (no glasses
+     * menu, no `e0-01`). Sent in order *before* [DOCULENS_LAUNCH]:
+     *   1. `81-20` Display Trigger
+     *   2. `04-20` Display Wake
+     *   3. `0e-20` display region config (the region DocuLens renders into)
+     * Each is a complete AA frame; written verbatim to 0x5401.
+     */
+    val COLD_INIT: List<ByteArray> = listOf(
+        hex("aa213108010181200801103c1a00d8ee"),
+        hex("aa213210010104200801103d1a080801100118072801a95f"),
+        hex("aa21469301010e2008021051228a0108011215080210904e1d00d8ad4525000000002800300038001215080310d00f1d00007a4425000000002800300038001214080410001d0000000025000000002800300038001214080510001d0000b842250000ae422800300038001214080610001d0000c042250000c4422800300038001214080910001d00000000250000000028003000380018006d43"),
+    )
+
+    /**
      * Read protobuf field 1 (the EvenHub message-type discriminator) from an
      * AA-frame PAYLOAD (the bytes after the 8-byte header, before the CRC).
      * Returns null if the payload doesn't begin with the field-1 varint tag

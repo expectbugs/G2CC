@@ -29,6 +29,20 @@ class ReplayKitTest {
     }
 
     @Test
+    fun coldInit_framesAreWellFormedWithValidCrc() {
+        // Verbatim display-activation frames (81-20 / 04-20 / 0e-20) — re-validate
+        // the embedded hex via CRC so a mis-transcription fails here, not on glasses.
+        val expected = listOf(0x8120, 0x0420, 0x0e20)
+        assertEquals("COLD_INIT count", expected.size, ReplayKit.COLD_INIT.size)
+        for ((i, f) in ReplayKit.COLD_INIT.withIndex()) {
+            assertEquals("init[$i] magic", 0xAA.toByte(), f[0])
+            val svc = ((f[6].toInt() and 0xFF) shl 8) or (f[7].toInt() and 0xFF)
+            assertEquals("init[$i] service", expected[i], svc)
+            assertTrue("init[$i] CRC must verify", G2Frame.verifyCrc(f))
+        }
+    }
+
+    @Test
     fun doculensLaunch_isByteIdenticalToCapture() {
         // Captured CRC was f450 (little-endian last two bytes).
         val n = ReplayKit.DOCULENS_LAUNCH.size

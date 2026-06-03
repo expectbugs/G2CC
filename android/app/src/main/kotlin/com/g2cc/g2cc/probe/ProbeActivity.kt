@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.text.method.ScrollingMovementMethod
 import android.util.TypedValue
 import android.view.ViewGroup
@@ -24,6 +25,7 @@ import com.g2cc.g2cc.ble.ConnectionState
 import com.g2cc.g2cc.ble.G2Constants
 import com.g2cc.g2cc.ble.PairingState
 import com.g2cc.g2cc.ble.Side
+import com.g2cc.g2cc.ble.Teleprompter
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.ConnectionManager
 import com.g2cc.g2cc.net.ServerMessage
@@ -34,7 +36,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.io.File
@@ -108,6 +112,25 @@ class ProbeActivity : ComponentActivity() {
     /** True between sending our launch-response and receiving its ack — stops
      *  the auto-responder firing twice if the firmware re-sends the request. */
     @Volatile private var launchInFlight = false
+
+    // Cold launch + keepalive (probe v5)
+    private lateinit var coldLaunchBtn: Button
+    private lateinit var autoRelaunchBtn: Button
+
+    /** When on, the probe cold-launches G2CC automatically on every R-lens Ready
+     *  — so it self-heals after a drop (heavy-persistence test). */
+    @Volatile private var autoRelaunch = false
+
+    /** Session keepalive: 80-00 sync_trigger to R every [HEARTBEAT_MS]. Started
+     *  on R Ready, cancelled on R disconnect. Without it the Hub session times
+     *  out (~22s) even though BLE stays up. */
+    private var heartbeatJob: Job? = null
+    @Volatile private var hbSeq = 0x90
+    @Volatile private var hbMsgId = 0x60
+
+    /** PARTIAL_WAKE_LOCK so the heartbeat coroutine's delay() fires on schedule
+     *  when the screen is off / phone in pocket (Phase D lesson). */
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private lateinit var prefs: Prefs
     private lateinit var pairing: PairingState
@@ -316,6 +339,24 @@ class ProbeActivity : ComponentActivity() {
         presetRow.addView(presetDoclistBtn)
         outer.addView(presetRow)
 
+        // Cold launch (phone-initiated, no glasses menu) + persistence (probe v5)
+        val coldRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        coldLaunchBtn = Button(this).apply {
+            text = "COLD LAUNCH G2CC"
+            isEnabled = false
+            setOnClickListener { coldLaunch(Side.Right) }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f)
+        }
+        autoRelaunchBtn = Button(this).apply {
+            text = "RELAUNCH: OFF"
+            isEnabled = false
+            setOnClickListener { toggleAutoRelaunch() }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        coldRow.addView(coldLaunchBtn)
+        coldRow.addView(autoRelaunchBtn)
+        outer.addView(coldRow)
+
         evenHubText = TextView(this).apply {
             text = "EvenHub (e0-xx): none seen yet"
             setTextColor(Color.argb(255, 255, 210, 120))
@@ -481,6 +522,7 @@ class ProbeActivity : ComponentActivity() {
         txSeq = 8 // auth re-runs (seq 1–7) on each connect; manual frames resume at 8
         autoRespond = false
         launchInFlight = false
+        acquireWakeLock() // keep CPU alive so the heartbeat fires on schedule
         val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager).adapter
         val leftDev = adapter.getRemoteDevice(leftAddr)
         val rightDev = adapter.getRemoteDevice(rightAddr)
@@ -521,7 +563,13 @@ class ProbeActivity : ComponentActivity() {
                     presetLaunchBtn.isEnabled = true
                     presetMenuBtn.isEnabled = true
                     presetDoclistBtn.isEnabled = true
+                    coldLaunchBtn.isEnabled = true
+                    autoRelaunchBtn.isEnabled = true
                 }
+            }
+            if (side == Side.Right) {
+                startHeartbeat(Side.Right)               // keep the Hub session alive
+                if (autoRelaunch) coldLaunch(Side.Right) // self-heal after a drop
             }
             if (leftReady && rightReady) {
                 setStatus("Auth'd. Notify subscriptions active on every char with notify property.")
@@ -534,6 +582,10 @@ class ProbeActivity : ComponentActivity() {
         }
         if (s is ConnectionState.Error || s is ConnectionState.Disconnected) {
             if (side == Side.Left) leftReady = false else rightReady = false
+            if (side == Side.Right) {
+                stopHeartbeat()
+                launchInFlight = false  // a fresh Ready can cold-launch cleanly
+            }
             runOnUiThread {
                 if (side == Side.Left) {
                     sendLBtn.isEnabled = false
@@ -543,6 +595,8 @@ class ProbeActivity : ComponentActivity() {
                     presetLaunchBtn.isEnabled = false
                     presetMenuBtn.isEnabled = false
                     presetDoclistBtn.isEnabled = false
+                    coldLaunchBtn.isEnabled = false
+                    autoRelaunchBtn.isEnabled = false
                 }
             }
         }
@@ -587,16 +641,98 @@ class ProbeActivity : ComponentActivity() {
      *  on human reaction time. [launchInFlight] prevents a double-fire if the
      *  firmware re-sends the request before our response is acked. */
     private fun maybeAutoRespond(side: Side, svcLo: Int, f1: Int?) {
-        if (!autoRespond) return
-        if (svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_LAUNCH_REQUEST && !launchInFlight) {
+        // Glasses-initiated launch request → send launch-response (armed only).
+        if (autoRespond && svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_LAUNCH_REQUEST && !launchInFlight) {
             launchInFlight = true
             log("[$side] AUTO ▶ launch-request seen → sending DocuLens launch-response")
             sendPreset(side, "auto:DocuLens-launch", ReplayKit.DOCULENS_LAUNCH)
-        } else if (svcLo == 0x00 && f1 == ReplayKit.MSGTYPE_LAUNCH_ACK && launchInFlight) {
-            launchInFlight = false
-            log("[$side] AUTO ▶ launch ack → sending G2CC menu")
-            sendPreset(side, "auto:G2CC-menu", ReplayKit.G2CC_MENU)
+            return
         }
+        // Launch ack → send our menu. Completes EITHER trigger (the armed
+        // auto-responder OR the cold-launch button — both set launchInFlight).
+        if (svcLo == 0x00 && f1 == ReplayKit.MSGTYPE_LAUNCH_ACK && launchInFlight) {
+            launchInFlight = false
+            log("[$side] launch ack → sending G2CC menu")
+            sendPreset(side, "G2CC-menu", ReplayKit.G2CC_MENU)
+        }
+    }
+
+    // ============================================================
+    // Cold launch + keepalive + persistence (probe v5)
+    // ============================================================
+
+    /** Phone-INITIATED cold launch — no glasses menu, no e0-01. Sends the
+     *  display-activation prelude then the DocuLens launch-response; the e0-00
+     *  ack then triggers our G2CC menu (see [maybeAutoRespond]). */
+    private fun coldLaunch(side: Side) {
+        val ble = when (side) {
+            Side.Left -> leftBle
+            Side.Right -> rightBle
+        }
+        if (ble == null) {
+            log("[$side] COLD LAUNCH: not connected")
+            return
+        }
+        log("[$side] COLD LAUNCH — display init + cold DocuLens launch (token ${ReplayKit.DOCULENS_TOKEN})")
+        for ((i, f) in ReplayKit.COLD_INIT.withIndex()) sendPreset(side, "cold-init[$i]", f)
+        launchInFlight = true
+        sendPreset(side, "cold:DocuLens-launch", ReplayKit.DOCULENS_LAUNCH)
+    }
+
+    private fun toggleAutoRelaunch() {
+        autoRelaunch = !autoRelaunch
+        runOnUiThread { autoRelaunchBtn.text = if (autoRelaunch) "RELAUNCH: ON" else "RELAUNCH: OFF" }
+        log("Auto-relaunch ${if (autoRelaunch) "ON — cold-launch G2CC on every (re)connect" else "OFF"}")
+    }
+
+    /** Session keepalive to [side]: 80-00 sync_trigger every [HEARTBEAT_MS].
+     *  Cancels any prior heartbeat so reconnects don't stack jobs. */
+    private fun startHeartbeat(side: Side) {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            log("[$side] heartbeat started (sync_trigger every ${HEARTBEAT_MS / 1000}s)")
+            while (isActive) {
+                val ble = when (side) {
+                    Side.Left -> leftBle
+                    Side.Right -> rightBle
+                }
+                if (ble != null) {
+                    val frame = Teleprompter.buildSyncTrigger(hbSeq, hbMsgId)
+                    hbSeq = (hbSeq + 1) and 0xFF
+                    hbMsgId = (hbMsgId + 1) and 0x7FFF
+                    ble.sendToChar(G2Constants.CHAR_WRITE, frame, "heartbeat")
+                }
+                delay(HEARTBEAT_MS) // HB exception to the no-timeouts rule
+            }
+        }
+    }
+
+    private fun stopHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        try {
+            val pm = getSystemService(PowerManager::class.java)
+            wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "G2CC:ProbeHeartbeat")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            log("wake lock acquired: held=${wakeLock?.isHeld}")
+        } catch (e: Exception) {
+            log("wake lock acquire failed: ${e.message}")
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let { if (it.isHeld) it.release() }
+        } catch (e: Exception) {
+            log("wake lock release failed: ${e.message}")
+        }
+        wakeLock = null
     }
 
     private fun dumpCharsToLog() {
@@ -743,6 +879,8 @@ class ProbeActivity : ComponentActivity() {
     @SuppressLint("MissingPermission")
     private fun disconnect() {
         log("Disconnect requested")
+        stopHeartbeat()
+        releaseWakeLock()
         scanner?.stop()
         scanner = null
         leftStateJob?.cancel(); leftStateJob = null
@@ -757,6 +895,7 @@ class ProbeActivity : ComponentActivity() {
         rightReady = false
         autoRespond = false
         launchInFlight = false
+        autoRelaunch = false
         setStatus("Disconnected")
         runOnUiThread {
             connectBtn.isEnabled = true
@@ -769,6 +908,9 @@ class ProbeActivity : ComponentActivity() {
             presetLaunchBtn.isEnabled = false
             presetMenuBtn.isEnabled = false
             presetDoclistBtn.isEnabled = false
+            coldLaunchBtn.isEnabled = false
+            autoRelaunchBtn.isEnabled = false
+            autoRelaunchBtn.text = "RELAUNCH: OFF"
         }
         flushLog()
         log("Log saved: ${logFile?.absolutePath}")
@@ -794,6 +936,11 @@ class ProbeActivity : ComponentActivity() {
 
     companion object {
         const val TAG = "G2CCProbe"
+
+        /** sync_trigger keepalive cadence. Even App used 15s; we use 10s for
+         *  margin under the firmware's ~22s Hub-session timeout. HB exception to
+         *  the no-timeouts rule (CLAUDE.md §"Three Absolute Rules"). */
+        const val HEARTBEAT_MS = 10_000L
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(Duration.ofSeconds(10))
             .readTimeout(Duration.ofSeconds(10))
