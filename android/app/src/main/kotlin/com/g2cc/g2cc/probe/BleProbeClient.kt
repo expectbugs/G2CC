@@ -202,19 +202,39 @@ class BleProbeClient(
     }
 
     /** Write arbitrary bytes to ANY discovered characteristic.
-     *  Returns true if enqueued (char exists + writable), false otherwise.
-     *  Failure status comes through logcat. */
+     *
+     *  Returns true if the write was enqueued (char exists + writable), false
+     *  otherwise. [onResult] reports the eventual outcome exactly once:
+     *   - false synchronously if the char is missing / not writable,
+     *   - true from the BLE `done` callback once the write is dispatched,
+     *   - false from the BLE `fail` callback with the GATT status.
+     *
+     *  This exists so the Probe UI can surface write outcomes to Adam's
+     *  on-screen + server diag log — not just logcat he can't see over SSH
+     *  (CLAUDE.md: NO SILENT FAILURES). NOTE: for WRITE_NO_RESPONSE there is no
+     *  ATT-level ack, so `done` means "handed to the controller", not "the
+     *  glasses accepted it" — any application-level confirmation arrives later
+     *  as a notify. The detail string says so honestly. */
     @SuppressLint("MissingPermission")
-    fun sendToChar(uuid: UUID, bytes: ByteArray, label: String = "raw"): Boolean {
+    fun sendToChar(
+        uuid: UUID,
+        bytes: ByteArray,
+        label: String = "raw",
+        onResult: ((success: Boolean, detail: String) -> Unit)? = null,
+    ): Boolean {
         val char = discoveredChars[uuid] ?: run {
-            Log.w(TAG, "[$side] sendToChar($label) — uuid=$uuid not discovered")
+            val msg = "uuid=$uuid not discovered"
+            Log.w(TAG, "[$side] sendToChar($label) — $msg")
+            onResult?.invoke(false, msg)
             return false
         }
         val props = char.properties
         val canWriteNoResp = (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
         val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
         if (!canWriteNoResp && !canWrite) {
-            Log.w(TAG, "[$side] sendToChar($label) — uuid=$uuid is not writable; props=${describeProps(props)}")
+            val msg = "uuid=$uuid is not writable; props=${describeProps(props)}"
+            Log.w(TAG, "[$side] sendToChar($label) — $msg")
+            onResult?.invoke(false, msg)
             return false
         }
         val writeType = if (canWriteNoResp) {
@@ -223,9 +243,22 @@ class BleProbeClient(
             BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         }
         writeCharacteristic(char, bytes, writeType)
-            .fail { _, status -> Log.e(TAG, "[$side] sendToChar($label) status=$status (${bytes.size}B to $uuid)") }
+            .done {
+                val detail = if (canWriteNoResp) {
+                    "dispatched (no-resp) ${bytes.size}B to $uuid"
+                } else {
+                    "ack ${bytes.size}B to $uuid"
+                }
+                Log.i(TAG, "[$side] sendToChar($label) $detail")
+                onResult?.invoke(true, detail)
+            }
+            .fail { _, status ->
+                val msg = "status=$status (${bytes.size}B to $uuid)"
+                Log.e(TAG, "[$side] sendToChar($label) $msg")
+                onResult?.invoke(false, msg)
+            }
             .enqueue()
-        Log.i(TAG, "[$side] sendToChar($label) — ${bytes.size}B to $uuid")
+        Log.i(TAG, "[$side] sendToChar($label) — enqueued ${bytes.size}B to $uuid")
         return true
     }
 
