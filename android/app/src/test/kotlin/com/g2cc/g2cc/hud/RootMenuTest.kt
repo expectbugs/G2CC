@@ -1,6 +1,7 @@
 package com.g2cc.g2cc.hud
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -216,6 +217,61 @@ class RootMenuTest {
         menu.replaceCurrentFrame("Y", listOf(RootMenu.MenuItem.Action("b") {}))
         // Single item; no synthetic back was added.
         assertEquals("b", menu.highlightedLabel)
+    }
+
+    @Test
+    fun pushSubmenu_withDisplayHeader_rendersHeaderAboveItems() {
+        // M3: displayHeader is read-only content rendered above the items
+        // list — used to show STT transcripts in the confirmation submenu
+        // without making them tappable.
+        val (menu, renders) = build()
+        menu.pushSubmenu(
+            title = "Confirm transcript",
+            items = listOf(
+                RootMenu.MenuItem.Action("✓ Send") {},
+                RootMenu.MenuItem.Action("⟲ Re-record") {},
+            ),
+            displayHeader = "the quick brown fox jumps over the lazy dog",
+        )
+        val (title, body) = renders.last()
+        assertEquals("Confirm transcript", title)
+        // The displayHeader is rendered FIRST, before the items list.
+        assertTrue("body must start with the header",
+            body.startsWith("the quick brown fox jumps over the lazy dog\n\n"))
+        // The synthetic Back action is highlighted by default (index 0).
+        assertEquals("← Back", menu.highlightedLabel)
+    }
+
+    @Test
+    fun replaceCurrentFrame_withDisplayHeader_preservesAcrossReplace() {
+        // M5: when an SttResult arrives, the dispatchInbound handler does
+        // replaceCurrentFrame with displayHeader=transcript. Verify the
+        // transcript is rendered in the new frame's body.
+        val (menu, renders) = build()
+        menu.pushSubmenu("Recording", listOf(RootMenu.MenuItem.Action("(recording)") {}))
+        menu.replaceCurrentFrame(
+            title = "Confirm",
+            items = listOf(RootMenu.MenuItem.Action("✓ Send") {}),
+            displayHeader = "transcript here",
+        )
+        val (title, body) = renders.last()
+        assertEquals("Confirm", title)
+        assertTrue("body contains the transcript", body.contains("transcript here"))
+        assertTrue("body contains the action", body.contains("✓ Send"))
+    }
+
+    @Test
+    fun render_withoutDisplayHeader_unchangedFormat() {
+        // Verify the default (no displayHeader) keeps the existing body
+        // shape — just items, no leading section. Guards against
+        // unintentional whitespace insertion from M3.
+        val (menu, renders) = build()
+        menu.render()
+        val (_, body) = renders.last()
+        assertFalse("body must not start with double newline",
+            body.startsWith("\n\n"))
+        assertTrue("body starts with the highlight prefix",
+            body.startsWith("▶ "))
     }
 
     @Test

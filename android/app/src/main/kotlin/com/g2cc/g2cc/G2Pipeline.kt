@@ -180,6 +180,13 @@ class G2Pipeline(
     // when SessionInfo or CcError arrives.
     @Volatile private var menuAwaitingSessionInfo: Boolean = false
 
+    // M4: tracks the active CC session's project name (or null if no session
+    // is active). Set when SessionInfo arrives, cleared on switch-project
+    // / exit-session. Drives whether "Claude Code" in the root menu shows
+    // the directory picker (no session) or the active-session menu
+    // (Record prompt / Switch project / Exit).
+    @Volatile private var activeCcProjectName: String? = null
+
     // === Phase Y feature flag ===
     //
     // When true, the pipeline takes the Even-App-style display path: after
@@ -226,18 +233,16 @@ class G2Pipeline(
      *  in the server log are correlatable. */
     fun emitDiag(text: String) = diag(text)
 
-    /** Build the root menu. "Claude Code" is the first real feature module
-     *  (Phase Ω) — wires through to the dispatch-target/directory-picker/
-     *  CC-spawn flow that already exists server-side. Other items remain
-     *  placeholders pending their own feature module implementations.
+    /** Build the root menu. "Claude Code" routes to either the directory
+     *  picker (no active session) or the active-session submenu via
+     *  [enterCcMenu]. Other items remain placeholders pending their own
+     *  feature module implementations.
      *
-     *  Note: this menu is only instantiated when PHASE_Y_ENABLED=true (see
-     *  installBleClients). With the flag off the menu code is dead — Phase Ω
-     *  validates the architecture against real server endpoints, but the
-     *  user-visible activation waits on Phase Y's display-path switch. */
+     *  M1: instantiated unconditionally now (was Phase Y-gated). The
+     *  RootMenu is the primary user input surface in teleprompter mode. */
     private fun buildRootMenuItems(): List<RootMenu.MenuItem> = listOf(
         RootMenu.MenuItem.Action("Claude Code") {
-            startCcDispatchFromMenu()
+            enterCcMenu()
         },
         RootMenu.MenuItem.Action("Aria") {
             diag("rootMenu: tap → Aria (placeholder)")
@@ -255,6 +260,78 @@ class G2Pipeline(
             diag("rootMenu: tap → Settings (placeholder)")
         },
     )
+
+    /** M4: route the user into the right CC submenu based on whether a CC
+     *  session is already active. No session → directory picker flow.
+     *  Active session → Record prompt / Switch project / Exit. */
+    private fun enterCcMenu() {
+        val rm = rootMenu ?: return
+        val activeName = activeCcProjectName
+        if (activeName == null) {
+            startCcDispatchFromMenu()
+        } else {
+            rm.pushSubmenu(
+                title = "Claude Code: $activeName",
+                items = buildActiveCcMenuItems(activeName),
+            )
+        }
+    }
+
+    /** M4: the active-CC submenu items. "Record prompt" toggles the audio
+     *  streamer; the recording-in-progress state replaces this frame with
+     *  a "(recording — tap to stop)" item via [toggleRecording]. */
+    private fun buildActiveCcMenuItems(projectName: String): List<RootMenu.MenuItem> = listOf(
+        RootMenu.MenuItem.Action("Record prompt") {
+            toggleRecording()
+        },
+        RootMenu.MenuItem.Action("Switch project") {
+            activeCcProjectName = null
+            startCcDispatchFromMenu()
+        },
+        RootMenu.MenuItem.Action("Exit session") {
+            // Server-side session close not yet wired from this entry point;
+            // for now, just drop client-side tracking. Server keeps the
+            // process alive until next switch.
+            activeCcProjectName = null
+            rootMenu?.popToRoot()
+            diag("rootMenu: exit session → cleared local activeCcProjectName")
+        },
+    )
+
+    /** M4: toggle recording. Recursive in spirit — the in-recording frame's
+     *  tap-to-stop Action calls this same method again, which sees
+     *  isStreaming=true and stops. */
+    private fun toggleRecording() {
+        val s = streamer ?: run {
+            diag("toggleRecording: streamer not initialized")
+            return
+        }
+        val rm = rootMenu ?: return
+        if (s.isStreaming) {
+            s.stop()
+            // While the server is transcribing, show a transient "wait"
+            // frame so the user knows something is happening. SttResult
+            // arrival will replace this with the confirmation submenu.
+            rm.replaceCurrentFrame(
+                title = "Processing",
+                items = listOf(RootMenu.MenuItem.Action("(transcribing…)") {}),
+            )
+            state.transition(AppState.AWAITING_TRANSCRIPT)
+            diag("toggleRecording: stopped streamer; showing transcribing frame")
+        } else {
+            s.start()
+            rm.replaceCurrentFrame(
+                title = "Recording",
+                items = listOf(
+                    RootMenu.MenuItem.Action("(recording — tap to stop)") {
+                        toggleRecording()
+                    },
+                ),
+            )
+            state.transition(AppState.AWAITING_TRANSCRIPT)
+            diag("toggleRecording: started streamer; showing recording frame")
+        }
+    }
 
     /** Tapping a directory entry in the menu's directory submenu fires this —
      *  sends DirectorySelect(path) which the server responds to with a
@@ -444,20 +521,38 @@ class G2Pipeline(
         } else {
             Log.w(TAG, "installBleClients: connection null — start() must run first; flows remain unset")
         }
-        // Phase Y: also instantiate NewsHud + RootMenu so the alternate
-        // display path is ready if PHASE_Y_ENABLED is on. Both live alongside
-        // the teleprompter Hud; only one is used per render depending on
-        // the flag. RootMenu's render callback feeds into NewsHud which
-        // writes to BLE via the News-style 0x01-20 path.
+        // M1: instantiate RootMenu in BOTH display paths. Teleprompter mode
+        // (default after the 2026-06-03 hardware test showed News mode is
+        // sub-feature only) renders the menu via teleprompter HUD by
+        // combining title + body into a single string. Phase Y wiring kept
+        // gated for any future protocol-takeover attempt.
+        // RootMenu is preserved across BLE rebuild — its stack state and
+        // pending feature-module work survive a BLE rescan. Render callbacks
+        // look up `this.hud` / `this.newsHud` at call time so they always
+        // hit the CURRENT instances even after rebuild.
         if (PHASE_Y_ENABLED) {
             val nh = NewsHud(left, right)
             newsHud = nh
+        } else {
+            newsHud = null
+        }
+        if (rootMenu == null) {
             rootMenu = RootMenu(rootItems = buildRootMenuItems()) { title, body ->
-                nh.render(title, body) { ok ->
-                    diag("phaseY: news-render '${title.take(20)}' ok=$ok body=${body.length}c")
+                if (PHASE_Y_ENABLED) {
+                    newsHud?.render(title, body) { ok ->
+                        diag("phaseY: news-render '${title.take(20)}' ok=$ok body=${body.length}c")
+                    }
+                } else {
+                    val combined = if (body.isNotEmpty()) "$title\n$body" else title
+                    hud?.render(combined) { ok ->
+                        if (!ok) diag("rootMenu: BLE render failed for '${title.take(20)}'")
+                    }
                 }
             }
         }
+        // Force re-render on the new Hud so the user sees the menu come
+        // back up after BLE rebuild. Deferred until after onBothReadyEdge
+        // fires (which is when render actually has a chance of succeeding).
         // Cancel any prior collectors so a re-install (e.g. after BLE disconnect
         // + reconnect) doesn't stack a second pair, double-firing every onTap.
         leftCollectorJob?.cancel()
@@ -508,99 +603,82 @@ class G2Pipeline(
                 val h = hud
                 val l = leftBle
                 val r = rightBle
-                val conn = connection
+                val rm = rootMenu
                 if (h == null) {
                     diag("hud: NULL on Ready edge! cannot render")
                     return
                 }
                 stopPostReadyWatchdog()
                 stopHeartbeat()
-                // Phase Y branch: run EvenAppInit then render RootMenu via
-                // NewsHud. Skips the teleprompter path entirely.
+                // Phase Y branch — gated off in current builds (News mode is
+                // sub-feature of default HUD, not a takeover). Code paths
+                // preserved for any future Phase Y attempt.
                 if (PHASE_Y_ENABLED) {
-                    val rm = rootMenu
                     val nh = newsHud
                     if (rm == null || nh == null) {
                         diag("phaseY: rootMenu/newsHud NULL — falling back to teleprompter path")
                     } else {
                         runPhaseYInit { initOk ->
                             if (!initOk) {
-                                // 4th-pass-final review HIGH: previously this
-                                // just logged and returned, leaving us with
-                                // no heartbeat AND no watchdog (we'd stopped
-                                // both above). Glasses would time out in 22s
-                                // with zero recovery. Now: start the
-                                // post-Ready watchdog so the 5s deadline
-                                // triggers a force-rescan if init keeps
-                                // failing. Diag includes the failure context
-                                // so we can debug.
                                 diag("phaseY: init failed — starting recovery watchdog")
                                 startPostReadyWatchdog()
                                 return@runPhaseYInit
                             }
                             sessionHasRenderedOnce.set(true)
                             pendingHudText = null
-                            // Render the root menu — this populates lastTitle/lastBody
-                            // on NewsHud so reconnect paths can replay.
                             rm.render()
                             startHeartbeat()
                         }
                         return
                     }
                 }
-                // Priority: STT confirmation prompt (user is waiting on the
-                // gate) > most recent server intent (pendingHudText) > Hud's
-                // last cached render > hello frame. The STT confirmation
-                // prompt takes precedence because losing it would discard
-                // the user's recent recording silently — they'd see CC's
-                // last output and not realize a transcript was waiting.
-                val textToRender = sttConfirmation?.getPendingPrompt()
-                    ?: pendingHudText
-                    ?: h.lastRenderedText
-                    ?: "G2CC paired\nL+R authed\n(idle)"
-                // Reconnect path: this pipeline has rendered before in THIS
-                // session (across BLE client rebuilds), OR there's
-                // session-state evidence (heartbeat ticked, or text differs
-                // from the default hello frame). Each of these alone proves
-                // we're not in a fresh post-install state.
-                val isReconnect = sessionHasRenderedOnce.get() ||
-                                  heartbeatTickCount.get() > 0 ||
-                                  textToRender != "G2CC paired\nL+R authed\n(idle)"
+                // Teleprompter path priority chain (default):
+                //   1. pendingHudText — CC streamed Output during outage;
+                //      render via hud so user catches up
+                //   2. STT confirmation pending — render the legacy STT prompt
+                //   3. RootMenu — default content (M1)
+                //   4. Hud.lastRenderedText — defensive replay
+                //   5. Hello frame — fresh-install fallback
+                val explicitText = pendingHudText
+                    ?: sttConfirmation?.getPendingPrompt()
                 val notifyBefore = "L=${l?.notifyCount?.get() ?: -1} R=${r?.notifyCount?.get() ?: -1}"
-                // One-shot diag: show actual MTU + PHY so we can see whether
-                // the BLE-stability requests (2M PHY, LOW_POWER priority) were
-                // accepted by the glasses or fell back to defaults.
                 diag(
                     "ble-link: L mtu=${l?.lastMtu ?: -1} phy=${l?.lastPhy ?: "?"} ${l?.lastConnParams ?: "?"} | " +
                     "R mtu=${r?.lastMtu ?: -1} phy=${r?.lastPhy ?: "?"} ${r?.lastConnParams ?: "?"}"
                 )
-                diag(
-                    "hud: ${if (isReconnect) "RECONNECT" else "initial"}-render | notify-before $notifyBefore"
-                )
-                // 2026-06-03 regression fix: use FULL pacing on reconnect.
-                // Adam reported "comes back blank with End Feature?" on ~half
-                // of reconnects — fast-rerender's cut-down delays
-                // (100/200/30ms vs 300/500/100ms) race past the firmware's
-                // mode-switch when the firmware fully exited teleprompter
-                // during the BLE drop. Take-over succeeds (we see End
-                // Feature?) but content stream gets flooded. The original
-                // "End Feature? but blank" bug from project start was fixed
-                // by the slow pacing; reconnects need the same treatment.
-                // Heartbeat still uses fastReRender=true (firmware is
-                // definitely in HUD mode there).
-                h.render(textToRender, fastReRender = false) { ok ->
-                    val lCount = l?.notifyCount?.get() ?: -1
-                    val rCount = r?.notifyCount?.get() ?: -1
-                    diag(
-                        "hud: render-done ok=$ok mode=${if (isReconnect) "RECONNECT-slow" else "initial-slow"} | notify: $notifyBefore → L=$lCount R=$rCount"
-                    )
-                    if (ok) {
-                        sessionHasRenderedOnce.set(true)
-                        // Clear the outage-buffer now that its content has
-                        // been delivered. Future reconnects fall through to
-                        // Hud.lastRenderedText for the source-of-truth replay.
-                        pendingHudText = null
-                        startHeartbeat()
+                val isReconnect = sessionHasRenderedOnce.get() || heartbeatTickCount.get() > 0
+                if (explicitText != null) {
+                    diag("hud: ${if (isReconnect) "RECONNECT" else "initial"}-render explicit | notify-before $notifyBefore")
+                    h.render(explicitText, fastReRender = false) { ok ->
+                        diag("hud: render-done ok=$ok mode=${if (isReconnect) "RECONNECT-explicit" else "initial-explicit"}")
+                        if (ok) {
+                            sessionHasRenderedOnce.set(true)
+                            pendingHudText = null
+                            startHeartbeat()
+                        }
+                    }
+                } else if (rm != null) {
+                    // Default: render the menu. RootMenu's onRender callback
+                    // is wired to hud.render(combined) above. Start heartbeat
+                    // immediately — heartbeat re-renders on its cadence so
+                    // even if the menu's first render is in flight, the next
+                    // tick replays. sessionHasRenderedOnce set on render
+                    // dispatch since RootMenu's onRender doesn't surface
+                    // success/failure to this level (covered by the diag in
+                    // the menu's render callback closure).
+                    diag("hud: ${if (isReconnect) "RECONNECT" else "initial"}-render menu | notify-before $notifyBefore")
+                    rm.render()
+                    sessionHasRenderedOnce.set(true)
+                    startHeartbeat()
+                } else {
+                    val fallback = h.lastRenderedText ?: "G2CC paired\nL+R authed\n(idle)"
+                    diag("hud: ${if (isReconnect) "RECONNECT" else "initial"}-render fallback | notify-before $notifyBefore")
+                    h.render(fallback, fastReRender = false) { ok ->
+                        diag("hud: render-done ok=$ok mode=fallback")
+                        if (ok) {
+                            sessionHasRenderedOnce.set(true)
+                            startHeartbeat()
+                        }
                     }
                 }
             }
@@ -929,8 +1007,6 @@ class G2Pipeline(
                 is EventParser.Event.Tap -> {
                     val prev = lastTapAt.get()
                     if (now - prev >= EVENT_DEBOUNCE_MS && lastTapAt.compareAndSet(prev, now)) {
-                        // Phase Y: route taps to RootMenu when active.
-                        if (PHASE_Y_ENABLED && rootMenu?.onTap() == true) return@collect
                         onTap()
                     }
                 }
@@ -942,28 +1018,24 @@ class G2Pipeline(
                 }
                 is EventParser.Event.ScrollUp -> {
                     val prev = lastScrollUpAt.get()
-                    // 4th-pass-final review MEDIUM: dispatch INSIDE the
-                    // CAS-success branch (mirror Tap pattern) so concurrent
-                    // L+R collectors can't double-fire the scroll handler
-                    // on a single ring event.
                     if (now - prev >= EVENT_DEBOUNCE_MS && lastScrollUpAt.compareAndSet(prev, now)) {
-                        // Phase Y: route scroll-up to RootMenu (prev item).
-                        if (PHASE_Y_ENABLED) rootMenu?.onScrollPrev()
-                        // Firmware-native scroll handles teleprompter pages; no app action otherwise.
+                        // M2: route scroll-up to RootMenu (prev item) ALWAYS
+                        // (not gated on PHASE_Y_ENABLED). Per Adam's design,
+                        // the menu is the primary interaction surface.
+                        rootMenu?.onScrollPrev()
                     }
                 }
                 is EventParser.Event.ScrollDown -> {
                     val prev = lastScrollDownAt.get()
                     if (now - prev >= EVENT_DEBOUNCE_MS && lastScrollDownAt.compareAndSet(prev, now)) {
-                        // Phase Y: route scroll-down to RootMenu (next item).
-                        if (PHASE_Y_ENABLED) rootMenu?.onScrollNext()
+                        // M2: route scroll-down to RootMenu (next item) ALWAYS.
+                        rootMenu?.onScrollNext()
                     }
                 }
                 is EventParser.Event.ScrollFocus -> {
-                    // Ring detected motion start. Phase Y: ensure RootMenu
-                    // re-renders (e.g. if the firmware had cleared the
-                    // display); cheap no-op otherwise.
-                    if (PHASE_Y_ENABLED) rootMenu?.render()
+                    // Ring detected motion start. Trigger a menu re-render so
+                    // a firmware-cleared display gets refreshed.
+                    rootMenu?.render()
                 }
                 is EventParser.Event.InternalMenuEvent -> {
                     // Glasses' internal-menu event (decorated 0x12345678 channel).
@@ -980,67 +1052,44 @@ class G2Pipeline(
         }
     }
 
-    /** Single-tap dispatch — priority order:
+    /** Single-tap dispatch — priority order (M2 model):
      *   1. server-initiated confirm-on-hud pending → confirmed
-     *   2. STT confirmation pending → send transcript as Prompt (Phase 8)
-     *   3. streaming → stop recording (audio_end will fire to server)
-     *   4. AWAITING_TRANSCRIPT (recording stopped, STT in flight) → ignore
-     *   5. idle → start recording */
+     *   2. STT confirmation pending → send transcript as Prompt (legacy;
+     *      will be subsumed into the menu's confirmation submenu in M5)
+     *   3. RootMenu — the primary input surface. Tap selects the highlighted
+     *      Action / drills into Submenu / pops Back. Recording start/stop
+     *      lives as menu Actions, not as a special-case tap dispatch.
+     *
+     * The previous "tap = audio toggle" path is GONE — Adam's design has
+     * the user navigate to "Record prompt" inside the CC submenu, and the
+     * Action's onSelect lambda handles the streamer toggle. */
     fun onTap() {
         if (confirmation?.onTap() == true) return
         if (sttConfirmation?.onTap() == true) {
-            // Confirmed; CC will start streaming output to the HUD shortly.
             state.transition(AppState.STREAMING)
             return
         }
-        val s = streamer ?: run {
-            Log.w(TAG, "onTap: streamer not initialized")
-            return
-        }
-        if (s.isStreaming) {
-            s.stop()
-            state.transition(AppState.AWAITING_TRANSCRIPT)
-            return
-        }
-        // Guard against starting a new recording while a transcription is in
-        // flight from a previous stop. Without this, an impatient double-tap
-        // (or two single taps in quick succession after audio_end) would
-        // start audio_start again, which the server then rejects with
-        // "previous transcription still in flight" — confusing UX. Better
-        // to no-op the tap loudly via diag.
-        if (state.current == AppState.AWAITING_TRANSCRIPT) {
-            diag("onTap: ignored (awaiting STT result; tap again after transcript arrives)")
-            return
-        }
-        s.start()
-        state.transition(AppState.AWAITING_TRANSCRIPT)
+        // M2: route taps to the menu. Returns true if a menu item was
+        // selected. If the menu is empty / null we just diag and stop —
+        // there's nothing else to do with a tap in the new model.
+        if (rootMenu?.onTap() == true) return
+        diag("onTap: no menu / unconsumed — ignoring")
     }
 
-    /** Double-tap dispatch — priority order:
-     *   1. server-initiated confirm-on-hud pending → rejected + reopen audio
-     *   2. STT confirmation pending → discard transcript (Phase 8)
-     *      Caveat: firmware may eat double-tap in teleprompter mode; see
-     *      SttConfirmationFlow class docs.
-     *   3. streaming → cancel recording
-     *   4. else → show menu (only reachable when firmware lets the event through) */
+    /** Double-tap dispatch — usually firmware-intercepted (shows "End
+     *  Feature?"). Kept for the rare event types that do reach the phone:
+     *   1. server-initiated confirm-on-hud pending → rejected
+     *   2. STT confirmation pending → discard (legacy)
+     *  All other double-tap inputs are ignored in the M2 menu-primary model. */
     fun onDoubleTap() {
         if (confirmation?.onDoubleTap() == true) {
-            streamer?.start()
-            state.transition(AppState.AWAITING_TRANSCRIPT)
             return
         }
         if (sttConfirmation?.onDoubleTap() == true) {
             state.transition(AppState.IDLE)
             return
         }
-        val s = streamer
-        if (s?.isStreaming == true) {
-            s.stop()
-            state.transition(AppState.IDLE)
-        } else {
-            menu?.showMenu()
-            state.transition(AppState.MENU)
-        }
+        diag("onDoubleTap: no consumer — ignoring (firmware usually intercepts this)")
     }
 
     /** Phase 8 hookpoint: Tasker `START_RECORDING` / `STOP_RECORDING` intents land here. */
@@ -1223,35 +1272,46 @@ class G2Pipeline(
             }
             is ServerMessage.ResponseComplete -> {
                 state.transition(AppState.IDLE)
+                // M6: CC finished streaming — replace whatever's on screen
+                // (CC output text rendered via hud.render) with the active
+                // CC menu so the user has the next action available.
+                val rm = rootMenu
+                val name = activeCcProjectName
+                if (rm != null && name != null) {
+                    rm.replaceCurrentFrame(
+                        title = "Claude Code: $name",
+                        items = buildActiveCcMenuItems(name),
+                        addBack = true,
+                    )
+                    diag("rootMenu: response_complete → re-rendered active CC menu")
+                }
             }
             is ServerMessage.SessionInfo -> {
                 Log.i(TAG, "session_info project=${msg.projectPath} resumed=${msg.resumed} ccId=${msg.ccSessionId}")
-                // Phase Ω: if the menu flow triggered this spawn, replace the
-                // current "Spawning…" frame with a success confirmation. The
-                // menu stays mounted (still consuming taps) — Phase Y polish
-                // will decide how prompts get back into CC from here.
+                val projectName = msg.projectPath.substringAfterLast('/').ifEmpty { msg.projectPath }
+                // M4: mark the session active so subsequent "Claude Code"
+                // taps route into the active submenu instead of triggering
+                // a new dispatch flow.
+                activeCcProjectName = projectName
+                // If the menu flow triggered this spawn, replace the
+                // "Spawning…" frame with the active CC menu directly so
+                // the user can immediately Record prompt.
                 if (menuAwaitingSessionInfo) {
                     menuAwaitingSessionInfo = false
                     val rm = rootMenu
                     if (rm != null) {
-                        // R1-MEDIUM1: if user backed out of the spawning
-                        // frame before SessionInfo landed, don't clobber root.
                         if (rm.depth == 0) {
                             diag("rootMenu: session_info arrived after user backed out — ignoring")
                             return
                         }
-                        val projectName = msg.projectPath.substringAfterLast('/').ifEmpty { msg.projectPath }
                         val verb = if (msg.resumed) "Resumed" else "Started"
-                        // R1-HIGH3: addBack=true so the user can navigate out
-                        // of the success confirmation back to the root menu.
-                        rm.replaceCurrentFrame("Claude Code", listOf(
-                            RootMenu.MenuItem.Action("✓ $verb $projectName") {
-                                // Tap on success row does nothing yet — Phase Y
-                                // polish wires it to a "send prompt" action or
-                                // similar once the audio path is end-to-end.
-                            },
-                        ), addBack = true)
-                        diag("rootMenu: session_info — replaced spawning frame with success ($projectName, resumed=${msg.resumed})")
+                        rm.replaceCurrentFrame(
+                            title = "Claude Code: $projectName",
+                            items = buildActiveCcMenuItems(projectName),
+                            addBack = true,
+                            displayHeader = "✓ $verb $projectName",
+                        )
+                        diag("rootMenu: session_info → active CC submenu ($projectName, resumed=${msg.resumed})")
                     }
                 }
             }
@@ -1309,14 +1369,33 @@ class G2Pipeline(
                 }
             }
             is ServerMessage.SttError -> {
-                hud?.render("STT ERROR: ${msg.error}\n\nTap to try again.")
-                // R5-CRITICAL: without this transition the state stays in
-                // AWAITING_TRANSCRIPT after every stt_error (audio too short,
-                // transcription failed, hallucination, no speech detected).
-                // The R2-CRITICAL onTap guard ("ignored: awaiting STT result")
-                // then silently swallows every subsequent tap — user is
-                // locked out of recording until WS reconnects. Move back to
-                // IDLE so the next tap restarts the recording cycle.
+                // M5: surface the error inside the menu so the user can
+                // retry or back out cleanly. The "Retry recording" Action
+                // re-triggers toggleRecording immediately.
+                val rm = rootMenu
+                val name = activeCcProjectName
+                if (rm != null) {
+                    rm.replaceCurrentFrame(
+                        title = "STT error",
+                        items = listOfNotNull(
+                            RootMenu.MenuItem.Action("⟲ Retry recording") {
+                                toggleRecording()
+                            },
+                            name?.let { projectName ->
+                                RootMenu.MenuItem.Action("← Back to Claude Code") {
+                                    rm.replaceCurrentFrame(
+                                        title = "Claude Code: $projectName",
+                                        items = buildActiveCcMenuItems(projectName),
+                                        addBack = true,
+                                    )
+                                }
+                            },
+                        ),
+                        displayHeader = msg.error,
+                    )
+                } else {
+                    hud?.render("STT ERROR: ${msg.error}\n\nTap to try again.")
+                }
                 state.transition(AppState.IDLE)
             }
             is ServerMessage.Error -> {
@@ -1336,9 +1415,56 @@ class G2Pipeline(
             is ServerMessage.PermissionRequest -> Log.i(TAG, "permission_request: id=${msg.requestId} tool=${msg.tool}")
             is ServerMessage.SttResult -> {
                 Log.i(TAG, "stt_result: \"${msg.text}\"")
+                val transcript = msg.text
+                val rm = rootMenu
+                val cm = connection
+                val name = activeCcProjectName
+                if (rm != null && cm != null) {
+                    // M5: menu-driven STT confirmation. The transcript goes
+                    // in displayHeader (read-only, untruncated, scrollable).
+                    // The user picks ✓ to send to CC, ⟲ to re-record (which
+                    // immediately calls toggleRecording), or ✗ to cancel
+                    // back to the active CC menu.
+                    rm.replaceCurrentFrame(
+                        title = "Confirm transcript",
+                        items = listOfNotNull(
+                            RootMenu.MenuItem.Action("✓ Send to Claude") {
+                                cm.send(ClientMessage.Prompt(transcript))
+                                rm.replaceCurrentFrame(
+                                    title = "Sending…",
+                                    items = listOf(
+                                        RootMenu.MenuItem.Action("(waiting for Claude response)") {},
+                                    ),
+                                )
+                                state.transition(AppState.STREAMING)
+                            },
+                            RootMenu.MenuItem.Action("⟲ Re-record") {
+                                toggleRecording()
+                            },
+                            name?.let { projectName ->
+                                RootMenu.MenuItem.Action("✗ Cancel") {
+                                    rm.replaceCurrentFrame(
+                                        title = "Claude Code: $projectName",
+                                        items = buildActiveCcMenuItems(projectName),
+                                        addBack = true,
+                                    )
+                                    state.transition(AppState.IDLE)
+                                }
+                            } ?: RootMenu.MenuItem.Action("✗ Cancel") {
+                                rm.popToRoot()
+                                state.transition(AppState.IDLE)
+                            },
+                        ),
+                        displayHeader = transcript,
+                    )
+                    state.transition(AppState.AWAITING_CONFIRMATION)
+                    return
+                }
+                // Fallback path: legacy SttConfirmationFlow render (kept for
+                // safety while M5 stabilizes). Shouldn't fire in production.
                 val flow = sttConfirmation
                 if (flow != null) {
-                    flow.onSttResult(msg.text)
+                    flow.onSttResult(transcript)
                     state.transition(AppState.AWAITING_CONFIRMATION)
                 } else {
                     // Server transcribed but the client lacks a confirmation

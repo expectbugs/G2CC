@@ -64,11 +64,17 @@ class RootMenu(
         ) : MenuItem
     }
 
-    /** A frame on the navigation stack. */
+    /** A frame on the navigation stack.
+     *
+     *  [displayHeader] is optional read-only content rendered between the
+     *  title and the items list — used for content that's NOT a tappable
+     *  menu item (e.g. an STT transcript shown above [Confirm / Re-record /
+     *  Cancel] options). Null = no header section, default behavior. */
     private data class Frame(
         val title: String,
         val items: List<MenuItem>,
         var highlightIndex: Int,
+        val displayHeader: String? = null,
     )
 
     // Root is always at stack[0]. Push on Submenu enter; pop on Back action.
@@ -148,11 +154,11 @@ class RootMenu(
      *  reliably receive (ring double-tap fires firmware's "End Feature?").
      *
      *  Re-renders on push so the HUD reflects the new frame immediately. */
-    fun pushSubmenu(title: String, items: List<MenuItem>) {
+    fun pushSubmenu(title: String, items: List<MenuItem>, displayHeader: String? = null) {
         val backItem = MenuItem.Action("← Back") { popFrame() }
         val withBack = listOf(backItem) + items
-        stack += Frame(title = title, items = withBack, highlightIndex = 0)
-        Log.i(TAG, "pushSubmenu '$title' (${items.size} items, depth now ${stack.size - 1})")
+        stack += Frame(title = title, items = withBack, highlightIndex = 0, displayHeader = displayHeader)
+        Log.i(TAG, "pushSubmenu '$title' (${items.size} items, header=${displayHeader?.length ?: 0}c, depth now ${stack.size - 1})")
         render()
     }
 
@@ -171,7 +177,12 @@ class RootMenu(
      *  always-false stranded users in Phase Ω feature flows because the
      *  loading-frame's synthetic back was lost on every replace
      *  (R1-HIGH3). */
-    fun replaceCurrentFrame(title: String, items: List<MenuItem>, addBack: Boolean = false) {
+    fun replaceCurrentFrame(
+        title: String,
+        items: List<MenuItem>,
+        addBack: Boolean = false,
+        displayHeader: String? = null,
+    ) {
         val current = currentFrame
         val finalItems = if (addBack) {
             val backItem = MenuItem.Action("← Back") { popFrame() }
@@ -179,8 +190,13 @@ class RootMenu(
         } else {
             items
         }
-        stack[stack.size - 1] = Frame(title = title, items = finalItems, highlightIndex = 0)
-        Log.i(TAG, "replaceCurrentFrame '${current.title}' → '$title' (${finalItems.size} items, addBack=$addBack)")
+        stack[stack.size - 1] = Frame(
+            title = title,
+            items = finalItems,
+            highlightIndex = 0,
+            displayHeader = displayHeader,
+        )
+        Log.i(TAG, "replaceCurrentFrame '${current.title}' → '$title' (${finalItems.size} items, addBack=$addBack, header=${displayHeader?.length ?: 0}c)")
         render()
     }
 
@@ -199,19 +215,24 @@ class RootMenu(
     fun render() {
         val frame = currentFrame
         val title = frame.title
-        // Body: one item per line, highlighted item prefixed with "▶".
-        // Non-highlighted prefixed with "  " for visual alignment. Long
-        // item lists scroll within the body display area — firmware
+        // Body: optional displayHeader (read-only content like an STT
+        // transcript) followed by the items list. Each item on its own
+        // line; highlighted item prefixed with "▶", others with "  ".
+        // Long content scrolls within the body display area — firmware
         // handles vertical scroll natively (per existing teleprompter
         // observations).
         val body = buildString {
+            if (frame.displayHeader != null) {
+                append(frame.displayHeader)
+                append("\n\n")
+            }
             for ((i, item) in frame.items.withIndex()) {
                 if (i == frame.highlightIndex) append("▶ ") else append("  ")
                 append(item.label)
                 if (i < frame.items.size - 1) append("\n")
             }
         }
-        Log.i(TAG, "render title='$title' highlight=${frame.highlightIndex}/${frame.items.size}")
+        Log.i(TAG, "render title='$title' highlight=${frame.highlightIndex}/${frame.items.size} header=${frame.displayHeader?.length ?: 0}c")
         onRender(title, body)
     }
 
