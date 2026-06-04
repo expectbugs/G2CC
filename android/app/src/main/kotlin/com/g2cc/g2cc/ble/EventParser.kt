@@ -65,6 +65,13 @@ object EventParser {
         data class InternalMenuEvent(val counter: Int, val payloadHex: String) : Event
         /** Frame failed CRC or header validation — emitted loudly. */
         data class Malformed(val reason: String, val rawHex: String) : Event
+        /** EvenHub (`e0-01` `f1=2`) native menu-list selection — the firmware
+         *  tracks focus locally (draws the select border) and reports the chosen
+         *  [index] in container [widgetType]. Primary input for the hijack path. */
+        data class HubSelect(val widgetType: String, val index: Int) : Event
+        /** EvenHub (`e0-01` `f1=2`) low-level gesture (codes 3/4/5/7 observed).
+         *  Firmware handles menu scroll natively, so these are informational. */
+        data class HubGesture(val code: Int) : Event
     }
 
     fun parse(packet: ByteArray): Event {
@@ -83,6 +90,10 @@ object EventParser {
         // Service 0x01-01 = ring input event channel (BTSnoop 2026-06-02).
         if (service.first == 0x01.toByte() && service.second == 0x01.toByte()) {
             return decodeInputEvent(payload)
+        }
+        // Service 0xe0-01 = EvenHub Hub-app input channel (the hijack path).
+        if (service.first == 0xE0.toByte() && service.second == 0x01.toByte()) {
+            return decodeHubInput(payload)
         }
         // Everything else (auth acks, display config responses, etc.) — surface
         // as Unknown so the caller can filter quietly without us losing data.
@@ -191,6 +202,82 @@ object EventParser {
             i++
         }
         return Event.InternalMenuEvent(counter, payload.toHex())
+    }
+
+    /** Decode an EvenHub input event on service 0xe0-01 (`f1=2`). Two shapes
+     *  (PROTOCOL_NOTES §"EvenHub channel", decoded 2026-06-04):
+     *    - SELECTION  `08 02 6a <l> 0a <l> [08 id] 12 <l> <type> [20 idx]`
+     *        → [Event.HubSelect] (firmware reports the chosen item + container)
+     *    - GESTURE    `08 02 6a <l> 1a <l> 08 <code> ...`
+     *        → [Event.HubGesture] (firmware handles scroll natively) */
+    private fun decodeHubInput(payload: ByteArray): Event {
+        val svc = 0xE0.toByte() to 0x01.toByte()
+        // All observed events are `08 02` (f1=2 input) then f13 (tag 0x6a).
+        if (payload.size < 3 || payload[0] != 0x08.toByte() || payload[1] != 0x02.toByte()) {
+            return Event.Unknown(svc, payload.toHex())
+        }
+        if (payload[2] != 0x6A.toByte()) return Event.Unknown(svc, payload.toHex())
+        return try {
+            val (f13Len, used) = Varint.decode(payload, 3)
+            val start = 3 + used
+            if (start + f13Len > payload.size) {
+                return Event.Malformed("hub input: f13 overruns payload", payload.toHex())
+            }
+            val f13 = payload.copyOfRange(start, start + f13Len)
+            when (f13.firstOrNull()?.toInt()?.and(0xFF)) {
+                0x0A -> decodeHubSelection(f13, payload.toHex())   // f13.f1 = selection
+                0x1A -> decodeHubGesture(f13, payload.toHex())     // f13.f3 = gesture
+                else -> Event.Unknown(svc, payload.toHex())
+            }
+        } catch (e: IllegalArgumentException) {
+            Event.Malformed("hub input: ${e.message}", payload.toHex())
+        }
+    }
+
+    /** f13.f1 submessage = `{f1=containerId, f2="<widgetType>", f4=<index>}`. */
+    private fun decodeHubSelection(f13: ByteArray, rawHex: String): Event {
+        return try {
+            val (subLen, used) = Varint.decode(f13, 1)          // f13 = 0a <len> <sub>
+            val s = 1 + used
+            if (s + subLen > f13.size) return Event.Malformed("hub select: overruns", rawHex)
+            val sub = f13.copyOfRange(s, s + subLen)
+            var widgetType: String? = null
+            var index = 0
+            var i = 0
+            while (i < sub.size) {
+                val tag = sub[i].toInt() and 0xFF; i++
+                when (tag) {
+                    0x08 -> { val (_, u) = Varint.decode(sub, i); i += u }   // f1 containerId (ignored)
+                    0x12 -> {                                                 // f2 widgetType string
+                        val (len, u) = Varint.decode(sub, i); i += u
+                        if (i + len > sub.size) return Event.Malformed("hub select: name overruns", rawHex)
+                        widgetType = String(sub, i, len, Charsets.UTF_8); i += len
+                    }
+                    0x20 -> { val (v, u) = Varint.decode(sub, i); i += u; index = v }  // f4 index
+                    else -> return Event.Malformed("hub select: unexpected tag 0x${"%02x".format(tag)}", rawHex)
+                }
+            }
+            if (widgetType != null) Event.HubSelect(widgetType, index)
+            else Event.Malformed("hub select: no widgetType", rawHex)
+        } catch (e: IllegalArgumentException) {
+            Event.Malformed("hub select: ${e.message}", rawHex)
+        }
+    }
+
+    /** f13.f3 submessage = `{f1=<gestureCode>, ...}`. Firmware handles scroll
+     *  locally; informational. */
+    private fun decodeHubGesture(f13: ByteArray, rawHex: String): Event {
+        return try {
+            val (subLen, used) = Varint.decode(f13, 1)          // f13 = 1a <len> <sub>
+            val s = 1 + used
+            if (s + subLen > f13.size) return Event.Malformed("hub gesture: overruns", rawHex)
+            val sub = f13.copyOfRange(s, s + subLen)
+            if (sub.isEmpty() || sub[0] != 0x08.toByte()) return Event.HubGesture(-1)
+            val (code, _) = Varint.decode(sub, 1)
+            Event.HubGesture(code)
+        } catch (e: IllegalArgumentException) {
+            Event.Malformed("hub gesture: ${e.message}", rawHex)
+        }
     }
 
     private fun ByteArray.toHex(): String =

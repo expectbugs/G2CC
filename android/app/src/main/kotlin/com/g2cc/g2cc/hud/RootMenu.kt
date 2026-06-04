@@ -88,11 +88,33 @@ class RootMenu(
      *  Returns true if the tap was consumed by menu navigation (always true
      *  if this controller is active). */
     fun onTap(): Boolean {
+        val item = currentFrame.items.getOrNull(currentFrame.highlightIndex) ?: return true
+        activate(item)
+        return true
+    }
+
+    /** Native menu-list selection (EvenHub path): the firmware tracks focus
+     *  locally (it draws the selection border) and reports the chosen index on
+     *  `e0-01`. Acts on items[index] directly rather than our local highlight;
+     *  syncs highlightIndex for any fallback render. Returns false (loud) if the
+     *  index is out of range. */
+    fun selectIndex(index: Int): Boolean {
         val frame = currentFrame
-        val item = frame.items.getOrNull(frame.highlightIndex) ?: return true
+        val item = frame.items.getOrNull(index) ?: run {
+            Log.w(TAG, "selectIndex($index) out of range (${frame.items.size} items)")
+            return false
+        }
+        frame.highlightIndex = index
+        activate(item)
+        return true
+    }
+
+    /** Shared activation used by both [onTap] (teleprompter highlight model) and
+     *  [selectIndex] (EvenHub firmware-index model). */
+    private fun activate(item: MenuItem) {
         when (item) {
             is MenuItem.Action -> {
-                Log.i(TAG, "tap → Action '${item.label}'")
+                Log.i(TAG, "activate → Action '${item.label}'")
                 try {
                     item.onSelect()
                 } catch (e: Exception) {
@@ -102,7 +124,7 @@ class RootMenu(
                 }
             }
             is MenuItem.Submenu -> {
-                Log.i(TAG, "tap → enter Submenu '${item.label}' (${item.items.size} items)")
+                Log.i(TAG, "activate → enter Submenu '${item.label}' (${item.items.size} items)")
                 // Synthesize a "Back" action prepended to each submenu so
                 // the user can navigate back without needing a gesture we
                 // can't reliably receive (ring double-tap is intercepted by
@@ -113,7 +135,6 @@ class RootMenu(
                 render()
             }
         }
-        return true
     }
 
     /** Move highlight to the next item (wraps). Called on ring scroll. */
@@ -234,6 +255,22 @@ class RootMenu(
         }
         Log.i(TAG, "render title='$title' highlight=${frame.highlightIndex}/${frame.items.size} header=${frame.displayHeader?.length ?: 0}c")
         onRender(title, body)
+    }
+
+    /** Structured snapshot of the current frame for the EvenHub renderer (native
+     *  menu-list). The teleprompter path uses the (title, body) text from
+     *  [onRender]; the EvenHub path pulls this to build a menu-list + menu-header.
+     *  Additive — does not change the [onRender] contract. */
+    data class RenderModel(
+        val title: String,
+        val items: List<String>,
+        val highlightIndex: Int,
+        val displayHeader: String?,
+    )
+
+    /** Snapshot the current frame as a [RenderModel] for the EvenHub renderer. */
+    fun currentRenderModel(): RenderModel = currentFrame.let { f ->
+        RenderModel(f.title, f.items.map { it.label }, f.highlightIndex, f.displayHeader)
     }
 
     /** For debug + tests: current highlighted item label, or null if empty. */

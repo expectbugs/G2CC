@@ -11,6 +11,7 @@ import com.g2cc.g2cc.ble.PairingState
 import com.g2cc.g2cc.ble.Side
 import com.g2cc.g2cc.ble.EvenAppInit
 import com.g2cc.g2cc.hud.ConfirmationFlow
+import com.g2cc.g2cc.hud.EvenHud
 import com.g2cc.g2cc.hud.Hud
 import com.g2cc.g2cc.hud.MenuController
 import com.g2cc.g2cc.hud.NewsHud
@@ -93,6 +94,7 @@ class G2Pipeline(
     // path takes over). See PHASE_Y_ENABLED docstring below.
     private var newsHud: NewsHud? = null
     private var rootMenu: RootMenu? = null
+    private var evenHud: EvenHud? = null
     // AtomicReference so writes from the BLE handler thread (scan callback) are
     // visible from the main thread (stop()) without a torn-reference race.
     private val bleScannerRef = AtomicReference<BleScanner?>(null)
@@ -214,6 +216,31 @@ class G2Pipeline(
     // Phase Y takeover is not viable without a different protocol path;
     // that work moves to a future research thread.
     private val PHASE_Y_ENABLED: Boolean = false
+
+    // === EvenHub display path (the proven DocuLens-hijack, probe v12) ===
+    //
+    // When true (default), the pipeline drives the glasses via the EvenHub
+    // `e0-20` channel: cold-launch the DocuLens slot, render the g2code-style
+    // two-region UI (menu-header status bar + menu-list / main content) through
+    // EvenHud, hold the session with the `f1=12` keepalive (every ~4 s), and take
+    // input from the firmware's native `e0-01` selection events. This is Adam's
+    // chosen primary path ("build the whole thing on the hijack", 2026-06-04).
+    // The teleprompter path (the else-branches below) stays as the escape hatch:
+    // set this false to revert to the Phase-D-proven teleprompter renderer.
+    private val EVENHUB_ENABLED: Boolean = true
+
+    // True once cold-launch has established the EvenHub session — so the menu
+    // render callback knows the first frame already shipped (via coldLaunch) and
+    // subsequent frames are plain content-updates. Reset on every BLE drop.
+    private val evenHubLaunched = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    // Latest server `status` fields, folded into the EvenHub status bar on the
+    // NEXT render (we don't re-render on a status change alone — that would
+    // flicker the whole screen; g2code-style flicker-free per-field upgrade is a
+    // later refinement).
+    @Volatile private var statusMode: String = ""
+    @Volatile private var statusContextPct: Int = 0
+    @Volatile private var statusProcessing: Boolean = false
 
     // Pipeline start timestamp + run ID for diag correlation. Every diag()
     // emission is prefixed with [T+s] so we can tell when each event
@@ -540,16 +567,36 @@ class G2Pipeline(
         } else {
             newsHud = null
         }
+        // EvenHub renderer — rebuilt against the current clients on every install
+        // (post-reconnect, BT-cycle). null when the flag is off (teleprompter path).
+        evenHud = if (EVENHUB_ENABLED) EvenHud(left, right) else null
         if (rootMenu == null) {
             rootMenu = RootMenu(rootItems = buildRootMenuItems()) { title, body ->
-                if (PHASE_Y_ENABLED) {
-                    newsHud?.render(title, body) { ok ->
-                        diag("phaseY: news-render '${title.take(20)}' ok=$ok body=${body.length}c")
+                when {
+                    EVENHUB_ENABLED -> {
+                        // Native EvenHub render: pull the structured frame and draw
+                        // a menu-list (+ status header), or a confirm screen when
+                        // the frame carries a read-only displayHeader (STT
+                        // transcript). Gated on evenHubLaunched — the cold-launch
+                        // ships the first frame itself; renders arriving before the
+                        // session is up are no-ops here (cold-launch / reconnect
+                        // repaints the current frame).
+                        val eh = evenHud
+                        val rm = rootMenu
+                        if (eh != null && rm != null && evenHubLaunched.get()) {
+                            renderModelViaEvenHub(eh, rm.currentRenderModel())
+                        }
                     }
-                } else {
-                    val combined = if (body.isNotEmpty()) "$title\n$body" else title
-                    hud?.render(combined) { ok ->
-                        if (!ok) diag("rootMenu: BLE render failed for '${title.take(20)}'")
+                    PHASE_Y_ENABLED -> {
+                        newsHud?.render(title, body) { ok ->
+                            diag("phaseY: news-render '${title.take(20)}' ok=$ok body=${body.length}c")
+                        }
+                    }
+                    else -> {
+                        val combined = if (body.isNotEmpty()) "$title\n$body" else title
+                        hud?.render(combined) { ok ->
+                            if (!ok) diag("rootMenu: BLE render failed for '${title.take(20)}'")
+                        }
                     }
                 }
             }
@@ -614,6 +661,35 @@ class G2Pipeline(
                 }
                 stopPostReadyWatchdog()
                 stopHeartbeat()
+                // EvenHub path (default): cold-launch the DocuLens slot, render
+                // the current menu, then start the f1=12 keepalive. Fires on the
+                // initial pair-up AND every reconnect (self-heal — the Hub session
+                // is lost when BLE drops, so we re-launch). RootMenu stack state is
+                // preserved across the BLE rebuild, so the current frame repaints.
+                if (EVENHUB_ENABLED) {
+                    val eh = evenHud
+                    if (rm == null || eh == null) {
+                        diag("evenHub: rootMenu=${rm != null} evenHud=${eh != null} NULL on Ready — cannot cold-launch")
+                    } else {
+                        evenHubLaunched.set(false)
+                        val model = rm.currentRenderModel()
+                        diag("evenHub: cold-launch on Ready (${model.items.size} items)")
+                        eh.coldLaunch(composeStatus(model.title), model.items) { ok ->
+                            diag("evenHub: cold-launch done ok=$ok")
+                            if (ok) {
+                                evenHubLaunched.set(true)
+                                sessionHasRenderedOnce.set(true)
+                                pendingHudText = null
+                                startHeartbeat()
+                            } else {
+                                // Launch write failed — let the post-Ready watchdog
+                                // tear down + rescan rather than sit on a dead session.
+                                startPostReadyWatchdog()
+                            }
+                        }
+                        return
+                    }
+                }
                 // Phase Y branch — gated off in current builds (News mode is
                 // sub-feature of default HUD, not a takeover). Code paths
                 // preserved for any future Phase Y attempt.
@@ -695,6 +771,10 @@ class G2Pipeline(
              *  will detect the persistent disconnect and force a re-scan. */
             fun onDroppedEdge(side: String, reason: String) {
                 stopHeartbeat()
+                // EvenHub Hub session is lost when BLE drops — require a fresh
+                // cold-launch on the next Ready edge. Renders during the outage
+                // buffer to pendingHudText instead of writing to a dead session.
+                evenHubLaunched.set(false)
                 // Include the BLE-level disconnect reason from each side so we
                 // can decode the failure: 0x08 = supervision timeout (body
                 // block / out of range), 0x13 = remote user terminated, 0x16
@@ -821,8 +901,17 @@ class G2Pipeline(
             // Either way: cadence is 10s for teleprompter (need to refresh
             // before the 22s firmware timeout), 15s for News (matches
             // Even App).
-            val cadenceMs: Long = if (PHASE_Y_ENABLED) 15_000L else 10_000L
-            diag("hb: started (mode=${if (PHASE_Y_ENABLED) "News-sync_trigger" else "teleprompter-full-rerender"}, cadence=${cadenceMs}ms)")
+            val cadenceMs: Long = when {
+                EVENHUB_ENABLED -> 4_000L          // probe v12 f1=12 cadence
+                PHASE_Y_ENABLED -> 15_000L
+                else -> 10_000L
+            }
+            val hbMode = when {
+                EVENHUB_ENABLED -> "evenHub-f1=12"
+                PHASE_Y_ENABLED -> "News-sync_trigger"
+                else -> "teleprompter-full-rerender"
+            }
+            diag("hb: started (mode=$hbMode, cadence=${cadenceMs}ms)")
             // Track expected-vs-actual delay so we can detect OS scheduler /
             // Doze throttling. With wake lock held in G2CCService this
             // should be ~0; if we still see gap drift, the wake lock isn't
@@ -845,7 +934,18 @@ class G2Pipeline(
                     val r1 = rightBle ?: break
                     val tick = heartbeatTickCount.incrementAndGet()
 
-                    if (PHASE_Y_ENABLED) {
+                    if (EVENHUB_ENABLED) {
+                        // EvenHub session keepalive: e0-20 f1=12 to R every ~4s
+                        // (probe v12 — THE keepalive). Skipped until cold-launch
+                        // establishes the session.
+                        val eh = evenHud
+                        if (eh == null || !evenHubLaunched.get()) {
+                            diag("hb: tick=$tick — evenHub session not ready, skipping")
+                            continue
+                        }
+                        r1.sendPacket(eh.keepaliveFrame(), "HB:e0-f1=12")
+                        diag("hb: tick=$tick (e0 f1=12 keepalive) | R notify=${r1.notifyCount.get()}")
+                    } else if (PHASE_Y_ENABLED) {
                         // News-style: sync_trigger to L+R staggered 2s.
                         val seq = nextHeartbeatSeq()
                         val msgId = heartbeatMsgId.getAndIncrement() and 0xFFFF
@@ -1049,6 +1149,18 @@ class G2Pipeline(
                     // Auth acks, display config responses, etc. EventParser
                     // logs them at DEBUG; no further action here.
                 }
+                is EventParser.Event.HubSelect -> {
+                    // EvenHub native menu-list selection (hijack path): the
+                    // firmware reports the chosen index. Route straight to the
+                    // menu — e0-01 is R-only, single emission, so no debounce.
+                    diag("hub-input: select '${event.widgetType}' idx=${event.index}")
+                    rootMenu?.selectIndex(event.index)
+                }
+                is EventParser.Event.HubGesture -> {
+                    // Firmware handles menu-list scroll natively (draws the
+                    // selection border); informational for bring-up diagnostics.
+                    diag("hub-input: gesture code=${event.code}")
+                }
                 is EventParser.Event.Malformed -> {
                     Log.w(TAG, "malformed BLE event: ${event.reason}")
                 }
@@ -1186,6 +1298,8 @@ class G2Pipeline(
         stopHeartbeat()
         stopPostReadyWatchdog()
         sessionHasRenderedOnce.set(false)
+        evenHubLaunched.set(false)
+        evenHud = null
         // 4th-pass-final review MEDIUM: clear pendingHudText on hard stop.
         pendingHudText = null
         // R4-HIGH5: explicitly stop the audio streamer so AudioRecord is
@@ -1248,6 +1362,86 @@ class G2Pipeline(
     /** ConnectionManager surface for outbound messages. */
     fun send(msg: ClientMessage) { connection?.send(msg) }
 
+    /** Compose the g2code-style status-bar line for the menu-header. v1: a
+     *  connection glyph + the section title + the latest server mode/ctx%
+     *  (captured by the Status handler, applied on the next render). Flicker-free
+     *  per-field upgrades like g2code's are a later refinement. */
+    private fun composeStatus(title: String): String {
+        val conn = if (leftBle != null && rightBle != null) "●" else "○"
+        val sb = StringBuilder("$conn $title")
+        if (statusMode.isNotEmpty() && statusMode != "default") sb.append(" | ").append(statusMode)
+        if (statusContextPct > 0) sb.append(" | ctx:").append(statusContextPct).append('%')
+        if (statusProcessing) sb.append(" | …")
+        return sb.toString()
+    }
+
+    /** Render a RootMenu frame via EvenHud: a confirm screen when it carries a
+     *  read-only displayHeader (STT transcript / confirm prompt), else a menu. */
+    private fun renderModelViaEvenHub(eh: EvenHud, model: RootMenu.RenderModel) {
+        if (model.displayHeader != null) {
+            eh.renderConfirm(model.displayHeader, model.items) { ok ->
+                if (!ok) diag("evenHub: confirm render failed ('${model.title}')")
+            }
+        } else {
+            eh.renderMenu(composeStatus(model.title), model.items) { ok ->
+                if (!ok) diag("evenHub: menu render failed ('${model.title}')")
+            }
+        }
+    }
+
+    /** Render free-form content (CC output, errors) to the active display path.
+     *  EvenHub → status-bar + body text screen; teleprompter → hud.render. When
+     *  the EvenHub session isn't up yet, buffer to pendingHudText for replay. */
+    private fun renderContent(text: String) {
+        if (EVENHUB_ENABLED) {
+            val eh = evenHud
+            if (eh != null && evenHubLaunched.get()) {
+                eh.renderText(composeStatus("Claude Code"), text) { ok ->
+                    if (!ok) diag("evenHub: text render failed (${text.length}c)")
+                }
+            } else {
+                pendingHudText = text
+                diag("evenHub: queued ${text.length}c content (session not launched)")
+            }
+            return
+        }
+        val h = hud
+        if (h != null) {
+            h.render(text)
+        } else {
+            pendingHudText = text
+            diag("hud-buffer: queued ${text.length}-char content while HUD unavailable")
+        }
+    }
+
+    /** EvenHub confirm_on_hud: push a selectable confirm frame (prompt as the
+     *  read-only header; ✓ Confirm / ✗ Reject as menu-list options the firmware
+     *  reports on e0-01). NOTE: unlike the teleprompter ConfirmationFlow this path
+     *  sends no BLE delivery-ack, so the server's channel-router marks delivery
+     *  'unverified' after its window (a status, not a failure). Backing out leaves
+     *  the confirm pending until answered or the socket drops (server rejects all
+     *  pending on close) — consistent with the no-timeouts rule. */
+    private fun showHubConfirm(requestId: String, text: String) {
+        val rm = rootMenu ?: return
+        val cm = connection ?: return
+        rm.pushSubmenu(
+            title = "Confirm",
+            items = listOf(
+                RootMenu.MenuItem.Action("✓ Confirm") {
+                    cm.send(ClientMessage.ConfirmOnHudResponse(requestId, "confirmed"))
+                    rm.popToRoot()
+                    state.transition(AppState.IDLE)
+                },
+                RootMenu.MenuItem.Action("✗ Reject") {
+                    cm.send(ClientMessage.ConfirmOnHudResponse(requestId, "rejected"))
+                    rm.popToRoot()
+                    state.transition(AppState.IDLE)
+                },
+            ),
+            displayHeader = text,
+        )
+    }
+
     private fun dispatchInbound(msg: ServerMessage) {
         when (msg) {
             is ServerMessage.DispatchTargetList -> {
@@ -1303,13 +1497,7 @@ class G2Pipeline(
                 // stale Output, hiding the confirmation prompt the server is
                 // waiting on (wedges per no-timeouts rule). The pendingHud
                 // buffer is now purely a "missed update during outage" queue.
-                val h = hud
-                if (h != null) {
-                    h.render(msg.text)
-                } else {
-                    pendingHudText = msg.text
-                    diag("hud-buffer: queued ${msg.text.length}-char Output while HUD unavailable")
-                }
+                renderContent(msg.text)
             }
             is ServerMessage.TextDelta -> {
                 // Phase 6 doesn't yet stream incremental updates to the HUD —
@@ -1363,6 +1551,13 @@ class G2Pipeline(
             }
             is ServerMessage.ConfirmOnHud -> {
                 state.transition(AppState.AWAITING_CONFIRMATION)
+                if (EVENHUB_ENABLED && rootMenu != null && connection != null) {
+                    // Render the prompt as a selectable confirm frame so the user
+                    // can answer with a tap (firmware reports the choice on e0-01).
+                    diag("confirm: EvenHub confirm frame requestId=${msg.requestId}")
+                    showHubConfirm(msg.requestId, msg.text)
+                    return
+                }
                 val flow = confirmation
                 if (flow == null) {
                     // Display-independence audit fix (CRITICAL finding #1):
@@ -1385,7 +1580,7 @@ class G2Pipeline(
             }
             is ServerMessage.CcError -> {
                 state.transition(AppState.ERROR)
-                hud?.render("ERROR: ${msg.error}")
+                renderContent("ERROR: ${msg.error}")
                 // Phase Ω: if the menu flow triggered this, replace the
                 // current frame with the error so the user isn't left
                 // staring at "Spawning…" / "(loading directories…)" forever.
@@ -1440,7 +1635,7 @@ class G2Pipeline(
                         displayHeader = msg.error,
                     )
                 } else {
-                    hud?.render("STT ERROR: ${msg.error}\n\nTap to try again.")
+                    renderContent("STT ERROR: ${msg.error}\n\nTap to try again.")
                 }
                 state.transition(AppState.IDLE)
             }
@@ -1455,7 +1650,13 @@ class G2Pipeline(
                 diag("server-err: ${msg.message}")
             }
             // Bug fix #6: log loudly instead of silently dropping.
-            is ServerMessage.Status -> Log.i(TAG, "status: mode=${msg.mode} ctx=${msg.contextPct}% processing=${msg.isProcessing}")
+            is ServerMessage.Status -> {
+                Log.i(TAG, "status: mode=${msg.mode} ctx=${msg.contextPct}% processing=${msg.isProcessing}")
+                // Capture for the EvenHub status bar (applied on the next render).
+                statusMode = msg.mode
+                statusContextPct = msg.contextPct
+                statusProcessing = msg.isProcessing
+            }
             is ServerMessage.ToolUse -> Log.i(TAG, "tool_use: ${msg.tool} ${msg.description}")
             is ServerMessage.BackgroundAlertMsg -> Log.i(TAG, "bg_alert: ${msg.alertType} session=${msg.sessionId} ${msg.details ?: ""}")
             is ServerMessage.PermissionRequest -> Log.i(TAG, "permission_request: id=${msg.requestId} tool=${msg.tool}")
@@ -1520,7 +1721,7 @@ class G2Pipeline(
                     // can re-record if needed. No auto-send-to-CC because the
                     // user explicitly asked for a confirmation gate.
                     Log.w(TAG, "stt_result arrived without SttConfirmationFlow — rendering raw, no auto-send")
-                    hud?.render("STT (unconfirmed): \"${msg.text}\"")
+                    renderContent("STT (unconfirmed): \"${msg.text}\"")
                     state.transition(AppState.IDLE)
                 }
             }

@@ -314,4 +314,49 @@ class RootMenuTest {
         assertEquals(0, menu.depth)
         assertEquals("Claude Code", menu.highlightedLabel)
     }
+
+    // ---- EvenHub native-selection model (additive; teleprompter path unchanged) ----
+
+    @Test
+    fun selectIndex_firesActionAtThatIndex() {
+        var fired = -1
+        val items = listOf(
+            RootMenu.MenuItem.Action("a") { fired = 0 },
+            RootMenu.MenuItem.Action("b") { fired = 1 },
+            RootMenu.MenuItem.Action("c") { fired = 2 },
+        )
+        val menu = RootMenu(rootItems = items) { _, _ -> }
+        assertTrue(menu.selectIndex(2))
+        assertEquals(2, fired)
+    }
+
+    @Test
+    fun selectIndex_descendsIntoSubmenuAtThatIndex() {
+        val (menu, _) = build()
+        assertTrue(menu.selectIndex(0))     // index 0 is the "Claude Code" submenu
+        assertEquals(1, menu.depth)
+        assertEquals("← Back", menu.highlightedLabel)
+    }
+
+    @Test
+    fun selectIndex_outOfRange_returnsFalseAndDoesNotNavigate() {
+        val (menu, _) = build()
+        assertFalse(menu.selectIndex(99))
+        assertEquals(0, menu.depth)
+    }
+
+    @Test
+    fun currentRenderModel_reflectsItemsTitleAndHeader() {
+        val (menu, _) = build()
+        val m0 = menu.currentRenderModel()
+        assertEquals("G2CC", m0.title)
+        assertEquals(listOf("Claude Code", "Aria", "SMS", "Email"), m0.items)
+        assertEquals(0, m0.highlightIndex)
+        assertNull(m0.displayHeader)
+        menu.pushSubmenu("Confirm", listOf(RootMenu.MenuItem.Action("✓ Send") {}), displayHeader = "hello transcript")
+        val m1 = menu.currentRenderModel()
+        assertEquals("Confirm", m1.title)
+        assertEquals(listOf("← Back", "✓ Send"), m1.items)
+        assertEquals("hello transcript", m1.displayHeader)
+    }
 }

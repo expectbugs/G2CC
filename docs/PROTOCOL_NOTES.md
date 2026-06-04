@@ -584,11 +584,30 @@ Reverse-engineered from BTSnoop of the Even App running DocuLens + on-glasses pr
 | `e0-01` | G→P | `f1=17` launch request (from glasses menu); `f1=2` ring input event |
 | `e0-20` | P→G | Content + app-state (host → glasses) |
 
-**`e0-20` message types (protobuf field 1):**
-- `f1=0` — **launch-response**: `{f2=msgId, f3={f1=1, f3=<container>, f5=<appToken>}}`. Sending this COLD (no preceding `e0-01`) is the **phone-initiated launch**. DocuLens token = `11417` (stable per app). Container has dims (f3=w f4=h), widget type `f10` (`loading`/`main`/`menu-list`/`doclist`/`pdf-text`/`toolbar`/`menu-header`), text `f12`, list items as repeated `f4` inside `f11` with item-count in `f11.f1`.
-- `f1=7` — **content-update** (new screen/container).
-- `f1=12` — **app-state keepalive**: `08 0c 10 <msgId> 72 00`. **Send every ~4s to keep the session alive** (the session reverts to native UI in ~15-20s without it). THE keepalive (probe v12).
-- `f1=9` — app-state: `08 09 10 <msgId> 5a 02 08 01`. Keeps session alive BUT **triggers the native "End This Feature?" exit menu** — do NOT send.
+**`e0-20` message types** (top-level protobuf `f1`=msgType, `f2`=msgId — monotonic, echoed in the `e0-00` ack). Fully decoded 2026-06-04 from parse1/parse3 (`scripts/btsnoop_parse.py` on `/tmp/g2cc-btsnoop{,3}/`):
+- `f1=0` — **launch-response**: wrapper in `f3 = {f1=1 (container count), f3=<text-container>, f5=<appToken>}`. Sending COLD (no preceding `e0-01`) is the phone-initiated launch. DocuLens token `11417`, Reddit `10217` (stable per app). [parse1 13:15:51.199]
+- `f1=7` — **content-update**: wrapper in `f7 = {f1=<count>, f2=<list-container…>, f3=<text-container…>}` (both repeated). The universal render primitive — re-send the full screen each update; no partial-upgrade opcode was observed (Reddit re-sends the whole `main` container on every text change). [parse1 13:16:18.762 menu, 13:16:14.382 text]
+- `f1=12` — **app-state keepalive**: `08 0c 10 <msgId> 72 00`. Send every ~4s. THE keepalive (probe v12). [parse1 13:15:56.330]
+- `f1=9` — app-state `08 09 10 <msgId> 5a 02 08 01`: keeps the session alive BUT triggers the native "End This Feature?" exit menu — **do NOT send.** [parse1 13:16:01.533]
+
+**Container object** (one LVGL widget, fields in wire order). Inside *both* wrappers, containers sort by kind: **list-type → wrapper `f2`, text-type → wrapper `f3`**.
+| Field | Meaning | Notes |
+|---|---|---|
+| f1 / f2 | x / y position (px) | menu-header y=0 (top); content below |
+| f3 / f4 | width / height (px) | header h≈28–38, content h≈172–248 |
+| f5–f8 | border width/color/radius, padding | copied verbatim per widget type; some widgets omit f6/f7 when 0 |
+| f9 | container instance id | **echoed in the input selection event** (below) |
+| f10 | **widget type** string | text: `loading`/`main`/`menu-header`/`pdf-text`/`pdf-info`; list: `menu-list`/`doclist`/`toolbar` |
+| f11 | text widget → scroll flag (varint 0/1, tag `58`); list widget → `{f1=itemCount, f2=itemWidth, f3=1 (firmware-drawn select border), f4=<items…>}` (tag `5a`) |
+| f12 | text widget → UTF-8 text (box-drawing glyphs OK, tag `62`); list widget → varint `1` (tag `60`) |
+
+Our-UI mapping: **menu-header = status bar** (region 1) · **menu-list = menu** (region 2) · **main = CC output/text** (region 2). A menu = one `f1=7` carrying `menu-list` (f2) + `menu-header` (f3) — exactly g2code's status+content. [Reddit "Select your Feed", parse1 13:16:18.762]
+
+**Multi-packet — PROVEN 2026-06-04 against the doclist capture:** when a content payload exceeds one packet, split it; **non-final packets carry Len = raw chunk length and NO CRC; the final packet has Len = lastChunk+2 with a single CRC-16/CCITT (init `0xFFFF`, poly `0x1021`) over the ENTIRE reassembled payload**, little-endian. (`G2Frame.commandMulti` does CRC-*per-packet* — WRONG for `e0`; `EvenHub` frames `e0` content itself.) Observed Even App chunk ≈232 B. [parse1 13:15:51.378 doclist P=2/2, whole-payload CRC = `0x5e5b` ✓]
+
+**Input — `e0-01` `f1=2` (G→P), the hijack input channel:**
+- **Selection (definitive):** `f13.f1 = {f1=<containerId (=container f9)>, f2="<widgetType>", f4=<selectedIndex>}`. Firmware tracks focus locally (draws the select border) and reports the chosen index + which container. [parse3 18:04:12.332 `{2,"menu-list",idx 1}`; 18:03:55.957 `{21,"doclist"}`; 18:04:01.984 `{10,"toolbar",idx 4}`]
+- **Low-level gesture:** `f13.f3 = {f1=<code>}` — codes 3/4/5/7 (nav/scroll; exact tap-vs-scroll mapping TBD on hardware — Adam confirmed scroll navigates a menu-list off the bat). [parse1 13:16:01.487]
 
 **Cold-launch init prelude** (verbatim, sent once before the `f1=0` launch): `81-20` Display Trigger, `04-20` Display Wake, `0e-20` region config.
 

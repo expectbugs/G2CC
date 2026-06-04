@@ -128,4 +128,45 @@ class EventParserTest {
         val ev = EventParser.parse(ringNotif(byteArrayOf(0x08, 0x77, 0x10, 0x01)))
         assertTrue("expected Unknown, got $ev", ev is EventParser.Event.Unknown)
     }
+
+    // === Service 0xe0-01 EvenHub input channel (decoded from BTSnoop 2026-06-04) ===
+
+    /** Build a notification (type 0x12) on the EvenHub input service 0xe0-01. */
+    private fun hubNotif(payload: ByteArray): ByteArray {
+        val pkt = G2Frame.command(seq = 0x10, service = byteArrayOf(0xE0.toByte(), 0x01), payload = payload)
+        pkt[1] = 0x12.toByte()
+        return pkt
+    }
+
+    @Test
+    fun parse_hubSelect_menuListWithIndex() {
+        // parse3 18:04:12.332: f13.f1={f1=2, f2="menu-list", f4=1}.
+        val payload = byteArrayOf(0x08, 0x02, 0x6A, 0x11, 0x0A, 0x0F, 0x08, 0x02, 0x12, 0x09) +
+            "menu-list".toByteArray(Charsets.UTF_8) + byteArrayOf(0x20, 0x01)
+        val ev = EventParser.parse(hubNotif(payload))
+        assertTrue("expected HubSelect, got $ev", ev is EventParser.Event.HubSelect)
+        ev as EventParser.Event.HubSelect
+        assertEquals("menu-list", ev.widgetType)
+        assertEquals(1, ev.index)
+    }
+
+    @Test
+    fun parse_hubSelect_noIndexDefaultsToZero() {
+        // parse3 18:03:55.957: f13.f1={f1=21, f2="doclist"} (no f4 index).
+        val payload = byteArrayOf(0x08, 0x02, 0x6A, 0x0D, 0x0A, 0x0B, 0x08, 0x15, 0x12, 0x07) +
+            "doclist".toByteArray(Charsets.UTF_8)
+        val ev = EventParser.parse(hubNotif(payload))
+        assertTrue("expected HubSelect, got $ev", ev is EventParser.Event.HubSelect)
+        ev as EventParser.Event.HubSelect
+        assertEquals("doclist", ev.widgetType)
+        assertEquals(0, ev.index)
+    }
+
+    @Test
+    fun parse_hubGesture_decodesCode() {
+        // parse1 13:16:01.487: f13.f3={f1=3, f2=2}.
+        val ev = EventParser.parse(hubNotif(byteArrayOf(0x08, 0x02, 0x6A, 0x06, 0x1A, 0x04, 0x08, 0x03, 0x10, 0x02)))
+        assertTrue("expected HubGesture, got $ev", ev is EventParser.Event.HubGesture)
+        assertEquals(3, (ev as EventParser.Event.HubGesture).code)
+    }
 }
