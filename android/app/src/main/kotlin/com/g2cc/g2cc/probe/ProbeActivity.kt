@@ -121,6 +121,10 @@ class ProbeActivity : ComponentActivity() {
      *  — so it self-heals after a drop (heavy-persistence test). */
     @Volatile private var autoRelaunch = false
 
+    /** True once our menu is on the glasses — gates the menu-resend keepalive so
+     *  we don't push content before a session exists. */
+    @Volatile private var sessionActive = false
+
     /** Session keepalive: 80-00 sync_trigger to R every [HEARTBEAT_MS]. Started
      *  on R Ready, cancelled on R disconnect. Without it the Hub session times
      *  out (~22s) even though BLE stays up. */
@@ -585,6 +589,7 @@ class ProbeActivity : ComponentActivity() {
             if (side == Side.Right) {
                 stopHeartbeat()
                 launchInFlight = false  // a fresh Ready can cold-launch cleanly
+                sessionActive = false
             }
             runOnUiThread {
                 if (side == Side.Left) {
@@ -654,6 +659,7 @@ class ProbeActivity : ComponentActivity() {
             launchInFlight = false
             log("[$side] launch ack → sending G2CC menu")
             sendPreset(side, "G2CC-menu", ReplayKit.G2CC_MENU)
+            sessionActive = true // keepalive may now re-send menu content
         }
     }
 
@@ -685,22 +691,39 @@ class ProbeActivity : ComponentActivity() {
         log("Auto-relaunch ${if (autoRelaunch) "ON — cold-launch G2CC on every (re)connect" else "OFF"}")
     }
 
-    /** Session keepalive to [side]: 80-00 sync_trigger every [HEARTBEAT_MS].
-     *  Cancels any prior heartbeat so reconnects don't stack jobs. */
+    /** Session keepalive to [side] every [HEARTBEAT_MS]: the 80-00 sync_trigger
+     *  (connection-level) PLUS, once a session is active, a re-send of the menu
+     *  content on e0-20 (the session-level keepalive — the Hub session times out
+     *  ~20s on host e0 silence; sync_trigger alone does NOT reset it). Every beat
+     *  is logged so we can see it firing. Cancels any prior job on reconnect. */
     private fun startHeartbeat(side: Side) {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
-            log("[$side] heartbeat started (sync_trigger every ${HEARTBEAT_MS / 1000}s)")
+            log("[$side] keepalive started (every ${HEARTBEAT_MS / 1000}s: menu content re-render once session active — proven Phase-D pattern)")
+            var beat = 0
             while (isActive) {
                 val ble = when (side) {
                     Side.Left -> leftBle
                     Side.Right -> rightBle
                 }
                 if (ble != null) {
-                    val frame = Teleprompter.buildSyncTrigger(hbSeq, hbMsgId)
-                    hbSeq = (hbSeq + 1) and 0xFF
-                    hbMsgId = (hbMsgId + 1) and 0x7FFF
-                    ble.sendToChar(G2Constants.CHAR_WRITE, frame, "heartbeat")
+                    beat++
+                    if (sessionActive) {
+                        // PROVEN Phase-D pattern (G2Pipeline.startHeartbeat): re-issue
+                        // the CONTENT every cycle to re-establish the session before
+                        // its ~20s timeout. sync_trigger does NOT reset it (that was
+                        // the regression). Distinct msg-id per beat so it's not a no-op.
+                        val mid = 100 + (beat % 20) // 100..119, single-byte varint
+                        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.menuKeepalive(mid), "hb:menu") { ok, detail ->
+                            log("[$side] HB#$beat menu re-render (msgid=$mid): ${if (ok) "sent" else "FAIL $detail"}")
+                        }
+                    } else {
+                        // No session yet — light connection keepalive only.
+                        ble.sendToChar(G2Constants.CHAR_WRITE, Teleprompter.buildSyncTrigger(hbSeq, hbMsgId), "hb:sync")
+                        hbSeq = (hbSeq + 1) and 0xFF
+                        hbMsgId = (hbMsgId + 1) and 0x7FFF
+                        log("[$side] HB#$beat sync_trigger only (no session yet)")
+                    }
                 }
                 delay(HEARTBEAT_MS) // HB exception to the no-timeouts rule
             }

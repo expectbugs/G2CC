@@ -1,5 +1,6 @@
 package com.g2cc.g2cc.probe
 
+import com.g2cc.g2cc.ble.Crc16
 import com.g2cc.g2cc.ble.Varint
 
 /**
@@ -82,6 +83,29 @@ object ReplayKit {
         } catch (e: IllegalArgumentException) {
             null
         }
+    }
+
+    /**
+     * The G2CC menu re-issued with a fresh message id, for the session keepalive.
+     * The Hub session times out (~20s) on host `e0` silence — the 80-00
+     * sync_trigger does NOT reset it (v4 ≈ v5). Re-sending the content frame
+     * does (same channel as the display — Phase-D "keepalive must match the
+     * display path"). Patching the msg-id (f2) makes each beat a distinct write
+     * so the firmware can't treat it as a no-op duplicate.
+     *
+     * In [G2CC_MENU] the f2 value is a single byte at frame offset 11
+     * (header[8]=08 f1-tag, [9]=07 f1, [10]=10 f2-tag, [11]=66 f2). [msgId] must
+     * stay a single-byte varint so the frame length is unchanged.
+     */
+    fun menuKeepalive(msgId: Int): ByteArray {
+        require(msgId in 1..127) { "keepalive msgId must be a single-byte varint (1..127), got $msgId" }
+        val f = G2CC_MENU.copyOf()
+        f[11] = msgId.toByte()
+        val payloadEnd = f.size - 2
+        val crc = Crc16.compute(f, 8, payloadEnd - 8)
+        f[payloadEnd] = (crc and 0xFF).toByte()
+        f[payloadEnd + 1] = ((crc ushr 8) and 0xFF).toByte()
+        return f
     }
 
     private fun hex(s: String): ByteArray = ProbeSend.parseHex(s)

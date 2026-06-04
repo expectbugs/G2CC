@@ -2,6 +2,7 @@ package com.g2cc.g2cc.probe
 
 import com.g2cc.g2cc.ble.G2Frame
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -48,6 +49,24 @@ class ReplayKitTest {
         val n = ReplayKit.DOCULENS_LAUNCH.size
         assertEquals(0xF4.toByte(), ReplayKit.DOCULENS_LAUNCH[n - 2])
         assertEquals(0x50.toByte(), ReplayKit.DOCULENS_LAUNCH[n - 1])
+    }
+
+    @Test
+    fun menuKeepalive_patchesMsgIdAndStaysValid() {
+        val ka = ReplayKit.menuKeepalive(123)
+        // same length as the source menu; msg-id (f2) byte patched; CRC still valid
+        assertEquals(ReplayKit.G2CC_MENU.size, ka.size)
+        assertEquals(123.toByte(), ka[11])
+        assertEquals(0xE0.toByte(), ka[6]) // still svc e0-20
+        assertEquals(0x20.toByte(), ka[7])
+        assertTrue("keepalive frame CRC must verify", G2Frame.verifyCrc(ka))
+        // a different msg-id yields a different frame (so beats aren't dedup'd)
+        assertFalse(ka.contentEquals(ReplayKit.menuKeepalive(124)))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun menuKeepalive_rejectsMultibyteMsgId() {
+        ReplayKit.menuKeepalive(200) // > 127 would change the varint length
     }
 
     @Test
