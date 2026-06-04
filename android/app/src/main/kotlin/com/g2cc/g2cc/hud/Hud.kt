@@ -24,6 +24,12 @@ import com.g2cc.g2cc.ble.Teleprompter
 class Hud(private val left: G2BleClient, private val right: G2BleClient) {
 
     private val counterLock = Any()
+    // PERSISTENT across renders (NOT reset per-render). Two render() calls that
+    // overlap (e.g. heartbeat re-render racing a server Output) used to both
+    // reset to 0x10 and emit colliding seq ranges. Keeping a monotonic counter
+    // — guarded by counterLock during each render's build — gives every render a
+    // distinct, contiguous block. Wraps within [0x10,0xFF] / [0x20,0xFFFF] so it
+    // never re-enters the auth seq range (0x00-0x0F).
     private var seq: Int = 0x10        // server reserves 0x00-0x0F for auth; we start higher
     private var msgId: Int = 0x20
 
@@ -61,13 +67,13 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         //   display_config → init → first 10 pages → marker → next 2 pages
         //   → sync trigger → remaining pages
         //
-        // Reset seq/msgId at the start of each render. The 8-bit seq used to
-        // wrap (~14 renders × 18 packets) and 16-bit msgId would eventually
-        // wrap too. Per-render reset gives each batch a fresh range so
-        // in-batch ordering is unambiguous. NOTE: this assumes renders
-        // serialize; two concurrent render() calls would collide on the
-        // same seq range. Phase 9 polish should add a render-level lock if
-        // concurrent renders become a real scenario.
+        // seq/msgId are NOT reset here — they advance monotonically across
+        // renders (see field decl). The whole packet build runs under
+        // counterLock, so two overlapping render() calls each draw a distinct
+        // contiguous block instead of both starting at 0x10 and colliding.
+        // (We deliberately do NOT coalesce/drop a concurrent render — each
+        // render() call may carry different content, so dropping one could lose
+        // a real Output update. Two legitimate render requests = two bursts.)
         //
         // delaysAfterMs mirrors the i-soxi teleprompter.py inter-packet sleeps:
         //   display_config → 300 ms (fast: 100 ms)
@@ -88,9 +94,6 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         val packets = ArrayList<ByteArray>()
         val delays = ArrayList<Long>()
         synchronized(counterLock) {
-            seq = 0x10
-            msgId = 0x20
-
             packets += Teleprompter.buildDisplayConfig(nextSeqLocked(), nextMsgIdLocked())
             delays += d_displayConfig
 
@@ -153,17 +156,19 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
         return pages.size
     }
 
-    /** MUST be called inside `synchronized(counterLock)`. */
+    /** MUST be called inside `synchronized(counterLock)`. Wraps within
+     *  [0x10, 0xFF] so it never collides with the auth seq range (0x00-0x0F). */
     private fun nextSeqLocked(): Int {
         val s = seq
-        seq = (seq + 1) and 0xFF
+        seq = if (seq >= 0xFF) 0x10 else seq + 1
         return s
     }
 
-    /** MUST be called inside `synchronized(counterLock)`. */
+    /** MUST be called inside `synchronized(counterLock)`. Wraps within
+     *  [0x20, 0xFFFF]. */
     private fun nextMsgIdLocked(): Int {
         val m = msgId
-        msgId = (msgId + 1) and 0xFFFF
+        msgId = if (msgId >= 0xFFFF) 0x20 else msgId + 1
         return m
     }
 

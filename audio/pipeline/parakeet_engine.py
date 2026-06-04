@@ -58,7 +58,9 @@ def resample(pcm: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
     from math import gcd
     from scipy import signal
     if from_rate == to_rate:
-        return pcm
+        # Still normalize dtype so equal-rate callers get the same float32
+        # guarantee as the resampling branch (avoids a float64 leak downstream).
+        return pcm.astype(np.float32, copy=False)
     g = gcd(int(from_rate), int(to_rate))
     up = int(to_rate) // g
     down = int(from_rate) // g
@@ -106,12 +108,17 @@ class ParakeetEngine:
         self,
         audio: str | Path | np.ndarray | bytes | io.BytesIO,
         language: str | None = None,
+        sample_rate: int | None = None,
     ) -> TranscriptResult:
         """Transcribe audio. Accepts:
           - file path (str or Path)
-          - 1-D float32 numpy array (mono, **MUST be at SAMPLE_RATE — caller is
-            responsible for resampling, use transcribe_numpy() if unsure**)
+          - 1-D float32 numpy array (mono). Pass `sample_rate` if it is NOT at
+            SAMPLE_RATE and it will be resampled here; omit it only when the
+            array is already at SAMPLE_RATE.
           - bytes / BytesIO (any format soundfile/ffmpeg can decode)
+
+        `sample_rate` is meaningful ONLY for a numpy-array argument (file/bytes
+        carry their own rate); passing it with any other input raises.
 
         Returns TranscriptResult with the same shape as Whisper's. NeMo
         Parakeet doesn't expose language detection (English-only model);
@@ -124,14 +131,12 @@ class ParakeetEngine:
         4th-pass review HIGH: numpy arrays at the WRONG sample rate previously
         passed silently — `_materialize_to_wav` wrote at SAMPLE_RATE (16 kHz)
         regardless, producing 3× time-scaled audio if the caller passed
-        48 kHz. The canonical entry point for numpy IS `transcribe_numpy()`
-        which resamples; this method is now strict about what it accepts as
-        numpy to prevent the silent corruption.
+        48 kHz. Now `transcribe()` itself resamples when given `sample_rate`,
+        so the rate is never silently assumed; `transcribe_numpy()` delegates
+        here. A bare numpy array with no `sample_rate` is still treated as
+        already-at-SAMPLE_RATE (documented contract).
         """
-        # NumPy SR enforcement at the boundary. If caller passes raw numpy,
-        # they're claiming it's already at SAMPLE_RATE. If they're not sure,
-        # they should route through transcribe_numpy() which knows how to
-        # resample. Documentation alone wasn't enough (see review).
+        # NumPy validation + sample-rate normalization at the boundary.
         if isinstance(audio, np.ndarray):
             if audio.dtype != np.float32:
                 raise ValueError(
@@ -142,6 +147,14 @@ class ParakeetEngine:
                 raise ValueError(
                     f"transcribe(numpy) requires mono 1-D; got shape {audio.shape}."
                 )
+            sr = sample_rate if sample_rate is not None else self.SAMPLE_RATE
+            if sr != self.SAMPLE_RATE:
+                audio = resample(audio, sr, self.SAMPLE_RATE)
+        elif sample_rate is not None:
+            raise ValueError(
+                "sample_rate is only meaningful for a numpy-array argument; "
+                "file / bytes inputs carry their own sample rate."
+            )
         with self._lock:
             self._ensure_model()
             assert self._model is not None
@@ -207,9 +220,9 @@ class ParakeetEngine:
             raise ValueError(f"Parakeet expects float32 PCM, got {pcm_float32.dtype}")
         if pcm_float32.ndim != 1:
             raise ValueError(f"Parakeet expects mono 1-D array, got shape {pcm_float32.shape}")
-        if sample_rate != self.SAMPLE_RATE:
-            pcm_float32 = resample(pcm_float32, sample_rate, self.SAMPLE_RATE)
-        return self.transcribe(pcm_float32, language=language)
+        # Delegate the resample to transcribe() (single source of truth) by
+        # passing the array's true rate through, rather than resampling here.
+        return self.transcribe(pcm_float32, language=language, sample_rate=sample_rate)
 
     def _materialize_to_wav(self, audio: Any) -> Path:
         """Write `audio` to a temp WAV file (NeMo's `transcribe()` takes a path).

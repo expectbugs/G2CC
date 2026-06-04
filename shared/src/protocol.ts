@@ -79,19 +79,20 @@ export interface ClientHbMsg {
   now: number
 }
 
-/** Audio format the phone is about to stream. The server uses this to route
- *  to the appropriate preprocessing pipeline:
- *    - `int16` mono 16 kHz → existing path (RNNoise + faster-whisper / Parakeet)
- *    - `float32` stereo 48 kHz → NLMS+DFN path (Phase 8; not yet fully wired —
- *      server fails LOUD on this format until the pipeline lands)
- *  All fields default to the legacy 16 kHz mono int16 shape for backward
- *  compatibility with clients that don't set them. */
+/** Audio format the phone is about to stream. The server routes on
+ *  encoding/channels/rate (NOT on `source`) to the appropriate pipeline:
+ *    - `int16` mono 16 kHz → legacy path (preprocess + faster-whisper / Parakeet)
+ *    - `float32` 2-channel (any rate ≥ 8 kHz) → DJI noise pipeline
+ *      (notch → Wiener-with-learned-PSD → Parakeet) via dji_pipeline_cli;
+ *      resampled to the profile rate internally.
+ *  Anything else loud-fails with stt_error. All fields default to the legacy
+ *  16 kHz mono int16 shape for clients that don't set them. */
 export interface AudioStartMsg {
   type: 'audio_start'
   sampleRate?: number          // default 16000
   channels?: number            // default 1
   encoding?: 'int16' | 'float32'  // default 'int16'
-  source?: 'phone-mic' | 'dji-usb'  // informational; server doesn't gate on it
+  source?: 'phone-mic' | 'dji-usb'  // informational only — logged, NOT used for routing
 }
 export interface AudioEndMsg { type: 'audio_end' }
 // Audio data is sent as raw WebSocket binary frames between audio_start and audio_end.

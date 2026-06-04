@@ -229,7 +229,7 @@ export class SessionPool extends EventEmitter {
     for (const entry of this.sessions.values()) {
       let sessionState: ActiveSessionSummary['state'] = 'idle'
       if (entry.pendingPermissionId) sessionState = 'permission'
-      else if (entry.session.isAlive() && entry.session.requestCount > 0) sessionState = 'streaming'
+      else if (entry.session.isAlive() && entry.session.isProcessingTurn) sessionState = 'streaming'
 
       result.push({
         id: entry.id,

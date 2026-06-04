@@ -46,6 +46,16 @@ export class Watchdog extends EventEmitter {
   // double-spawn guard, throws, and double-increments consecutiveFailures.
   private checking = false
 
+  constructor() {
+    super()
+    // L4: each WS connection registers a 'crash_loop' listener (ws-handler) so
+    // it can route give-ups to the owning client. The single global Watchdog
+    // therefore sees one listener per live connection; raise the cap so normal
+    // reconnect churn doesn't trip the MaxListenersExceededWarning. Listeners
+    // are removed on ws close, so a genuine leak still surfaces above this.
+    this.setMaxListeners(50)
+  }
+
   /** Register a session that's been spawned (or about to be spawned) outside
    *  the watchdog. The caller is expected to have called spawn() already so
    *  the initial healthySince is approximately correct. */

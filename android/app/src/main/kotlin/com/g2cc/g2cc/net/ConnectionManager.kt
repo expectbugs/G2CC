@@ -47,9 +47,12 @@ import kotlin.math.min
  *      from the bootstrap host (via EndpointFetcher) — always has current
  *      set.
  *
- *   5. LAST-RESORT PROCESS RESTART. If we've been offline for STUCK_RELOAD_MS
- *      despite all the above, restart the foreground service; the new
- *      process re-reads token + endpoints and retries from zero.
+ *   5. LAST-RESORT CONNECTION-STACK REBUILD. If we've been offline for
+ *      STUCK_RELOAD_MS despite all the above, fire onStuckTooLong. The owner
+ *      (G2Pipeline.restartConnectionStack) tears down this ConnectionManager +
+ *      streamer and builds a fresh stack from a clean state — re-reading token +
+ *      endpoints from prefs and reconnecting from zero. "Offline duration" is
+ *      measured from offlineSince, NOT lastAuthedAt (see ensureLivenessWatchdog).
  *
  * Constants below mirror /home/user/G2CC/shared/src/constants.ts.
  */
@@ -62,7 +65,8 @@ class ConnectionManager(
     private val onConnected: () -> Unit = {},
     private val onDisconnected: () -> Unit = {},
     private val onAuthFailure: (consecutiveCount: Int) -> Unit = {},
-    /** Phase 6 hookpoint — Phase 7 ties this into `process restart` last-resort. */
+    /** Defence #5 — invoked when offline past STUCK_RELOAD_MS. The owner rebuilds
+     *  the connection stack from a clean state (G2Pipeline.restartConnectionStack). */
     private val onStuckTooLong: () -> Unit = {},
 ) {
 
@@ -384,11 +388,19 @@ class ConnectionManager(
         livenessJob = scope.launch {
             while (true) {
                 delay(LIVENESS_CHECK_MS)
-                val stuckMs = lastAuthedAt?.let { System.currentTimeMillis() - it } ?: 0L
-                if (!_connected.value && lastAuthedAt != null
-                    && stuckMs > STUCK_RELOAD_MS && !reloadAttempted) {
+                // "Stuck" = OFFLINE for STUCK_RELOAD_MS, measured from when we
+                // went offline (offlineSince), gated on having authed at least
+                // once (lastAuthedAt != null — a never-connected socket is a
+                // config problem a restart won't fix). The prior code measured
+                // `now - lastAuthedAt`, which after a long healthy session is
+                // already ≫ STUCK_RELOAD_MS the instant the socket drops, so the
+                // last-resort recovery fired on the FIRST tick instead of after
+                // 90s of failed reconnects — defeating the staged escalation.
+                val offlineMs = offlineSince?.let { System.currentTimeMillis() - it } ?: 0L
+                if (!_connected.value && lastAuthedAt != null && offlineSince != null
+                    && offlineMs > STUCK_RELOAD_MS && !reloadAttempted) {
                     reloadAttempted = true
-                    Log.w(TAG, "stuck for ${stuckMs}ms — invoking onStuckTooLong (last resort)")
+                    Log.w(TAG, "offline for ${offlineMs}ms despite reconnect attempts — invoking onStuckTooLong (last resort)")
                     onStuckTooLong()
                     continue
                 }

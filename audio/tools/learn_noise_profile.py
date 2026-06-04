@@ -126,6 +126,12 @@ def _detect_peaks(
     # those are also outside the keep-band (50 Hz–0.9·Nyquist) so they get
     # filtered out below regardless.
     win = max(31, len(psd) // 64) | 1   # ensure odd
+    # Clamp the kernel to the PSD length (kept odd). With a tiny --nperseg the
+    # PSD can be shorter than 31, and signal.medfilt with kernel_size > array
+    # length emits a UserWarning and zero-pads — skewing edge peak detection.
+    # Default nperseg (2048 → PSD length 1025) is unaffected.
+    max_win = len(psd) if len(psd) % 2 == 1 else len(psd) - 1
+    win = max(1, min(win, max_win))
     local_med = signal.medfilt(psd_db, kernel_size=win)
 
     bin_hz = freqs[1] - freqs[0] if len(freqs) > 1 else 1.0

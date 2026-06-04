@@ -130,6 +130,27 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     })
   })
 
+  // L4: surface watchdog crash-loop give-ups to THIS client. The Watchdog is a
+  // single global instance but pools are per-connection, so each client filters
+  // by pool ownership. Without this, a crash-looped session was only logged
+  // server-side (index.ts) and the user learned of it lazily via a misleading
+  // "No active CC session" on the next prompt. Removed on ws close (below).
+  const onCrashLoop = (sessionId: string): void => {
+    const entry = client.pool.get(sessionId)
+    if (!entry) return  // not this client's session
+    if (client.pool.activeSessionId === sessionId) {
+      sendMsg(client, {
+        type: 'cc_error',
+        error: `Session "${entry.name}" crash-looped and was stopped. Pick a directory from the menu to start it fresh.`,
+      })
+    } else {
+      // emitBackgroundAlert no-ops for the active session; safe here since
+      // this branch is the non-active case.
+      client.pool.emitBackgroundAlert(sessionId, 'error', 'Session crash-looped and was stopped')
+    }
+  }
+  watchdog?.on('crash_loop', onCrashLoop)
+
   // AUTH_TIMEOUT_MS — security guard, NOT an I/O timeout. See FORBIDDEN_PATTERN_AUDIT.md §A.
   client.authTimer = setTimeout(() => {
     if (!client.authenticated) {
@@ -181,6 +202,9 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     if (client.streamTimer) clearTimeout(client.streamTimer)
     if (client.hbInterval) clearInterval(client.hbInterval)
     if (client.livenessInterval) clearInterval(client.livenessInterval)
+    // Drop the crash-loop listener registered for this client (else the global
+    // Watchdog accumulates one dead closure per past connection).
+    watchdog?.off('crash_loop', onCrashLoop)
     // Reject any in-flight confirm_on_hud promises — loud failure, not silent.
     for (const [, resolve] of client.confirmCallbacks) {
       // The caller awaits 'confirmed' | 'rejected'. On socket close we surface as 'rejected'
@@ -395,6 +419,22 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       const active = client.pool.getActive()
       if (active) active.pendingPermissionId = null
       client.dispatcher?.interrupt()
+      // Proactively clear the HUD's "processing" indicator. CC may or may not
+      // emit a terminal 'result' on SIGINT under --output-format stream-json
+      // (unverified); if it does, turn_complete sends another isProcessing:false
+      // — idempotent. Without this, an interrupt that yields no result would
+      // leave the HUD stuck showing "processing" until the next prompt.
+      if (active) {
+        sendMsg(client, {
+          type: 'status',
+          mode: client.mode,
+          contextPct: active.contextPct,
+          isProcessing: false,
+          poolSize: client.pool.count,
+          poolIndex: client.pool.indexOf(active.id),
+          projectName: active.name,
+        })
+      }
       break
     }
 
@@ -468,6 +508,12 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
 
     case 'session_switch': {
       try {
+        // Discard any text_delta buffered for the OUTGOING session — its pending
+        // flush would otherwise land under the incoming session's view
+        // (cross-session bleed). The buffer/timer are per-client, shared across
+        // the pool; only accumulation is session-gated, not the flush.
+        if (client.streamTimer) { clearTimeout(client.streamTimer); client.streamTimer = null }
+        client.streamBuffer = ''
         const entry = client.pool.switchTo(msg.sessionId)
         client.dispatcher = new CCDispatcher(entry)
         const page = entry.scrollback.getPage(entry.scrollback.lastPage)
@@ -477,7 +523,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
           type: 'status',
           mode: client.mode,
           contextPct: entry.contextPct,
-          isProcessing: entry.session.isAlive() && entry.session.requestCount > 0,
+          isProcessing: entry.session.isAlive() && entry.session.isProcessingTurn,
           poolSize: client.pool.count,
           poolIndex: client.pool.indexOf(msg.sessionId),
           projectName: entry.name,
@@ -489,6 +535,10 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'session_close': {
+      // Same cross-session bleed guard as session_switch: a text_delta buffered
+      // for the session we're closing must not flush onto the next active one.
+      if (client.streamTimer) { clearTimeout(client.streamTimer); client.streamTimer = null }
+      client.streamBuffer = ''
       watchdog?.unregister(msg.sessionId)
       client.pool.closeSession(msg.sessionId)
       const active = client.pool.getActive()
@@ -805,18 +855,21 @@ async function handleAudio(
   }
 
   // Route based on the phone-announced format:
-  //   - DJI USB path (any rate >= 8 kHz / 2 ch / float32 / source='dji-usb'):
-  //     full noise pipeline (notch → wiener → parakeet) via
-  //     pipeline.dji_pipeline_cli. The pipeline resamples to the noise
-  //     profile's rate (48 kHz) internally — we don't require the phone to
-  //     announce 48 kHz exactly because some USB Audio Class enumerations
-  //     don't surface 48 kHz as a top-level sampleRate (R5-HIGH3).
+  //   - DJI USB path (float32 / 2 ch / rate >= 8 kHz): full noise pipeline
+  //     (notch → wiener → parakeet) via pipeline.dji_pipeline_cli. The pipeline
+  //     resamples to the noise profile's rate (48 kHz) internally — we don't
+  //     require the phone to announce 48 kHz exactly because some USB Audio
+  //     Class enumerations don't surface 48 kHz as a top-level sampleRate
+  //     (R5-HIGH3). We route purely on encoding/channels/rate and do NOT gate
+  //     on `source`: the protocol documents `source` as informational, and
+  //     float32/2ch is unambiguously the DJI shape. (Previously this also
+  //     required source==='dji-usb', which silently rejected a correctly-shaped
+  //     DJI stream whose client omitted the field — contradicting the contract.)
   //   - Legacy phone-mic (16 kHz / 1 ch / int16): preprocessAudio +
   //     faster-whisper or Parakeet via the existing transcribe() path.
   //     Phone mic is the "no DJI plugged in" fallback for dev iteration;
   //     production target is DJI.
-  const isDji = format.source === 'dji-usb' &&
-    format.encoding === 'float32' &&
+  const isDji = format.encoding === 'float32' &&
     format.channels === 2 &&
     format.sampleRate >= 8_000
   const isLegacyShape = format.encoding === 'int16' &&
@@ -860,7 +913,7 @@ async function handleAudio(
 
 function handlePrompt(client: WSClient, text: string): void {
   if (!client.dispatcher?.isAlive()) {
-    sendMsg(client, { type: 'cc_error', error: 'No active CC session — pick a directory from the menu first' })
+    sendMsg(client, { type: 'cc_error', error: 'No active CC session (it may have ended or crash-looped) — pick a directory from the menu first' })
     return
   }
   const active = client.pool.getActive()

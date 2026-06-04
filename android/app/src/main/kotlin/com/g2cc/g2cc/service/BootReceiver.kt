@@ -54,6 +54,23 @@ class BootReceiver : BroadcastReceiver() {
     }
 
     private fun postBatteryOptRevokedNotification(context: Context) {
+        // On Android 13+ posting ANY notification requires the runtime
+        // POST_NOTIFICATIONS permission (the FG-service notification is exempt;
+        // this standalone one is NOT). If it's denied, nm.notify() silently
+        // no-ops — which would reproduce the very silent-dormancy this method
+        // exists to prevent. We can't launch an Activity from a background boot
+        // receiver either, so the honest move is to log LOUDLY that the user
+        // won't see the prompt; they'll still discover "not running" next time
+        // they open MainActivity. (Don't pretend we surfaced it.)
+        if (!androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+            Log.w(
+                TAG,
+                "battery-opt exemption revoked AND notifications are disabled " +
+                    "(POST_NOTIFICATIONS denied) — cannot surface the re-grant prompt. " +
+                    "G2CC will stay stopped until the user reopens the app.",
+            )
+            return
+        }
         try {
             val launchIntent = android.content.Intent(context, com.g2cc.g2cc.MainActivity::class.java)
             val pi = android.app.PendingIntent.getActivity(

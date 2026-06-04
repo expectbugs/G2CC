@@ -58,6 +58,7 @@ export class CCSession extends EventEmitter {
   private currentTurnTextParts: string[] = []
   private toolCallsSeen: string[] = []
   private _requestCount = 0
+  private _isProcessingTurn = false           // true between sendPrompt() and the turn's 'result' event
   private _ccSessionId: string | null = null  // CC's own session UUID (from system init event)
   private _recentStderr: string[] = []        // ring buffer of last stderr lines (for death diagnostics)
   private _recentEvents: string[] = []        // ring buffer of last stream-json event types
@@ -75,6 +76,12 @@ export class CCSession extends EventEmitter {
   }
 
   get requestCount(): number { return this._requestCount }
+  /** True iff a prompt has been sent and the turn's terminal 'result' event has
+   *  not yet fired (or the turn was interrupted / the process died). Drives the
+   *  HUD's "processing" indicator on on-demand snapshots (session_switch,
+   *  list_active_sessions). Unlike `requestCount > 0`, this clears on turn end,
+   *  so an idle-but-prompted session no longer reports busy forever. */
+  get isProcessingTurn(): boolean { return this._isProcessingTurn }
   get projectPath(): string { return this.config.projectPath }
   /** CC's own session UUID — captured from the system init event. Used for --resume. */
   get ccSessionId(): string | null { return this._ccSessionId }
@@ -172,6 +179,7 @@ export class CCSession extends EventEmitter {
       console.log(`[cc-session] Recent events: ${recentEvents || '(none)'}`)
       if (stderr) console.log(`[cc-session] Last stderr:\n  ${stderr}`)
       this.proc = null
+      this._isProcessingTurn = false   // a dead process is not mid-turn
       this.emit('process_died', code)
     })
 
@@ -180,6 +188,7 @@ export class CCSession extends EventEmitter {
     // Resetting on every successful spawn() (g2code's bug we inherited) makes the
     // crash-loop guard unreachable for procs that crash within seconds of spawning.
     this._requestCount = 0
+    this._isProcessingTurn = false
     console.log(`[cc-session] Spawned (pid=${this.proc.pid}, cwd=${this.config.projectPath}, effort=${effort}, model=${model})`)
   }
 
@@ -191,6 +200,7 @@ export class CCSession extends EventEmitter {
     this.currentTurnTextParts = []
     this.toolCallsSeen = []
     this._requestCount++
+    this._isProcessingTurn = true
 
     const msg = JSON.stringify({
       type: 'user',
@@ -201,6 +211,11 @@ export class CCSession extends EventEmitter {
 
   interrupt(): void {
     if (this.proc) this.proc.kill('SIGINT')
+    // The turn is aborted. Clear the processing flag now rather than relying on
+    // CC to emit a terminal 'result' on SIGINT (unverified in stream-json mode);
+    // if it does emit one, the result handler clears the (already-false) flag
+    // again — idempotent.
+    this._isProcessingTurn = false
   }
 
   isAlive(): boolean {
@@ -212,6 +227,7 @@ export class CCSession extends EventEmitter {
       this.proc.kill('SIGKILL')
       this.proc = null
     }
+    this._isProcessingTurn = false
   }
 
   // [V] control_response APPROVE format verified from ARIA session_pool.py:361-368.
@@ -279,6 +295,8 @@ export class CCSession extends EventEmitter {
 
     // [V] "result" handling + text assembly verified from ARIA session_pool.py:279-317.
     if (msgType === 'result') {
+      // A 'result' event (success or error subtype) terminates the turn.
+      this._isProcessingTurn = false
       const resultSubtype = data.subtype as string | undefined
       if (data.is_error || resultSubtype === 'error_during_execution' || resultSubtype === 'error_max_turns') {
         const errText = (data.result as string) || `CC ${resultSubtype || 'error'}`

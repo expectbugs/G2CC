@@ -44,14 +44,26 @@ class G2BleClient(
     private val _events = MutableSharedFlow<EventParser.Event>(extraBufferCapacity = 32)
     val events: SharedFlow<EventParser.Event> = _events.asSharedFlow()
 
-    private var writeChar: BluetoothGattCharacteristic? = null
-    private var notifyChar: BluetoothGattCharacteristic? = null
+    // @Volatile: written on the main thread (isRequiredServiceSupported /
+    // onServicesInvalidated — Nordic BleManager callbacks run on the main
+    // looper) but READ from Dispatchers.Default coroutines (sendPacket /
+    // queueWrites, driven by G2Pipeline's heartbeat + render). Without the
+    // happens-before edge a background coroutine could observe a stale char
+    // reference across a reconnect rebuild. Matches the @Volatile diagnostic
+    // fields above.
+    @Volatile private var writeChar: BluetoothGattCharacteristic? = null
+    @Volatile private var notifyChar: BluetoothGattCharacteristic? = null
     // Probe support — display-service char (0x6402 under parent 0x6450).
     // Discovered opportunistically; null if the firmware doesn't expose it
     // on this connection. Probe activity calls [sendDisplayPacket] / collects
     // [displayNotifies] to test raw-display + raw-input hypotheses without
     // touching the existing teleprompter path.
-    private var displayChar: BluetoothGattCharacteristic? = null
+    @Volatile private var displayChar: BluetoothGattCharacteristic? = null
+
+    // Reassembles multi-packet (PktTot > 1) notify frames before EventParser.
+    // Single-packet frames (the only kind observed today) pass straight through.
+    // Touched only from the notify callback (single thread).
+    private val reassembler = FrameReassembler()
     private val _displayNotifies = MutableSharedFlow<ByteArray>(extraBufferCapacity = 32)
     val displayNotifies: SharedFlow<ByteArray> = _displayNotifies.asSharedFlow()
     /** True after a successful service-discovery that found 0x6402. Probes
@@ -269,7 +281,13 @@ class G2BleClient(
                 val raw = data.value ?: return@with
                 notifyCount.incrementAndGet()
                 lastNotifyHex = raw.take(24).joinToString("") { "%02x".format(it) }
-                val ev = EventParser.parse(raw)
+                // Reassemble multi-packet frames (PktTot > 1) before parsing.
+                // Without this a fragmented frame CRC-fails per fragment and is
+                // silently lost as Malformed. Single-packet frames pass through.
+                val out = reassembler.offer(raw)
+                out.warning?.let { Log.w(TAG, "[$side] notify reassembly: $it") }
+                val frame = out.deliver ?: return@with
+                val ev = EventParser.parse(frame)
                 // 4th-pass F4: A-H4 (third pass) only covered ConnectionManager;
                 // the same silent-drop concern applies here. Log loudly on
                 // buffer overflow so a stuck downstream collector is visible.

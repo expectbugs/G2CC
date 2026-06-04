@@ -180,6 +180,10 @@ object EventParser {
                         break
                     }
                     shift += 7
+                    // Bound the shift like Varint.decode does — a garbage run of
+                    // continuation bytes must not overflow Int into a wrapped
+                    // value. counter stays -1 (diagnostic-only field) on overflow.
+                    if (shift >= 35) break
                     k++
                 }
                 break

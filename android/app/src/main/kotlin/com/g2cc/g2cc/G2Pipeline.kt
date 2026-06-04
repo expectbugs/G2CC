@@ -108,6 +108,10 @@ class G2Pipeline(
     // observer pair. Stored here so installBleClients can cancel the prior
     // observer set before launching a new one.
     private var bleHealthJob: Job? = null
+    // Forwards bleStatus → server diag. Tracked so the defence-#5 connection
+    // rebuild (restartConnectionStack) can cancel it before start() relaunches
+    // it, instead of stacking a second collector per rebuild.
+    private var bleStatusJob: Job? = null
 
     // Heartbeat job — keeps the teleprompter HUD session alive against the
     // ~10-second firmware idle timeout (confirmed 2026-06-01: render
@@ -1146,15 +1150,22 @@ class G2Pipeline(
                 state.transition(AppState.ERROR)
             },
             onStuckTooLong = {
-                Log.w(TAG, "STUCK_RELOAD_MS exceeded — would restart service here (Phase 6 hookpoint)")
-                // Phase 7 wires the actual service restart. For now log loudly.
+                // Defence #5 (last resort): offline past STUCK_RELOAD_MS despite
+                // pings, the liveness watchdog, endpoint rotation, and endpoint
+                // refresh. Rebuild the whole connection stack from a clean state.
+                // Launch on the PIPELINE scope — restartConnectionStack shuts down
+                // the ConnectionManager (cancelling the very coroutine that fired
+                // this callback), so it must not run on that scope.
+                Log.w(TAG, "STUCK_RELOAD_MS exceeded — rebuilding connection stack (defence #5)")
+                scope.launch { restartConnectionStack() }
             },
         )
         connection = cm
         // Forward every bleStatus change to the server as a DiagMsg so we have
         // a server-side scrolling log of BLE state during hardware bring-up
         // (the notification cycles too fast to read by eye).
-        scope.launch {
+        bleStatusJob?.cancel()
+        bleStatusJob = scope.launch {
             bleStatus.collect { status ->
                 diag("BLE: $status")
             }
@@ -1194,9 +1205,44 @@ class G2Pipeline(
         leftCollectorJob?.cancel(); leftCollectorJob = null
         rightCollectorJob?.cancel(); rightCollectorJob = null
         bleHealthJob?.cancel(); bleHealthJob = null
+        bleStatusJob?.cancel(); bleStatusJob = null
         connection?.shutdown()
         connection = null
         scope.cancel()
+    }
+
+    /** Defence #5 (last resort) — the ConnectionManager reported it's been
+     *  offline past STUCK_RELOAD_MS despite every lighter recovery. Rebuild the
+     *  connection stack from a clean state: shut down the wedged
+     *  ConnectionManager + streamer, then start() a fresh one (re-reads
+     *  prefs.serverUrl + authToken, opens a new socket, refreshes endpoints).
+     *  BLE is left connected (the stuck condition is the WS/network side); if
+     *  it's up we re-wire the HUD-dependent flows against the NEW connection via
+     *  installBleClients — they captured the old one and would otherwise send to
+     *  a dead socket.
+     *
+     *  MUST run on the pipeline scope (NOT the ConnectionManager scope): the
+     *  shutdown() below cancels that scope. Idempotent-safe: a fresh
+     *  ConnectionManager resets reloadAttempted, so this won't re-fire until the
+     *  new connection itself stays offline another STUCK_RELOAD_MS. */
+    private fun restartConnectionStack() {
+        diag("stuck-recovery: rebuilding connection stack from clean state (defence #5)")
+        Log.w(TAG, "stuck-recovery: rebuilding connection stack")
+        streamer?.stop(); streamer = null
+        bleStatusJob?.cancel(); bleStatusJob = null
+        connection?.shutdown()
+        connection = null
+        // start() is guarded by `connection != null`; now null, it rebuilds the
+        // ConnectionManager + streamer + bleStatus collector + dispatchInbound.
+        start()
+        // Re-wire menu / confirmation / sttConfirmation against the new
+        // connection (they captured the old instance at install time).
+        val l = leftBle
+        val r = rightBle
+        if (l != null && r != null) {
+            diag("stuck-recovery: re-wiring HUD flows + re-rendering against new connection")
+            installBleClients(l, r)
+        }
     }
 
     /** ConnectionManager surface for outbound messages. */
