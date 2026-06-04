@@ -669,20 +669,20 @@ class ProbeActivity : ComponentActivity() {
         // "End This Feature?" dialog (input → our reply → another input → …).
     }
 
-    /** H1 keepalive: send the Even App's app-state message to R. v11 sends ONLY
-     *  f1=9 — in the capture it fires on its own timer (keepalive-shaped), whereas
-     *  f1=12 clusters around inputs and is the suspected exit-menu trigger (Adam's
-     *  hypothesis). If f1=9 alone keeps the session alive with no exit menu, that
-     *  split is confirmed. */
+    /** H1 keepalive: send the Even App's app-state message to R. v12 sends ONLY
+     *  f1=12 — v11 proved f1=9 keeps the session alive but TRIGGERS the native exit
+     *  menu on its own (observed directly on hardware). f1=12 is the other app-state
+     *  message the Even App sends; the test is whether it keeps the session alive
+     *  WITHOUT triggering the exit menu. */
     private fun sendStateAlive(reason: String) {
         val ble = rightBle ?: return
         saMsgId = if (saMsgId >= 126) 0x40 else saMsgId + 1
-        val id9 = saMsgId
-        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.stateAlive9(hbSeq, id9), "sa9:$reason") { ok, d ->
-            if (!ok) log("[R] *** state-alive f1=9 WRITE FAILED: $d ***")
+        val id12 = saMsgId
+        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.stateAlive12(hbSeq, id12), "sa12:$reason") { ok, d ->
+            if (!ok) log("[R] *** state-alive f1=12 WRITE FAILED: $d ***")
         }
         hbSeq = (hbSeq + 1) and 0xFF
-        log("[R] state-alive ($reason): f1=9 msgid=$id9")
+        log("[R] state-alive ($reason): f1=12 msgid=$id12")
     }
 
     /** Periodic app-state loop (H1) — fires only once a session is active. */
