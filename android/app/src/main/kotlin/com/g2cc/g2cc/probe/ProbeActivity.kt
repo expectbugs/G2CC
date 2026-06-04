@@ -125,6 +125,10 @@ class ProbeActivity : ComponentActivity() {
      *  we don't push content before a session exists. */
     @Volatile private var sessionActive = false
 
+    /** Rolling single-byte msg-id (100..126) for keepalive / input-response menu
+     *  re-sends, so each is a distinct write the firmware can't dedup. */
+    @Volatile private var kaMsgId = 100
+
     /** Session keepalive: 80-00 sync_trigger to R every [HEARTBEAT_MS]. Started
      *  on R Ready, cancelled on R disconnect. Without it the Hub session times
      *  out (~22s) even though BLE stays up. */
@@ -660,6 +664,13 @@ class ProbeActivity : ComponentActivity() {
             log("[$side] launch ack → sending G2CC menu")
             sendPreset(side, "G2CC-menu", ReplayKit.G2CC_MENU)
             sessionActive = true // keepalive may now re-send menu content
+            return
+        }
+        // Be a responsive host: answer every input with a content write, exactly
+        // as the Even App does (~60ms), to satisfy the app's responsiveness
+        // watchdog that fires "Connection Lost" ~20s after we stop responding.
+        if (svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_INPUT_EVENT && sessionActive) {
+            sendMenuKeepalive(side, "input")
         }
     }
 
@@ -691,6 +702,23 @@ class ProbeActivity : ComponentActivity() {
         log("Auto-relaunch ${if (autoRelaunch) "ON — cold-launch G2CC on every (re)connect" else "OFF"}")
     }
 
+    /** Re-send the menu content (fresh msg-id) to [side] — used both as the idle
+     *  keepalive and as the response to each input. The Even App answers every
+     *  input with an e0-20 write within ~60ms; the hijacked app's "Connection
+     *  Lost" watchdog (~20s) tracks that responsiveness, NOT unsolicited content
+     *  (the firmware acks our re-renders but tears the display down anyway). */
+    private fun sendMenuKeepalive(side: Side, reason: String) {
+        val ble = when (side) {
+            Side.Left -> leftBle
+            Side.Right -> rightBle
+        } ?: return
+        kaMsgId = if (kaMsgId >= 126) 100 else kaMsgId + 1
+        val mid = kaMsgId
+        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.menuKeepalive(mid), "ka:$reason") { ok, detail ->
+            log("[$side] keepalive($reason msgid=$mid): ${if (ok) "sent" else "FAIL $detail"}")
+        }
+    }
+
     /** Session keepalive to [side] every [HEARTBEAT_MS]: the 80-00 sync_trigger
      *  (connection-level) PLUS, once a session is active, a re-send of the menu
      *  content on e0-20 (the session-level keepalive — the Hub session times out
@@ -709,14 +737,11 @@ class ProbeActivity : ComponentActivity() {
                 if (ble != null) {
                     beat++
                     if (sessionActive) {
-                        // PROVEN Phase-D pattern (G2Pipeline.startHeartbeat): re-issue
-                        // the CONTENT every cycle to re-establish the session before
-                        // its ~20s timeout. sync_trigger does NOT reset it (that was
-                        // the regression). Distinct msg-id per beat so it's not a no-op.
-                        val mid = 100 + (beat % 20) // 100..119, single-byte varint
-                        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.menuKeepalive(mid), "hb:menu") { ok, detail ->
-                            log("[$side] HB#$beat menu re-render (msgid=$mid): ${if (ok) "sent" else "FAIL $detail"}")
-                        }
+                        // Idle backstop: re-send content when no inputs are flowing.
+                        // The main keepalive during use is the per-input response
+                        // below (the Even App answers every input ~60ms).
+                        log("[$side] HB#$beat idle keepalive")
+                        sendMenuKeepalive(side, "hb#$beat")
                     } else {
                         // No session yet — light connection keepalive only.
                         ble.sendToChar(G2Constants.CHAR_WRITE, Teleprompter.buildSyncTrigger(hbSeq, hbMsgId), "hb:sync")
