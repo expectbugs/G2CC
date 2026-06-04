@@ -4,6 +4,63 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-4ec8384 — 2026-06-04 — **Full-project code-review remediation (2 HIGH, 2 MEDIUM, 11 LOW)**
+
+A deep review of the entire tree (Android + server + audio + shared) after the
+persistent-session milestone. 15 verified issues fixed; no behavior change to the
+proven probe keepalive/cold-launch path (single-packet notify frames pass through
+byte-for-byte, teleprompter render unchanged). One agent-reported finding was
+**rejected on verification** as a false positive — the "overlapping audio_start
+discarded N bytes" log is actually always truthful, because in single-threaded
+Node `collectingAudio == true` implies `sttInFlightCount == 0` (mutually
+exclusive), so the "both true" branch is unreachable. Verifying every candidate
+against real code (not just trusting the finder) is the load-bearing lesson here.
+
+The two findings that actually mattered, with the WHY:
+
+- **Connection defence #5 didn't exist and its trigger was wrong** — and the
+  `ConnectionManager` docstring described all five defences as if live, so it
+  *read* as a working last resort. `onStuckTooLong` was a log-only stub; now
+  wired to `G2Pipeline.restartConnectionStack()` (rebuild the connection stack
+  from clean state, re-wire HUD flows against the new connection, on the pipeline
+  scope so it survives the wedged CM teardown). Separately, the stuck-watchdog
+  measured `now - lastAuthedAt`, which after a long healthy session is already
+  ≫ 90 s the instant the socket drops — so the last resort would have fired on
+  the *first* 5 s tick instead of after 90 s of failed reconnects. Fixed to
+  measure `offlineSince`, which was being written in four places and **read in
+  zero** (a dead field hiding the bug). Lesson: a write-only field is a smell;
+  the intent ("offline for 90 s") and the code ("90 s since auth") had silently
+  diverged. Chose an in-pipeline rebuild over a literal service stop()+start()
+  because the latter can race the dying instance and skip rebuilding.
+
+- **Multi-packet notify frames were parsed per-fragment** (no `DataMerger`), so a
+  fragmented glasses→phone frame would CRC-fail on each fragment and vanish as
+  `Event.Malformed`. Latent today (ring events are <16 B, single-packet), but a
+  silent-loss hole. New `FrameReassembler` reassembles per the documented
+  PktTot/PktSer format, CRC-checks each fragment, and is loud on anomalies;
+  `PktTot==1` (the only case observed) passes straight through. Marked clearly as
+  untested against a real fragmented notify — none has been captured yet.
+
+The LOW bucket was mostly latent-correctness and honesty fixes: a never-
+decremented `requestCount` made idle sessions report "processing" forever on
+snapshots (→ explicit `isProcessingTurn`); the server gated the DJI audio route
+on `source` despite the protocol comment saying it didn't (→ route on
+encoding/channels/rate, comment corrected); a watchdog crash-loop give-up was
+only logged server-side and reached the user as a misleading "No active CC
+session" (→ routed to the phone); `@Volatile` on the BLE char fields; Hud render
+counters now persist so concurrent renders don't collide on the `0x10` seq range;
+an unbounded varint shift in `EventParser`; `parakeet_engine.transcribe()` now
+resamples instead of silently writing wrong-rate numpy at 16 kHz; `BootReceiver`
+checks `POST_NOTIFICATIONS` before its battery-opt prompt; `learn_noise_profile`
+clamps the medfilt kernel; `interrupt` clears the processing flag and pushes a
+status so the HUD can't wedge on "processing" if CC emits no result on SIGINT.
+
+Verified: `tsc` clean (shared+server), Android **134/134** unit tests (+6 new
+`FrameReassemblerTest`), debug APK assembles, Python modules compile +
+resample/transcribe/medfilt logic checked. Three fixes (defence-#5 rebuild,
+crash-loop round-trip, interrupt status) are logic-sound and compile-clean but
+not unit-testable — they need a real-device / live-server pass.
+
 ## v0.0.1-32c7302 — 2026-06-04 — **🍾 PERSISTENT APP-INITIATED HUB SESSION (probe v3→v12)**
 
 The big one. Across probes v3–v12 we went from "EvenHub channel discovered" to a
