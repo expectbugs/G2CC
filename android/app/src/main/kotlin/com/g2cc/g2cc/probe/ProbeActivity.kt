@@ -131,9 +131,10 @@ class ProbeActivity : ComponentActivity() {
      *  re-sends, so each is a distinct write the firmware can't dedup. */
     @Volatile private var kaMsgId = 100
 
-    /** Session keepalive: 80-00 sync_trigger to R every [HEARTBEAT_MS]. Started
-     *  on R Ready, cancelled on R disconnect. Without it the Hub session times
-     *  out (~22s) even though BLE stays up. */
+    /** Session keepalive: 80-00 sync_trigger to BOTH lenses (L→R staggered),
+     *  each lens every [HEARTBEAT_CYCLE_MS]. Started on R Ready, cancelled on R
+     *  disconnect. The Hub session times out (~10–22s) on missing keepalive even
+     *  though BLE stays up. */
     private var heartbeatJob: Job? = null
     @Volatile private var hbSeq = 0x90
     @Volatile private var hbMsgId = 0x60
@@ -578,7 +579,7 @@ class ProbeActivity : ComponentActivity() {
                 }
             }
             if (side == Side.Right) {
-                startHeartbeat(Side.Right)               // keep the Hub session alive
+                startHeartbeat()                         // sync_trigger keepalive to L+R
                 if (autoRelaunch) coldLaunch(Side.Right) // self-heal after a drop
             }
             if (leftReady && rightReady) {
@@ -710,41 +711,43 @@ class ProbeActivity : ComponentActivity() {
         }
     }
 
-    /** Keepalive heartbeat. Once the session is active, re-establishes the whole
-     *  session every [HEARTBEAT_MS] (the proven teleprompter full-re-render
-     *  pattern). Before a session exists, a light 80-00 sync_trigger keeps the
-     *  connection warm. Cancels any prior job on reconnect. */
-    private fun startHeartbeat(side: Side) {
+    /** Keepalive heartbeat — replicates the Even App's pattern: an 80-00
+     *  sync_trigger to BOTH lenses, **L first** then R after a stagger (L is the
+     *  quiet "keepalive" lens, R the display lens — Adam's hypothesis is L is what
+     *  the firmware watches for liveness), repeated continuously. We run it FASTER
+     *  than the Even App's 15s so a connection-lagged beat still lands inside the
+     *  firmware's session window — the failure mode Adam has seen for months even
+     *  in official apps ("dies when delayed too long"). Pure sync_trigger: no
+     *  content re-render, no re-launch. Runs from connect onward; the cold launch
+     *  separately establishes the menu. Cancels any prior job on reconnect. */
+    private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
-            log("[$side] heartbeat started (every ${HEARTBEAT_MS / 1000}s: full session re-establishment once active)")
+            log("heartbeat: 80-00 sync_trigger L→(${HEARTBEAT_STAGGER_MS / 1000}s)→R, each lens every ${HEARTBEAT_CYCLE_MS / 1000}s")
             var beat = 0
             while (isActive) {
-                // Delay FIRST: coldLaunch does the immediate re-establish, so the
-                // first beat shouldn't double it up (review finding: avoids two
-                // back-to-back re-establishments on the autoRelaunch path).
-                delay(HEARTBEAT_MS) // HB exception to the no-timeouts rule
-                val ble = when (side) {
-                    Side.Left -> leftBle
-                    Side.Right -> rightBle
-                }
-                if (ble != null) {
-                    beat++
-                    if (sessionActive) {
-                        log("[$side] HB#$beat re-establish")
-                        reEstablishSession(side, "hb#$beat")
-                    } else {
-                        // No session yet — light connection keepalive only.
-                        ble.sendToChar(G2Constants.CHAR_WRITE, Teleprompter.buildSyncTrigger(hbSeq, hbMsgId), "hb:sync") { ok, detail ->
-                            if (!ok) log("[$side] *** hb:sync WRITE FAILED: $detail ***")
-                        }
-                        hbSeq = (hbSeq + 1) and 0xFF
-                        hbMsgId = (hbMsgId + 1) and 0x7FFF
-                        log("[$side] HB#$beat sync_trigger only (no session yet)")
-                    }
-                }
+                beat++
+                sendSyncTrigger(Side.Left, beat)
+                delay(HEARTBEAT_STAGGER_MS)         // L→R stagger, like the Even App
+                sendSyncTrigger(Side.Right, beat)
+                delay(HEARTBEAT_CYCLE_MS - HEARTBEAT_STAGGER_MS) // HB exception to no-timeouts
             }
         }
+    }
+
+    /** Send one 80-00 sync_trigger to [side] with a fresh seq/msgId. Loud on failure. */
+    private fun sendSyncTrigger(side: Side, beat: Int) {
+        val ble = when (side) {
+            Side.Left -> leftBle
+            Side.Right -> rightBle
+        } ?: return
+        val frame = Teleprompter.buildSyncTrigger(hbSeq, hbMsgId)
+        hbSeq = (hbSeq + 1) and 0xFF
+        hbMsgId = (hbMsgId + 1) and 0x7FFF
+        ble.sendToChar(G2Constants.CHAR_WRITE, frame, "hb:$side") { ok, detail ->
+            if (!ok) log("[$side] *** hb sync_trigger WRITE FAILED: $detail ***")
+        }
+        log("[$side] HB#$beat sync_trigger")
     }
 
     private fun stopHeartbeat() {
@@ -976,10 +979,12 @@ class ProbeActivity : ComponentActivity() {
     companion object {
         const val TAG = "G2CCProbe"
 
-        /** sync_trigger keepalive cadence. Even App used 15s; we use 10s for
-         *  margin under the firmware's ~22s Hub-session timeout. HB exception to
-         *  the no-timeouts rule (CLAUDE.md §"Three Absolute Rules"). */
-        const val HEARTBEAT_MS = 10_000L
+        /** sync_trigger keepalive cadence. The Even App fires each lens every ~15s
+         *  (L, +2s R, +13s, loop). We run each lens every 7s — ~2× the Even App —
+         *  so a connection-lagged beat still lands inside the firmware's session
+         *  window. HB exception to the no-timeouts rule (CLAUDE.md §Three Rules). */
+        const val HEARTBEAT_STAGGER_MS = 2_000L  // L→R gap, matches the Even App
+        const val HEARTBEAT_CYCLE_MS = 7_000L    // per-lens interval (Even App ~15s)
 
         /** Inter-packet pacing inside a re-establishment sequence. The teleprompter
          *  path proved this is load-bearing (Hud.kt: without delays the take-over
