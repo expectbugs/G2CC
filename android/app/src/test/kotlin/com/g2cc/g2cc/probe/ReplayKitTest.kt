@@ -70,6 +70,19 @@ class ReplayKitTest {
     }
 
     @Test
+    fun stateAlive_matchesCapturedBytes() {
+        // Captured from the Even App DocuLens session: f1=9 msgid 0x54, f1=12 msgid 0x56.
+        val f9 = ReplayKit.stateAlive9(seq = 0x40, msgId = 0x54)
+        val f12 = ReplayKit.stateAlive12(seq = 0x40, msgId = 0x56)
+        // svc e0-20, valid CRC, and the payload (bytes 8..size-2) equals the capture.
+        assertEquals(0xE0.toByte(), f9[6]); assertEquals(0x20.toByte(), f9[7])
+        assertTrue("f1=9 CRC", G2Frame.verifyCrc(f9))
+        assertTrue("f1=12 CRC", G2Frame.verifyCrc(f12))
+        assertEquals("080910545a020801", f9.copyOfRange(8, f9.size - 2).joinToString("") { "%02x".format(it) })
+        assertEquals("080c10567200", f12.copyOfRange(8, f12.size - 2).joinToString("") { "%02x".format(it) })
+    }
+
+    @Test
     fun field1_readsLaunchRequest() {
         // e0-01 launch payload 08 11 a2 01 03 08 99 59 -> field1 = 17
         assertEquals(ReplayKit.MSGTYPE_LAUNCH_REQUEST, ReplayKit.field1(ProbeSend.parseHex("0811a20103089959")))

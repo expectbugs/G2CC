@@ -1,6 +1,7 @@
 package com.g2cc.g2cc.probe
 
 import com.g2cc.g2cc.ble.Crc16
+import com.g2cc.g2cc.ble.G2Frame
 import com.g2cc.g2cc.ble.Varint
 
 /**
@@ -107,6 +108,31 @@ object ReplayKit {
         f[payloadEnd + 1] = ((crc ushr 8) and 0xFF).toByte()
         return f
     }
+
+    /** EvenHub data service (e0-20) — the channel both content and these app-state
+     *  messages ride on (the service id lives in the AA-frame header). */
+    private val SVC_EVENHUB_DATA = byteArrayOf(0xE0.toByte(), 0x20)
+
+    /**
+     * The Even App's small "app-state" e0-20 messages, sent ~every 5s during a
+     * live DocuLens session — message types we have **never** sent (H1: they keep
+     * the app foregrounded; the firmware reverts to its native UI without them).
+     * Built fresh with the given [seq]/[msgId]; byte shapes verbatim from the
+     * 2026-06-03 capture:
+     *   - f1=9:  `08 09 10 <msgId> 5a 02 08 01`  (f1=9, f2=msgId, f11={f1=1})
+     *   - f1=12: `08 0c 10 <msgId> 72 00`        (f1=12, f2=msgId, f14=empty)
+     */
+    fun stateAlive9(seq: Int, msgId: Int): ByteArray =
+        G2Frame.command(
+            seq, SVC_EVENHUB_DATA,
+            byteArrayOf(0x08, 0x09, 0x10) + Varint.encode(msgId) + byteArrayOf(0x5a, 0x02, 0x08, 0x01),
+        )
+
+    fun stateAlive12(seq: Int, msgId: Int): ByteArray =
+        G2Frame.command(
+            seq, SVC_EVENHUB_DATA,
+            byteArrayOf(0x08, 0x0c, 0x10) + Varint.encode(msgId) + byteArrayOf(0x72, 0x00),
+        )
 
     private fun hex(s: String): ByteArray = ProbeSend.parseHex(s)
 }

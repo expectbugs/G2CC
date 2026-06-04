@@ -139,6 +139,11 @@ class ProbeActivity : ComponentActivity() {
     @Volatile private var hbSeq = 0x90
     @Volatile private var hbMsgId = 0x60
 
+    /** H1 test: the Even App's app-state messages (e0-20 f1=9/f1=12) sent
+     *  periodically + on each input. Single-byte rolling msg-id. */
+    private var stateAliveJob: Job? = null
+    @Volatile private var saMsgId = 0x40
+
     /** PARTIAL_WAKE_LOCK so the heartbeat coroutine's delay() fires on schedule
      *  when the screen is off / phone in pocket (Phase D lesson). */
     private var wakeLock: PowerManager.WakeLock? = null
@@ -580,6 +585,7 @@ class ProbeActivity : ComponentActivity() {
             }
             if (side == Side.Right) {
                 startHeartbeat()                         // sync_trigger keepalive to L+R
+                startStateAlive()                        // H1: app-state f1=9/f1=12 to R
                 if (autoRelaunch) coldLaunch(Side.Right) // self-heal after a drop
             }
             if (leftReady && rightReady) {
@@ -595,6 +601,7 @@ class ProbeActivity : ComponentActivity() {
             if (side == Side.Left) leftReady = false else rightReady = false
             if (side == Side.Right) {
                 stopHeartbeat()
+                stopStateAlive()
                 sessionActive = false // a fresh Ready can cold-launch cleanly
             }
             runOnUiThread {
@@ -655,7 +662,54 @@ class ProbeActivity : ComponentActivity() {
         if (autoRespond && svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_LAUNCH_REQUEST && !sessionActive) {
             log("[$side] AUTO ▶ launch-request → cold launch")
             coldLaunch(side)
+            return
         }
+        // H1: answer each ring input with the Even App's app-state messages
+        // (f1=9/f1=12), exactly as it does ~60ms after every input.
+        if (svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_INPUT_EVENT && sessionActive) {
+            sendStateAlive("input")
+        }
+    }
+
+    /** H1 keepalive: send the Even App's app-state messages (e0-20 f1=9 then f1=12)
+     *  to R with fresh msg-ids. The hypothesis is these keep the firmware from
+     *  reverting to its native UI; we have never sent them. */
+    private fun sendStateAlive(reason: String) {
+        val ble = rightBle ?: return
+        saMsgId = if (saMsgId >= 126) 0x40 else saMsgId + 1
+        val id9 = saMsgId
+        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.stateAlive9(hbSeq, id9), "sa9:$reason") { ok, d ->
+            if (!ok) log("[R] *** state-alive f1=9 WRITE FAILED: $d ***")
+        }
+        hbSeq = (hbSeq + 1) and 0xFF
+        saMsgId = if (saMsgId >= 126) 0x40 else saMsgId + 1
+        val id12 = saMsgId
+        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.stateAlive12(hbSeq, id12), "sa12:$reason") { ok, d ->
+            if (!ok) log("[R] *** state-alive f1=12 WRITE FAILED: $d ***")
+        }
+        hbSeq = (hbSeq + 1) and 0xFF
+        log("[R] state-alive ($reason): f1=9 msgid=$id9, f1=12 msgid=$id12")
+    }
+
+    /** Periodic app-state loop (H1) — fires only once a session is active. */
+    private fun startStateAlive() {
+        stateAliveJob?.cancel()
+        stateAliveJob = scope.launch {
+            log("state-alive started: e0-20 f1=9+f1=12 to R every ${STATE_ALIVE_MS / 1000}s once active (H1)")
+            var n = 0
+            while (isActive) {
+                delay(STATE_ALIVE_MS) // HB exception to no-timeouts
+                if (sessionActive) {
+                    n++
+                    sendStateAlive("periodic#$n")
+                }
+            }
+        }
+    }
+
+    private fun stopStateAlive() {
+        stateAliveJob?.cancel()
+        stateAliveJob = null
     }
 
     // ============================================================
@@ -922,6 +976,7 @@ class ProbeActivity : ComponentActivity() {
     private fun disconnect() {
         log("Disconnect requested")
         stopHeartbeat()
+        stopStateAlive()
         releaseWakeLock()
         scanner?.stop()
         scanner = null
@@ -985,6 +1040,10 @@ class ProbeActivity : ComponentActivity() {
          *  window. HB exception to the no-timeouts rule (CLAUDE.md §Three Rules). */
         const val HEARTBEAT_STAGGER_MS = 2_000L  // L→R gap, matches the Even App
         const val HEARTBEAT_CYCLE_MS = 7_000L    // per-lens interval (Even App ~15s)
+
+        /** H1: cadence for the Even App's app-state messages (f1=9/f1=12). The
+         *  Even App sends them ~every 5s; we run 4s for margin. */
+        const val STATE_ALIVE_MS = 4_000L
 
         /** Inter-packet pacing inside a re-establishment sequence. The teleprompter
          *  path proved this is load-bearing (Hud.kt: without delays the take-over
