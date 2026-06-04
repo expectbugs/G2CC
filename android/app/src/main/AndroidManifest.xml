@@ -24,6 +24,10 @@
 
     <!-- Audio capture (Phase 8 active). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Required to route the comms capture path to the Bluetooth SCO mic
+         (AudioManager.setCommunicationDevice / MODE_IN_COMMUNICATION) for the
+         DJI Mic 3 TX-over-Bluetooth source. Normal (install-time) permission. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <!-- Foreground service (Phase 4 active — survives doze). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

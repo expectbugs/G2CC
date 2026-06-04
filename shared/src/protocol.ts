@@ -92,7 +92,10 @@ export interface AudioStartMsg {
   sampleRate?: number          // default 16000
   channels?: number            // default 1
   encoding?: 'int16' | 'float32'  // default 'int16'
-  source?: 'phone-mic' | 'dji-usb'  // informational only — logged, NOT used for routing
+  // informational only — logged, NOT used for routing. 'dji-bt' is the DJI TX
+  // paired straight to the phone over Bluetooth (HFP/SCO): same 16k/1ch/int16
+  // wire shape as 'phone-mic', so it rides the legacy mono path.
+  source?: 'phone-mic' | 'dji-usb' | 'dji-bt'
 }
 export interface AudioEndMsg { type: 'audio_end' }
 // Audio data is sent as raw WebSocket binary frames between audio_start and audio_end.

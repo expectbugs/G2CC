@@ -52,6 +52,7 @@ class AudioStreamer(
                         }
                         val sourceName = when (event.source) {
                             MicCapture.Source.DjiUsb -> "dji-usb"
+                            MicCapture.Source.DjiBluetooth -> "dji-bt"
                             MicCapture.Source.PhoneMic -> "phone-mic"
                         }
                         connection.send(

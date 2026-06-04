@@ -19,23 +19,37 @@ import kotlinx.coroutines.launch
 import java.io.IOException
 
 /**
- * Stereo 32-bit float capture from the DJI Mic 3 USB receiver, with a
- * phone-mic fallback for away-from-workplace use.
+ * Audio capture for the G2CC speak/see/confirm flow. Source is selected at
+ * `start()` by descending quality:
  *
- * Pass-through ONLY — no on-device DSP, no downmix, no denoise. The server
- * runs the NLMS + DeepFilterNet + Parakeet pipeline (Phase 8 server-side).
+ *   1. **DjiUsb** — DJI Mic 3 *receiver* over USB-C: 48 kHz, 32-bit float,
+ *      stereo (TX1 + TX2 sample-synchronized). AudioDeviceInfo.TYPE_USB_DEVICE
+ *      / TYPE_USB_HEADSET. The high-fidelity path the server NR pipeline is
+ *      tuned for. (Gated on a working receiver — the dongle, not the mic.)
+ *   2. **DjiBluetooth** — DJI Mic 3 *transmitter* paired straight to the phone
+ *      over Bluetooth (no receiver): HFP/SCO, **16 kHz mono 16-bit** (the HFP
+ *      wideband ceiling — DJI caps BT-to-phone there). Routed via
+ *      AudioManager.setCommunicationDevice() + MODE_IN_COMMUNICATION; captured
+ *      with AudioSource.VOICE_COMMUNICATION (the only source that rides SCO).
+ *   3. **PhoneMic** — the phone's own mic, 16 kHz mono 16-bit. Last resort.
  *
- * Per spec §B2:
- *   - 48 kHz, 32-bit float, stereo (TX1 + TX2 sample-synchronized)
- *   - DJI receiver appears as a USB audio device when plugged into the Pixel
- *     via USB-C → USB-A adapter; AudioDeviceInfo.TYPE_USB_DEVICE / TYPE_USB_HEADSET
- *   - Falls back to MIC source (single-channel 16 kHz 16-bit) if no USB audio
+ * Pass-through for the USB/phone paths — no on-device DSP, no downmix, no
+ * denoise; the server runs the NR + DeepFilterNet + Parakeet pipeline.
+ *
+ * CAVEAT (DjiBluetooth): the SCO mic is only reachable through Android's
+ * *communication* capture path (VOICE_COMMUNICATION), so the OS applies its own
+ * AEC/NS/AGC that we cannot disable here. That is NOT our DSP, but it is NOT
+ * clean pass-through either — it can interfere with the server's learned-profile
+ * subtraction. Flagged loudly because it directly bears on "is BT good enough."
  *
  * Hard rules:
  *   - **No timeouts** on the read loop — capture runs as long as `start()` ↔
- *     `stop()` keeps it open.
+ *     `stop()` keeps it open. SCO link establishment after
+ *     setCommunicationDevice() is not waited on; the read loop simply reads
+ *     whatever the route delivers (early frames may be silence until SCO settles).
  *   - **No silent failures** — every failure mode (no permission, AudioRecord
- *     init fail, USB device not found) emits a typed `Failure` event.
+ *     init fail, USB/BT device not found, comms-route refused) is logged; an
+ *     unrecoverable "no usable source at all" emits a typed `Failure` event.
  */
 class MicCapture(private val context: Context) {
 
@@ -46,11 +60,18 @@ class MicCapture(private val context: Context) {
         data object Stopped : Event
     }
 
-    enum class Source { DjiUsb, PhoneMic }
+    enum class Source { DjiUsb, DjiBluetooth, PhoneMic }
 
     private var record: AudioRecord? = null
     private var captureJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
+
+    // Set true once we've taken over the comms audio route for the BT-SCO path
+    // (MODE_IN_COMMUNICATION + setCommunicationDevice). Guards teardown so we only
+    // restore routing/mode that we actually changed — and never disturb the comms
+    // route on the USB / phone-mic paths. Touched only under the instance lock.
+    private var commsRouted = false
+    private var savedAudioMode: Int? = null
 
     @get:Synchronized @set:Synchronized
     var isCapturing: Boolean = false
@@ -70,9 +91,15 @@ class MicCapture(private val context: Context) {
                 return
             }
 
-            val attempt = startUsb(onEvent) ?: startPhoneMic(onEvent)
+            // Descending quality: DJI USB receiver (48k float stereo) → DJI TX
+            // over Bluetooth SCO (16k mono) → phone's own mic (16k mono). The
+            // first two return null + log when their device is simply absent, so
+            // the chain falls through cleanly; only a total miss is a Failure.
+            val attempt = startUsb(onEvent)
+                ?: startBluetoothSco(onEvent)
+                ?: startPhoneMic(onEvent)
             if (attempt == null) {
-                onEvent(Event.Failure("no usable audio source (USB or phone mic)"))
+                onEvent(Event.Failure("no usable audio source (USB, Bluetooth, or phone mic)"))
                 return
             }
             val (rec, source, sampleRate, channels, encoding) = attempt
@@ -130,6 +157,25 @@ class MicCapture(private val context: Context) {
         try { record?.release() } catch (e: Exception) { Log.w(TAG, "release threw", e) }
         record = null
         captureJob = null
+        clearCommsRouteLocked()
+    }
+
+    /** Undo the BT-SCO comms takeover (clear the selected comms device, restore
+     *  the prior audio mode). Idempotent and a no-op for the USB / phone-mic
+     *  paths, so it's safe to call from every teardown. */
+    private fun clearCommsRouteLocked() {
+        if (!commsRouted) return
+        try {
+            val am = context.getSystemService(AudioManager::class.java)
+            if (am != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) am.clearCommunicationDevice()
+                savedAudioMode?.let { am.mode = it }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "clearCommsRoute threw", e)
+        }
+        savedAudioMode = null
+        commsRouted = false
     }
 
     private fun hasRecordPermission(): Boolean = ContextCompat.checkSelfPermission(
@@ -196,6 +242,99 @@ class MicCapture(private val context: Context) {
             return null
         }
         return AttemptResult(rec, Source.DjiUsb, sampleRate, 2, encoding)
+    }
+
+    /**
+     * DJI Mic 3 transmitter paired straight to the phone over Bluetooth (no
+     * receiver). Routes the comms capture path to the HFP/SCO mic via
+     * setCommunicationDevice() + MODE_IN_COMMUNICATION, then captures 16 kHz mono
+     * 16-bit through AudioSource.VOICE_COMMUNICATION (the only source that rides
+     * SCO). Returns null + logs (not a Failure event) when no BT comms device is
+     * paired or the route can't be taken — so the chain falls through to the
+     * phone mic without aborting the whole capture.
+     */
+    @SuppressLint("MissingPermission")
+    private fun startBluetoothSco(onEvent: (Event) -> Unit): AttemptResult? {
+        // setCommunicationDevice / getAvailableCommunicationDevices are API 31+.
+        // Pre-31 would need the deprecated startBluetoothSco() dance; the target
+        // hardware (Pixel 10a) is well past 31, so we skip rather than carry it.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            Log.i(TAG, "BT-SCO capture needs API 31+; SDK=${Build.VERSION.SDK_INT}, skipping")
+            return null
+        }
+        val am = context.getSystemService(AudioManager::class.java) ?: return null
+
+        // getAvailableCommunicationDevices() returns SINK-role devices; a paired
+        // HFP mic (DJI TX over BT) appears as TYPE_BLUETOOTH_SCO (or TYPE_BLE_HEADSET
+        // for an LE-Audio device). Selecting it as the comms device is what routes
+        // the *capture* mic to that headset — you do not setPreferredDevice an input.
+        val btDevice = am.availableCommunicationDevices.firstOrNull {
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+        }
+        if (btDevice == null) {
+            Log.i(TAG, "no Bluetooth comms (SCO/LE) device paired; falling through")
+            return null
+        }
+
+        // Take over the comms route. MODE_IN_COMMUNICATION is what brings the SCO
+        // link up for capture; setCommunicationDevice() aims it at the DJI. Mark
+        // commsRouted = true BEFORE the fallible calls so every error path below
+        // restores the prior mode/route via clearCommsRouteLocked().
+        savedAudioMode = am.mode
+        commsRouted = true
+        am.mode = AudioManager.MODE_IN_COMMUNICATION
+        val routed = try {
+            am.setCommunicationDevice(btDevice)
+        } catch (e: Exception) {
+            clearCommsRouteLocked()
+            Log.w(TAG, "setCommunicationDevice threw; falling through", e)
+            return null
+        }
+        if (!routed) {
+            clearCommsRouteLocked()
+            Log.w(TAG, "setCommunicationDevice(type=${btDevice.type}) returned false; falling through")
+            return null
+        }
+
+        // HFP wideband = 16 kHz mono 16-bit: exactly what the DJI sends over BT and
+        // what Parakeet ingests natively. Same wire shape as the phone-mic fallback,
+        // so the server's existing 16k-mono pipeline handles it with no changes.
+        val sampleRate = 16_000
+        val channelMask = AudioFormat.CHANNEL_IN_MONO
+        val encoding = AudioFormat.ENCODING_PCM_16BIT
+        val bufCheck = AudioRecord.getMinBufferSize(sampleRate, channelMask, encoding)
+        if (bufCheck <= 0) {
+            clearCommsRouteLocked()
+            Log.w(TAG, "BT-SCO min-buffer-size invalid at ${sampleRate}Hz: $bufCheck; falling through")
+            return null
+        }
+        val bufSize = bufCheck * 4
+        val rec = try {
+            AudioRecord.Builder()
+                .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(channelMask)
+                        .setEncoding(encoding)
+                        .build(),
+                )
+                .setBufferSizeInBytes(bufSize)
+                .build()
+        } catch (e: Exception) {
+            clearCommsRouteLocked()
+            Log.w(TAG, "AudioRecord build failed for BT-SCO; falling through", e)
+            return null
+        }
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            try { rec.release() } catch (e: Exception) { Log.w(TAG, "release", e) }
+            clearCommsRouteLocked()
+            Log.w(TAG, "AudioRecord state != INITIALIZED for BT-SCO; falling through")
+            return null
+        }
+        Log.i(TAG, "BT-SCO capture: '${btDevice.productName}' type=${btDevice.type} @ ${sampleRate}Hz mono")
+        return AttemptResult(rec, Source.DjiBluetooth, sampleRate, 1, encoding)
     }
 
     @SuppressLint("MissingPermission")

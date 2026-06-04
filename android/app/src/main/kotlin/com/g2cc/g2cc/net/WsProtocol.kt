@@ -93,7 +93,7 @@ sealed interface ClientMessage {
         val sampleRate: Int = 16_000,
         val channels: Int = 1,
         val encoding: String = "int16",          // "int16" | "float32"
-        val source: String? = null,              // "phone-mic" | "dji-usb"
+        val source: String? = null,              // "phone-mic" | "dji-usb" | "dji-bt"
     ) : ClientMessage
 
     @Serializable @SerialName("audio_end")
