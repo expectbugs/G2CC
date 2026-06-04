@@ -194,6 +194,18 @@ class G2Pipeline(
     @Volatile private var statusContextPct: Int = 0
     @Volatile private var statusProcessing: Boolean = false
 
+    // Generation counter for the async EvenHub cold-launch: bumped on each
+    // cold-launch dispatch AND on every BLE drop (onDroppedEdge), so a stale
+    // cold-launch completion that lands after we've moved on is ignored instead
+    // of arming a heartbeat against a superseded session (review B1/B4).
+    private val evenHubLaunchEpoch = java.util.concurrent.atomic.AtomicInteger(0)
+
+    // The in-flight EvenHub confirm_on_hud requestId (one at a time). Answered by
+    // the ✓/✗ menu items; auto-rejected if the confirm becomes un-answerable on a
+    // BLE-only drop (WS still up) so the server's CC subprocess can't hang forever
+    // (no-timeouts rule; review C1). Null when no confirm is showing.
+    @Volatile private var pendingHubConfirmId: String? = null
+
     // Pipeline start timestamp + run ID for diag correlation. Every diag()
     // emission is prefixed with [T+s] so we can tell when each event
     // happened on the client side (server-side timestamp can lag due to WS
@@ -544,6 +556,13 @@ class G2Pipeline(
             var leftReady = false
             var rightReady = false
             var lastBothReady = false   // edge-tracking: did both go Ready last cycle?
+            // Serializes the edge detector: the two state collectors below run on
+            // Dispatchers.Default and can mutate leftReady/rightReady/lastBothReady
+            // (+ fire onBothReadyEdge) concurrently. Both lenses authenticate near-
+            // simultaneously, so without this they could double-fire the cold-launch
+            // or miss an edge (review B2). Critical section is quick — the edge
+            // handlers only set flags + dispatch async work, none blocks under it.
+            val edgeLock = Any()
             _bleStatus.value = "connecting L+R"
 
             fun updateStatus(side: String, s: ConnectionState) {
@@ -582,9 +601,19 @@ class G2Pipeline(
                         diag("evenHub: rootMenu=${rm != null} evenHud=${eh != null} NULL on Ready — cannot cold-launch")
                     } else {
                         evenHubLaunched.set(false)
+                        // Generation guard (review B1/B4): a drop or a newer Ready edge
+                        // bumps the epoch, so a stale cold-launch completion landing
+                        // after we've moved on becomes a no-op.
+                        val epoch = evenHubLaunchEpoch.incrementAndGet()
                         val model = rm.currentRenderModel()
-                        diag("evenHub: cold-launch on Ready (${model.items.size} items)")
-                        eh.coldLaunch(composeStatus(model.title), model.items) { ok ->
+                        diag("evenHub: cold-launch on Ready (${model.items.size} items, epoch=$epoch)")
+                        // Pass displayHeader so a reconnect mid-confirm/STT repaints the
+                        // transcript (confirm screen), not a bare menu (review C2).
+                        eh.coldLaunch(composeStatus(model.title), model.items, model.displayHeader) { ok ->
+                            if (epoch != evenHubLaunchEpoch.get()) {
+                                diag("evenHub: stale cold-launch (epoch $epoch≠${evenHubLaunchEpoch.get()}) — ignoring")
+                                return@coldLaunch
+                            }
                             diag("evenHub: cold-launch done ok=$ok")
                             if (ok) {
                                 evenHubLaunched.set(true)
@@ -663,6 +692,11 @@ class G2Pipeline(
                 // cold-launch on the next Ready edge. Renders during the outage
                 // buffer to pendingHudText instead of writing to a dead session.
                 evenHubLaunched.set(false)
+                // Supersede any in-flight cold-launch (its completion is now stale).
+                evenHubLaunchEpoch.incrementAndGet()
+                // A confirm_on_hud shown over a BLE-only drop (WS still up) would
+                // otherwise hang the server's CC subprocess forever (review C1).
+                rejectPendingHubConfirm("BLE dropped")
                 // Include the BLE-level disconnect reason from each side so we
                 // can decode the failure: 0x08 = supervision timeout (body
                 // block / out of range), 0x13 = remote user terminated, 0x16
@@ -692,41 +726,45 @@ class G2Pipeline(
             // so a glasses-off scenario at first connect rebuilds via scan.
             launch {
                 left.state.collect { s ->
-                    when (s) {
-                        is ConnectionState.Ready -> {
-                            leftReady = true; updateStatus("L", s); recomputeEdges()
-                        }
-                        is ConnectionState.Error,
-                        is ConnectionState.Disconnected -> {
-                            if (!lastBothReady && !leftReady) {
-                                _bleStatus.value = "L fail: ${left.lastDiagnostic}"
-                                onInstallFailure("L", s)
-                            } else {
-                                leftReady = false; updateStatus("L", s); recomputeEdges()
-                                startPostReadyWatchdog()
+                    synchronized(edgeLock) {
+                        when (s) {
+                            is ConnectionState.Ready -> {
+                                leftReady = true; updateStatus("L", s); recomputeEdges()
                             }
+                            is ConnectionState.Error,
+                            is ConnectionState.Disconnected -> {
+                                if (!lastBothReady && !leftReady) {
+                                    _bleStatus.value = "L fail: ${left.lastDiagnostic}"
+                                    onInstallFailure("L", s)
+                                } else {
+                                    leftReady = false; updateStatus("L", s); recomputeEdges()
+                                    startPostReadyWatchdog()
+                                }
+                            }
+                            else -> { updateStatus("L", s) }
                         }
-                        else -> { updateStatus("L", s) }
                     }
                 }
             }
             launch {
                 right.state.collect { s ->
-                    when (s) {
-                        is ConnectionState.Ready -> {
-                            rightReady = true; updateStatus("R", s); recomputeEdges()
-                        }
-                        is ConnectionState.Error,
-                        is ConnectionState.Disconnected -> {
-                            if (!lastBothReady && !rightReady) {
-                                _bleStatus.value = "R fail: ${right.lastDiagnostic}"
-                                onInstallFailure("R", s)
-                            } else {
-                                rightReady = false; updateStatus("R", s); recomputeEdges()
-                                startPostReadyWatchdog()
+                    synchronized(edgeLock) {
+                        when (s) {
+                            is ConnectionState.Ready -> {
+                                rightReady = true; updateStatus("R", s); recomputeEdges()
                             }
+                            is ConnectionState.Error,
+                            is ConnectionState.Disconnected -> {
+                                if (!lastBothReady && !rightReady) {
+                                    _bleStatus.value = "R fail: ${right.lastDiagnostic}"
+                                    onInstallFailure("R", s)
+                                } else {
+                                    rightReady = false; updateStatus("R", s); recomputeEdges()
+                                    startPostReadyWatchdog()
+                                }
+                            }
+                            else -> { updateStatus("R", s) }
                         }
-                        else -> { updateStatus("R", s) }
                     }
                 }
             }
@@ -1270,25 +1308,42 @@ class G2Pipeline(
         }
     }
 
+    /** Answer any in-flight EvenHub confirm_on_hud with "rejected" so the server's
+     *  CC subprocess can't hang when the confirm becomes un-answerable — e.g. a
+     *  BLE-only drop while the WS stays up (review C1). No-op if none pending; loud
+     *  via diag. (A normal WS close is handled server-side — it rejects all pending
+     *  confirms — so this targets the BLE-drop-with-live-WS gap.) */
+    private fun rejectPendingHubConfirm(reason: String) {
+        val id = pendingHubConfirmId ?: return
+        pendingHubConfirmId = null
+        connection?.send(ClientMessage.ConfirmOnHudResponse(id, "rejected"))
+        diag("confirm: auto-rejected pending EvenHub confirm ($reason) requestId=$id")
+    }
+
     /** EvenHub confirm_on_hud: push a selectable confirm frame (prompt as the
      *  read-only header; ✓ Confirm / ✗ Reject as menu-list options the firmware
-     *  reports on e0-01). NOTE: unlike the teleprompter ConfirmationFlow this path
-     *  sends no BLE delivery-ack, so the server's channel-router marks delivery
-     *  'unverified' after its window (a status, not a failure). Backing out leaves
-     *  the confirm pending until answered or the socket drops (server rejects all
-     *  pending on close) — consistent with the no-timeouts rule. */
+     *  reports on e0-01). Tracks the requestId in [pendingHubConfirmId] so it is
+     *  auto-rejected on a BLE drop (review C1) and superseded if a second confirm
+     *  arrives. NOTE: unlike the teleprompter ConfirmationFlow this path sends no
+     *  BLE delivery-ack, so the server's channel-router marks delivery 'unverified'
+     *  after its window (a status, not a failure). */
     private fun showHubConfirm(requestId: String, text: String) {
         val rm = rootMenu ?: return
         val cm = connection ?: return
+        // Only one confirm at a time — reject any prior so it can't strand.
+        rejectPendingHubConfirm("superseded by a newer confirm")
+        pendingHubConfirmId = requestId
         rm.pushSubmenu(
             title = "Confirm",
             items = listOf(
                 RootMenu.MenuItem.Action("✓ Confirm") {
+                    pendingHubConfirmId = null
                     cm.send(ClientMessage.ConfirmOnHudResponse(requestId, "confirmed"))
                     rm.popToRoot()
                     state.transition(AppState.IDLE)
                 },
                 RootMenu.MenuItem.Action("✗ Reject") {
+                    pendingHubConfirmId = null
                     cm.send(ClientMessage.ConfirmOnHudResponse(requestId, "rejected"))
                     rm.popToRoot()
                     state.transition(AppState.IDLE)
@@ -1299,6 +1354,19 @@ class G2Pipeline(
     }
 
     private fun dispatchInbound(msg: ServerMessage) {
+        // Defensive (review A1): the OkHttp reader calls this inline and does NOT
+        // wrap the call, so an uncaught throw here (e.g. EvenHub's >255-packet
+        // content limit) would tear down the WebSocket. Surface loudly via diag
+        // instead — no message handler may kill the transport.
+        try {
+            dispatchInboundInner(msg)
+        } catch (e: Exception) {
+            Log.e(TAG, "dispatchInbound(${msg::class.simpleName}) threw", e)
+            diag("dispatch-error: ${msg::class.simpleName} threw — ${e.message}")
+        }
+    }
+
+    private fun dispatchInboundInner(msg: ServerMessage) {
         when (msg) {
             is ServerMessage.DispatchTargetList -> {
                 menu?.dispatchTargets = msg.targets

@@ -31,14 +31,6 @@ class EvenHud(private val left: G2BleClient, private val right: G2BleClient) {
     private var seq: Int = 0x10
     private var msgId: Int = 0x20
 
-    /** Last status string rendered — for the pipeline's reconnect repaint. */
-    @Volatile var lastStatusText: String = "G2CC"
-        private set
-
-    // Re-runs the most recent render against the current frames; used on a
-    // reconnect to repaint whatever screen the user was on.
-    @Volatile private var lastRender: (() -> Unit)? = null
-
     private fun nextSeq(): Int = synchronized(counterLock) {
         val s = seq; seq = if (seq >= 0xFF) 0x10 else seq + 1; s
     }
@@ -48,26 +40,33 @@ class EvenHud(private val left: G2BleClient, private val right: G2BleClient) {
     }
 
     /** Phone-initiated COLD launch: display prelude → DocuLens launch (`f1=0`) →
-     *  first menu content. Paced like the proven probe re-establishment
-     *  (150 ms between stages). After this, the pipeline's heartbeat keeps the
-     *  session alive with [keepaliveFrame]. */
-    fun coldLaunch(statusText: String, items: List<String>, onComplete: (Boolean) -> Unit = {}) {
-        lastStatusText = statusText
-        lastRender = { renderMenu(statusText, items) }
+     *  first content. Paced like the proven probe re-establishment (150 ms between
+     *  stages). The first content reflects the CURRENT frame: a confirm screen
+     *  when [displayHeader] is non-null (so a reconnect mid-confirm/STT repaints
+     *  the transcript, not a bare menu), otherwise a menu. After this the pipeline
+     *  heartbeat holds the session with [keepaliveFrame]. */
+    fun coldLaunch(
+        statusText: String,
+        items: List<String>,
+        displayHeader: String? = null,
+        onComplete: (Boolean) -> Unit = {},
+    ) {
         val frames = ArrayList<ByteArray>()
         val delays = ArrayList<Long>()
         for (f in EvenHub.COLD_INIT) { frames += f; delays += STAGE_PACE_MS }
         frames += EvenHub.launch(nextSeq(), nextMsgId()); delays += STAGE_PACE_MS
-        val menu = EvenHub.menuScreen(nextSeq(), nextMsgId(), statusText, items)
-        appendPaced(frames, delays, menu)
-        Log.i(TAG, "coldLaunch: ${frames.size} frames (prelude + launch + menu/${items.size} items)")
+        val content = if (displayHeader != null) {
+            EvenHub.confirmScreen(nextSeq(), nextMsgId(), displayHeader, items)
+        } else {
+            EvenHub.menuScreen(nextSeq(), nextMsgId(), statusText, items)
+        }
+        appendPaced(frames, delays, content)
+        Log.i(TAG, "coldLaunch: ${frames.size} frames (prelude + launch + ${if (displayHeader != null) "confirm" else "menu"}/${items.size} items)")
         writeR(frames, delays, "coldLaunch", onComplete)
     }
 
     /** Render a menu screen: `menu-header` status bar + `menu-list` items. */
     fun renderMenu(statusText: String, items: List<String>, onComplete: (Boolean) -> Unit = {}) {
-        lastStatusText = statusText
-        lastRender = { renderMenu(statusText, items) }
         val packets = EvenHub.menuScreen(nextSeq(), nextMsgId(), statusText, items)
         Log.i(TAG, "renderMenu: '${statusText.take(24)}' ${items.size} items → ${packets.size} pkts")
         writeR(packets, pacing(packets.size), "renderMenu", onComplete)
@@ -75,8 +74,6 @@ class EvenHud(private val left: G2BleClient, private val right: G2BleClient) {
 
     /** Render a text screen: `menu-header` status bar + `main` body (CC output). */
     fun renderText(statusText: String, body: String, onComplete: (Boolean) -> Unit = {}) {
-        lastStatusText = statusText
-        lastRender = { renderText(statusText, body) }
         val packets = EvenHub.textScreen(nextSeq(), nextMsgId(), statusText, body)
         Log.i(TAG, "renderText: '${statusText.take(24)}' ${body.length}c → ${packets.size} pkts")
         writeR(packets, pacing(packets.size), "renderText", onComplete)
@@ -85,7 +82,6 @@ class EvenHud(private val left: G2BleClient, private val right: G2BleClient) {
     /** Render a confirmation screen: read-only [body] above a selectable
      *  [options] menu-list (firmware reports the choice on `e0-01`). */
     fun renderConfirm(body: String, options: List<String>, onComplete: (Boolean) -> Unit = {}) {
-        lastRender = { renderConfirm(body, options) }
         val packets = EvenHub.confirmScreen(nextSeq(), nextMsgId(), body, options)
         Log.i(TAG, "renderConfirm: ${body.length}c + ${options.size} options → ${packets.size} pkts")
         writeR(packets, pacing(packets.size), "renderConfirm", onComplete)
@@ -94,13 +90,6 @@ class EvenHud(private val left: G2BleClient, private val right: G2BleClient) {
     /** Mint a session-keepalive frame (`f1=12`) with fresh seq/msgId. The pipeline
      *  heartbeat writes this to R every ~4 s (probe v12 cadence). */
     fun keepaliveFrame(): ByteArray = EvenHub.keepalive(nextSeq(), nextMsgId())
-
-    /** Repaint the most recent screen (used after a reconnect). No-op if nothing
-     *  has been rendered yet. */
-    fun replayLast() {
-        val r = lastRender
-        if (r == null) Log.i(TAG, "replayLast: nothing rendered yet") else r()
-    }
 
     // ---- internals ----
 

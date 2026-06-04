@@ -152,6 +152,16 @@ class EvenHubTest {
         assertEquals(Crc16.compute(payload), gotCrc)
     }
 
+    @Test(expected = IllegalArgumentException::class)
+    fun content_exceedingPacketCeiling_throwsCleanlyNotCorrupt() {
+        // The AA PktTot field is one byte (max 255 packets). Content beyond
+        // 255 * MAX_CHUNK payload bytes must throw (the dispatchInbound layer
+        // catches it and surfaces via diag — review A1) rather than silently wrap
+        // PktTot into a corrupt frame. This locks in the clean-refusal boundary.
+        val huge = "x".repeat(256 * EvenHub.MAX_CHUNK)
+        EvenHub.textScreen(seq = 0x10, msgId = 0x20, statusText = "s", body = huge)
+    }
+
     // ---- helpers ----
 
     /** Reassemble the payload from AA packets per the EvenHub convention:

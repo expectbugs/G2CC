@@ -65,14 +65,23 @@ class RootMenu(
     private val stack: MutableList<Frame> = mutableListOf(
         Frame(title = "G2CC", items = rootItems, highlightIndex = 0),
     )
+    // RootMenu is driven from TWO threads — the BLE input collector
+    // (selectIndex / onScroll / onTap, on Dispatchers.Default) and the
+    // server-message dispatcher (pushSubmenu / replaceCurrentFrame / popToRoot,
+    // on the OkHttp reader thread). Guard every structural `stack` access on this
+    // lock so a concurrent push/pop and read can't tear the ArrayList. Held only
+    // for the brief stack op — NEVER across the onRender / onSelect callbacks
+    // (those re-enter RootMenu and do BLE/WS I/O).
+    private val lock = Any()
 
-    private val currentFrame: Frame get() = stack.last()
+    private val currentFrame: Frame get() = synchronized(lock) { stack.last() }
 
     /** Called from G2Pipeline's event collector on Tap (0x01-01 type 0x0b).
      *  Returns true if the tap was consumed by menu navigation (always true
      *  if this controller is active). */
     fun onTap(): Boolean {
-        val item = currentFrame.items.getOrNull(currentFrame.highlightIndex) ?: return true
+        val frame = currentFrame
+        val item = frame.items.getOrNull(frame.highlightIndex) ?: return true
         activate(item)
         return true
     }
@@ -115,7 +124,7 @@ class RootMenu(
                 // firmware for "End Feature?").
                 val backItem = MenuItem.Action("← Back") { popFrame() }
                 val withBack = listOf(backItem) + item.items
-                stack += Frame(title = item.label, items = withBack, highlightIndex = 0)
+                synchronized(lock) { stack += Frame(title = item.label, items = withBack, highlightIndex = 0) }
                 render()
             }
         }
@@ -142,11 +151,13 @@ class RootMenu(
     /** Programmatic back — pop one level. Tied to the synthetic "← Back"
      *  Action at the top of each submenu. */
     private fun popFrame() {
-        if (stack.size <= 1) {
-            Log.w(TAG, "popFrame at root — ignoring (no parent to return to)")
-            return
+        synchronized(lock) {
+            if (stack.size <= 1) {
+                Log.w(TAG, "popFrame at root — ignoring (no parent to return to)")
+                return
+            }
+            stack.removeAt(stack.size - 1)
         }
-        stack.removeAt(stack.size - 1)
         render()
     }
 
@@ -162,8 +173,11 @@ class RootMenu(
     fun pushSubmenu(title: String, items: List<MenuItem>, displayHeader: String? = null) {
         val backItem = MenuItem.Action("← Back") { popFrame() }
         val withBack = listOf(backItem) + items
-        stack += Frame(title = title, items = withBack, highlightIndex = 0, displayHeader = displayHeader)
-        Log.i(TAG, "pushSubmenu '$title' (${items.size} items, header=${displayHeader?.length ?: 0}c, depth now ${stack.size - 1})")
+        val depthNow = synchronized(lock) {
+            stack += Frame(title = title, items = withBack, highlightIndex = 0, displayHeader = displayHeader)
+            stack.size - 1
+        }
+        Log.i(TAG, "pushSubmenu '$title' (${items.size} items, header=${displayHeader?.length ?: 0}c, depth now $depthNow)")
         render()
     }
 
@@ -188,20 +202,23 @@ class RootMenu(
         addBack: Boolean = false,
         displayHeader: String? = null,
     ) {
-        val current = currentFrame
         val finalItems = if (addBack) {
             val backItem = MenuItem.Action("← Back") { popFrame() }
             listOf(backItem) + items
         } else {
             items
         }
-        stack[stack.size - 1] = Frame(
-            title = title,
-            items = finalItems,
-            highlightIndex = 0,
-            displayHeader = displayHeader,
-        )
-        Log.i(TAG, "replaceCurrentFrame '${current.title}' → '$title' (${finalItems.size} items, addBack=$addBack, header=${displayHeader?.length ?: 0}c)")
+        val prevTitle = synchronized(lock) {
+            val prev = stack.last().title
+            stack[stack.size - 1] = Frame(
+                title = title,
+                items = finalItems,
+                highlightIndex = 0,
+                displayHeader = displayHeader,
+            )
+            prev
+        }
+        Log.i(TAG, "replaceCurrentFrame '$prevTitle' → '$title' (${finalItems.size} items, addBack=$addBack, header=${displayHeader?.length ?: 0}c)")
         render()
     }
 
@@ -209,8 +226,10 @@ class RootMenu(
      *  completes — leaves the user back at the top-level menu rather than
      *  stranded in a submenu they can't recover from. */
     fun popToRoot() {
-        if (stack.size <= 1) return       // already at root
-        while (stack.size > 1) stack.removeAt(stack.size - 1)
+        synchronized(lock) {
+            if (stack.size <= 1) return       // already at root
+            while (stack.size > 1) stack.removeAt(stack.size - 1)
+        }
         Log.i(TAG, "popToRoot — depth now 0")
         render()
     }
@@ -259,10 +278,10 @@ class RootMenu(
 
     /** For debug + tests: current highlighted item label, or null if empty. */
     val highlightedLabel: String?
-        get() = currentFrame.items.getOrNull(currentFrame.highlightIndex)?.label
+        get() = currentFrame.let { f -> f.items.getOrNull(f.highlightIndex)?.label }
 
     /** For debug + tests: current navigation depth (0 = root). */
-    val depth: Int get() = stack.size - 1
+    val depth: Int get() = synchronized(lock) { stack.size - 1 }
 
     companion object {
         const val TAG = "G2CCRootMenu"
