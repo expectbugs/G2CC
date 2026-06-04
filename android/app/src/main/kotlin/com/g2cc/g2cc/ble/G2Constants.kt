@@ -95,24 +95,6 @@ object G2Constants {
         val COMMIT = byteArrayOf(0x20.toByte(), 0x20)
         val DISPLAY_TRIGGER = byteArrayOf(0x81.toByte(), 0x20)
         val NOTIFICATION = byteArrayOf(0x02.toByte(), 0x20)   // metadata only — partial
-
-        // Services observed in Even App BTSnoop init flow (2026-06-02) — not
-        // documented in i-soxi but used during full setup. Adding here for
-        // Phase Y "display takeover" so we can replicate the Even App
-        // initialization sequence and (hypothesis) inherit its session
-        // durability. Catalogued purposes from payload analysis:
-        val APP_ENUMERATION = byteArrayOf(0x03.toByte(), 0x20)   // lists feature modules (DocuLens, Reddit Feed, etc.)
-        val UNKNOWN_10 = byteArrayOf(0x10.toByte(), 0x20)        // small one-shot init packet
-        val UNKNOWN_30 = byteArrayOf(0x30.toByte(), 0x20)        // small one-shot init packet
-        val R1_REGISTRATION = byteArrayOf(0x91.toByte(), 0x20)   // tells glasses about R1 ring MAC
-        val SETTINGS_BINARY = byteArrayOf(0xC4.toByte(), 0x00)   // encrypted/binary settings push
-        val SETTINGS_JSON = byteArrayOf(0xC5.toByte(), 0x00)     // JSON config push (notification whitelist etc.)
-        val DEVICE_INFO_QUERY = byteArrayOf(0x09.toByte(), 0x20) // WRITE side — phone queries glasses for firmware/serial
-        // Phase Y: News-style content delivery channel. Decoded from BTSnoop
-        // 2026-06-03 — the 329-write channel used by Even App News mode for
-        // article-push (f11 wrapper with title + body + metadata). See
-        // PROTOCOL_NOTES.md §"Service 0x01-20".
-        val NEWS_CONTENT = byteArrayOf(0x01.toByte(), 0x20)
     }
 
     /** PROTOCOL_NOTES.md §"Connection parameters" — informational; Nordic library

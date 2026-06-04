@@ -3,49 +3,33 @@ package com.g2cc.g2cc.hud
 import android.util.Log
 
 /**
- * Phase Y / Ω scaffolding — the G2CC root menu.
+ * The G2CC root menu — the user's primary input/content surface on the glasses.
  *
- * **Not wired into G2Pipeline yet** — Phase Y switches the display path from
- * teleprompter (0x06-20) to News-style content (0x01-20), at which point
- * this controller becomes what the user sees on the HUD. The render hook
- * is left as a callback so the Phase Y display path can plug in later
- * without redesigning the menu.
+ * Display-path-agnostic by design: the menu model emits state changes via
+ * [onRender] (a (title, body) text form) and also exposes a structured
+ * [currentRenderModel]; the active renderer draws it. On the EvenHub path
+ * (default) G2Pipeline reads [currentRenderModel] to draw a native menu-list +
+ * status header, and the firmware reports selections on `e0-01` →
+ * [selectIndex]. On the teleprompter fallback the (title, body) text is rendered
+ * and the native ring drives [onScrollNext]/[onScrollPrev]/[onTap].
  *
- * Architectural framing (per Adam's "take over the main menu" requirement
- * 2026-06-03): G2CC enters News-style display mode at startup and stays in
- * it indefinitely. The CONTENT we render inside that mode IS the G2CC root
- * menu, not News articles. To the user this looks like G2CC has replaced
- * the default Even menu — the only escape is the firmware-native "End
- * Feature?" double-tap dialog (which we can't suppress; it's the OS-level
- * safety hatch back to the default Even HUD).
- *
- * Menu tree shape (Phase Ω): each MenuItem is either an [Action] (leaf,
- * runs a callback on tap) or a [Submenu] (branch, navigates into a nested
- * MenuItem list on tap). Scroll moves the highlight within the current
- * level; tap drills in or fires action; "back" returns to the parent level.
- *
- * Ring event mapping (from EventParser.kt and BTSnoop intel):
- *   - Scroll = move highlight down (we only have ScrollDown confirmed;
- *     ScrollUp goes through the same path once direction encoding is
- *     determined by a controlled up-vs-down BTSnoop capture)
- *   - Tap (0x0b notification on service 0x01-01) = select highlighted item
- *   - Double-tap = firmware shows "End Feature?" — we DON'T receive it,
- *     it's intercepted by the firmware. So no "back" gesture from the
- *     ring; submenu navigation needs a different mechanism (a synthetic
- *     "Back" menu item at the top of every submenu is the simplest UX).
+ * Menu tree: each MenuItem is an [Action] (leaf, runs a callback on select) or a
+ * [Submenu] (branch, navigates into a nested list). A synthetic "← Back" item is
+ * prepended to every submenu because the ring double-tap is firmware-intercepted
+ * ("End Feature?") and never reaches us — so submenu exit is a tappable item, not
+ * a gesture.
  *
  * Hard rules:
  *   - NO TIMEOUTS — menu doesn't auto-close on inactivity
- *   - NO TRUNCATION — long item lists scroll within the body display area
+ *   - NO TRUNCATION — long item lists scroll within the content region
  *   - Loud failures via Log + diag (no swallowed exceptions)
  */
 class RootMenu(
     rootItems: List<MenuItem>,
     /** Called whenever the menu state changes and the HUD should re-render.
-     *  Title = current submenu name (root = "G2CC"); body = listing of items
-     *  with the highlighted one marked. Phase Y's News-style display path
-     *  feeds these into the 0x01-20 article-wrapper writes (f6=title,
-     *  f9=body). */
+     *  Title = current submenu name (root = "G2CC"); body = items listing with
+     *  the highlighted one marked (teleprompter text form). The EvenHub renderer
+     *  ignores `body` and pulls [currentRenderModel] for the native menu-list. */
     private val onRender: (title: String, body: String) -> Unit,
 ) {
     sealed interface MenuItem {

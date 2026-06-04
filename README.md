@@ -4,11 +4,13 @@ Direct-BLE G2 glasses + Claude Code dispatch + DJI single-mic learned-profile NR
 
 Replaces the Even Hub seven-tap relaunch dance with a Pixel 10a foreground service that talks BLE to the Even G2 glasses and WebSocket to a home server. The server bridges to a Claude Code subprocess (vanilla CC today; swarm Code/Engineering specialist later). Audio path goes server-side: DJI Mic 3 (mono TX2) → spectral subtraction with learned noise profile → DeepFilterNet polish → NVIDIA Parakeet TDT 0.6B v2. Two-mic NLMS retained in-tree as fallback for non-stationary noise scenarios.
 
-## Current state (2026-06-03)
+## Current state (2026-06-04)
 
-**Phase D zero-touch resilience: DONE.** Adam ran the latest APK (`1fd3124`) for 37 minutes in his factory pocket while moving around — zero disconnects, zero glitches. The product premise is achieved.
+**EvenHub production integration: code-complete (`v0.0.1-d67022d`).** The proven DocuLens-hijack primitive (probe v12) is the production default display path (`EVENHUB_ENABLED=true`): g2code-style menu-list + status-bar UI, `f1=12` keepalive, native `e0-01` selection input. Wire encoder byte-verified against captures; 133 unit tests green. First real-glasses pass on this build is the pending gate. The teleprompter path (Phase D, 37-min factory pocket test) remains the `EVENHUB_ENABLED=false` escape hatch.
 
-**Next phases queued**: Phase Y main-menu takeover (scaffolded, gated behind `PHASE_Y_ENABLED=false`), Phase Z Even-App-uninstall verification, Phase Ω feature modules (Claude Code dispatch, Aria, SMS, Email, Calendar).
+**Removed**: the dead News/Phase-Y display path (`NewsHud`/`EvenAppInit`) — News mode proved to be a sub-feature of the default HUD, not a self-contained takeover (see CHANGELOG / PROTOCOL_NOTES §"Display paths").
+
+**Remaining**: hardware-validate the EvenHub build, the display-blank-on-idle fix, DJI noise-profile capture, Phase Ω feature modules (Aria/SMS/Email/Calendar).
 
 **For fresh Claude Code sessions picking up the project**: read `HANDOFF.md` first, then `CHANGELOG.md`, then `docs/PROTOCOL_NOTES.md`. The handoff has the full project state, architecture, what works, what doesn't, and recommended next-phase priority.
 

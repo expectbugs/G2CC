@@ -9,12 +9,10 @@ import com.g2cc.g2cc.ble.EventParser
 import com.g2cc.g2cc.ble.G2BleClient
 import com.g2cc.g2cc.ble.PairingState
 import com.g2cc.g2cc.ble.Side
-import com.g2cc.g2cc.ble.EvenAppInit
 import com.g2cc.g2cc.hud.ConfirmationFlow
 import com.g2cc.g2cc.hud.EvenHud
 import com.g2cc.g2cc.hud.Hud
 import com.g2cc.g2cc.hud.MenuController
-import com.g2cc.g2cc.hud.NewsHud
 import com.g2cc.g2cc.hud.RootMenu
 import com.g2cc.g2cc.hud.SttConfirmationFlow
 import com.g2cc.g2cc.net.ClientMessage
@@ -89,10 +87,6 @@ class G2Pipeline(
     private var connection: ConnectionManager? = null
     private var streamer: AudioStreamer? = null
 
-    // Phase Y additions — instantiated alongside Hud in installBleClients
-    // when PHASE_Y_ENABLED is true. Both null otherwise (current teleprompter
-    // path takes over). See PHASE_Y_ENABLED docstring below.
-    private var newsHud: NewsHud? = null
     private var rootMenu: RootMenu? = null
     private var evenHud: EvenHud? = null
     // AtomicReference so writes from the BLE handler thread (scan callback) are
@@ -122,25 +116,7 @@ class G2Pipeline(
     // lightest known teleprompter-flow packet. Allowed under the no-timeouts
     // rule (annotated as HB pacing, not a clock-kill).
     private var heartbeatJob: Job? = null
-    // 4th-pass review MEDIUM (BLE bug 2): heartbeat seq must NEVER overlap
-    // auth seq range (1-7). Previously started at 0xF0 and masked to 8 bits,
-    // so after ~16 ticks (4 min) it wrapped 0xFF→0x00 and could hit 0x01-0x07
-    // while an auth re-handshake was in progress, risking auth packet
-    // rejection for "replay". New range: [0x10, 0xFF] with wrap to 0x10.
-    private val heartbeatSeq = java.util.concurrent.atomic.AtomicInteger(0x10)
-    private val heartbeatMsgId = java.util.concurrent.atomic.AtomicInteger(0xF000)
     private val heartbeatTickCount = java.util.concurrent.atomic.AtomicInteger(0)
-
-    /** Next heartbeat seq in the safe range [0x10, 0xFF], wrapping back to
-     *  0x10 instead of 0x00 to avoid auth-seq collision (1-7 reserved). */
-    private fun nextHeartbeatSeq(): Int {
-        val v = heartbeatSeq.getAndIncrement()
-        // Use the low 8 bits with a floor of 0x10. AtomicInteger overflow at
-        // 0x7FFFFFFF is fine because we always normalize here, so the raw
-        // counter can grow unbounded.
-        val masked = v and 0xFF
-        return if (masked < 0x10) (masked + 0x10) else masked
-    }
 
     // Post-Ready BLE watchdog. If a side drops post-Ready and Nordic's
     // useAutoConnect(true) fails to bring it back within a grace window,
@@ -192,30 +168,6 @@ class G2Pipeline(
     // the directory picker (no session) or the active-session menu
     // (Record prompt / Switch project / Exit).
     @Volatile private var activeCcProjectName: String? = null
-
-    // === Phase Y feature flag ===
-    //
-    // When true, the pipeline takes the Even-App-style display path: after
-    // both lenses Ready, runs the multi-service init sequence from
-    // EvenAppInit, switches HUD content rendering to NewsHud (service
-    // 0x01-20 article-push), and uses RootMenu as the displayed content
-    // source.
-    //
-    // Tried true on 2026-06-03 — app did NOT come up on Adam's glasses at
-    // all. Architectural insight from that test: News mode in the Even App
-    // is a SUB-feature of the default HUD (it's content delivery INTO the
-    // running HUD feature), not a self-contained display takeover. The
-    // `0x01-20` channel + `sync_trigger` keepalive + `EvenAppInit` sequence
-    // were designed to be layered on top of the firmware's default HUD
-    // loop, not to replace it. Teleprompter (0x06-20) is the only known
-    // self-contained takeover that lets us drive every pixel.
-    //
-    // Reverted to false. The teleprompter path that closed Phase D
-    // (37-min factory pocket test, zero disconnects) is the right
-    // foundation. Re-using RootMenu / NewsHud / EvenAppInit code as a
-    // Phase Y takeover is not viable without a different protocol path;
-    // that work moves to a future research thread.
-    private val PHASE_Y_ENABLED: Boolean = false
 
     // === EvenHub display path (the proven DocuLens-hijack, probe v12) ===
     //
@@ -412,29 +364,6 @@ class G2Pipeline(
         ))
     }
 
-    /** Phase Y init sequence run after both lenses Ready: send the
-     *  EvenAppInit packets to R lens (matches Even App: News init goes to
-     *  R only). On completion, render the root menu via NewsHud. */
-    private fun runPhaseYInit(onDone: (success: Boolean) -> Unit) {
-        val r = rightBle
-        if (r == null) {
-            onDone(false)
-            return
-        }
-        val initPackets = EvenAppInit.buildFullInitSequence(
-            startSeq = 0x40,           // safe range above auth (1-7) + teleprompter (0x10-0x1F) + news (0x20-0x3F)
-            startMsgId = 0x200,
-            r1MacBleOrder = null,      // skip R1 registration until we have the MAC
-        )
-        diag("phaseY: sending ${initPackets.size} EvenAppInit packets to R")
-        val packets = initPackets.map { it.first }
-        val delays = initPackets.map { it.second }
-        r.queueWrites(packets, "phaseY-init", delays) { ok ->
-            diag("phaseY: init complete ok=$ok")
-            onDone(ok)
-        }
-    }
-
     /** Scan or directed-connect to the G2 lens pair, then install BLE clients.
      *  Idempotent — calling twice is a no-op if BLE clients are already installed.
      *
@@ -552,51 +481,32 @@ class G2Pipeline(
         } else {
             Log.w(TAG, "installBleClients: connection null — start() must run first; flows remain unset")
         }
-        // M1: instantiate RootMenu in BOTH display paths. Teleprompter mode
-        // (default after the 2026-06-03 hardware test showed News mode is
-        // sub-feature only) renders the menu via teleprompter HUD by
-        // combining title + body into a single string. Phase Y wiring kept
-        // gated for any future protocol-takeover attempt.
-        // RootMenu is preserved across BLE rebuild — its stack state and
-        // pending feature-module work survive a BLE rescan. Render callbacks
-        // look up `this.hud` / `this.newsHud` at call time so they always
-        // hit the CURRENT instances even after rebuild.
-        if (PHASE_Y_ENABLED) {
-            val nh = NewsHud(left, right)
-            newsHud = nh
-        } else {
-            newsHud = null
-        }
+        // RootMenu is the live input/content surface, preserved across BLE
+        // rebuild — its stack state + pending feature-module work survive a
+        // rescan. The render callback looks up `this.hud` / `this.evenHud` at
+        // call time so it always hits the CURRENT instances after a rebuild.
         // EvenHub renderer — rebuilt against the current clients on every install
-        // (post-reconnect, BT-cycle). null when the flag is off (teleprompter path).
+        // (post-reconnect, BT-cycle). null when EVENHUB_ENABLED is off (teleprompter).
         evenHud = if (EVENHUB_ENABLED) EvenHud(left, right) else null
         if (rootMenu == null) {
             rootMenu = RootMenu(rootItems = buildRootMenuItems()) { title, body ->
-                when {
-                    EVENHUB_ENABLED -> {
-                        // Native EvenHub render: pull the structured frame and draw
-                        // a menu-list (+ status header), or a confirm screen when
-                        // the frame carries a read-only displayHeader (STT
-                        // transcript). Gated on evenHubLaunched — the cold-launch
-                        // ships the first frame itself; renders arriving before the
-                        // session is up are no-ops here (cold-launch / reconnect
-                        // repaints the current frame).
-                        val eh = evenHud
-                        val rm = rootMenu
-                        if (eh != null && rm != null && evenHubLaunched.get()) {
-                            renderModelViaEvenHub(eh, rm.currentRenderModel())
-                        }
+                if (EVENHUB_ENABLED) {
+                    // Native EvenHub render: pull the structured frame and draw a
+                    // menu-list (+ status header), or a confirm screen when the
+                    // frame carries a read-only displayHeader (STT transcript).
+                    // Gated on evenHubLaunched — the cold-launch ships the first
+                    // frame itself; renders arriving before the session is up are
+                    // no-ops here (cold-launch / reconnect repaints the frame).
+                    val eh = evenHud
+                    val rm = rootMenu
+                    if (eh != null && rm != null && evenHubLaunched.get()) {
+                        renderModelViaEvenHub(eh, rm.currentRenderModel())
                     }
-                    PHASE_Y_ENABLED -> {
-                        newsHud?.render(title, body) { ok ->
-                            diag("phaseY: news-render '${title.take(20)}' ok=$ok body=${body.length}c")
-                        }
-                    }
-                    else -> {
-                        val combined = if (body.isNotEmpty()) "$title\n$body" else title
-                        hud?.render(combined) { ok ->
-                            if (!ok) diag("rootMenu: BLE render failed for '${title.take(20)}'")
-                        }
+                } else {
+                    // Teleprompter escape hatch (EVENHUB_ENABLED=false).
+                    val combined = if (body.isNotEmpty()) "$title\n$body" else title
+                    hud?.render(combined) { ok ->
+                        if (!ok) diag("rootMenu: BLE render failed for '${title.take(20)}'")
                     }
                 }
             }
@@ -690,29 +600,7 @@ class G2Pipeline(
                         return
                     }
                 }
-                // Phase Y branch — gated off in current builds (News mode is
-                // sub-feature of default HUD, not a takeover). Code paths
-                // preserved for any future Phase Y attempt.
-                if (PHASE_Y_ENABLED) {
-                    val nh = newsHud
-                    if (rm == null || nh == null) {
-                        diag("phaseY: rootMenu/newsHud NULL — falling back to teleprompter path")
-                    } else {
-                        runPhaseYInit { initOk ->
-                            if (!initOk) {
-                                diag("phaseY: init failed — starting recovery watchdog")
-                                startPostReadyWatchdog()
-                                return@runPhaseYInit
-                            }
-                            sessionHasRenderedOnce.set(true)
-                            pendingHudText = null
-                            rm.render()
-                            startHeartbeat()
-                        }
-                        return
-                    }
-                }
-                // Teleprompter path priority chain (default):
+                // Teleprompter path priority chain (EVENHUB_ENABLED=false fallback):
                 //   1. pendingHudText — CC streamed Output during outage;
                 //      render via hud so user catches up
                 //   2. STT confirmation pending — render the legacy STT prompt
@@ -880,37 +768,16 @@ class G2Pipeline(
         heartbeatJob?.cancel()
         heartbeatTickCount.set(0)
         heartbeatJob = scope.launch {
-            // REGRESSION FIX (2026-06-03): the Even-App-style sync_trigger-only
-            // keepalive (89c7f47) was WRONG for our display path. The Even
-            // App uses News-style content (0x01-20) which has firmware
-            // session semantics that survive on sync_trigger alone. We use
-            // teleprompter (0x06-20) for HUD content (PHASE_Y_ENABLED=false),
-            // and the teleprompter session dies ~22s after the last full
-            // render even when sync_trigger keeps the BLE link alive. So
-            // the HUD was going blank ~22s after each render and never
-            // coming back (heartbeat fired but didn't recreate the session).
-            //
-            // Fix: heartbeat branches based on PHASE_Y_ENABLED:
-            //   - false (teleprompter, current default): full re-render via
-            //     hud.render(lastText, fastReRender=true). Re-establishes
-            //     the teleprompter session every cycle. ~0.8s per cycle.
-            //     This is what the working v0.0.1-aae90de did.
-            //   - true (Phase Y News mode): sync_trigger-only at 15s
-            //     staggered L+R per Even App pattern.
-            //
-            // Either way: cadence is 10s for teleprompter (need to refresh
-            // before the 22s firmware timeout), 15s for News (matches
-            // Even App).
-            val cadenceMs: Long = when {
-                EVENHUB_ENABLED -> 4_000L          // probe v12 f1=12 cadence
-                PHASE_Y_ENABLED -> 15_000L
-                else -> 10_000L
-            }
-            val hbMode = when {
-                EVENHUB_ENABLED -> "evenHub-f1=12"
-                PHASE_Y_ENABLED -> "News-sync_trigger"
-                else -> "teleprompter-full-rerender"
-            }
+            // Keepalive branches by display path:
+            //   - EvenHub (default): e0-20 f1=12 to R every ~4s (probe v12 — THE
+            //     keepalive that holds the Hub session).
+            //   - teleprompter (EVENHUB_ENABLED=false fallback): full re-render via
+            //     hud.render(lastText, fastReRender=true) every 10s. The
+            //     teleprompter firmware session dies ~22s after the last full
+            //     render even while the BLE link stays alive, so a sync_trigger-only
+            //     beat is NOT enough — the re-render re-establishes the session.
+            val cadenceMs: Long = if (EVENHUB_ENABLED) 4_000L else 10_000L
+            val hbMode = if (EVENHUB_ENABLED) "evenHub-f1=12" else "teleprompter-full-rerender"
             diag("hb: started (mode=$hbMode, cadence=${cadenceMs}ms)")
             // Track expected-vs-actual delay so we can detect OS scheduler /
             // Doze throttling. With wake lock held in G2CCService this
@@ -930,7 +797,7 @@ class G2Pipeline(
                     if (actualGap > cadenceMs + 5_000L) {
                         diag("hb: WARN delay throttled (expected ${cadenceMs}ms got ${actualGap}ms) — wake lock not holding?")
                     }
-                    val l1 = leftBle ?: break
+                    leftBle ?: break    // both lenses must be up before we keep the session alive
                     val r1 = rightBle ?: break
                     val tick = heartbeatTickCount.incrementAndGet()
 
@@ -945,18 +812,6 @@ class G2Pipeline(
                         }
                         r1.sendPacket(eh.keepaliveFrame(), "HB:e0-f1=12")
                         diag("hb: tick=$tick (e0 f1=12 keepalive) | R notify=${r1.notifyCount.get()}")
-                    } else if (PHASE_Y_ENABLED) {
-                        // News-style: sync_trigger to L+R staggered 2s.
-                        val seq = nextHeartbeatSeq()
-                        val msgId = heartbeatMsgId.getAndIncrement() and 0xFFFF
-                        val pkt = com.g2cc.g2cc.ble.Teleprompter.buildSyncTrigger(seq, msgId)
-                        val lBefore = l1.notifyCount.get()
-                        val rBefore = r1.notifyCount.get()
-                        l1.sendPacket(pkt, "HB:L")
-                        kotlinx.coroutines.delay(2_000L)
-                        val r2 = rightBle
-                        if (r2 != null && r2 === r1) r2.sendPacket(pkt, "HB:R")
-                        diag("hb: tick=$tick (sync_trigger) | notify L=$lBefore→${l1.notifyCount.get()} R=$rBefore→${(r2 ?: r1).notifyCount.get()}")
                     } else {
                         // Teleprompter: full re-render via Hud.render.
                         // Re-establishes the firmware-side teleprompter
@@ -1123,9 +978,10 @@ class G2Pipeline(
                 is EventParser.Event.ScrollUp -> {
                     val prev = lastScrollUpAt.get()
                     if (now - prev >= EVENT_DEBOUNCE_MS && lastScrollUpAt.compareAndSet(prev, now)) {
-                        // M2: route scroll-up to RootMenu (prev item) ALWAYS
-                        // (not gated on PHASE_Y_ENABLED). Per Adam's design,
-                        // the menu is the primary interaction surface.
+                        // Native-ring scroll-up (teleprompter fallback path) →
+                        // RootMenu prev. On the EvenHub path the firmware scrolls
+                        // the menu-list locally and reports the pick via e0-01
+                        // HubSelect, so this handler is the teleprompter case.
                         rootMenu?.onScrollPrev()
                     }
                 }

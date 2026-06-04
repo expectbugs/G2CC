@@ -384,7 +384,7 @@ aa 21 [seq] 08 01 01 80 00 08 0e 10 [msg_id_varint] 6a 00 [crc-LE]
 
 ### Init flow observed (steps the Even App does before display)
 
-This is the elaborate sequence that may be why their session is more durable than ours under stress. **Not all yet implemented in G2CC** — placeholder builders live in `EvenAppInit.kt` for Phase Y integration.
+This is the elaborate sequence the Even App runs before display. Kept here as reference; **G2CC does not replicate it** — the EvenHub DocuLens-hijack (probe v12) establishes a working session with just the cold-init prelude + `f1=0` launch + `f1=12` keepalive (see §"EvenHub channel"). The earlier `EvenAppInit.kt` builders for this sequence were removed along with the News/Phase-Y path (2026-06-04).
 
 After CCCD subscribes (handles 2117, 2085, 2149, 2181) and the 7-packet auth handshake:
 1. Service `0x09-20` Device Info query (response: firmware "2.2.2.202" / "2.2.2.208" per lens — different firmwares per side!)
@@ -423,6 +423,8 @@ Three event types:
 
 ### Service `0x01-20` — News-style content delivery (decoded 2026-06-03)
 
+> **RULED OUT as a G2CC display path (2026-06-04).** Driving `0x01-20` was tried (`PHASE_Y_ENABLED=true`, build `655a32d`) and the app did NOT come up on hardware — News mode is a SUB-feature *inside* the running default-HUD loop, not a self-contained display takeover. The `NewsHud` / `EvenAppInit` code was removed. The working takeover is the EvenHub `e0-XX` DocuLens-hijack (§"EvenHub channel"). Decode kept below as protocol reference — do NOT re-attempt News as a display path.
+
 The Even App's busiest write channel (329 writes to R lens vs 0 to L in the 9-min News session). Initially suspected to be a hidden session keepalive, **decoded as content delivery** — News articles streamed to the glasses for HUD display. NOT required for session aliveness (sync_trigger on 0x80-00 alone is sufficient).
 
 Packet structure for type=9 (article-push, 89% of all 0x01-20 traffic):
@@ -446,13 +448,13 @@ Other observed types on 0x01-20:
 
 Burst pattern: 13 bursts in the capture, sizes 1/29/14/9/24/56/81... correlated to ring-scroll-to-new-article events (not 1:1 with ring notifies; ring scroll triggers a phone-side HTTP fetch, then the article body streams via 0x01-20).
 
-### Architectural implication for Phase Y display takeover
+### Display paths in the firmware (resolved 2026-06-04)
 
-Two distinct content-display paths exist in the firmware:
-- **`0x06-20` Teleprompter** — scripted text playback (what G2CC uses today; the "End Feature?" mode; structurally more fragile)
-- **`0x01-20` News-style content push** — UTF-8 article delivery using a structured wrapper (what News uses; the most-stable Even mode per Adam's testing)
-
-Phase Y should switch G2CC from teleprompter to News-style content. For Claude Code output (text streams, not full news articles), we can use a simplified f11 wrapper with just f6 (title/header line) and f9 (body text). Other fields (f7 timestamp, f8 source) are likely optional metadata for the source-line display.
+Three exist; only the EvenHub hijack drives a self-contained, persistent,
+phone-initiated session — the others are dead ends for our purpose:
+- **`e0-XX` EvenHub (DocuLens-hijack)** — THE path G2CC uses (default). Cold-launch + `f1=12` keepalive + native `e0-01` input. See §"EvenHub channel".
+- **`0x06-20` Teleprompter** — scripted text playback; works but eats ring input and needs a heavy ~10s full-re-render keepalive. Kept only as the `EVENHUB_ENABLED=false` escape hatch.
+- **`0x01-20` News-style** — RULED OUT (above): a sub-feature, not a takeover. Code removed.
 
 ### Settings/file-push channel pair `0xc4-00` + `0xc5-00` (decoded 2026-06-03)
 

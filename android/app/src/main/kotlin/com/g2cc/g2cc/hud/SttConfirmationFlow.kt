@@ -26,12 +26,10 @@ import java.util.concurrent.atomic.AtomicReference
  *     buffers (caller queries [getPendingPrompt] from the BLE-Ready edge so
  *     reconnect re-renders it).
  *
- * Reject gesture caveat: in the current teleprompter display path
- * (PHASE_Y_ENABLED=false), the firmware intercepts double-tap to show
- * "End Feature?" — so the [onDoubleTap] reject pathway may not actually
- * receive events in production. If Adam reports that, swap to a different
- * reject gesture (long-press isn't available; an in-HUD "Discard" menu item
- * navigated via ring scroll is the obvious fallback).
+ * Reject gesture caveat: the firmware intercepts ring double-tap to show
+ * "End Feature?" — so the [onDoubleTap] reject pathway may not receive events
+ * in production. The live STT confirm UX is the menu-driven one in G2Pipeline
+ * (✓ Send / ⟲ Re-record / ✗ Cancel as menu-list items); this flow is a fallback.
  *
  * The constructor takes functional callbacks (not concrete Hud +
  * ConnectionManager) so unit tests can drive it without BLE / WS mocks.
