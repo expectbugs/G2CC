@@ -73,7 +73,7 @@ The display blanks when on-screen content doesn't CHANGE for too long — a firm
 
 - **Build:** `JAVA_HOME=/opt/openjdk-bin-17 ANDROID_HOME=/opt/android-sdk /home/user/G2CC/android/gradlew -p /home/user/G2CC/android testDebugUnitTest assembleDebug` (cwd resets between Bash calls — always use `-p`). 134 unit tests, keep green.
 - **APK:** `android/app/build/outputs/apk/debug/app-debug.apk`.
-- **Release:** `gh release create "v0.0.1-<shortsha>" "<apk>#g2cc-evenhub-vN.apk" --target <FULLSHA> --title … --notes …`. **`--target` MUST be the FULL 40-char sha — the GitHub API rejects a short sha with `target_commitish is invalid`** (learned 6/04). gh authed as `amarzello`, remote `expectbugs/G2CC`. Adam installs via phone browser → release URL. **Put the APK link LAST** in your reply (memory `terminal-scroll-links-last`).
+- **Release:** copy the APK to the desired name FIRST (`cp .../app-debug.apk /tmp/g2cc-evenhub-vN.apk`), then `gh release create "v0.0.1-<shortsha>" "/tmp/g2cc-evenhub-vN.apk" --target <FULLSHA> --title … --notes …`. **Two gotchas, both learned 6/04:** (1) `--target` MUST be the FULL 40-char sha — a short sha is rejected with `target_commitish is invalid`; (2) the `path#label` syntax sets only the asset's DISPLAY LABEL, **not** its download filename — the download URL always uses the actual uploaded filename, so **rename the FILE** (don't rely on `#`, or the link 404s). gh authed as `amarzello`, remote `expectbugs/G2CC` (public). Adam installs via phone browser → the asset download URL `…/releases/download/<tag>/<filename>`. **Put the APK link LAST** in your reply (memory `terminal-scroll-links-last`).
 - **Server:** Node on `:7300`; tails app diag into `/tmp/g2cc-server.log`.
 
 ## How Adam works / critical rules
@@ -85,6 +85,8 @@ The display blanks when on-screen content doesn't CHANGE for too long — a firm
 - **Verify, don't guess the wire format.** **Commit/push only when asked.** Don't touch `/home/user/g2code/` or `/home/user/g2aria/`. Gentoo + OpenRC + Portage, SSH on port 80, venv-only Python.
 
 ## Recommended next steps
+
+**Audio path changed 2026-06-04 (`v0.0.1-f027423`):** the DJI *receiver* (the USB dongle) bricked on first power-on (hot all-white screen — RMA'd), so the app now also captures the DJI *transmitter* straight over Bluetooth (HFP/SCO, 16k mono, `MicCapture.Source.DjiBluetooth`). The USB 48k path stays the top-priority source for when a replacement receiver arrives. First real audio test on ANY path is still pending — over BT, confirm `src=dji-bt` in `/tmp/g2cc-server.log` and judge whether the OS-forced NS/AGC on the SCO comms path is "good enough" vs the dongle's clean 48 kHz.
 
 1. **Hardware-validate the EvenHub build** (the checklist above) — THE gate to all-day use. Read `/tmp/g2cc-server.log`.
 2. **Fix display-blank-on-idle** (deferred to an at-work session) — critical for voice-only control.

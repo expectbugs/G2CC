@@ -4,6 +4,42 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-f027423 — 2026-06-04 — **DJI TX mic over Bluetooth (no receiver)**
+
+The DJI Mic 3 *receiver* — the USB dongle the audio path assumed — bricked on
+first power-on (boots to a hot, all-white screen, unresponsive to every control;
+hardware fault, being RMA'd). Rather than block on a replacement, this build adds
+the **no-receiver Bluetooth path**: the DJI *transmitter* pairs straight to the
+Pixel over HFP/SCO and drives the speak/see/confirm flow with zero dongle.
+
+- New `MicCapture.Source.DjiBluetooth`. Source priority is now USB receiver (48k
+  float stereo) → **BT-SCO (16k mono)** → phone mic. The BT attempt takes over the
+  comms route (`MODE_IN_COMMUNICATION` + `setCommunicationDevice` to the
+  `TYPE_BLUETOOTH_SCO` / `TYPE_BLE_HEADSET` device) and captures via
+  `AudioSource.VOICE_COMMUNICATION` — the only source that rides SCO. Teardown
+  restores the prior mode/route idempotently on every path. Added
+  `MODIFY_AUDIO_SETTINGS` (the comms-route API requires it). Verified against the
+  Android `AudioManager` reference, not guessed — `startBluetoothSco()` is
+  deprecated (API 34); `setCommunicationDevice()` is the replacement.
+- 16k/1ch/int16 is exactly the server's existing legacy-mono shape, so **no server
+  routing change** — only the `source` type widened to include `'dji-bt'`
+  (informational/logged only; the server routes on format, never source).
+- **Known ceiling, flagged loud:** the SCO mic is only reachable through Android's
+  communication-capture path, so the OS applies its own AEC/NS/AGC we cannot
+  disable on-device. Not our DSP, not clean pass-through — it's the variable that
+  decides whether BT is "good enough" vs the USB receiver's 48 kHz learned-profile
+  path. Also a Bluetooth-coexistence cost (verified reasoning, not measured): the
+  SCO link reserves radio slots that compete with the glasses' BLE keepalive; the
+  USB receiver path keeps the mic off the BT radio entirely.
+
+Why BT despite the quality hit: it's wireless-to-phone with no dongle, which is
+the whole point for factory-floor use. "Good enough as-is" is now a hardware
+question — capture over BT and confirm `src=dji-bt` in `/tmp/g2cc-server.log`.
+
+Verified: clean rebuild, **134/134 unit tests green** (no regressions), debug APK
+assembles, shared+server TypeScript typechecks. Hardware pass pending — this is
+the first real audio test on ANY capture path.
+
 ## v0.0.1-6b52559 — 2026-06-04 — **Code-review remediation of the EvenHub path (verify-first)**
 
 A four-lens review of the new EvenHub code (encoder · concurrency/lifecycle ·
