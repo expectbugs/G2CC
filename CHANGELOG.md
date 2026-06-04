@@ -4,6 +4,29 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-a3003d5 — 2026-06-04 — **Remove dead News/Phase-Y display path**
+
+With EvenHub shipped as the production default (`v0.0.1-d67022d`), the dormant
+News/Phase-Y display path is dead weight — removed. News mode (`0x01-20`) was
+confirmed a SUB-feature of the default HUD, not a self-contained takeover
+(`PHASE_Y_ENABLED=true` didn't come up on hardware, 2026-06-03 — see the
+"Phase Y reverted" entry below). Surgical removal, nothing live touched:
+
+- Deleted `NewsHud.kt`, `EvenAppInit.kt` + their tests.
+- `G2Pipeline`: dropped `PHASE_Y_ENABLED`, the `newsHud` field, `runPhaseYInit()`,
+  and the four PHASE_Y branches (installBleClients / RootMenu callback /
+  onBothReadyEdge / startHeartbeat) — each collapses to EvenHub-vs-teleprompter.
+  Removed the now-orphaned heartbeat-seq helpers (only the News branch used them).
+- `G2Constants`: removed the Phase-Y `Services` block (incl. `NEWS_CONTENT`); kept
+  the general protocol catalog.
+- Refreshed `RootMenu` / `SttConfirmationFlow` doc comments; `PROTOCOL_NOTES` marks
+  `0x01-20` RULED OUT (decode kept as protocol reference); README current-state updated.
+
+Verified: clean `--rerun-tasks` rebuild, **133/133 tests green**. The delta from 149
+is exactly `NewsHudTest` + `EvenAppInitTest` (16 tests) — no other test moved,
+confirming nothing live depended on the removed path. Teleprompter escape hatch
+(`EVENHUB_ENABLED=false`) intact.
+
 ## v0.0.1-d67022d — 2026-06-04 — **🎯 EvenHub production integration (probe v12 → the real app)**
 
 The probe proved the persistent, phone-initiated Hub session; this build ports
