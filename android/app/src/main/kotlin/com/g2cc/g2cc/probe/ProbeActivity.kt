@@ -662,18 +662,18 @@ class ProbeActivity : ComponentActivity() {
         if (autoRespond && svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_LAUNCH_REQUEST && !sessionActive) {
             log("[$side] AUTO ▶ launch-request → cold launch")
             coldLaunch(side)
-            return
         }
-        // H1: answer each ring input with the Even App's app-state messages
-        // (f1=9/f1=12), exactly as it does ~60ms after every input.
-        if (svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_INPUT_EVENT && sessionActive) {
-            sendStateAlive("input")
-        }
+        // NOTE: we deliberately do NOT respond to inputs with state-alive. v10
+        // proved the PERIODIC state-alive (every 4s) keeps the session alive on
+        // its own, and per-input responses fed a tight loop with the native
+        // "End This Feature?" dialog (input → our reply → another input → …).
     }
 
-    /** H1 keepalive: send the Even App's app-state messages (e0-20 f1=9 then f1=12)
-     *  to R with fresh msg-ids. The hypothesis is these keep the firmware from
-     *  reverting to its native UI; we have never sent them. */
+    /** H1 keepalive: send the Even App's app-state message to R. v11 sends ONLY
+     *  f1=9 — in the capture it fires on its own timer (keepalive-shaped), whereas
+     *  f1=12 clusters around inputs and is the suspected exit-menu trigger (Adam's
+     *  hypothesis). If f1=9 alone keeps the session alive with no exit menu, that
+     *  split is confirmed. */
     private fun sendStateAlive(reason: String) {
         val ble = rightBle ?: return
         saMsgId = if (saMsgId >= 126) 0x40 else saMsgId + 1
@@ -682,13 +682,7 @@ class ProbeActivity : ComponentActivity() {
             if (!ok) log("[R] *** state-alive f1=9 WRITE FAILED: $d ***")
         }
         hbSeq = (hbSeq + 1) and 0xFF
-        saMsgId = if (saMsgId >= 126) 0x40 else saMsgId + 1
-        val id12 = saMsgId
-        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.stateAlive12(hbSeq, id12), "sa12:$reason") { ok, d ->
-            if (!ok) log("[R] *** state-alive f1=12 WRITE FAILED: $d ***")
-        }
-        hbSeq = (hbSeq + 1) and 0xFF
-        log("[R] state-alive ($reason): f1=9 msgid=$id9, f1=12 msgid=$id12")
+        log("[R] state-alive ($reason): f1=9 msgid=$id9")
     }
 
     /** Periodic app-state loop (H1) — fires only once a session is active. */
