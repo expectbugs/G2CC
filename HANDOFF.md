@@ -1,6 +1,6 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
-**Last updated: 2026-06-04, after probe v12 achieved a PERSISTENT, PHONE-INITIATED Hub-app session on Adam's hardware (the core architectural goal is proven), followed by a full-project code-review remediation (`v0.0.1-4ec8384`: 2 HIGH, 2 MEDIUM, 11 LOW — see CHANGELOG.md). Read this first, then the "Required reading" files, then proceed.**
+**Last updated: 2026-06-04. Probe v12 proved the persistent phone-initiated Hub session; the latest build (`v0.0.1-d67022d`) PORTS that primitive into the production app as the new default display path (`EVENHUB_ENABLED=true`) — the g2code-style EvenHub renderer, `f1=12` keepalive, and `e0-01` native-selection input are all wired and the wire encoder is byte-verified against the captures (149 unit tests green). What's NOT yet done: the first real-glasses pass on this production EvenHub build (see "EvenHub production integration" below). Read this first, then the "Required reading" files, then proceed.**
 
 ---
 
@@ -99,12 +99,44 @@ is now 134 (all green).
 - **Three absolute rules:** no timeouts (HB/AUTH annotated exceptions OK), no silent failures (surface BLE write fails to the diag log, not just logcat), no truncation.
 - **Don't guess the wire format** — read the captures / `PROTOCOL_NOTES`. Don't touch `/home/user/g2code/` or `/home/user/g2aria/`. Gentoo+OpenRC+Portage, SSH on 80, venv-only Python.
 
+## EvenHub production integration (`v0.0.1-d67022d`) — what to validate on hardware
+
+Prior-handoff next-steps #2 and #3 are DONE: the probe's EvenHub primitive is now
+the production default (`EVENHUB_ENABLED=true` in `G2Pipeline`). The encoder
+(`ble/EvenHub.kt`) is a structured protobuf builder that reproduces the captured
+DocuLens launch + Reddit menu + keepalive **byte-for-byte** (`EvenHubTest`); the
+renderer (`hud/EvenHud.kt`) draws the g2code two-region layout (menu-header status
+bar + menu-list / main content) on `e0-20`, R-lens only; `G2Pipeline` cold-launches
+on Ready, holds the session with `f1=12` @4s, routes CC output / menus / STT-confirm
+/ confirm-on-hud through EvenHud, and maps `e0-01` selection events to
+`RootMenu.selectIndex`. Schema in `PROTOCOL_NOTES.md` §"EvenHub channel".
+
+**The wire encoding is proven; the on-glasses behavior is not.** First hardware
+pass should check, in order (full list + WHY in CHANGELOG.md). Read
+`/tmp/g2cc-server.log` diag — look for `evenHub: cold-launch done ok=true`,
+`hb: tick=N (e0 f1=12 keepalive)`, `hub-input: select …`:
+1. Cold-launch brings the menu up + `f1=12` @4s holds the session (probe proved
+   the exact sequence; production replicates it).
+2. `e0-01` selection actually drives `selectIndex` → menu navigation (scroll is
+   proven; the select→action loop is new).
+3. Multi-packet SEND of a long menu / CC output page (>1 `e0-20` packet).
+4. Render geometry (status+body, confirm body+options) — px layout may need tuning.
+5. If it misbehaves, flip `EVENHUB_ENABLED=false` → instant revert to the
+   Phase-D-proven teleprompter path (escape hatch, untouched).
+
 ## Recommended next steps
 
-1. **Fix the display-blank-on-idle** (the known issue above) — critical for voice-only control. Capture an idle Even App session to find the missing signal.
-2. **Port the proven recipe into the production app's hardened service** (`G2Pipeline`/`G2CCService` already have foreground-service + wake-lock + reconnect). The probe proved the protocol; production integration is the path to all-day use.
-3. **Wire the existing menu/STT/Claude-Code flow** (RootMenu, SttConfirmationFlow, the CC dispatcher) onto the EvenHub display+input instead of teleprompter.
-4. **DJI noise profile capture** at the machine (still pending — using a phone-recording prototype profile; `machine.npz` is a phone `.m4a` artifact with peaks inside the speech band, must be re-recorded with the DJI TX2).
-5. **On the next hardware pass, spot-check the 3 unvalidated remediation fixes** (see "Code-review remediation" above) — they compile + pass review but haven't touched real glasses / a live server.
+1. **Hardware-validate the EvenHub production build** (checklist above) — the gate
+   to all-day use on the new path.
+2. **Fix display-blank-on-idle** (known issue above) — critical for voice-only
+   control; capture an idle Even App session to find the missing refresh signal.
+   (Adam is deferring this until he can iterate at work.)
+3. **DJI noise profile capture** at the machine (still pending — `machine.npz` is a
+   phone `.m4a` prototype with peaks inside the speech band; must be re-recorded
+   with the DJI TX2).
+4. **Spot-check the 3 unvalidated remediation fixes** from `v0.0.1-4ec8384` — still
+   untouched by real glasses / a live server.
 
-Welcome aboard. The session-persistence wall that blocked everything is down, and the tree is now code-review-hardened (`v0.0.1-4ec8384`). The remaining work is the idle-blank fix and wiring the proven primitive into the real app.
+Welcome aboard. The session-persistence wall is down AND the proven primitive now
+lives in the real app as the default path. The remaining work is the first
+hardware pass on this EvenHub build, then the idle-blank fix.

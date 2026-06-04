@@ -4,6 +4,57 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-d67022d — 2026-06-04 — **🎯 EvenHub production integration (probe v12 → the real app)**
+
+The probe proved the persistent, phone-initiated Hub session; this build ports
+that primitive into the hardened production app as the **new default display
+path** (`EVENHUB_ENABLED=true`). Adam's call after confirming ring-scroll works
+on the DocuLens hijack: *"build the whole thing on the hijack."* Teleprompter
+(`0x06-20`) and the dead News path (`0x01-20`) stay behind their flags as escape
+hatches — flip `EVENHUB_ENABLED=false` to revert to the Phase-D-proven renderer.
+
+**Wire format — decoded and PROVEN byte-exact (the risky part, de-risked without
+hardware).** The full `e0-20` container protocol was decoded from the 2026-06-03
+BTSnoops (`scripts/btsnoop_parse.py` on `/tmp/g2cc-btsnoop{,3}`) and documented in
+PROTOCOL_NOTES: top-level `{f1=msgType, f2=msgId, <wrapper>}`; inside a wrapper,
+list-type widgets → `f2`, text-type → `f3`; widget types `menu-header` (status
+bar) / `menu-list` (menu) / `main` (text). The new `EvenHub` encoder is a
+*structured protobuf builder* (not the probe's hex-patching), and `EvenHubTest`
+rebuilds the captured DocuLens launch + multi-packet Reddit menu + keepalive
+**byte-for-byte**. Multi-packet convention proven against the doclist capture:
+non-final packets carry the raw chunk with **no** CRC; the final packet's single
+CRC-16/CCITT covers the **entire** reassembled payload (so
+`G2Frame.commandMulti`'s CRC-per-packet is wrong for `e0` — `EvenHub` frames it
+itself). The lesson that keeps paying off: reproduce captures byte-exactly, never
+trust a merely-plausible decode.
+
+**Input** — `e0-01 f1=2` decoded too: the firmware tracks menu-list focus locally
+(draws the select border) and reports the chosen item as `f13.f1={containerId,
+"<widgetType>", index}`. New `EventParser.HubSelect`/`HubGesture`;
+`RootMenu.selectIndex(i)` acts on the firmware-reported index (additive — the
+teleprompter highlight model is untouched). Matches what Adam scrolled on the probe.
+
+**New / changed:** `EvenHub.kt` (encoder), `EvenHud.kt` (g2code-style renderer:
+menu-header + menu-list/main, R-lens-only, cold-launch + keepalive), `RootMenu`
+(+`currentRenderModel`/`selectIndex`), `EventParser` (e0-01), `G2Pipeline`
+(cold-launch on Ready, `f1=12` keepalive @4s, route CC output/menu/STT-confirm/
+confirm-on-hud through EvenHud, `e0-01`→`selectIndex`). **149 unit tests green
+(+15 new)**, debug APK assembles.
+
+**NOT yet hardware-validated** (logic-sound + compile-clean + encoder byte-exact,
+but no real-glasses pass — check on the next hardware session):
+1. **Cold-launch + keepalive end-to-end** — does our `COLD_INIT → f1=0 launch →
+   f1=7 menu` bring the menu up, and does `f1=12` @4s hold it? (Probe proved this
+   exact sequence; production replicates it.)
+2. **Multi-packet SEND** — long menus / CC output split into >1 `e0-20` packet.
+   Byte-verified + the Even App did it, but our *sending* multi-packet is unproven.
+3. **`e0-01` select → action loop** — scroll is proven; the full
+   select-index → `selectIndex` → navigate loop is new.
+4. **Render geometry** — the status+body and confirm (body+options) layouts use
+   chosen px positions (encoding exact; px is a layout choice). May need tuning.
+5. **Idle-blank** (carried over) — static content still blanks; deferred to a work
+   session per Adam.
+
 ## v0.0.1-4ec8384 — 2026-06-04 — **Full-project code-review remediation (2 HIGH, 2 MEDIUM, 11 LOW)**
 
 A deep review of the entire tree (Android + server + audio + shared) after the
