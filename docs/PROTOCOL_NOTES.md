@@ -574,4 +574,30 @@ The expected i-soxi main service `00002760-...-0000` is GONE on Adam's firmware.
 
 ---
 
-*Last updated 2026-06-02. Update when the i-soxi clone SHA changes or when Phase 5/6/Y reverse-engineers new behavior.*
+## EvenHub channel `e0-XX` — phone-initiated Hub-app session (decoded 2026-06-03/04)
+
+Reverse-engineered from BTSnoop of the Even App running DocuLens + on-glasses probe tests (v3–v12). All `e0-XX` frames ride GATT char `0x5401`/`0x5402`; the service id is in the AA-frame header.
+
+| Service | Dir | Purpose |
+|---------|-----|---------|
+| `e0-00` | G→P | Acks (`f1=1` launch-ack; `f1=8/10/12` content/state acks) |
+| `e0-01` | G→P | `f1=17` launch request (from glasses menu); `f1=2` ring input event |
+| `e0-20` | P→G | Content + app-state (host → glasses) |
+
+**`e0-20` message types (protobuf field 1):**
+- `f1=0` — **launch-response**: `{f2=msgId, f3={f1=1, f3=<container>, f5=<appToken>}}`. Sending this COLD (no preceding `e0-01`) is the **phone-initiated launch**. DocuLens token = `11417` (stable per app). Container has dims (f3=w f4=h), widget type `f10` (`loading`/`main`/`menu-list`/`doclist`/`pdf-text`/`toolbar`/`menu-header`), text `f12`, list items as repeated `f4` inside `f11` with item-count in `f11.f1`.
+- `f1=7` — **content-update** (new screen/container).
+- `f1=12` — **app-state keepalive**: `08 0c 10 <msgId> 72 00`. **Send every ~4s to keep the session alive** (the session reverts to native UI in ~15-20s without it). THE keepalive (probe v12).
+- `f1=9` — app-state: `08 09 10 <msgId> 5a 02 08 01`. Keeps session alive BUT **triggers the native "End This Feature?" exit menu** — do NOT send.
+
+**Cold-launch init prelude** (verbatim, sent once before the `f1=0` launch): `81-20` Display Trigger, `04-20` Display Wake, `0e-20` region config.
+
+**Session death (without keepalive)** = glasses revert to native UI: a burst of `01-01` internal-menu events (`f1=3` decorated with magic `0x12345678`) + `09-01` device-info. The `e0`/BLE channel stays alive through it. NOT a disconnect.
+
+**Ruled out as keepalives** (Even App does NOT do them during a session, verified in capture): responding to `80-01` pings, Commit `20-20`, periodic display-wake, R1 registration. The `80-00` sync_trigger is a connection keepalive only (does not hold the Hub session).
+
+**Display-refresh timeout (open):** the display blanks if visible content is static too long (separate from the session keepalive; autoscroll avoids it). Needs periodic real content changes — unsolved.
+
+---
+
+*Last updated 2026-06-04 (EvenHub session protocol). Update when the i-soxi clone SHA changes or when new behavior is reverse-engineered.*

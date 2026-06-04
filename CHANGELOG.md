@@ -4,6 +4,42 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-32c7302 — 2026-06-04 — **🍾 PERSISTENT APP-INITIATED HUB SESSION (probe v3→v12)**
+
+The big one. Across probes v3–v12 we went from "EvenHub channel discovered" to a
+**phone-initiated, self-keepalive Hub-app session** — Adam's core goal (open the app,
+it drives the glasses, no glasses menu, stays alive). Validated on hardware.
+
+What we proved (all from BTSnoop captures + on-glasses tests, no guessing the wire):
+- **Phone-initiated COLD LAUNCH works.** The phone sends the `e0-20` launch-response
+  (`f1=0`, app container + token) COLD — no glasses menu, no `e0-01` request. Preceded
+  by display init (`81-20` trigger, `04-20` wake, `0e-20` region config). Tokens are
+  stable per app (DocuLens `11417`). We render OUR menu under DocuLens's slot.
+- **Inputs forward to us** on `e0-01` (`f1=2`) and track our own menu (focus index).
+- **The session keepalive is `e0-20` `f1=12`** (`08 0c 10 <id> 72 00`) sent every ~4s.
+  This was the 8-version hunt: `80-00` sync_trigger (v5), content re-render (v6/v8),
+  input-responses (v7), full re-launch (v8), sync_trigger-both-lenses (v9) — ALL failed;
+  the session died ~15–20s by the glasses **reverting to their native UI** (the `01-01`
+  magic-`0x12345678` burst), which the Even App's session never shows.
+- **`f1=9` is the exit-menu trigger, NOT a keepalive.** v10/v11 sent f1=9 — it kept the
+  session alive but popped the native "End This Feature?" menu on its own cadence. v12
+  swapped to `f1=12` only → alive **and** clean.
+
+Known issue carried forward: the **display blanks when the on-screen content doesn't
+CHANGE for too long** (a firmware display-refresh timeout — NOT input-related, no
+disconnect; official Even Hub apps do it too; autoscroll-while-reading does NOT blank
+because content keeps changing). Matters for voice-only control (DJI Mic): HUD content
+may stay static during a spoken command. Fix = periodic real content updates.
+
+Process lesson (now a rule in `~/.claude/CLAUDE.md` + memory): I repeatedly latched onto
+the first plausible keepalive and presented the guess as a finding. New rule: on any
+hiccup, generate ≥10 distinct explanations fitting ALL data before narrowing.
+
+Also in this arc: a 3-agent comprehensive code review fixed real bugs — keepalive write
+failures were logcat-only (now surfaced), `G2Frame.commandMulti` Len-byte overflow at
+MTU 512, and the BTSnoop parser's multi-packet reassembly (`scripts/btsnoop_parse.py`).
+Frame primitives (CRC/Varint/auth/G2Frame) all verified correct.
+
 ## v0.0.1-81bd233 — 2026-06-03 — **Probe v2 + EvenHub channel discovered**
 
 The architectural breakthrough after the menu-driven UX hit hardware reality. Probe v2 is a comprehensive BLE protocol shell — discovers every service + characteristic, subscribes to every notify-capable char, logs full untruncated payloads, streams every event to the home server's diag log live, and saves a local backup file.

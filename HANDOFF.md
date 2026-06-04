@@ -1,215 +1,85 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
-**Last updated: 2026-06-03, after probe v2 confirmed the EvenHub channel (`0xe0-XX`) is the firmware's Hub-app launch handshake path. Project pivoted from "direct-BLE display/input takeover" to "direct-BLE activation of a Hub-SDK app". The architectural breakthrough is real; the next step is one BTSnoop capture that Adam will run.**
-
-This document is the single entry point for a fresh CC session picking up G2CC. Read this first, then read the files in the "Required reading" section below. Then proceed.
+**Last updated: 2026-06-04, after probe v12 achieved a PERSISTENT, PHONE-INITIATED Hub-app session on Adam's hardware. The core architectural goal is proven. Read this first, then the "Required reading" files, then proceed.**
 
 ---
 
-## TL;DR — current state in three paragraphs
+## TL;DR — where we are
 
-**Where we are.** Adam owns a pair of Even Realities G2 glasses + R1 ring (~$1500 sunk; will not buy replacement hardware). Across June 2026 he and the previous CC instance built G2CC: a direct-BLE Android driver (bypassing the Even App), a Parakeet + DJI Mic 3 noise pipeline (audio path complete and stable), a Claude Code subprocess dispatcher (works), and a foreground service that survived a 37-min factory-pocket test. After Phase Y (News-mode display takeover) failed in hardware and the menu-driven UX over teleprompter ALSO failed (teleprompter eats inputs locally), we pivoted to investigating whether installed Hub-SDK apps can be driven by our own direct-BLE driver instead of the Even App's WebView. The probe v2 APK (`v0.0.1-81bd233`) just confirmed they can be.
+**The breakthrough is done.** Adam's goal: open an Android app, and it controls the G2 glasses all day with **zero use of the glasses' built-in menu**, self-healing on drops (see memory `g2cc-app-initiated-goal`). As of probe v12 (`v0.0.1-32c7302`) we have, validated on his hardware:
 
-**What we proved.** When Adam selected DocuLens from the G2 main menu with Even App closed but our probe providing an authenticated BLE session, the firmware fired a single notify on a previously-undocumented service `0xe0-01` (the **EvenHub channel**), waited ~10 s for our acknowledgment, then timed out. This means: (a) Hub apps don't require the Even App at runtime — any authenticated host that speaks the protocol works; (b) `0xe0-XX` is the launch-handshake channel, with `0xe0-00` = write, `0xe0-01` = notify, `0xe0-20` = data; (c) once we know what bytes the Even App writes to `0xe0-00` during a successful launch, we can replay them from our own driver and own the activation primitive end-to-end.
+1. **Phone-initiated COLD LAUNCH** — the phone drives a Hub app onto the glasses with no glasses-menu selection. We render OUR menu under DocuLens's slot.
+2. **Input** — the ring forwards events to us (`e0-01 f1=2`) and navigates our own menu.
+3. **Persistent session** — it **stays alive indefinitely**, input or not, via the keepalive we finally found: the `e0-20` **`f1=12`** app-state message every ~4s.
 
-**What's next.** ONE BTSnoop capture from Adam: open Even App, let it normally launch DocuLens (or any Hub app), save `btsnoop_hci.log`. Diff against the probe v2 log already on disk → exact `0xe0-00` / `0xe0-20` write bytes during a working launch. Then I (or the next CC instance) decode the protocol, add a "Send to char" UI to the probe to confirm we can replay, then move the primitive into the production app. Eventually Adam builds a minimal "G2CC Mode" Hub-SDK app (one-time setup via Even App), and from then on his G2CC Android service activates it via direct-BLE the same way it currently activates Teleprompter — but as our OWN app, with our OWN input/display semantics.
+This took 12 probe versions (v3→v12) and an 8-version keepalive hunt. The hard-won keepalive facts are below and in memory `keepalive-is-content-rerender`.
 
----
+## The working recipe (probe v12 — this is the answer)
 
-## Who is Adam, what is his setup
+All frames ride GATT char `0x5401`; the `e0-XX` service id lives in the AA-frame header (it is NOT a separate GATT characteristic). Sequence:
 
-- **Adam Marzello** — works in a factory. Phone lives in his pants pocket the entire shift; he never takes it out. Wears G2 glasses + R1 ring as primary I/O. **"Phone in pocket while walking around a factory" is the ONLY operating mode** — desk-use is irrelevant. Adam strongly wants to be free of the Even App's prototype-mode URL-paste dance.
-- **Hardware**: Pixel 10a (Android 14+, Tensor G5, BT 5.3), Even Realities G2 glasses (BT 5.0, two BLE devices = L+R lens), R1 ring (separate BLE device that pairs to the GLASSES, not the phone — input events flow ring → glasses → phone), DJI Mic 3 TX2 (close-talk collar mic).
-- **Home server**: Gentoo box on Tailscale. Phone reaches it at `100.107.139.121:7300`. Server bridges WebSocket ↔ Claude Code subprocess. The server also tails diag from any G2CC APK (including probes) into `/tmp/g2cc-server.log`.
-- **Adam communicates with you via Tailscale SSH/mosh/tmux from his phone** while at work. You never have direct access to his phone. APKs are delivered via GitHub Releases; he downloads via phone browser.
-- **Adam emailed Even Realities pre-purchase** to confirm he could write his own software for the glasses; their answer was technically true (the Hub SDK exists) but architecturally misleading (no bare-metal control). He's now committed to making the SDK work for him.
+1. **Connect + 7-packet auth** to L+R lenses (existing `AuthSequence`).
+2. **Display init** to R (verbatim from capture, `ReplayKit.COLD_INIT`): `81-20` Display Trigger, `04-20` Display Wake, `0e-20` region config.
+3. **Cold launch**: send `e0-20` launch-response `f1=0` (DocuLens token **11417**, `ReplayKit.DOCULENS_LAUNCH`) → glasses ack on `e0-00` → send our menu `e0-20 f1=7` (`ReplayKit.G2CC_MENU`).
+4. **Keepalive**: send `e0-20` **`f1=12`** (`08 0c 10 <msgId> 72 00`, `ReplayKit.stateAlive12`) to R **every ~4s, forever**. THIS is what keeps the session alive. Plus an `80-00` sync_trigger to L+R (connection-level, harmless).
+5. **Inputs** arrive on `e0-01 f1=2`; the firmware navigates our menu locally and reports focus.
 
-## Critical environmental facts (don't re-discover the hard way)
+**Do NOT send `e0-20 f1=9`** (`08 09 10 <id> 5a 02 08 01`) — it ALSO keeps the session alive but triggers the native "End This Feature?" exit menu on its own cadence. f1=12 is the clean keepalive; f1=9 is the exit-menu trigger.
 
-Adam's global rules in `~/.claude/CLAUDE.md` override training defaults. Key items:
+## ⚠️ Known issue — the next thing to fix
 
-- **OS**: Gentoo Linux + OpenRC + Portage. Use `rc-service` / `emerge`, NOT `systemctl` / `apt`.
-- **SSH**: port 80, NOT 22.
-- **Python**: always use `./venv/bin/python` per project. NEVER system pip.
-- **Sudo**: passwordless for ALL — be especially careful with destructive commands.
-- **Mr. Awesome canary**: if Adam stops referring to you as Mr. Awesome in a long session, his global CLAUDE.md context is getting truncated; tell him.
+**The display blanks when the on-screen content doesn't CHANGE for too long** (Adam, 2026-06-04 — it's a *display-refresh* timeout, NOT an input timeout and NOT a disconnect). The `f1=12` keepalive keeps the **session** alive, but does NOT keep the **display** lit if the visible content is static too long. The screen just goes dark; no "Connection Lost". Official Even Hub apps do this too. **It matters for voice-only control (DJI Mic):** during a spoken command the HUD content may not change for a stretch, so it would blank. Fix is likely a periodic real *content update* (re-send the menu/content with an actual visible change) layered on top of the f1=12 keepalive. **Confirming data point (Adam): autoscroll while reading a book does NOT blank** — because the content is continuously changing. So the fix is to keep the visible content changing, not just keep the session alive. Mine a sustained-idle Even App capture for how it refreshes the display.
 
-## The three absolute rules (apply to ALL code)
+## What works today (verified on hardware)
 
-From `/home/user/aria2/overhaul.md` §22-24, repeated in `/home/user/G2CC/CLAUDE.md`:
+- ✅ BLE pair + 7-packet auth to L+R
+- ✅ Phone-initiated cold launch (no glasses menu) — menu renders
+- ✅ Ring input forwarded to us, navigates our menu
+- ✅ **Persistent session via `f1=12` keepalive (probe v12) — alive 56s+ with zero interaction, indefinitely with the 4s beat**
+- ✅ Wake lock held while connected (heartbeat fires screen-off)
+- ✅ DJI Mic 3 USB-C capture (stereo float32 48k) + server noise pipeline + Parakeet (all pre-existing, stable)
+- ✅ WebSocket auth + Claude Code subprocess dispatch (pre-existing)
 
-1. **NO TIMEOUTS** in BLE / WS / capture / display / ASR paths. Annotated exceptions: AUTH, HB, BLE_ACK, watchdog backoff.
-2. **NO SILENT FAILURES**. No `except: pass`. Errors surface loud.
-3. **NO TRUNCATION** of user-facing strings. HUD scrolls; long transcripts stay long.
+## Dead paths / facts — don't re-investigate
 
-Also: **NEVER guess BLE UUIDs without lineage**. Cite `docs/PROTOCOL_NOTES.md` or i-soxi.
+- **Teleprompter (`0x06-20`) eats inputs** — it's a native firmware feature; inputs never reach the phone. The Hub-app (`e0-XX`) path is what gives display + input.
+- **Hijacking DocuLens works** for our purposes (cold launch its token, drive our content). We did NOT need a custom Hub app to get here. (A custom "G2CC Mode" app via the Hub SDK is still an option for a cleaner identity, but not required.)
+- **Keepalive dead-ends (all tried, all failed for EvenHub):** `80-00` sync_trigger alone, content (`f1=7`) re-render, responding to inputs, full re-launch, sync_trigger-to-both-lenses. The ONLY thing that works is `f1=12`.
+- **Refuted by capture (Even App does NOT do these):** respond to `80-01` pings, send Commit (`20-20`), periodic display-wake, R1-ring registration (ring is optional — glasses work identically without it).
+- **The session death was the glasses reverting to native UI** (`01-01` magic-`0x12345678` burst), not a BLE drop. BLE/`e0` channel stays alive through it.
 
-## Required reading (in this order)
+## Key files
 
-1. **`/home/user/G2CC/CLAUDE.md`** — project-specific rules + forbidden patterns
-2. **`/home/user/G2CC/docs/EVENHUB_FINDING.md`** — the breakthrough that defines next steps. The single most important doc to read.
-3. **`/home/user/G2CC/CHANGELOG.md`** — full history of what worked, what didn't, why
-4. **`/home/user/G2CC/docs/PROTOCOL_NOTES.md`** — BLE protocol reference (note: EvenHub service `0xe0-XX` is documented in EVENHUB_FINDING.md, not yet folded back into PROTOCOL_NOTES)
-5. **`/home/user/G2CC/docs/PROBE_V2_LOG_EXCERPT.txt`** — the 31 service-tagged notifies from the test that found the EvenHub channel
-6. **`/home/user/G2CC/g2_custom_app_spec.md`** — original build spec (note: the architectural pivot has invalidated parts of this — see "Dead paths" below)
-7. **`/home/user/G2CC/audio/pipeline/README.md`** — audio pipeline architecture (this part is fully valid and works)
+- **Probe (the live work):** `android/app/src/main/kotlin/com/g2cc/g2cc/probe/`
+  - `ProbeActivity.kt` — UI, cold launch, keepalive heartbeat (`startStateAlive`/`sendStateAlive` = f1=12), sync_trigger heartbeat, diag streaming
+  - `ReplayKit.kt` — all the EvenHub frames + builders (`DOCULENS_LAUNCH`, `G2CC_MENU`, `COLD_INIT`, `stateAlive9`/`stateAlive12`), each CRC-verified in `ReplayKitTest`
+  - `BleProbeClient.kt` — permissive BLE client (subscribes to every notify char, `sendToChar` to any char)
+  - `ProbeSend.kt` — manual send-prep (RAW/FRAME), tested
+- **Shared BLE (verified correct in review):** `ble/G2Frame.kt`, `Crc16.kt`, `Varint.kt`, `AuthSequence.kt`, `Teleprompter.kt` (`buildSyncTrigger`), `G2Constants.kt`
+- **Analysis tools:** `scripts/btsnoop_parse.py` (BTSnoop→HCI→ATT→AA-frame parser, bug-fixed; takes a btsnoop path as argv). `/tmp/build_kit.py` was the frame builder (one-shot; templates captured containers).
+- **Protocol reference:** `docs/PROTOCOL_NOTES.md` (+ the EvenHub section). `docs/EVENHUB_FINDING.md` (the original channel discovery).
+- **Captures:** the BTSnoops came from Android bug reports Adam emails to `adam@marzello.net`; pull via `mbsync -a` then parse from `~/Mail/marzello.net/INBOX`. Raw captures lived in `/tmp/g2cc-btsnoop*/`.
 
-For the BLE driver internals:
-- `android/app/src/main/kotlin/com/g2cc/g2cc/probe/BleProbeClient.kt` — comprehensive BLE probe (subscribes to all chars, exposes raw notifies, can write to any char)
-- `android/app/src/main/kotlin/com/g2cc/g2cc/probe/ProbeActivity.kt` — UI + log streaming
-- `android/app/src/main/kotlin/com/g2cc/g2cc/ble/G2BleClient.kt` — production BLE client (still works for teleprompter; will be repurposed for EvenHub once protocol is known)
-- `android/app/src/main/kotlin/com/g2cc/g2cc/ble/AuthSequence.kt` — 7-packet handshake (reused by both)
+## Build + release flow
 
-For server-side:
-- `server/src/ws-handler.ts` — WebSocket protocol + CC dispatch + audio routing (DJI + phone-mic paths)
-- `server/src/stt.ts` — STT pipelines (Parakeet primary, faster-whisper fallback)
-- `audio/pipeline/dji_pipeline_cli.py` — noise + Parakeet end-to-end
+- Build: `JAVA_HOME=/opt/openjdk-bin-17 ANDROID_HOME=/opt/android-sdk /home/user/G2CC/android/gradlew -p /home/user/G2CC/android testDebugUnitTest assembleDebug` (cwd resets to repo root between Bash calls — use `-p`).
+- APK: `android/app/build/outputs/apk/debug/app-debug.apk`. ~127 unit tests, keep green.
+- Release: `gh release create "v0.0.1-<shortsha>" "<apk>#g2cc-probe-vN.apk" --target <fullsha> --title ... --notes ...` (gh authed as `amarzello`, remote `expectbugs/G2CC`). Adam installs via phone browser → release URL. **Put the APK link LAST in your reply** (memory `terminal-scroll-links-last`).
+- Server: Node on `:7300`, tails probe diag into `/tmp/g2cc-server.log`. The probe streams every event there — READ IT to diagnose (don't theorize).
 
-## Architecture overview (revised post-pivot)
+## How Adam works / critical rules
 
-```
-+--------+        +-------+         +-------+        +-----------+
-| R1 Ring|--BLE-->| G2    |<--BLE-->| Pixel |--WS--->| Home box  |
-+--------+        | L lens|         | 10a   |        | (Tailscale|
-                  +-------+         |       |        |  ...      |
-                  +-------+         | G2CC  |        |  :7300)   |
-                  | G2    |<--BLE-->| FG svc|        |           |
-                  | R lens|         +-------+        | g2cc-srv  |
-                  +-------+                          |   ↓       |
-                                                     | spawns CC |
-                                                     |  subproc  |
-                                                     +-----------+
-```
+- Adam SSHes from his phone at a factory; he runs every hardware test, you never touch the phone. He's sharp, calls out lazy reasoning, wants data not guesses.
+- **Mr. Awesome canary** (global `~/.claude/CLAUDE.md`): if you stop calling him Mr. Awesome in a long session, context is truncating — tell him.
+- **Ten Explanations rule** (NEW, global CLAUDE.md + memory `ten-explanations-rule`): on ANY hiccup, generate ≥10 distinct explanations fitting ALL data before narrowing. I violated this repeatedly this session — don't.
+- **Three absolute rules:** no timeouts (HB/AUTH annotated exceptions OK), no silent failures (surface BLE write fails to the diag log, not just logcat), no truncation.
+- **Don't guess the wire format** — read the captures / `PROTOCOL_NOTES`. Don't touch `/home/user/g2code/` or `/home/user/g2aria/`. Gentoo+OpenRC+Portage, SSH on 80, venv-only Python.
 
-- **Server**: works. Node + Fastify + WebSocket on `:7300`. Per-client SessionPool with CC subprocesses keyed by `cwd`. Watchdog restarts dead processes via `--resume`. Audio routes by phone-announced format (DJI 48k/2ch/float32 → noise pipeline + Parakeet; phone-mic 16k/1ch/int16 → preprocessAudio + Parakeet/whisper).
-- **Audio pipeline**: works. `audio/venv/` has NeMo 2.7.3 + PyTorch 2.12+cu130. DJI capture on Android already implements USB-C stereo float32 via `MicCapture.kt`. STT confirmation menu logic exists (currently rendered to teleprompter, dead until display takeover lands).
-- **BLE display + inputs**: **PIVOT IN PROGRESS.** Teleprompter direct-BLE (`0x06-20`) still works as display-only (proven 3+ hours stable). Inputs in teleprompter mode are consumed by firmware locally (the original plan failed here). New plan: install a Hub-SDK "G2CC Mode" app once via Even App, then activate it via direct-BLE writes to the newly-discovered EvenHub channel (`0xe0-XX`) — bypassing Even App at runtime. Hub-SDK apps get their OWN input/display semantics via the SDK's container/event abstraction.
+## Recommended next steps
 
-## What works today (verified on Adam's hardware)
+1. **Fix the display-blank-on-idle** (the known issue above) — critical for voice-only control. Capture an idle Even App session to find the missing signal.
+2. **Port the proven recipe into the production app's hardened service** (`G2Pipeline`/`G2CCService` already have foreground-service + wake-lock + reconnect). The probe proved the protocol; production integration is the path to all-day use.
+3. **Wire the existing menu/STT/Claude-Code flow** (RootMenu, SttConfirmationFlow, the CC dispatcher) onto the EvenHub display+input instead of teleprompter.
+4. **DJI noise profile capture** at the machine (still pending — using a phone-recording prototype profile).
 
-- ✅ BLE pair-up + auth handshake to G2 L+R lenses (7-packet sequence)
-- ✅ Teleprompter HUD render with inter-packet pacing (display-only — inputs lost to firmware)
-- ✅ Heartbeat keeps teleprompter session alive via full re-render every 10 s (+ `PARTIAL_WAKE_LOCK`)
-- ✅ Auto-recovery from BLE drops: post-Ready watchdog, BT-toggle handling, observer-leak-free reconnect
-- ✅ WebSocket auth + Claude Code subprocess spawning
-- ✅ Server-side scrollback + paging
-- ✅ DJI Mic 3 USB-C capture on Android (stereo float32 @ 48 kHz)
-- ✅ Server noise pipeline (notch + wiener + Parakeet) end-to-end via `dji_pipeline_cli.py`
-- ✅ Parakeet smoke test against espeak speech → exact transcript
-- ✅ Probe v2 — direct-BLE shell that streams every event to the server log
-- ✅ Phase D pocket-survival test: 37 min in factory pocket, zero disconnects
-- ✅ **EvenHub launch-handshake notify captured and decoded (2026-06-03)**
-
-## What's NOT working / Dead paths — don't re-investigate
-
-These were tried, didn't work, and the reason is well-understood. Don't re-investigate without strong new evidence:
-
-- **Direct-BLE display takeover via `0x6402` raw writes.** The Apollo510b SoC renders the display locally via LVGL/FreeType from container layouts shipped over BLE — there is no raw pixel/framebuffer path. Probe wrote 6 different test patterns to `0x6402`, nothing appeared. (`0x6402` is also notify-only, not write — `0x6401` is the write side, but it only accepts container protobuf, not pixels.)
-- **Phase Y display via News-style content (`0x01-20`).** Failed in hardware test (`v0.0.1-655a32d`): app didn't come up at all. News mode is a sub-feature of the default HUD, requires the HUD framework underneath. Code is preserved in-tree but gated behind `PHASE_Y_ENABLED=false`.
-- **Menu-driven UX over Teleprompter (`0x06-20`).** Built (`v0.0.1-064950e`) and tested: teleprompter consumes tap (= font size) and scroll (= scrollbar) locally on the glasses; the phone never sees those events. RootMenu was driving a display that no one could navigate.
-- **Direct-BLE input from idle / no active feature.** Firmware only forwards ring scroll/tap on `0x01-01` when an interactive feature is active. In idle, only mode-change gestures (double-tap toggles default HUD, long-press while default HUD is open opens default menu) reach the phone.
-- **`0x6402` writes to take over the display.** Even if we could push pixels, `0x6402` is notify-only direction.
-- **Even Realities' `@evenrealities/even-terminal` CLI** as the answer. Adam considered, rejected: he wants a real custom app, not just a Claude Code terminal.
-- **Switching to different glasses (Brilliant Labs Frame, etc.).** Hardware cost ruled out; the $1500 G2 + ring is the only option.
-
-## What needs hardware testing next
-
-**1. BTSnoop capture of normal DocuLens launch via Even App.** This is THE pending experiment. Adam runs it. We need to capture all `0xe0-00` / `0xe0-20` writes the Even App sends during a successful Hub-app launch. Procedure (Adam's done this before for the News-mode capture):
-
-- Pixel Developer Options → **Enable Bluetooth HCI snoop log**
-- Close all apps, reboot phone (HCI log starts fresh)
-- Open Even App, let it pair with glasses
-- From G2 main menu, ring-select DocuLens, wait for normal app launch (~3–5 s)
-- Use DocuLens briefly
-- Exit DocuLens, close Even App
-- Pull the snoop log: `adb shell bugreport` then extract from the bug report, OR pull `/data/misc/bluetooth/logs/btsnoop_hci.log` directly if accessible
-
-Then diff against `docs/PROBE_V2_LOG_EXCERPT.txt`. The writes flowing on service `0xe0-00` / `0xe0-20` (look for `aa 21 ?? ?? 01 01 e0 00 ...` or `e0 20` in Phone→Glasses direction) during the seconds around DocuLens activation are the launch protocol.
-
-**2. (After protocol decoded)** Replay the launch sequence from the probe to confirm we can drive DocuLens activation ourselves — i.e., select DocuLens from menu, then have our probe write the captured bytes to `0xe0-00`, see if DocuLens proceeds past the timeout into a working state.
-
-**3. (After replay works)** Adam builds a minimal "G2CC Mode" Hub-SDK app (`evenhub-templates` scaffold), installs it via Even App (one-time), then we activate it via the same `0xe0-XX` primitive from the production G2CC service.
-
-## Recommended next-phase priority order
-
-1. **Adam runs the BTSnoop** (above). Without this data, everything else is stuck.
-2. **Decode the `0xe0-XX` launch protocol** from the BTSnoop. Pure desk work for whichever CC instance picks up.
-3. **Add "Send to char" UI to the probe** (probe v3) so the launch sequence can be replayed manually. Small Kotlin work.
-4. **Replay launch from probe** to confirm protocol understanding. Adam runs.
-5. **Build G2CC Mode Hub-SDK app** — Adam sets up the Hub SDK toolchain, builds a minimal app with text containers and event handlers, installs via Even App once.
-6. **Wire G2CC Android service to activate G2CC Mode via `0xe0-XX`**. Production integration.
-7. **Port menu state machine to SDK containers**. The RootMenu state machine (depth, push, replace, displayHeader, addBack) translates directly to SDK container hierarchy. Mechanical port.
-8. **STT confirmation flow as menu frame**. The state machine already exists; the UI surface changes from teleprompter text to SDK containers.
-9. **DJI noise profile capture** at the machine (still pending — currently using a phone-recording prototype profile).
-
-## Server-side runtime notes
-
-- Server binary path: `/home/user/G2CC/server/dist/index.js`
-- Start fresh: `cd /home/user/G2CC && setsid -f node server/dist/index.js > /tmp/g2cc-server.log 2>&1 < /dev/null`
-- Server log: `/tmp/g2cc-server.log` (every `[client-diag]` line, including probe diag streams)
-- Build cleanly: `rm -rf shared/dist shared/tsconfig.tsbuildinfo server/dist server/tsconfig.tsbuildinfo && npm run build`
-- Auth token: `~/.g2cc/config.json` (gitignored). Currently `stt.engine = "parakeet"`.
-- Port: 7300 (bound `0.0.0.0`)
-- The server is running as of 2026-06-03; pid changes across reboots but the listener is reliable
-
-## Android build + release flow
-
-- Build env: `JAVA_HOME=/opt/openjdk-bin-17 ANDROID_HOME=/opt/android-sdk`
-- Build: `cd /home/user/G2CC/android && ./gradlew test assembleDebug`
-- APK path: `android/app/build/outputs/apk/debug/app-debug.apk`
-- Release: `gh release create "v0.0.1-${SHA}" android/app/build/outputs/apk/debug/app-debug.apk --title "..." --notes "..."`
-- Adam installs via phone browser → GitHub release URL → "install unknown apps"
-- Two launcher icons after install: **G2CC** (main app) and **G2CC Probe** (probe activity)
-
-## Reading the diag log
-
-Server-side line format: `<ISO timestamp> [client-diag] [<source>] [<HH:MM:SS.mmm>] <event>`
-
-For probe v2, the `<source>` is `[probe]`. Filter with `grep '\[probe\]' /tmp/g2cc-server.log` to see only probe events.
-
-Notify lines from probe: `[Right notify <short-uuid>] <N>B  <full-hex>  | RSP seq=XX len=XX 1/1 svc=XX-XX`
-
-Service IDs (per `docs/PROTOCOL_NOTES.md` + `docs/EVENHUB_FINDING.md`):
-- `80-00` / `80-20` / `80-01` — auth control/data/response
-- `06-20` — Teleprompter (firmware feature; eats inputs)
-- `01-20` — News content (sub-feature of default HUD)
-- `01-01` — ring input events
-- `09-00` / `09-01` — Device Info
-- `0d-00` / `0d-01` — Configuration
-- `0e-00` — Display Config response
-- `91-00` / `91-20` — R1 ring identity / registration
-- `c4-00` / `c5-00` — file push (notification whitelist etc.)
-- **`e0-00` / `e0-01` / `e0-20` — EvenHub (Hub-app launch / runtime)** ← the live edge
-
-## Things NOT to do
-
-- **Don't modify `/home/user/g2code/` or `/home/user/g2aria/`** — escape hatches.
-- **Don't push audio to Adam's phone in tests** — mock the side-effect path.
-- **Don't commit `config.py` / `config.json`** — gitignored, contain secrets.
-- **Don't run on synthetic audio for tuning** — DJI captures only.
-- **Don't use system pip** — always `./venv/bin/python` / `./venv/bin/pip`.
-- **Don't skip "verify before execute"** — read source/schema/docs/`--help` before guessing.
-- **Don't waste effort re-investigating Dead Paths** — see list above. The architectural reasons are well-understood.
-- **Don't suggest hardware switch** — Adam is committed to the G2.
-
-## Key learnings (don't repeat the mistakes)
-
-1. **The firmware's "Connection Lost" message just means "no BLE host responding"** — it does NOT mean "Even App is required". With our probe providing a valid authenticated session, the firmware proceeded past the connection check and tried to launch the requested app.
-2. **Hub-SDK apps' documented architecture (WebView in Even App) describes the development model, not a firmware constraint.** The firmware itself just needs SOMEONE on the BLE side to speak the EvenHub protocol.
-3. **Service IDs in AA-frame packet headers are independent of GATT characteristic UUIDs.** All notifies arrive on the canonical notify chars (`0x5402` etc.), but the service ID inside the packet header tells you which logical service the message belongs to. `0xe0-XX` is a service ID, not a separate GATT service.
-4. **openCFW's broader claims were refuted by adversarial verification, but its narrow technical findings (BLE directions, container model, EvenHub service prefix) held up.** Trust the firmware-symbol-level facts; don't trust the broader framing.
-5. **Wake lock is mandatory for any coroutine-based heartbeat.** FG service prevents process kill, NOT CPU sleep. (Phase D fix.)
-6. **The display path and keepalive must match.** Mixing News-style keepalive with teleprompter content = blank HUD.
-7. **Reconnect renders need full pacing**, not the fast re-render variant.
-8. **L lens is essentially a passive companion in the firmware design.** Send auth + sync_trigger only; teleprompter content goes to R only.
-9. **The Even App is ALSO janky** — Adam's words. Our goal is to beat it, not match it.
-
-## When in doubt
-
-- Read the file you're about to modify before modifying it
-- Check `/tmp/g2cc-server.log` for live diag from Adam's hardware
-- Run `claude --help` before assuming any flag exists
-- Ask Adam — he's at the hardware end of every test
-- If you find yourself reaching for "must use Even App" or "raw framebuffer would work", consult the Dead Paths list above
-
-Welcome aboard. The architectural breakthrough is done; the remaining work is decoding one protocol from one BTSnoop and shipping the activation primitive.
+Welcome aboard. The session-persistence wall that blocked everything is down. The remaining work is the idle-blank fix and wiring the proven primitive into the real app.
