@@ -1,6 +1,6 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
-**Last updated: 2026-06-04, after probe v12 achieved a PERSISTENT, PHONE-INITIATED Hub-app session on Adam's hardware. The core architectural goal is proven. Read this first, then the "Required reading" files, then proceed.**
+**Last updated: 2026-06-04, after probe v12 achieved a PERSISTENT, PHONE-INITIATED Hub-app session on Adam's hardware (the core architectural goal is proven), followed by a full-project code-review remediation (`v0.0.1-4ec8384`: 2 HIGH, 2 MEDIUM, 11 LOW — see CHANGELOG.md). Read this first, then the "Required reading" files, then proceed.**
 
 ---
 
@@ -40,6 +40,30 @@ All frames ride GATT char `0x5401`; the `e0-XX` service id lives in the AA-frame
 - ✅ DJI Mic 3 USB-C capture (stereo float32 48k) + server noise pipeline + Parakeet (all pre-existing, stable)
 - ✅ WebSocket auth + Claude Code subprocess dispatch (pre-existing)
 
+## Code-review remediation (`v0.0.1-4ec8384`, 2026-06-04)
+
+A full-tree review (Android + server + audio + shared) landed 15 verified fixes on
+top of probe v12. **Nothing on the proven probe path changed** — single-packet
+notify frames pass through byte-for-byte and the teleprompter render is identical,
+so this build doubles as a regression check of the working flow. Headlines: the
+WebSocket "stuck" last-resort recovery (defence #5) was a log-only stub *and*
+measured the wrong clock — now a real `G2Pipeline.restartConnectionStack()` keyed
+off `offlineSince`; added multi-packet notify reassembly (`FrameReassembler`, a
+latent silent-loss hole); plus a batch of latent-correctness/honesty fixes. One
+agent-reported finding was **rejected on verification** as a false positive (the
+"overlapping audio_start discarded N bytes" log is always truthful — unreachable
+"both true" branch in single-threaded Node). Full WHY in CHANGELOG.md. Test count
+is now 134 (all green).
+
+**Three fixes are logic-sound + compile-clean but NOT yet hardware/live-validated**
+— check these on the next real-device pass:
+1. **Defence-#5 stuck-recovery rebuild** (`G2Pipeline.restartConnectionStack`) —
+   force a >90 s offline stretch; confirm it tears down + rebuilds + reconnects.
+2. **Crash-loop → phone** — a CC subprocess that crash-loops should now surface a
+   `cc_error` on the HUD (was server-log-only before).
+3. **`interrupt` clears "processing"** — the HUD shouldn't wedge on "processing"
+   after an interrupt that yields no CC `result`.
+
 ## Dead paths / facts — don't re-investigate
 
 - **Teleprompter (`0x06-20`) eats inputs** — it's a native firmware feature; inputs never reach the phone. The Hub-app (`e0-XX`) path is what gives display + input.
@@ -63,7 +87,7 @@ All frames ride GATT char `0x5401`; the `e0-XX` service id lives in the AA-frame
 ## Build + release flow
 
 - Build: `JAVA_HOME=/opt/openjdk-bin-17 ANDROID_HOME=/opt/android-sdk /home/user/G2CC/android/gradlew -p /home/user/G2CC/android testDebugUnitTest assembleDebug` (cwd resets to repo root between Bash calls — use `-p`).
-- APK: `android/app/build/outputs/apk/debug/app-debug.apk`. ~127 unit tests, keep green.
+- APK: `android/app/build/outputs/apk/debug/app-debug.apk`. 134 unit tests (BLE + hud + probe + audio-prep), keep green. Latest release: `v0.0.1-4ec8384`.
 - Release: `gh release create "v0.0.1-<shortsha>" "<apk>#g2cc-probe-vN.apk" --target <fullsha> --title ... --notes ...` (gh authed as `amarzello`, remote `expectbugs/G2CC`). Adam installs via phone browser → release URL. **Put the APK link LAST in your reply** (memory `terminal-scroll-links-last`).
 - Server: Node on `:7300`, tails probe diag into `/tmp/g2cc-server.log`. The probe streams every event there — READ IT to diagnose (don't theorize).
 
@@ -80,6 +104,7 @@ All frames ride GATT char `0x5401`; the `e0-XX` service id lives in the AA-frame
 1. **Fix the display-blank-on-idle** (the known issue above) — critical for voice-only control. Capture an idle Even App session to find the missing signal.
 2. **Port the proven recipe into the production app's hardened service** (`G2Pipeline`/`G2CCService` already have foreground-service + wake-lock + reconnect). The probe proved the protocol; production integration is the path to all-day use.
 3. **Wire the existing menu/STT/Claude-Code flow** (RootMenu, SttConfirmationFlow, the CC dispatcher) onto the EvenHub display+input instead of teleprompter.
-4. **DJI noise profile capture** at the machine (still pending — using a phone-recording prototype profile).
+4. **DJI noise profile capture** at the machine (still pending — using a phone-recording prototype profile; `machine.npz` is a phone `.m4a` artifact with peaks inside the speech band, must be re-recorded with the DJI TX2).
+5. **On the next hardware pass, spot-check the 3 unvalidated remediation fixes** (see "Code-review remediation" above) — they compile + pass review but haven't touched real glasses / a live server.
 
-Welcome aboard. The session-persistence wall that blocked everything is down. The remaining work is the idle-blank fix and wiring the proven primitive into the real app.
+Welcome aboard. The session-persistence wall that blocked everything is down, and the tree is now code-review-hardened (`v0.0.1-4ec8384`). The remaining work is the idle-blank fix and wiring the proven primitive into the real app.
