@@ -4,6 +4,60 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-6b52559 — 2026-06-04 — **Code-review remediation of the EvenHub path (verify-first)**
+
+A four-lens review of the new EvenHub code (encoder · concurrency/lifecycle ·
+flows/rules · removal-safety). **Every candidate finding was re-traced against the
+live code before fixing; 3 were rejected as false positives** (the project's
+load-bearing lesson — a finding you can't defend with a concrete failing scenario
+is worse than none). 7 verified issues fixed:
+
+- **C1 (HIGH, latent):** the EvenHub `confirm_on_hud` requestId was orphaned on a
+  BLE-*only* drop (WS still up) → the server's CC subprocess would hang forever
+  (no-timeouts rule). The teleprompter `ConfirmationFlow` already handled this; the
+  EvenHub path didn't. Now tracked in `pendingHubConfirmId` and auto-rejected on
+  drop/supersede. Latent today (the server's `confirmOnHud` senders are stubbed,
+  never called) — real the moment HITL / permission-mode confirmations are wired.
+- **C2 (MED):** a reconnect mid-confirm cold-launched a *bare menu*, dropping the
+  `displayHeader` → the user re-confirmed an STT transcript they could no longer
+  see (no-truncation violation + wrong-send risk). `coldLaunch` now repaints a
+  confirm frame as a confirm screen (renders the `displayHeader`).
+- **B2 (HIGH):** data race in the both-Ready edge detector — two concurrent
+  `state.collect` coroutines (Dispatchers.Default) mutated plain
+  `leftReady/rightReady/lastBothReady` vars. Both lenses authenticate
+  near-simultaneously, so it could double-fire the cold-launch (double init+menu to
+  R) or miss an edge (blank past a reconnect). Serialized on `edgeLock`.
+- **B1/B4 (HIGH):** the async cold-launch had no generation guard — a stale
+  completion (landing after a drop / a newer launch) could arm a heartbeat against
+  a superseded session. Added `evenHubLaunchEpoch`; a stale completion is now a
+  no-op.
+- **A1 (defensive):** an encoder exception (content exceeding the 1-byte AA
+  `PktTot` ceiling — 255 packets ≈ 59 KB) escaped `dispatchInbound`, whose OkHttp
+  call site is unwrapped → it would tear down the WebSocket. Server pagination
+  (~1500 chars/page) makes this very unlikely, but `dispatchInbound` now catches →
+  `diag` (loud, non-fatal) so no message handler can kill the transport. + a unit
+  test asserting the encoder refuses cleanly at the boundary (never corrupts).
+- **RootMenu stack race (MED, pre-existing):** the navigation `stack` was mutated
+  from the input-collector thread AND the server-message thread with no sync (a
+  rare ArrayList-tear crash, made more reachable by the new `currentRenderModel`
+  reads). Guarded every structural `stack` access on a lock (held only for the op,
+  never across the `onRender`/`onSelect` callbacks).
+- **Cleanup:** removed dead `EvenHud.replayLast`/`lastRender`/`lastStatusText`
+  (never wired; the cold-launch repaint subsumes it).
+
+**Rejected as false positives** (verified against the code, NOT real): the
+seq/msgId counter locking (correct — `counterLock` serializes, exactly one seq per
+multi-packet frame, Nordic runs each `queueWrites` as a non-interleaved atomic
+batch); the menu index-mapping (clean — both the rendered `menu-list` and
+`selectIndex` read the same `currentFrame.items`, including the synthetic "← Back");
+the multi-packet split math + whole-payload CRC + varint widths + `e0-01` parser
+bounds (fuzzed clean — every malformed input returns `Malformed`/`Unknown`, no
+crash). The News-removal safety sweep also came back clean.
+
+Verified: clean `--rerun-tasks` rebuild, **134/134 tests green** (+1 boundary test).
+The concurrency/lifecycle fixes are logic-verified + compile-clean but not
+unit-testable — first-hardware-pass items (see HANDOFF.md).
+
 ## v0.0.1-a3003d5 — 2026-06-04 — **Remove dead News/Phase-Y display path**
 
 With EvenHub shipped as the production default (`v0.0.1-d67022d`), the dormant
