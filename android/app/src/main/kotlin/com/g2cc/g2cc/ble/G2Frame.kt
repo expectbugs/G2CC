@@ -39,7 +39,12 @@ object G2Frame {
         payload: ByteArray,
         mtu: Int = G2Constants.ConnectionParams.MTU,
     ): List<ByteArray> {
-        val maxPayload = mtu - HEADER_SIZE - CRC_SIZE
+        // Two ceilings on a single packet's payload: the BLE MTU, AND the AA-frame
+        // Len field, which is ONE byte. Len = payload + CRC_SIZE, so payload can
+        // never exceed 0xFF - CRC_SIZE (253) no matter how large the MTU. Sizing
+        // chunks to the MTU alone (e.g. 502 at MTU 512) overflows Len and makes
+        // build() throw — so clamp to the smaller of the two.
+        val maxPayload = minOf(mtu - HEADER_SIZE - CRC_SIZE, 0xFF - CRC_SIZE)
         require(maxPayload > 0) { "MTU $mtu too small for header+crc (need >${HEADER_SIZE + CRC_SIZE})" }
         if (payload.size <= maxPayload) {
             return listOf(command(seq, service, payload, pktTotal = 1, pktSerial = 1))

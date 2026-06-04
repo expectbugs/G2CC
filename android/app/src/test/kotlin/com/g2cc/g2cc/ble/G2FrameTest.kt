@@ -88,6 +88,30 @@ class G2FrameTest {
     }
 
     @Test
+    fun commandMulti_respectsLenByteCeilingAtRealMtu() {
+        // Regression: a chunk's payload is capped by the 1-byte Len field
+        // (payload ≤ 253), not just the MTU. At the real MTU=512 the prior code
+        // sized 502-byte chunks → Len = 504 → build() threw.
+        val payload = ByteArray(600) { (it and 0xFF).toByte() }
+        val packets = G2Frame.commandMulti(
+            seq = 3,
+            service = G2Constants.Services.TELEPROMPTER,
+            payload = payload,
+            mtu = 512,
+        )
+        assertTrue("must split into multiple packets", packets.size >= 3)
+        for ((i, p) in packets.withIndex()) {
+            val chunkLen = p.size - G2Frame.HEADER_SIZE - G2Frame.CRC_SIZE
+            assertTrue("packet $i chunk ($chunkLen) must fit the Len byte (≤253)", chunkLen in 1..253)
+            assertTrue("packet $i CRC valid", G2Frame.verifyCrc(p))
+        }
+        val reassembled = packets.fold(ByteArray(0)) { acc, p ->
+            acc + p.copyOfRange(G2Frame.HEADER_SIZE, p.size - G2Frame.CRC_SIZE)
+        }
+        assertArrayEquals("chunks must reassemble to the original payload", payload, reassembled)
+    }
+
+    @Test
     fun commandMulti_chunksWhenPayloadExceedsMtu() {
         val payloadSize = 100
         val mtu = 32                                       // header(8) + crc(2) leaves 22 bytes per chunk

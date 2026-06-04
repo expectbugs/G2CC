@@ -40,6 +40,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import java.io.File
 import java.io.PrintWriter
@@ -109,9 +111,9 @@ class ProbeActivity : ComponentActivity() {
      *  launch-ack it sends the G2CC menu. Purely event-driven, no timeouts. */
     @Volatile private var autoRespond = false
 
-    /** True between sending our launch-response and receiving its ack — stops
-     *  the auto-responder firing twice if the firmware re-sends the request. */
-    @Volatile private var launchInFlight = false
+    /** Serializes session re-establishment so the cold-launch button and the
+     *  heartbeat can't interleave their paced write sequences. */
+    private val reestablishMutex = Mutex()
 
     // Cold launch + keepalive (probe v5)
     private lateinit var coldLaunchBtn: Button
@@ -529,7 +531,7 @@ class ProbeActivity : ComponentActivity() {
         setStatus("Connecting L+R")
         txSeq = 8 // auth re-runs (seq 1–7) on each connect; manual frames resume at 8
         autoRespond = false
-        launchInFlight = false
+        sessionActive = false
         acquireWakeLock() // keep CPU alive so the heartbeat fires on schedule
         val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager).adapter
         val leftDev = adapter.getRemoteDevice(leftAddr)
@@ -592,8 +594,7 @@ class ProbeActivity : ComponentActivity() {
             if (side == Side.Left) leftReady = false else rightReady = false
             if (side == Side.Right) {
                 stopHeartbeat()
-                launchInFlight = false  // a fresh Ready can cold-launch cleanly
-                sessionActive = false
+                sessionActive = false // a fresh Ready can cold-launch cleanly
             }
             runOnUiThread {
                 if (side == Side.Left) {
@@ -645,32 +646,14 @@ class ProbeActivity : ComponentActivity() {
         }
     }
 
-    /** Event-driven auto-responder (no timeouts): reply to the EvenHub launch
-     *  handshake the instant the glasses notify us, so the test doesn't depend
-     *  on human reaction time. [launchInFlight] prevents a double-fire if the
-     *  firmware re-sends the request before our response is acked. */
+    /** Event-driven auto-responder (no timeouts): when armed, a glasses-initiated
+     *  launch request (e0-01) triggers the same full cold-launch we'd do from the
+     *  button. Acks/inputs are logged in [onNotify] for visibility but don't drive
+     *  anything — the heartbeat's full re-establishment is the keepalive. */
     private fun maybeAutoRespond(side: Side, svcLo: Int, f1: Int?) {
-        // Glasses-initiated launch request → send launch-response (armed only).
-        if (autoRespond && svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_LAUNCH_REQUEST && !launchInFlight) {
-            launchInFlight = true
-            log("[$side] AUTO ▶ launch-request seen → sending DocuLens launch-response")
-            sendPreset(side, "auto:DocuLens-launch", ReplayKit.DOCULENS_LAUNCH)
-            return
-        }
-        // Launch ack → send our menu. Completes EITHER trigger (the armed
-        // auto-responder OR the cold-launch button — both set launchInFlight).
-        if (svcLo == 0x00 && f1 == ReplayKit.MSGTYPE_LAUNCH_ACK && launchInFlight) {
-            launchInFlight = false
-            log("[$side] launch ack → sending G2CC menu")
-            sendPreset(side, "G2CC-menu", ReplayKit.G2CC_MENU)
-            sessionActive = true // keepalive may now re-send menu content
-            return
-        }
-        // Be a responsive host: answer every input with a content write, exactly
-        // as the Even App does (~60ms), to satisfy the app's responsiveness
-        // watchdog that fires "Connection Lost" ~20s after we stop responding.
-        if (svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_INPUT_EVENT && sessionActive) {
-            sendMenuKeepalive(side, "input")
+        if (autoRespond && svcLo == 0x01 && f1 == ReplayKit.MSGTYPE_LAUNCH_REQUEST && !sessionActive) {
+            log("[$side] AUTO ▶ launch-request → cold launch")
+            coldLaunch(side)
         }
     }
 
@@ -678,22 +661,18 @@ class ProbeActivity : ComponentActivity() {
     // Cold launch + keepalive + persistence (probe v5)
     // ============================================================
 
-    /** Phone-INITIATED cold launch — no glasses menu, no e0-01. Sends the
-     *  display-activation prelude then the DocuLens launch-response; the e0-00
-     *  ack then triggers our G2CC menu (see [maybeAutoRespond]). */
+    /** Phone-INITIATED cold launch — no glasses menu, no e0-01. Runs the full
+     *  re-establishment sequence once, then marks the session active so the
+     *  heartbeat keeps re-establishing it. */
     private fun coldLaunch(side: Side) {
-        val ble = when (side) {
-            Side.Left -> leftBle
-            Side.Right -> rightBle
-        }
-        if (ble == null) {
+        val connected = (if (side == Side.Left) leftBle else rightBle) != null
+        if (!connected) {
             log("[$side] COLD LAUNCH: not connected")
             return
         }
-        log("[$side] COLD LAUNCH — display init + cold DocuLens launch (token ${ReplayKit.DOCULENS_TOKEN})")
-        for ((i, f) in ReplayKit.COLD_INIT.withIndex()) sendPreset(side, "cold-init[$i]", f)
-        launchInFlight = true
-        sendPreset(side, "cold:DocuLens-launch", ReplayKit.DOCULENS_LAUNCH)
+        log("[$side] COLD LAUNCH — full re-establishment (token ${ReplayKit.DOCULENS_TOKEN})")
+        sessionActive = true
+        scope.launch { reEstablishSession(side, "cold-launch") }
     }
 
     private fun toggleAutoRelaunch() {
@@ -702,34 +681,49 @@ class ProbeActivity : ComponentActivity() {
         log("Auto-relaunch ${if (autoRelaunch) "ON — cold-launch G2CC on every (re)connect" else "OFF"}")
     }
 
-    /** Re-send the menu content (fresh msg-id) to [side] — used both as the idle
-     *  keepalive and as the response to each input. The Even App answers every
-     *  input with an e0-20 write within ~60ms; the hijacked app's "Connection
-     *  Lost" watchdog (~20s) tracks that responsiveness, NOT unsolicited content
-     *  (the firmware acks our re-renders but tears the display down anyway). */
-    private fun sendMenuKeepalive(side: Side, reason: String) {
-        val ble = when (side) {
-            Side.Left -> leftBle
-            Side.Right -> rightBle
-        } ?: return
-        kaMsgId = if (kaMsgId >= 126) 100 else kaMsgId + 1
-        val mid = kaMsgId
-        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.menuKeepalive(mid), "ka:$reason") { ok, detail ->
-            log("[$side] keepalive($reason msgid=$mid): ${if (ok) "sent" else "FAIL $detail"}")
+    /** Re-establish the EvenHub session by re-sending the FULL sequence —
+     *  display init (COLD_INIT) → launch-response (f1=0) → menu (f1=7) — with
+     *  inter-packet pacing. Mirrors the PROVEN teleprompter heartbeat
+     *  (Hud.render: display_config→init→content→sync, re-establishing the session
+     *  every cycle). Re-sending content ALONE did not satisfy the firmware
+     *  (v6: acked but the display still timed out at ~20s); the launch/init is
+     *  what re-establishes the session. Pacing is load-bearing
+     *  (Hud.kt: "without delays the take-over succeeds but text never renders").
+     *  Mutex-guarded so the button and heartbeat can't interleave writes. */
+    private suspend fun reEstablishSession(side: Side, reason: String) {
+        reestablishMutex.withLock {
+            val ble = when (side) {
+                Side.Left -> leftBle
+                Side.Right -> rightBle
+            } ?: return
+            kaMsgId = if (kaMsgId >= 126) 100 else kaMsgId + 1
+            val frames = ReplayKit.COLD_INIT + listOf(ReplayKit.DOCULENS_LAUNCH, ReplayKit.menuKeepalive(kaMsgId))
+            log("[$side] re-establish ($reason): ${frames.size} frames, menu msgid=$kaMsgId")
+            for ((i, f) in frames.withIndex()) {
+                // Surface GATT write failures to the diag log — NO silent failures
+                // in the keepalive path (review finding: was logcat-only before).
+                ble.sendToChar(G2Constants.CHAR_WRITE, f, "reest:$reason[$i]") { ok, detail ->
+                    if (!ok) log("[$side] *** re-establish[$i] WRITE FAILED: $detail ***")
+                }
+                delay(REESTABLISH_PACE_MS) // inter-packet pacing — load-bearing (Hud.kt)
+            }
         }
     }
 
-    /** Session keepalive to [side] every [HEARTBEAT_MS]: the 80-00 sync_trigger
-     *  (connection-level) PLUS, once a session is active, a re-send of the menu
-     *  content on e0-20 (the session-level keepalive — the Hub session times out
-     *  ~20s on host e0 silence; sync_trigger alone does NOT reset it). Every beat
-     *  is logged so we can see it firing. Cancels any prior job on reconnect. */
+    /** Keepalive heartbeat. Once the session is active, re-establishes the whole
+     *  session every [HEARTBEAT_MS] (the proven teleprompter full-re-render
+     *  pattern). Before a session exists, a light 80-00 sync_trigger keeps the
+     *  connection warm. Cancels any prior job on reconnect. */
     private fun startHeartbeat(side: Side) {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
-            log("[$side] keepalive started (every ${HEARTBEAT_MS / 1000}s: menu content re-render once session active — proven Phase-D pattern)")
+            log("[$side] heartbeat started (every ${HEARTBEAT_MS / 1000}s: full session re-establishment once active)")
             var beat = 0
             while (isActive) {
+                // Delay FIRST: coldLaunch does the immediate re-establish, so the
+                // first beat shouldn't double it up (review finding: avoids two
+                // back-to-back re-establishments on the autoRelaunch path).
+                delay(HEARTBEAT_MS) // HB exception to the no-timeouts rule
                 val ble = when (side) {
                     Side.Left -> leftBle
                     Side.Right -> rightBle
@@ -737,20 +731,18 @@ class ProbeActivity : ComponentActivity() {
                 if (ble != null) {
                     beat++
                     if (sessionActive) {
-                        // Idle backstop: re-send content when no inputs are flowing.
-                        // The main keepalive during use is the per-input response
-                        // below (the Even App answers every input ~60ms).
-                        log("[$side] HB#$beat idle keepalive")
-                        sendMenuKeepalive(side, "hb#$beat")
+                        log("[$side] HB#$beat re-establish")
+                        reEstablishSession(side, "hb#$beat")
                     } else {
                         // No session yet — light connection keepalive only.
-                        ble.sendToChar(G2Constants.CHAR_WRITE, Teleprompter.buildSyncTrigger(hbSeq, hbMsgId), "hb:sync")
+                        ble.sendToChar(G2Constants.CHAR_WRITE, Teleprompter.buildSyncTrigger(hbSeq, hbMsgId), "hb:sync") { ok, detail ->
+                            if (!ok) log("[$side] *** hb:sync WRITE FAILED: $detail ***")
+                        }
                         hbSeq = (hbSeq + 1) and 0xFF
                         hbMsgId = (hbMsgId + 1) and 0x7FFF
                         log("[$side] HB#$beat sync_trigger only (no session yet)")
                     }
                 }
-                delay(HEARTBEAT_MS) // HB exception to the no-timeouts rule
             }
         }
     }
@@ -860,7 +852,6 @@ class ProbeActivity : ComponentActivity() {
 
     private fun toggleAuto() {
         autoRespond = !autoRespond
-        launchInFlight = false  // re-arm cleanly on every toggle
         runOnUiThread {
             autoBtn.text = if (autoRespond) "AUTO-RESPOND: ON  (now pick DocuLens)" else "AUTO-RESPOND: OFF"
         }
@@ -942,7 +933,7 @@ class ProbeActivity : ComponentActivity() {
         leftReady = false
         rightReady = false
         autoRespond = false
-        launchInFlight = false
+        sessionActive = false
         autoRelaunch = false
         setStatus("Disconnected")
         runOnUiThread {
@@ -989,6 +980,11 @@ class ProbeActivity : ComponentActivity() {
          *  margin under the firmware's ~22s Hub-session timeout. HB exception to
          *  the no-timeouts rule (CLAUDE.md §"Three Absolute Rules"). */
         const val HEARTBEAT_MS = 10_000L
+
+        /** Inter-packet pacing inside a re-establishment sequence. The teleprompter
+         *  path proved this is load-bearing (Hud.kt: without delays the take-over
+         *  succeeds but content never renders). 5 frames × this ≈ 0.75s/cycle. */
+        const val REESTABLISH_PACE_MS = 150L
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(Duration.ofSeconds(10))
             .readTimeout(Duration.ofSeconds(10))
