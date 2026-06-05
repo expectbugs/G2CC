@@ -163,6 +163,12 @@ class G2Pipeline(
      *  frame (83 dirs ≈ 6 packets hung the HUD; the Even App never sent >4). */
     @Volatile private var ccDirectoryEntries: List<DirectoryEntry> = emptyList()
 
+    /** Set true when the user taps ✗ Cancel on the transcribing-wait frame, so a
+     *  late stt_result/stt_error (server STT can take ~12 s) is dropped instead of
+     *  clobbering the menu the user backed out to. Reset when a new transcribe
+     *  wait begins. */
+    @Volatile private var transcribeCancelled: Boolean = false
+
     // Phase Ω: tracks whether the next SessionInfo should land in the menu's
     // current frame (replacing a "Spawning…" placeholder). Set true when the
     // user taps a directory entry in the menu's directory submenu; cleared
@@ -300,6 +306,23 @@ class G2Pipeline(
         },
     )
 
+    /** Bail out of the transcribing wait. Server STT can take ~12 s (it cold-loads
+     *  the Parakeet model per request), and the wait frame must never trap the user
+     *  with no escape. Returns to the active CC menu and arms [transcribeCancelled]
+     *  so the (eventual) late stt_result/stt_error is ignored. */
+    private fun cancelTranscribing() {
+        val rm = rootMenu ?: return
+        transcribeCancelled = true
+        state.transition(AppState.IDLE)
+        diag("toggleRecording: user cancelled the transcribing wait")
+        val name = activeCcProjectName
+        if (name != null) {
+            rm.replaceCurrentFrame("Claude Code: $name", buildActiveCcMenuItems(name), addBack = true)
+        } else {
+            rm.popToRoot()
+        }
+    }
+
     /** M4: toggle recording. Recursive in spirit — the in-recording frame's
      *  tap-to-stop Action calls this same method again, which sees
      *  isStreaming=true and stops. */
@@ -314,12 +337,20 @@ class G2Pipeline(
             // While the server is transcribing, show a transient "wait"
             // frame so the user knows something is happening. SttResult
             // arrival will replace this with the confirmation submenu.
+            transcribeCancelled = false
             rm.replaceCurrentFrame(
                 title = "Processing",
-                items = listOf(RootMenu.MenuItem.Action("(transcribing…)") {}),
+                items = listOf(
+                    RootMenu.MenuItem.Action("(transcribing…)") {},
+                    // No-trap rule: server STT can take ~12 s (cold model load per
+                    // request), so the user MUST be able to bail out of the wait
+                    // instead of staring at a dead frame while ring-scrolls do
+                    // nothing. ✗ Cancel returns to the active CC menu.
+                    RootMenu.MenuItem.Action("✗ Cancel") { cancelTranscribing() },
+                ),
             )
             state.transition(AppState.AWAITING_TRANSCRIPT)
-            diag("toggleRecording: stopped streamer; showing transcribing frame")
+            diag("toggleRecording: stopped streamer; showing transcribing frame (+Cancel)")
         } else {
             s.start()
             rm.replaceCurrentFrame(
@@ -355,7 +386,7 @@ class G2Pipeline(
         // wedged (per no-timeouts rule there is no server-side cap, so the
         // user needs an explicit escape).
         rm.replaceCurrentFrame("Claude Code", listOf(
-            RootMenu.MenuItem.Action("(spawning $displayName…)") {},
+            RootMenu.MenuItem.Action("(starting Claude Code in $displayName…)") {},
         ), addBack = true)
     }
 
@@ -1566,6 +1597,11 @@ class G2Pipeline(
                 }
             }
             is ServerMessage.SttError -> {
+                if (transcribeCancelled) {
+                    transcribeCancelled = false
+                    diag("stt_error after user cancel — ignoring: ${msg.error}")
+                    return
+                }
                 // M5: surface the error inside the menu so the user can
                 // retry or back out cleanly. The "Retry recording" Action
                 // re-triggers toggleRecording immediately.
@@ -1618,6 +1654,11 @@ class G2Pipeline(
             is ServerMessage.PermissionRequest -> Log.i(TAG, "permission_request: id=${msg.requestId} tool=${msg.tool}")
             is ServerMessage.SttResult -> {
                 Log.i(TAG, "stt_result: \"${msg.text}\"")
+                if (transcribeCancelled) {
+                    transcribeCancelled = false
+                    diag("stt_result after user cancel — ignoring")
+                    return
+                }
                 val transcript = msg.text
                 val rm = rootMenu
                 val cm = connection
