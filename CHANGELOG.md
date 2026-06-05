@@ -4,6 +4,63 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-9f210ee — 2026-06-05 — **Bug-audit remediation: 25 fixes, 8 false positives rejected**
+
+A full-codebase audit (the now-removed `bugs.txt` — 7 parallel auditors, 54
+findings) was VERIFIED against the real source before any change: every finding
+re-traced, treated as suspect until it could be defended with a concrete failing
+scenario. Outcome — **25 fixed + verified, 8 false positives rejected, ~21 held**
+(hardware-risk / pivot-mooted / architectural). Builds green: Android 134/134,
+server `tsc`, Python compile. g2code/g2aria untouched.
+
+**8 false positives — recorded so they're never re-chased:** `AUD-4` (server
+already maps an empty transcript → `stt_error`), `SRV-2`, `SRV-11` (code had
+drifted past the described break-before-reset), `SRV-18` (Android-side, not
+server), `BLE-9` (`scanRecord.deviceName` already covers the SCAN_RSP case),
+`PRB-1`/`PRB-2` (Nordic 2.7.5 `disconnect()` DOES reach `close()` via the
+userDisconnected branch), `PRB-6` (the probe runs single-threaded on main). Two
+audit *fix suggestions* were also wrong and would have introduced bugs — `NET-13`
+(shutdown-from-stop() breaks the reused MicCapture's restart) and `NET-9` (targets
+the dormant USB path).
+
+**Headline fixes (with the WHY):**
+- **AUD-2 (audio, the real win):** the apply-time notch cascade was carving the
+  speech band on EVERY DJI transcription — the shipped phone profile's three peaks
+  (2554/5015/5132 Hz) are all above 1.5 kHz, i.e. pure fricative/sibilant energy.
+  Now drops >1.5 kHz peaks at apply time; Wiener handles the broadband residue.
+  (The DJI pipeline is DORMANT today — the live BT-SCO mic routes through the
+  legacy `transcribe()` path, not `transcribeDji` — so this, and AUD-1, are
+  insurance for when the RMA'd USB receiver returns.)
+- **SRV-1 (server, security):** `directory_select` passed the raw client path
+  straight to `spawn({cwd})` under `--dangerously-skip-permissions`. Now
+  realpath + `/home/user/` prefix + isDirectory validated before spawn.
+- **BLE-1 (android):** a single transient `WRITE_NO_RESPONSE` on the 4 s keepalive
+  set the connection state to Error → tore a HEALTHY session into a rescan storm,
+  while the diag fabricated success. `sendPacket` no longer overwrites state on a
+  write fail (true link loss still arrives via `onDeviceDisconnected`) and reports
+  the real result to the HB diag (`write=OK|FAIL`). **NOT log-verifiable — needs a
+  hardware pass to confirm** (the load-bearing lesson, again: only Adam's eyes
+  verify a connection/display change).
+
+**Also fixed:** audio AUD-1 (loud profile-mismatch warn + `mic` profile tag),
+AUD-3 (sentinel-in-transcript loud-fails instead of silent truncation), AUD-6,
+AUD-8 (documented the intentional aggressive-Wiener gain). Server SRV-7 (UTF-8
+stdout — no glyph mojibake into scrollback), SRV-8 (WAV frame-alignment assert),
+SRV-9 (atomic `sessions.json` write), SRV-10 (markdown no longer mangles
+`my_var_name` / `price * qty`), SRV-17 (daemon stdout buffer cap). Android PIPE-1
+(cancel-guard clobber), PIPE-2 (input collector exception-guarded so one oversized
+render can't brick all input), PIPE-5 (`@Volatile` BLE refs), PIPE-6
+(prompt-lost-on-reconnect — `send()` reports success), PIPE-7, PIPE-9, NET-7
+(FGS-start crash guard), NET-10, NET-12, and probe PRB-3/4/7/8 (accuracy for the
+upcoming capture-decode phase).
+
+**Held for a hardware pass or an architectural call** (full verdict map in session
+memory `bugs-audit-status`): the reconnect-resilience cluster (NET-2/3/4/5 — the
+Phase-D layer), the server session-pool lifecycle (SRV-3/4/5/13/15/16 — SRV-3
+global-singleton is the keystone), runtime-gated items (SRV-6/12/14, NET-11,
+BLE-2), and the pivot-mooted EvenHub-widget / teleprompter render findings
+(BLE-3/4/6/7/8/10, PIPE-3/4/8/10/12/13) the pure-image renderer will replace anyway.
+
 ## v0.0.1-06cc6d0 — 2026-06-05 — **Warm STT engine (win) + confirm-screen attempt (FAILED → pivot)**
 
 One real win and one honest miss that redirected the whole project.
