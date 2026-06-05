@@ -4,6 +4,32 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-57ca33a — 2026-06-05 — **Escape the transcribing wait + STT-latency diagnosis**
+
+The new diag stream earned its keep: "stuck on transcribing" wasn't a hang. The
+server takes ~12 s to transcribe — it `execFile`s a fresh Python per request,
+cold-loading the NeMo/Parakeet model **every time** (`stt.ts`) — and the
+transcribing-wait frame had **no escape**, so ring-scrolls were no-ops and it read
+as dead. The diag showed the result frame rendering ~12 s later, every time.
+
+- **✗ Cancel on the transcribing frame** (no-trap rule) → back to the active CC
+  menu; a late stt_result/stt_error after cancel is dropped (`transcribeCancelled`).
+- Wording: "(spawning G2CC…)" → "(starting Claude Code in G2CC…)" (the directory
+  name isn't the thing being spawned).
+
+**Confirmed working on hardware this session:** the BT mic (`src=dji-bt`), the
+paginated directory picker (each page renders clean, `write OK`), and the
+spawn→active-menu transition (the "spawning" stickiness is a cosmetic glasses-side
+double-render race — `renderMenu` then `renderConfirm` 200 ms apart — and is
+workaroundable via Back/re-enter).
+
+**Open / next (server-side, no re-flash):** the ~12 s STT latency is the
+per-request cold model load. A persistent warm Parakeet engine (load once, reuse —
+the `whisper_engine.py` lazy-load + lock pattern) takes it to ~0.5 s. That's the
+real voice-usability fix, and the obvious next step.
+
+134/134 tests green.
+
 ## v0.0.1-17f7cdd — 2026-06-05 — **Paginated directory picker + loud HUD/decode diagnostics**
 
 First real multi-packet HUD send hit its first real wall. After the mtime fix
