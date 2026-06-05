@@ -4,6 +4,40 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-06cc6d0 — 2026-06-05 — **Warm STT engine (win) + confirm-screen attempt (FAILED → pivot)**
+
+One real win and one honest miss that redirected the whole project.
+
+**WIN — warm Parakeet STT (server, live).** The ~12 s "transcribing…" stall was the
+server cold-loading the NeMo model on EVERY request (per-call `execFile` of
+`parakeet_cli`). New persistent `audio/pipeline/parakeet_daemon.py` loads it once;
+`server/src/stt.ts`'s `ParakeetDaemon` manages it (serialized, respawns on crash, no
+timeouts) and `warmParakeet()` pre-loads it at server start. Verified **COLD 10.7 s →
+WARM 0.03 s**, daemon framing clean, transcript correct. Deployed.
+
+**MISS — confirm screens still don't display.** Theory this build shipped: the confirm
+screens (active CC menu, transcript confirm, STT error, post-response) never painted
+because they were the only screen type without a `menu-header`, so added one
+(`confirmScreen` = menu-header + main + menu-list). On hardware it made **zero**
+difference — falsifying the header theory and pointing at the real constraint: **the
+firmware won't render a text body (`main`) and a selectable list (`menu-list`) on the
+same screen** (every screen that paints has one or the other, never both). Load-bearing
+lesson re-learned the hard way: the diag shows `write OK`, never "painted" — a display
+fix can only be verified by Adam's eyes, not logs. Claimed "highest confidence" twice,
+wrong twice.
+
+**Also:** CC output now renders as an interactive frame (response + active menu options)
+so a finished response no longer strands the user on dead text — but it rides the same
+broken confirm path, so it's invisible too until the display layer is rebuilt.
+`PAGE_CHAR_TARGET` 700 → 500.
+
+**Consequence:** after a week fighting the firmware's widget model, Adam called the
+pivot — **pure image-based display rendering** (own every pixel; glasses as a dumb
+framebuffer). Next step is decoding BTSnoop captures for the image format + real BLE
+throughput + partial-update support. See `HANDOFF.md`.
+
+134/134 client tests green; APK assembles; warm STT load-tested + deployed.
+
 ## v0.0.1-57ca33a — 2026-06-05 — **Escape the transcribing wait + STT-latency diagnosis**
 
 The new diag stream earned its keep: "stuck on transcribing" wasn't a hang. The
