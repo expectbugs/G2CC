@@ -273,6 +273,14 @@ class ConnectionManager(
                 WsJson.codec.decodeFromString(ServerMessage.serializer(), text)
             } catch (e: Exception) {
                 Log.w(TAG, "onMessage parse failed: ${e.message}; raw=${text.take(120)}")
+                // Loud-and-proud: this class only logs to logcat, so a dropped
+                // inbound message is invisible over SSH — a fractional-double mtime
+                // silently killing the directory_list_reply was exactly this. Echo
+                // the decode failure to the server diag log (best-effort; the send
+                // guard drops it pre-auth, which is fine).
+                try {
+                    send(ClientMessage.Diag("[ws-decode-FAIL] ${e.message}; raw=${text.take(160)}"))
+                } catch (_: Exception) { /* never mask the original failure */ }
                 return
             }
             when (msg) {

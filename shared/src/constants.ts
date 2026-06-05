@@ -47,7 +47,11 @@ export const MENU_CONTAINER_NAME = 'menu'
 
 export const STARTUP_CHAR_LIMIT = 1000
 export const UPGRADE_CHAR_LIMIT = 2000
-export const PAGE_CHAR_TARGET = 1500   // safe margin under 2000 for pagination
+// ≤~3 EvenHub packets per page — inside the proven multi-packet HUD envelope
+// (the Even App's largest observed send was 4 packets / ~900 B). Was 1500
+// (~8 packets), which would hit the same multi-packet wall that hung the HUD
+// on the 83-entry directory list.
+export const PAGE_CHAR_TARGET = 700
 
 // ============================================================
 // Scrollback

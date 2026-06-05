@@ -17,6 +17,7 @@ import com.g2cc.g2cc.hud.RootMenu
 import com.g2cc.g2cc.hud.SttConfirmationFlow
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.ConnectionManager
+import com.g2cc.g2cc.net.DirectoryEntry
 import com.g2cc.g2cc.net.EndpointFetcher
 import com.g2cc.g2cc.net.ServerMessage
 import com.g2cc.g2cc.state.AppState
@@ -155,6 +156,12 @@ class G2Pipeline(
     // (the legacy teleprompter-mode menu) for backwards compat. Set true by the
     // Claude Code action; cleared once the reply lands or a CcError aborts.
     @Volatile private var menuAwaitingDirectoryList: Boolean = false
+
+    /** Full directory list from the last DirectoryListReply, retained so the HUD
+     *  can page through it ([showDirectoryPage]) within the proven EvenHub
+     *  multi-packet envelope instead of blasting all entries in one oversized
+     *  frame (83 dirs ≈ 6 packets hung the HUD; the Even App never sent >4). */
+    @Volatile private var ccDirectoryEntries: List<DirectoryEntry> = emptyList()
 
     // Phase Ω: tracks whether the next SessionInfo should land in the menu's
     // current frame (replacing a "Spawning…" placeholder). Set true when the
@@ -376,6 +383,33 @@ class G2Pipeline(
         ))
     }
 
+    /** Render one page of the /home/user directory picker. The full list (dozens
+     *  of dirs) is far bigger than anything the Even App ever sent in one e0-20
+     *  frame — real DocuLens topped out at a 15-item chapter list (2 packets) and
+     *  a 4-packet text page. 83 dirs in one frame (~6 packets) hung the HUD on the
+     *  stale "loading" frame. So we page to [DIR_PAGE_SIZE] dirs/screen (each
+     *  ≤ ~3 packets, inside the proven envelope), swapped in place with ◂ Prev /
+     *  ▸ More nav. The firmware reports the chosen index against the rendered
+     *  page; ← Back (auto-prepended) exits the whole picker. */
+    private fun showDirectoryPage(page: Int) {
+        val rm = rootMenu ?: return
+        val entries = ccDirectoryEntries
+        if (entries.isEmpty()) return
+        val pageCount = (entries.size + DIR_PAGE_SIZE - 1) / DIR_PAGE_SIZE
+        val p = page.coerceIn(0, pageCount - 1)
+        val start = p * DIR_PAGE_SIZE
+        val end = minOf(start + DIR_PAGE_SIZE, entries.size)
+        val items = ArrayList<RootMenu.MenuItem>(DIR_PAGE_SIZE + 2)
+        for (i in start until end) {
+            val entry = entries[i]
+            items += RootMenu.MenuItem.Action(entry.name) { selectDirectoryFromMenu(entry.path, entry.name) }
+        }
+        if (p > 0) items += RootMenu.MenuItem.Action("◂ Prev page") { showDirectoryPage(p - 1) }
+        if (p < pageCount - 1) items += RootMenu.MenuItem.Action("▸ More (page ${p + 2}/$pageCount)") { showDirectoryPage(p + 1) }
+        diag("rootMenu: directory page ${p + 1}/$pageCount (dirs ${start + 1}–$end of ${entries.size})")
+        rm.replaceCurrentFrame("Pick dir ${p + 1}/$pageCount", items, addBack = true)
+    }
+
     /** Scan or directed-connect to the G2 lens pair, then install BLE clients.
      *  Idempotent — calling twice is a no-op if BLE clients are already installed.
      *
@@ -499,7 +533,7 @@ class G2Pipeline(
         // call time so it always hits the CURRENT instances after a rebuild.
         // EvenHub renderer — rebuilt against the current clients on every install
         // (post-reconnect, BT-cycle). null when EVENHUB_ENABLED is off (teleprompter).
-        evenHud = if (EVENHUB_ENABLED) EvenHud(left, right) else null
+        evenHud = if (EVENHUB_ENABLED) EvenHud(left, right) { diag(it) } else null
         if (rootMenu == null) {
             rootMenu = RootMenu(rootItems = buildRootMenuItems()) { title, body ->
                 if (EVENHUB_ENABLED) {
@@ -1391,22 +1425,20 @@ class G2Pipeline(
                             diag("rootMenu: directory_list_reply arrived after user backed out of CC flow — ignoring")
                             return
                         }
-                        diag("rootMenu: directory_list_reply (${msg.entries.size} entries) — populating submenu")
-                        val items: List<RootMenu.MenuItem> = msg.entries.map { entry ->
-                            RootMenu.MenuItem.Action(entry.name) {
-                                selectDirectoryFromMenu(entry.path, entry.name)
-                            }
-                        }
-                        // R1-HIGH3: preserve a back-out gesture across the
-                        // replace — without addBack=true the user has no
-                        // way to escape this frame (firmware eats
-                        // double-tap, and popToRoot isn't wired to a tap).
-                        if (items.isEmpty()) {
+                        diag("rootMenu: directory_list_reply (${msg.entries.size} entries) — paginating")
+                        ccDirectoryEntries = msg.entries
+                        // 83 dirs in one frame is ~6 packets — past the proven
+                        // EvenHub multi-packet envelope (Even App max: 4) — which
+                        // hung the HUD on the stale "loading" frame. Page it so each
+                        // screen stays inside the envelope. addBack via the page
+                        // render (R1-HIGH3: keep a tappable exit; firmware eats the
+                        // double-tap gesture).
+                        if (msg.entries.isEmpty()) {
                             rm.replaceCurrentFrame("Claude Code", listOf(
                                 RootMenu.MenuItem.Action("(no directories under /home/user)") {},
                             ), addBack = true)
                         } else {
-                            rm.replaceCurrentFrame("Pick directory", items, addBack = true)
+                            showDirectoryPage(0)
                         }
                     }
                 }
@@ -1679,6 +1711,12 @@ class G2Pipeline(
 
         /** Debounce window for paired-lens BLE input events (Phase 7 fix #10). */
         const val EVENT_DEBOUNCE_MS = 300L
+
+        /** Directory-picker page size. Keeps each rendered page within the proven
+         *  EvenHub multi-packet envelope (Even App max observed: 15 items /
+         *  4 packets); the full /home/user list is far larger and hangs the HUD
+         *  if sent in one frame. */
+        const val DIR_PAGE_SIZE = 12
 
         fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(Duration.ofSeconds(10))

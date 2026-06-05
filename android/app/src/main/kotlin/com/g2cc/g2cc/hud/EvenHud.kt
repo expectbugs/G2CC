@@ -22,7 +22,14 @@ import com.g2cc.g2cc.ble.G2BleClient
  * clipped), no timeouts (BLE failures surface via the write callback), loud
  * failures (write failure → Log + the onComplete(false) the caller diags).
  */
-class EvenHud(private val left: G2BleClient, private val right: G2BleClient) {
+class EvenHud(
+    private val left: G2BleClient,
+    private val right: G2BleClient,
+    /** Loud-failure hook → server diag stream (CLAUDE.md). Render packet counts
+     *  and BLE write results go here so a multi-packet send the glasses drop is
+     *  visible over SSH, not just in logcat. No-op default keeps tests simple. */
+    private val diag: (String) -> Unit = {},
+) {
 
     private val counterLock = Any()
     // Persistent monotonic counters (NOT reset per render) so overlapping renders
@@ -106,8 +113,15 @@ class EvenHud(private val left: G2BleClient, private val right: G2BleClient) {
      *  finding); L stays authenticated at the connection level. Failures are
      *  loud: the write callback's `false` is surfaced to the caller's diag. */
     private fun writeR(packets: List<ByteArray>, delays: List<Long>, label: String, onComplete: (Boolean) -> Unit) {
+        val bytes = packets.sumOf { it.size }
+        // Loud per CLAUDE.md: surface render size + write result to the diag stream
+        // (not just logcat) so a multi-packet send the glasses drop is visible over
+        // SSH. The 83-dir directory hang was invisible precisely because this
+        // render/write path was silent.
+        diag("hud→R $label: ${packets.size} pkt / ${bytes}B — writing")
         right.queueWrites(packets, "R:$label", delays) { ok ->
             if (!ok) Log.w(TAG, "$label: R write reported failure")
+            diag("hud→R $label: write ${if (ok) "OK" else "FAILED"} (${packets.size} pkt)")
             onComplete(ok)
         }
     }
