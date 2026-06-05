@@ -44,7 +44,13 @@ export function listProjectDirectories(): DirectoryEntry[] {
     entries.push({
       name,
       path: fullPath,
-      mtime: stats.mtimeMs,
+      // Node's mtimeMs is a sub-millisecond FLOAT (e.g. 1749865721361.572). The
+      // Android client deserializes DirectoryEntry.mtime as a Kotlin Long, and
+      // kotlinx.serialization throws on a fractional number — which silently
+      // dropped the entire directory_list_reply and hung the HUD on "loading
+      // directories…" forever. Floor to integer ms so it's Long-parseable. (Sub-ms
+      // precision is meaningless for a directory mtime.)
+      mtime: Math.floor(stats.mtimeMs),
     })
   }
 
