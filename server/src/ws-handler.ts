@@ -36,7 +36,7 @@ import { SessionPool, type PoolEntry } from './session-pool.js'
 import { Watchdog } from './watchdog.js'
 import { transcribe, transcribeDji } from './stt.js'
 import { markdownToPlaintext, formatToolUse } from './output-parser.js'
-import { listProjectDirectories } from './directory-picker.js'
+import { listProjectDirectories, validateProjectPath } from './directory-picker.js'
 import { CCDispatcher, DISPATCH_TARGETS, type Dispatcher, getDispatchTarget } from './dispatch.js'
 import { ChannelRouter } from './channel-router.js'
 
@@ -293,8 +293,16 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         sendMsg(client, { type: 'error', message: `directory_select not supported for target ${client.selectedTargetId}` })
         break
       }
+      // SRV-1: validate the client-supplied path before it becomes a CC cwd.
+      let projectPath: string
       try {
-        const { entry, resumed, wired } = client.pool.getOrCreateByDirectory(msg.path, {
+        projectPath = validateProjectPath(msg.path)
+      } catch (err) {
+        sendMsg(client, { type: 'cc_error', error: `Invalid directory: ${(err as Error).message}` })
+        break
+      }
+      try {
+        const { entry, resumed, wired } = client.pool.getOrCreateByDirectory(projectPath, {
           permissionMode: client.mode,
           effort: config.claude.effort,
           model: config.claude.model,
@@ -307,7 +315,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         if (!wired) {
           wireSessionEvents(client, entry)
           await entry.session.spawn()
-          watchdog?.register(entry.id, entry.session, msg.path)
+          watchdog?.register(entry.id, entry.session, projectPath)
         }
         client.pool.persistSessionMeta()
         client.dispatcher = new CCDispatcher(entry)
@@ -315,7 +323,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         sendMsg(client, {
           type: 'session_info',
           sessionId: entry.id,
-          projectPath: msg.path,
+          projectPath,
           mode: client.mode,
           poolSize: client.pool.count,
           poolIndex: client.pool.indexOf(entry.id),

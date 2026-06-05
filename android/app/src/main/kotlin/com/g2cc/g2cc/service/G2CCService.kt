@@ -176,18 +176,28 @@ class G2CCService : LifecycleService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val notification = baseNotification(getString(R.string.fg_state_idle), pi).build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // Combined connectedDevice + microphone. Per 4th-pass review
-            // (CRITICAL): Android 14+ SecurityException-s if AudioRecord
-            // opens from a FG service without microphone declared in the
-            // type bitmask. Even if we don't start recording until later,
-            // the type is fixed at startForeground and can't be upgraded
-            // mid-flight without redeclaring.
-            val typeMask = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            startForeground(NOTIF_ID, notification, typeMask)
-        } else {
-            startForeground(NOTIF_ID, notification)
+        // NET-7: a background-initiated start (e.g. the exported IntentReceiver's
+        // START_RECORDING broadcast arriving while the service was killed) can
+        // throw ForegroundServiceStartNotAllowedException on Android 12+/14 with a
+        // microphone FGS type. Don't let it crash the service silently — log
+        // loudly and stop cleanly so a later user-initiated start can recover.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // Combined connectedDevice + microphone. Per 4th-pass review
+                // (CRITICAL): Android 14+ SecurityException-s if AudioRecord
+                // opens from a FG service without microphone declared in the
+                // type bitmask. Even if we don't start recording until later,
+                // the type is fixed at startForeground and can't be upgraded
+                // mid-flight without redeclaring.
+                val typeMask = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                startForeground(NOTIF_ID, notification, typeMask)
+            } else {
+                startForeground(NOTIF_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed (background mic-FGS start not allowed?) — stopping self", e)
+            stopSelf()
         }
     }
 

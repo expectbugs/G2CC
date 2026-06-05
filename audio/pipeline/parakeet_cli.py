@@ -38,6 +38,15 @@ def main() -> int:
         return 2
     engine = get_engine()
     result = engine.transcribe(sys.argv[1])
+    # AUD-3 (no-truncation): refuse to emit a transcript containing a sentinel
+    # (stt.ts would slice early and silently drop the remainder).
+    if RESULT_BEGIN in result.text or RESULT_END in result.text:
+        print(
+            'parakeet_cli: transcript contains a reserved G2CC sentinel; refusing '
+            'to emit a frame the server would mis-slice (no-truncation)',
+            file=sys.stderr,
+        )
+        return 3
     print(RESULT_BEGIN)
     print(result.text)
     print(RESULT_END)

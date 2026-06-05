@@ -37,6 +37,17 @@ ERROR_END = "___G2CC_ERROR_END___"
 
 def _emit(begin: str, body: str, end: str) -> None:
     """Write one framed block to stdout and flush (so the server sees it now)."""
+    # AUD-3 (no-truncation): a body containing any sentinel would make stt.ts
+    # slice the block early and silently drop the remainder. Refuse to emit it.
+    # On the RESULT path this raise is caught in main() and reframed as a loud
+    # ERROR block — never a silent truncation. (The ERROR path sanitizes its
+    # body first, so this can't trip there.)
+    for marker in (RESULT_BEGIN, RESULT_END, ERROR_BEGIN, ERROR_END):
+        if marker in body:
+            raise ValueError(
+                f"body contains reserved sentinel {marker!r}; refusing to emit "
+                f"a frame the server would mis-slice"
+            )
     sys.stdout.write(begin + "\n")
     sys.stdout.write(body + "\n")
     sys.stdout.write(end + "\n")
@@ -68,7 +79,13 @@ def main() -> int:
             _emit(RESULT_BEGIN, result.text, RESULT_END)
         except Exception as exc:  # loud + framed — never swallow
             logging.getLogger("g2cc.parakeet").exception("transcribe failed for %s", wav_path)
-            _emit(ERROR_BEGIN, f"{type(exc).__name__}: {exc}", ERROR_END)
+            detail = f"{type(exc).__name__}: {exc}"
+            # Defang any sentinel in the diagnostic text so _emit's guard can't
+            # trip on the ERROR path (the body here is diagnostics, not the
+            # transcript, so neutering the marker is fine — and still loud).
+            for marker in (RESULT_BEGIN, RESULT_END, ERROR_BEGIN, ERROR_END):
+                detail = detail.replace(marker, marker.strip("_"))
+            _emit(ERROR_BEGIN, detail, ERROR_END)
 
     return 0
 

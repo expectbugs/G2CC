@@ -66,18 +66,29 @@ export function markdownToPlaintext(md: string): string {
     // Unordered list items
     let processed = line.replace(/^(\s*)[-*+]\s/, '$1▸ ')
 
-    // Bold: **text** -> TEXT
-    processed = processed.replace(/\*\*([^*]+)\*\*/g, (_m, t: string) => t.toUpperCase())
-
-    // Italic: *text* or _text_ -> text (strip markers)
-    processed = processed.replace(/\*([^*]+)\*/g, '$1')
-    processed = processed.replace(/_([^_]+)_/g, '$1')
-
-    // Links: [text](url) -> text
-    processed = processed.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-
-    // Images: ![alt](url) -> [alt]
-    processed = processed.replace(/!\[([^\]]*)\]\([^)]+\)/g, '[$1]')
+    // SRV-10 (no-mangle): apply the emphasis/link transforms ONLY to the
+    // non-code segments of a line, so inline code like `my_var_name` or `a*b`
+    // is emitted verbatim and never corrupted by the markdown rules below.
+    const applyInline = (seg: string): string => {
+      // Bold: **text** -> TEXT; non-space adjacency (CommonMark) so `2 ** 3`
+      // (exponent) is not treated as emphasis.
+      seg = seg.replace(/\*\*(\S[^*]*\S|\S)\*\*/g, (_m, t: string) => t.toUpperCase())
+      // Italic: *text* -> text; non-space-adjacent so `price * qty * tax` survives.
+      seg = seg.replace(/\*(\S[^*]*\S|\S)\*/g, '$1')
+      // Italic: _text_ -> text, but only when underscores are not flanked by
+      // word chars, so `my_var_name` and `__init__` survive intact.
+      seg = seg.replace(/(?<![A-Za-z0-9_])_([^_]+)_(?![A-Za-z0-9_])/g, '$1')
+      // Links then images (order preserved from the original).
+      seg = seg.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      seg = seg.replace(/!\[([^\]]*)\]\([^)]+\)/g, '[$1]')
+      return seg
+    }
+    // split() keeps the `...` code spans (capture group) at ODD indices; only
+    // the even-index plain-text segments get the markdown transforms.
+    processed = processed
+      .split(/(`[^`]+`)/g)
+      .map((part, idx) => (idx % 2 === 1 ? part : applyInline(part)))
+      .join('')
 
     output.push(processed)
   }

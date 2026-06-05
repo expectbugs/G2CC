@@ -385,22 +385,32 @@ class G2BleClient(
     }
 
     /** Phase 6/7 entry: send a single packet (already-built bytes from
-     *  Teleprompter/G2Frame). Returns true on enqueue success — actual delivery
-     *  status surfaces via the `events` flow when the glasses ack. */
+     *  Teleprompter/G2Frame). `onResult(success)` reports the ACTUAL write
+     *  outcome (BLE-1) so the caller can diag the truth instead of assuming
+     *  success; it fires on the Nordic callback thread. */
     @SuppressLint("MissingPermission")
-    fun sendPacket(packet: ByteArray, label: String = "send") {
+    fun sendPacket(packet: ByteArray, label: String = "send", onResult: (success: Boolean) -> Unit = {}) {
         val char = writeChar ?: run {
             Log.w(TAG, "[$side] sendPacket($label) called before write char available")
+            onResult(false)
             return
         }
         writeCharacteristic(
             char,
             packet,
             BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
-        ).fail { _, status ->
-            // LOUD: failure surfaces in logcat AND on the state flow so callers can act.
-            _state.value = ConnectionState.Error(side, "$label: write status=$status")
+        ).done { _ ->
+            onResult(true)
+        }.fail { _, status ->
+            // BLE-1: a single WRITE_NO_RESPONSE failure (e.g. transient body
+            // blockage — exactly what the link tuning targets) must NOT be treated
+            // as a GATT disconnect. Surface the REAL result to the caller + logcat,
+            // but do NOT overwrite _state to Error — doing so tore a HEALTHY session
+            // down into a rescan storm on one bad keepalive write. True link loss
+            // still arrives via ConnectionObserver.onDeviceDisconnected (sets
+            // Disconnected), which the health watcher acts on.
             Log.e(TAG, "[$side] $label write failed status=$status")
+            onResult(false)
         }.enqueue()
     }
 

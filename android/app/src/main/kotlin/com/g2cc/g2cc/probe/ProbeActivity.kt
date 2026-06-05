@@ -143,6 +143,12 @@ class ProbeActivity : ComponentActivity() {
      *  periodically + on each input. Single-byte rolling msg-id. */
     private var stateAliveJob: Job? = null
     @Volatile private var saMsgId = 0x40
+    // PRB-4: state-alive gets its OWN tx seq, separate from the sync_trigger
+    // hbSeq. Sharing hbSeq made two independent keepalive loops (7s sync_trigger
+    // + 4s state-alive) double-increment one counter, so the captured
+    // per-direction seq jumped by 2 and interleaved two streams — corrupting the
+    // "which beat did the firmware ack" analysis this probe exists to do.
+    @Volatile private var saSeq = 0xC0
 
     /** PARTIAL_WAKE_LOCK so the heartbeat coroutine's delay() fires on schedule
      *  when the screen is off / phone in pocket (Phase D lesson). */
@@ -435,6 +441,14 @@ class ProbeActivity : ComponentActivity() {
         // On-screen
         runOnUiThread {
             logText.append(line + "\n")
+            // PRB-3: bound the on-screen TextView. A multi-hour RE session logs
+            // every notify + 4s/7s beats; an unbounded Editable janks/OOMs the UI.
+            // Trim the oldest half past the cap. The file + WS sinks below keep the
+            // FULL history (no truncation of the actual record).
+            val editable = logText.editableText
+            if (editable != null && editable.length > 200_000) {
+                editable.delete(0, editable.length - 100_000)
+            }
             logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
         }
         // Local file
@@ -678,10 +692,10 @@ class ProbeActivity : ComponentActivity() {
         val ble = rightBle ?: return
         saMsgId = if (saMsgId >= 126) 0x40 else saMsgId + 1
         val id12 = saMsgId
-        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.stateAlive12(hbSeq, id12), "sa12:$reason") { ok, d ->
+        ble.sendToChar(G2Constants.CHAR_WRITE, ReplayKit.stateAlive12(saSeq, id12), "sa12:$reason") { ok, d ->
             if (!ok) log("[R] *** state-alive f1=12 WRITE FAILED: $d ***")
         }
-        hbSeq = (hbSeq + 1) and 0xFF
+        saSeq = (saSeq + 1) and 0xFF   // PRB-4: own counter, not hbSeq
         log("[R] state-alive ($reason): f1=12 msgid=$id12")
     }
 
@@ -884,16 +898,18 @@ class ProbeActivity : ComponentActivity() {
         val wireHex = prepared.bytes.joinToString("") { "%02x".format(it) }
         log("[$side] SEND ${prepared.summary}")
         log("[$side]   bytes: $wireHex")
-        val enqueued = ble.sendToChar(
+        ble.sendToChar(
             prepared.charUuid,
             prepared.bytes,
             label = sendMode.name.lowercase(),
         ) { ok, detail ->
             log("[$side] SEND ${if (ok) "OK" else "FAIL"} — $detail")
-        }
-        // Only advance the frame sequence once a FRAME write actually goes out.
-        if (enqueued && sendMode == ProbeSend.Mode.FRAME) {
-            txSeq = (txSeq + 1) and 0xFF
+            // PRB-7: advance the frame seq on actual write SUCCESS, not on
+            // enqueue. A queued-but-then-failed write used to bump txSeq, leaving
+            // a phantom seq gap that reads like an eaten frame in the capture.
+            if (ok && sendMode == ProbeSend.Mode.FRAME) {
+                txSeq = (txSeq + 1) and 0xFF
+            }
         }
     }
 

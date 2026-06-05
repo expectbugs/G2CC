@@ -11,7 +11,7 @@
 import { EventEmitter } from 'node:events'
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { CCSession, type CCUsage, type CCPermissionMode } from './cc-session.js'
 import { ScrollbackBuffer } from './scrollback.js'
@@ -290,7 +290,13 @@ export class SessionPool extends EventEmitter {
 
     // Sort by recency; cap at 50.
     entries.sort((a, b) => b.lastActive.localeCompare(a.lastActive))
-    writeFileSync(SESSIONS_FILE, JSON.stringify(entries.slice(0, 50), null, 2), 'utf-8')
+    // SRV-9: write atomically (temp + rename) so a crash mid-write can't leave a
+    // truncated/corrupt sessions.json that drops every resume id. (The remaining
+    // cross-client lost-update race needs the shared-pool fix — see the
+    // session-pool lifecycle cluster held for review.)
+    const tmpFile = SESSIONS_FILE + '.tmp'
+    writeFileSync(tmpFile, JSON.stringify(entries.slice(0, 50), null, 2), 'utf-8')
+    renameSync(tmpFile, SESSIONS_FILE)
   }
 
   /** List saved (ended or paused) sessions for the resume menu. */

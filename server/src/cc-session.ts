@@ -151,6 +151,11 @@ export class CCSession extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
+    // SRV-7 (no-mangle): decode stdout as UTF-8 so a multibyte glyph (CC's
+    // markdown box-drawing ┌─└│▸ / emoji) split across two pipe reads isn't
+    // mis-decoded into mojibake that then flows into scrollback. (The Parakeet
+    // daemon path already does this.)
+    this.proc.stdout!.setEncoding('utf8')
     const rl = createInterface({ input: this.proc.stdout!, crlfDelay: Infinity })
     rl.on('line', (line: string) => {
       if (!line.trim()) return

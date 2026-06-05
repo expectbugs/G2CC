@@ -145,6 +145,24 @@ def main() -> int:
             )
             return 3
         profile = spectral_subtract.load_profile(profile_path)
+        # AUD-1 (no-silent-failures): the noise profile MUST be learned with the
+        # same mic + codec as the live capture (CLAUDE.md audio rules). A profile
+        # learned on a different mic — e.g. the phone HE-AAC prototyping profile
+        # applied to DJI float audio — mismatches the spectral shape and leaves
+        # residue / carves speech, degrading every transcription. We cannot fix
+        # that here (it needs a re-record with the DJI TX2); we surface it loudly
+        # instead of degrading silently.
+        profile_mic = str(profile.get('mic', '') or '')
+        if 'dji' not in profile_mic.lower():
+            print(
+                f'dji_pipeline_cli: WARNING noise profile {profile_path} was not '
+                f'learned with the DJI TX2 (mic tag={profile_mic!r}, '
+                f'source={profile.get("source_file", "")!r}). Spectral shape will '
+                f'mismatch the DJI capture path and degrade transcription. '
+                f'Re-record a noise sample with the DJI TX2 and re-learn '
+                f'(learn_noise_profile.py --mic dji-tx2), or pass --no-denoise.',
+                file=sys.stderr,
+            )
         # Resample to profile SR before applying notch + wiener. The PSD bins
         # only map to the right frequencies at the rate the profile was
         # trained on; wiener_subtract_with_profile loud-fails on mismatch.
@@ -170,9 +188,28 @@ def main() -> int:
                 f'= nperseg) — zero-padded to one STFT window',
                 file=sys.stderr,
             )
-        peak_freqs = profile.get('peak_freqs', np.array([]))
-        if len(peak_freqs) > 0:
-            data = notch_filter.apply_notches(data, sr, peak_freqs)
+        # AUD-2: only notch sub-formant tonals. The narrow Q=30 notches are
+        # "near-zero speech impact" ONLY below the formant/sibilance band; peaks
+        # above ~1.5 kHz sit in fricative/sibilant energy (s, sh, f, th ~2-8 kHz)
+        # and notching them raises WER on exactly the phonemes ASR is most
+        # sensitive to. Drop high peaks here and let the broadband Wiener stage
+        # handle them. (The learn-time formant guard only WARNS and still saves
+        # the peaks; THIS is the apply-time enforcement.)
+        peak_freqs = np.asarray(profile.get('peak_freqs', np.array([])),
+                                dtype=np.float64).ravel()
+        NOTCH_MAX_HZ = 1500.0
+        if peak_freqs.size > 0:
+            kept = peak_freqs[peak_freqs <= NOTCH_MAX_HZ]
+            dropped = peak_freqs[peak_freqs > NOTCH_MAX_HZ]
+            if dropped.size > 0:
+                print(
+                    f'dji_pipeline_cli: skipping {dropped.size} notch peak(s) above '
+                    f'{NOTCH_MAX_HZ:.0f} Hz (speech band): {dropped.tolist()} Hz — '
+                    f'Wiener handles the broadband residue',
+                    file=sys.stderr,
+                )
+            if kept.size > 0:
+                data = notch_filter.apply_notches(data, sr, kept)
         data = spectral_subtract.wiener_subtract_with_profile(
             data, sr, profile, alpha=args.alpha,
         )
@@ -184,6 +221,16 @@ def main() -> int:
 
     engine = get_engine()
     result = engine.transcribe_numpy(data, sample_rate=sr)
+    # AUD-3 (no-truncation): a transcript containing a sentinel would make
+    # stt.ts slice the block early and silently drop the remainder. Refuse
+    # loudly (non-zero exit + stderr) rather than emit a mis-sliceable frame.
+    if RESULT_BEGIN in result.text or RESULT_END in result.text:
+        print(
+            'dji_pipeline_cli: transcript contains a reserved G2CC sentinel; '
+            'refusing to emit a frame the server would mis-slice (no-truncation)',
+            file=sys.stderr,
+        )
+        return 6
     print(RESULT_BEGIN)
     print(result.text)
     print(RESULT_END)

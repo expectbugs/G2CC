@@ -20,6 +20,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
+import okio.ByteString.Companion.toByteString
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 
@@ -156,6 +157,10 @@ class ConnectionManager(
         reconnectJob?.cancel(); reconnectJob = null
         livenessJob?.cancel(); livenessJob = null
         clientHbJob?.cancel(); clientHbJob = null
+        // NET-10: invalidate the old socket's listener (mirror forceReconnect) so
+        // a late onClosed from this deliberate disconnect can't run its
+        // attemptCount++/scheduleReconnect body and spawn an unwanted reconnect.
+        wsGen.incrementAndGet()
         try { ws?.close(1000, "client disconnect") } catch (e: Exception) {
             Log.w(TAG, "close threw", e)
         }
@@ -163,13 +168,17 @@ class ConnectionManager(
         _connected.value = false
     }
 
-    fun send(msg: ClientMessage) {
+    /** PIPE-6: returns true iff the message was accepted by the socket. Callers
+     *  that strand the user on a "waiting" frame (e.g. Send-to-Claude) MUST check
+     *  this — a tap during a reconnect blip used to drop the prompt silently.
+     *  Statement callers can still ignore the result. */
+    fun send(msg: ClientMessage): Boolean {
         // A-H3: loud-fail on send before the socket is ready. The brief window
         // between _connected.value=false and forceReconnect()'s new socket is a
         // real period where messages used to vanish invisibly.
         val w = ws ?: run {
             Log.w(TAG, "send(${msg::class.simpleName}) before socket ready — message dropped")
-            return
+            return false
         }
         // Drop non-Auth messages sent before the server confirmed our Auth.
         // Without this guard, any diag emission (BT state change, BLE link
@@ -179,9 +188,9 @@ class ConnectionManager(
         // must always go through — that's what gets us to _connected=true.
         if (!_connected.value && msg !is ClientMessage.Auth) {
             Log.w(TAG, "send(${msg::class.simpleName}) before WS auth — dropping")
-            return
+            return false
         }
-        try {
+        return try {
             val text = WsJson.codec.encodeToString(ClientMessage.serializer(), msg)
             // OkHttp's WebSocket.send() returns false when the message couldn't
             // be enqueued — buffer full (16 MiB cap) or socket closing. Used to
@@ -190,19 +199,23 @@ class ConnectionManager(
             if (!accepted) {
                 Log.w(TAG, "OkHttp.send(${msg::class.simpleName}) returned false — message dropped (buffer full or closing)")
             }
+            accepted
         } catch (e: Exception) {
             Log.w(TAG, "send threw", e)
+            false
         }
     }
 
-    /** Send binary frame (Phase 8 audio streaming between audio_start/audio_end). */
-    fun sendBinary(payload: ByteArray) {
+    /** Send binary frame (Phase 8 audio streaming between audio_start/audio_end).
+     *  Returns true iff accepted by the socket (NET-6 enabler: lets the caller
+     *  detect sustained uplink drops). */
+    fun sendBinary(payload: ByteArray): Boolean {
         // A-H3: same loud-fail logic as send() — audio frames at ~50 Hz are
         // exactly the case where silent drops would be invisible until the
         // server reports "audio too short" with no clue why.
         val w = ws ?: run {
             Log.w(TAG, "sendBinary(${payload.size}B) before socket ready — frame dropped")
-            return
+            return false
         }
         // 4th-pass review HIGH: same pre-auth guard as send(). Without this,
         // text send() drops AudioStart mid-handshake but sendBinary keeps
@@ -213,15 +226,20 @@ class ConnectionManager(
         // consistent: all-or-nothing.
         if (!_connected.value) {
             Log.w(TAG, "sendBinary(${payload.size}B) before WS auth — frame dropped")
-            return
+            return false
         }
-        try {
-            val accepted = w.send(okio.ByteString.of(*payload))
+        return try {
+            // NET-12: no spread (*payload) — ByteString.of(vararg) would copy the
+            // whole array AGAIN on top of MicCapture's per-frame copyOf(). The
+            // toByteString(offset, len) extension copies the range once.
+            val accepted = w.send(payload.toByteString(0, payload.size))
             if (!accepted) {
                 Log.w(TAG, "OkHttp.send(binary ${payload.size}B) returned false — frame dropped (buffer full or closing)")
             }
+            accepted
         } catch (e: Exception) {
             Log.w(TAG, "sendBinary threw", e)
+            false
         }
     }
 

@@ -203,6 +203,10 @@ const DAEMON_RESULT_BEGIN = '___G2CC_RESULT_BEGIN___'
 const DAEMON_RESULT_END = '___G2CC_RESULT_END___'
 const DAEMON_ERROR_BEGIN = '___G2CC_ERROR_BEGIN___'
 const DAEMON_ERROR_END = '___G2CC_ERROR_END___'
+// SRV-17: a transcript frame is tiny; this only catches a runaway / never-
+// terminated block (crash mid-write, stdout flood) so the buffer can't grow
+// without bound while the inflight promise hangs forever.
+const DAEMON_MAX_BUF = 4 * 1024 * 1024
 
 class ParakeetDaemon {
   private proc: ChildProcessWithoutNullStreams | null = null
@@ -230,6 +234,10 @@ class ParakeetDaemon {
     proc.stderr.on('data', () => { /* NeMo / tqdm chatter — ignored unless it dies */ })
     proc.stdin.on('error', (e: Error) => console.warn(`[stt] parakeet daemon stdin error: ${e}`))
     const die = (err: Error): void => {
+      // Only clean up if THIS proc is still the current one — a later respawn
+      // (e.g. the SRV-17 overflow path) may have already replaced it, and we
+      // must not null/reject the fresh daemon's state.
+      if (this.proc !== proc) return
       this.proc = null
       if (this.inflight) { const j = this.inflight; this.inflight = null; j.reject(err) }
       while (this.queue.length) this.queue.shift()!.reject(err)
@@ -258,6 +266,20 @@ class ParakeetDaemon {
 
   private onStdout(chunk: string): void {
     this.buf += chunk
+    // SRV-17: bound the buffer. If it grows past the cap with a request still in
+    // flight and no complete sentinel block, the daemon is wedged/flooding —
+    // reject loudly, drop the broken proc, and respawn a fresh one (so the
+    // promise can't hang forever; honors no-timeouts by supervising externally).
+    if (this.inflight && this.buf.length > DAEMON_MAX_BUF) {
+      console.error(`[stt] parakeet daemon stdout exceeded ${DAEMON_MAX_BUF} bytes with no result frame — killing + respawning`)
+      this.buf = ''
+      const job = this.inflight; this.inflight = null
+      const dying = this.proc; this.proc = null   // next pump() → ensureProc() spawns fresh
+      job.reject(new Error('parakeet daemon stdout overflow (no result frame); respawning'))
+      try { dying?.kill('SIGKILL') } catch { /* already dead */ }
+      this.pump()                                 // drain any queued jobs onto the fresh daemon
+      return
+    }
     while (this.inflight) {
       const rb = this.buf.indexOf(DAEMON_RESULT_BEGIN)
       const re = rb >= 0 ? this.buf.indexOf(DAEMON_RESULT_END, rb) : -1

@@ -95,8 +95,10 @@ object ReplayKit {
      * so the firmware can't treat it as a no-op duplicate.
      *
      * In [G2CC_MENU] the f2 value is a single byte at frame offset 11
-     * (header[8]=08 f1-tag, [9]=07 f1, [10]=10 f2-tag, [11]=66 f2). [msgId] must
-     * stay a single-byte varint so the frame length is unchanged.
+     * (header[8]=08 f1-tag, [9]=07 f1, [10]=10 f2-tag, [11]=42 f2 — PRB-8: the
+     * real byte is 0x42; the old comment wrote it as decimal "66", which reads as
+     * a phantom 0x66 offset against the hex neighbours). [msgId] must stay a
+     * single-byte varint so the frame length is unchanged.
      */
     fun menuKeepalive(msgId: Int): ByteArray {
         require(msgId in 1..127) { "keepalive msgId must be a single-byte varint (1..127), got $msgId" }

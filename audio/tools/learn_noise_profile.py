@@ -158,8 +158,14 @@ def learn_profile(
     noverlap: int = DEFAULT_NOVERLAP,
     peak_prominence_db: float = DEFAULT_PEAK_PROMINENCE_DB,
     peak_min_distance_hz: float = DEFAULT_PEAK_MIN_DISTANCE_HZ,
+    mic: str = '',
 ) -> dict:
-    """Compute and save a noise profile. Returns a summary dict."""
+    """Compute and save a noise profile. Returns a summary dict.
+
+    `mic` tags the capture device/codec (e.g. 'dji-tx2'). CLAUDE.md requires a
+    profile be learned with the SAME mic+codec as the live capture; the tag lets
+    the apply-time path (dji_pipeline_cli) loudly warn on a mismatch instead of
+    silently degrading every transcription (AUD-1)."""
     if not input_path.exists():
         raise FileNotFoundError(f'input does not exist: {input_path}')
 
@@ -213,11 +219,13 @@ def learn_profile(
         source_file=str(input_path),
         duration_s=np.float32(duration),
         rms=np.float32(rms),
+        mic=str(mic),
     )
 
     return {
         'output_path': str(output_path),
         'source_file': str(input_path),
+        'mic': str(mic),
         'duration_s': duration,
         'sample_rate': target_sample_rate,
         'rms': rms,
@@ -244,6 +252,10 @@ def main() -> int:
                    help='Tonal peak threshold dB above local median (default %(default)s).')
     p.add_argument('--peak-min-distance-hz', type=float, default=DEFAULT_PEAK_MIN_DISTANCE_HZ,
                    help='Minimum spacing between detected peaks Hz (default %(default)s).')
+    p.add_argument('--mic', type=str, default='',
+                   help="Capture device/codec tag, e.g. 'dji-tx2'. CLAUDE.md: the "
+                        "profile MUST be learned with the same mic+codec as live "
+                        "capture; this tag lets the pipeline warn on mismatch (AUD-1).")
     p.add_argument('--force', action='store_true',
                    help='Allow overwriting an existing profile at --output. Without this flag, refuse to clobber.')
     args = p.parse_args()
@@ -264,10 +276,12 @@ def main() -> int:
         noverlap=args.noverlap,
         peak_prominence_db=args.peak_prominence_db,
         peak_min_distance_hz=args.peak_min_distance_hz,
+        mic=args.mic,
     )
 
     print(f'profile written: {summary["output_path"]}')
     print(f'  source:        {summary["source_file"]}')
+    print(f'  mic tag:       {summary["mic"] or "(none — set --mic for DJI captures)"}')
     print(f'  duration:      {summary["duration_s"]:.2f}s')
     print(f'  sample_rate:   {summary["sample_rate"]} Hz')
     print(f'  input rms:     {summary["rms"]:.4f}')

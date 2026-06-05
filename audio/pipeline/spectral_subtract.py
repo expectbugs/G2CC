@@ -151,6 +151,13 @@ def wiener_subtract(
     eps = np.float64(1e-12)
 
     clean_pow = np.maximum(Y_pow - alpha * N, 0.0)
+    # AUD-8 (INTENTIONAL, documented): G is a POWER ratio (clean_pow/|Y|^2)
+    # applied directly to the complex magnitude below — more aggressive than the
+    # textbook sqrt(power-ratio) Wiener gain. Deliberate: favors stronger
+    # machine-noise rejection at the cost of slightly more speech-onset
+    # attenuation at low SNR. Bounded to [floor, 1] (no amplification). Do NOT
+    # "fix" to sqrt() without re-tuning alpha on a REAL DJI capture
+    # (CLAUDE.md: never re-tune NR on synthetic audio).
     G = np.maximum(clean_pow / np.maximum(Y_pow, eps), floor)
 
     Y_clean = Y * G
@@ -174,7 +181,8 @@ def load_profile(path: str | Path) -> dict:
     """Load a noise profile produced by learn_noise_profile.py.
 
     Returns a dict with: sample_rate, nperseg, noverlap, noise_psd, peak_freqs
-    (may be empty), source_file (may be empty).
+    (may be empty), source_file (may be empty), mic (capture-device tag, may be
+    empty for legacy profiles).
 
     Raises FileNotFoundError or KeyError loudly if the file is missing or
     malformed.
@@ -201,6 +209,7 @@ def load_profile(path: str | Path) -> dict:
             if 'peak_freqs' in data.files else np.array([], dtype=np.float64),
         'source_file': data['source_file'].item() if 'source_file' in data.files else '',
         'duration_s': float(data['duration_s'].item()) if 'duration_s' in data.files else 0.0,
+        'mic': str(data['mic'].item()) if 'mic' in data.files else '',
     }
 
 

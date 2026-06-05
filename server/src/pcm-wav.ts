@@ -18,6 +18,17 @@ export function pcmToWav(
   const byteRate = sampleRate * channels * (bitsPerSample / 8)
   const blockAlign = channels * (bitsPerSample / 8)
   const dataSize = pcmData.length
+  // SRV-8 (no-silent-failures): a data chunk that isn't a whole number of
+  // sample-frames means a frame was split/truncated upstream (e.g. a partial WS
+  // binary frame). Left alone, soundfile mis-aligns every subsequent sample →
+  // garbage transcription with no error surfaced. Loud-fail instead. (The throw
+  // is caught by the transcribeDji/transcribe try/catch → stt_error.)
+  if (blockAlign > 0 && dataSize % blockAlign !== 0) {
+    throw new Error(
+      `pcmToWav: PCM length ${dataSize} is not a multiple of blockAlign ${blockAlign} ` +
+      `(${channels}ch × ${bitsPerSample}-bit) — frame-misaligned audio, refusing to build a WAV`,
+    )
+  }
   const headerSize = 44
   const buffer = Buffer.alloc(headerSize + dataSize)
 

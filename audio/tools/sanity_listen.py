@@ -42,7 +42,10 @@ def band_energy_db(x: np.ndarray, sr: int, low_hz: float, high_hz: float) -> flo
     band = (f >= low_hz) & (f <= high_hz)
     if not band.any():
         return float('-inf')
-    e = float(np.trapezoid(pxx[band], f[band]))
+    # AUD-6: np.sum, not np.trapezoid — trapezoid returns 0 for a single-bin
+    # mask (→ -inf dB if a probe band ever narrows to one bin). Matches the
+    # convention in nlms / notch_filter / spectral_subtract.
+    e = float(np.sum(pxx[band]) + 1e-20)
     return 10.0 * float(np.log10(e + 1e-20))
 
 

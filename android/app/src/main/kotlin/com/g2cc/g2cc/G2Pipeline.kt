@@ -79,8 +79,13 @@ class G2Pipeline(
     private val _bleStatus = MutableStateFlow("scanning")
     val bleStatus: StateFlow<String> = _bleStatus.asStateFlow()
 
-    var leftBle: G2BleClient? = null
-    var rightBle: G2BleClient? = null
+    // PIPE-5: @Volatile — written from Dispatchers.Default coroutines (watchdog,
+    // BT-state) and read from the OkHttp reader thread via composeStatus and the
+    // null-guards. Matches the visibility invariant already applied to
+    // pendingHudText (@Volatile) / bleScannerRef (AtomicReference); without it the
+    // reader thread can observe a stale ref (wrong conn glyph / stale guard).
+    @Volatile var leftBle: G2BleClient? = null
+    @Volatile var rightBle: G2BleClient? = null
     private var hud: Hud? = null
     private var menu: MenuController? = null
     private var confirmation: ConfirmationFlow? = null
@@ -337,7 +342,7 @@ class G2Pipeline(
             // While the server is transcribing, show a transient "wait"
             // frame so the user knows something is happening. SttResult
             // arrival will replace this with the confirmation submenu.
-            transcribeCancelled = false
+            // (PIPE-1: the cancel-guard is reset on START, not here.)
             rm.replaceCurrentFrame(
                 title = "Processing",
                 items = listOf(
@@ -352,6 +357,12 @@ class G2Pipeline(
             state.transition(AppState.AWAITING_TRANSCRIPT)
             diag("toggleRecording: stopped streamer; showing transcribing frame (+Cancel)")
         } else {
+            // PIPE-1: clear the cancel-guard when a NEW transcribe cycle begins —
+            // NOT in the stop branch or the late-result drop handlers. Every fresh
+            // recording then starts unguarded even if the previous cycle ended via
+            // a path that skipped the stop branch (WS-drop, capture Failure), and
+            // a 2nd straggler can't slip past an already-consumed guard.
+            transcribeCancelled = false
             s.start()
             rm.replaceCurrentFrame(
                 title = "Recording",
@@ -425,9 +436,20 @@ class G2Pipeline(
     private fun showDirectoryPage(page: Int) {
         val rm = rootMenu ?: return
         val entries = ccDirectoryEntries
-        if (entries.isEmpty()) return
+        if (entries.isEmpty()) {
+            // PIPE-9: don't silently render nothing — a re-entry after the list
+            // cleared (a new DirectoryListReply) would strand the user on a stale
+            // frame with zero feedback. Surface it to the diag stream.
+            diag("rootMenu: showDirectoryPage($page) with no entries — directory list empty/cleared")
+            return
+        }
         val pageCount = (entries.size + DIR_PAGE_SIZE - 1) / DIR_PAGE_SIZE
         val p = page.coerceIn(0, pageCount - 1)
+        if (p != page) {
+            // PIPE-9: a stale showDirectoryPage(p+1) captured before the list
+            // shrank would be silently clamped onto the wrong page; say so.
+            diag("rootMenu: showDirectoryPage($page) clamped to page $p (pageCount=$pageCount)")
+        }
         val start = p * DIR_PAGE_SIZE
         val end = minOf(start + DIR_PAGE_SIZE, entries.size)
         val items = ArrayList<RootMenu.MenuItem>(DIR_PAGE_SIZE + 2)
@@ -913,8 +935,13 @@ class G2Pipeline(
                             diag("hb: tick=$tick — evenHub session not ready, skipping")
                             continue
                         }
-                        r1.sendPacket(eh.keepaliveFrame(), "HB:e0-f1=12")
-                        diag("hb: tick=$tick (e0 f1=12 keepalive) | R notify=${r1.notifyCount.get()}")
+                        r1.sendPacket(eh.keepaliveFrame(), "HB:e0-f1=12") { ok ->
+                            // BLE-1: report the TRUE write result, not a fabricated
+                            // success. A failed keepalive no longer tears the
+                            // session down (see G2BleClient.sendPacket), so the
+                            // diag must say what actually happened.
+                            diag("hb: tick=$tick (e0 f1=12 keepalive) write=${if (ok) "OK" else "FAIL"} | R notify=${r1.notifyCount.get()}")
+                        }
                     } else {
                         // Teleprompter: full re-render via Hud.render.
                         // Re-establishes the firmware-side teleprompter
@@ -1064,6 +1091,11 @@ class G2Pipeline(
 
     private suspend fun collectEventsDebounced(events: kotlinx.coroutines.flow.Flow<EventParser.Event>) {
         events.collect { event ->
+            // PIPE-2: guard the whole dispatch. A synchronous throw in any handler
+            // below (e.g. an oversized EvenHub render exceeding the 255-packet
+            // ceiling) would otherwise cancel this collector coroutine and
+            // permanently kill ring/tap/scroll input until a full BLE rebuild.
+            try {
             val now = System.currentTimeMillis()
             when (event) {
                 is EventParser.Event.Tap -> {
@@ -1113,7 +1145,14 @@ class G2Pipeline(
                     // firmware reports the chosen index. Route straight to the
                     // menu — e0-01 is R-only, single emission, so no debounce.
                     diag("hub-input: select '${event.widgetType}' idx=${event.index}")
-                    rootMenu?.selectIndex(event.index)
+                    // PIPE-7: if the index is stale (frame swapped underneath the
+                    // firmware's local focus by an async server message), selectIndex
+                    // returns false — resync by re-rendering + diag, instead of
+                    // dropping the tap with no feedback.
+                    if (rootMenu?.selectIndex(event.index) == false) {
+                        diag("hub-input: select idx=${event.index} out of range — re-rendering to resync")
+                        rootMenu?.render()
+                    }
                 }
                 is EventParser.Event.HubGesture -> {
                     // Firmware handles menu-list scroll natively (draws the
@@ -1123,6 +1162,12 @@ class G2Pipeline(
                 is EventParser.Event.Malformed -> {
                     Log.w(TAG, "malformed BLE event: ${event.reason}")
                 }
+            }
+            } catch (e: Exception) {
+                // PIPE-2: diag loudly + continue (mirrors dispatchInbound's catch)
+                // so one bad render can't brick all subsequent input.
+                Log.e(TAG, "input-collector handler threw for ${event::class.simpleName}", e)
+                diag("input-collector: ${event::class.simpleName} threw — ${e.message} (continuing)")
             }
         }
     }
@@ -1608,7 +1653,10 @@ class G2Pipeline(
             }
             is ServerMessage.SttError -> {
                 if (transcribeCancelled) {
-                    transcribeCancelled = false
+                    // PIPE-1: do NOT clear the guard here — it is reset only when a
+                    // new recording starts. Clearing on the first straggler left a
+                    // 2nd straggler (e.g. a late stt_error after an already-dropped
+                    // stt_result) un-guarded, clobbering the frame the user backed to.
                     diag("stt_error after user cancel — ignoring: ${msg.error}")
                     return
                 }
@@ -1665,7 +1713,8 @@ class G2Pipeline(
             is ServerMessage.SttResult -> {
                 Log.i(TAG, "stt_result: \"${msg.text}\"")
                 if (transcribeCancelled) {
-                    transcribeCancelled = false
+                    // PIPE-1: do NOT clear the guard here (reset happens on a fresh
+                    // recording start). See the SttError handler note above.
                     diag("stt_result after user cancel — ignoring")
                     return
                 }
@@ -1683,14 +1732,24 @@ class G2Pipeline(
                         title = "Confirm transcript",
                         items = listOfNotNull(
                             RootMenu.MenuItem.Action("✓ Send to Claude") {
-                                cm.send(ClientMessage.Prompt(transcript))
-                                rm.replaceCurrentFrame(
-                                    title = "Sending…",
-                                    items = listOf(
-                                        RootMenu.MenuItem.Action("(waiting for Claude response)") {},
-                                    ),
-                                )
-                                state.transition(AppState.STREAMING)
+                                // PIPE-6: only advance to the "waiting" frame if the
+                                // prompt was actually accepted by the socket. A tap
+                                // during a reconnect blip used to drop the prompt
+                                // silently (send() no-ops on a dead socket) and strand
+                                // the user on a dead "waiting" frame forever. On
+                                // failure, stay on the confirm frame (transcript still
+                                // shown) so ✓ can be re-tapped once reconnected.
+                                if (cm.send(ClientMessage.Prompt(transcript))) {
+                                    rm.replaceCurrentFrame(
+                                        title = "Sending…",
+                                        items = listOf(
+                                            RootMenu.MenuItem.Action("(waiting for Claude response)") {},
+                                        ),
+                                    )
+                                    state.transition(AppState.STREAMING)
+                                } else {
+                                    diag("send-to-claude: prompt NOT sent (socket not ready) — staying on confirm frame to retry")
+                                }
                             },
                             RootMenu.MenuItem.Action("⟲ Re-record") {
                                 toggleRecording()
