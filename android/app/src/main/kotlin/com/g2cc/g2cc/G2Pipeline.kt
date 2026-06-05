@@ -1338,7 +1338,7 @@ class G2Pipeline(
      *  read-only displayHeader (STT transcript / confirm prompt), else a menu. */
     private fun renderModelViaEvenHub(eh: EvenHud, model: RootMenu.RenderModel) {
         if (model.displayHeader != null) {
-            eh.renderConfirm(model.displayHeader, model.items) { ok ->
+            eh.renderConfirm(composeStatus(model.title), model.displayHeader, model.items) { ok ->
                 if (!ok) diag("evenHub: confirm render failed ('${model.title}')")
             }
         } else {
@@ -1476,15 +1476,25 @@ class G2Pipeline(
             }
             is ServerMessage.Output -> {
                 if (state.current != AppState.STREAMING) state.transition(AppState.STREAMING)
-                // 4th-pass review HIGH (BLE bug 7) fix: only buffer in
-                // pendingHudText when the HUD is actually unavailable. If we
-                // unconditionally set it on every Output, a later
-                // ConfirmationFlow render updates Hud.lastRenderedText but
-                // NOT pendingHudText — and on reconnect we'd replay the
-                // stale Output, hiding the confirmation prompt the server is
-                // waiting on (wedges per no-timeouts rule). The pendingHud
-                // buffer is now purely a "missed update during outage" queue.
-                renderContent(msg.text)
+                // Render CC output as an INTERACTIVE frame — Claude's reply in the
+                // scrollable body + the active CC menu options — so the user reads
+                // the response AND can act (Record prompt / Switch / Exit), never
+                // stranded on dead text with no way out but quitting the app. The
+                // server sends this output right AFTER response_complete
+                // (ws-handler.ts 807-809), so it's the frame the user lands on.
+                // Falls back to plain text render if the menu isn't up yet.
+                val rm = rootMenu
+                val name = activeCcProjectName
+                if (rm != null && name != null) {
+                    rm.replaceCurrentFrame(
+                        title = "Claude Code: $name",
+                        items = buildActiveCcMenuItems(name),
+                        addBack = true,
+                        displayHeader = msg.text,
+                    )
+                } else {
+                    renderContent(msg.text)
+                }
             }
             is ServerMessage.TextDelta -> {
                 // Phase 6 doesn't yet stream incremental updates to the HUD —

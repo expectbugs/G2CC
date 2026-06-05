@@ -137,11 +137,13 @@ class EvenHubTest {
     fun confirmScreen_hasBodyTextAndOptionsList() {
         val packets = EvenHub.confirmScreen(
             seq = 0x20, msgId = 0x30,
+            statusText = "● Claude Code",
             body = "transcribed prompt text",
             options = listOf("✓ Send", "⟲ Re-record", "✗ Cancel"),
         )
         for (p in packets) { assertEquals(0xE0.toByte(), p[6]); assertEquals(0x20.toByte(), p[7]) }
         val h = hex(reassemble(packets))
+        assertTrue("menu-header status bar (the display trigger)", h.contains("6d656e752d686561646572")) // "menu-header"
         assertTrue("main body container", h.contains("6d61696e"))           // "main"
         assertTrue("menu-list options container", h.contains("6d656e752d6c697374")) // "menu-list"
         assertTrue("option text present", h.contains("53656e64"))           // "Send"

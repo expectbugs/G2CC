@@ -19,6 +19,7 @@ import { handleConnection, setWatchdog } from './ws-handler.js'
 import { Watchdog } from './watchdog.js'
 import { renderSetupPage, getLocalInterfaces } from './setup-page.js'
 import { getEndpointJson } from './endpoints.js'
+import { warmParakeet } from './stt.js'
 
 const VERSION = '0.0.1'
 
@@ -79,6 +80,9 @@ try {
 
   watchdogInstance.start()
   startDiscovery(config.port)
+  // Pre-warm the Parakeet STT daemon so the first voice command isn't a ~12 s
+  // cold model load (fire-and-forget; lazy-loads on first request if it fails).
+  void warmParakeet(config)
 } catch (err) {
   console.error('[g2cc-server] Failed to start:', err)
   process.exit(1)

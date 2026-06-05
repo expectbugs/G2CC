@@ -128,8 +128,15 @@ object EvenHub {
      *  (so the firmware reports the chosen option on `e0-01`). Uses a custom
      *  top/bottom geometry — px positions are app layout data; the container wire
      *  format is the same proven encoding. */
-    fun confirmScreen(seq: Int, msgId: Int, body: String, options: List<String>): List<ByteArray> =
-        content(seq, msgId, lists = listOf(confirmList(options)), texts = listOf(confirmBody(body)))
+    fun confirmScreen(seq: Int, msgId: Int, statusText: String, body: String, options: List<String>): List<ByteArray> =
+        // MUST carry a menu-header status bar. Every screen the firmware actually
+        // DISPLAYS (menuScreen, textScreen) has one; the old header-less
+        // main+menu-list confirm wrote OK to the glasses but never PAINTED —
+        // stranding the user on the prior frame (the "spawning"/"transcribing"
+        // sticks, and the invisible transcript-confirm). Header + body(main) +
+        // options(menu-list).
+        content(seq, msgId, lists = listOf(confirmList(options)),
+            texts = listOf(menuHeader(statusText), confirmBody(body)))
 
     // ============================================================
     // Container builders (layout constants copied verbatim per widget type)
@@ -162,7 +169,9 @@ object EvenHub {
     /** Confirm-screen body: scrollable `main` text filling the top region.
      *  Custom geometry (top band) — see [confirmScreen]. */
     private fun confirmBody(text: String): ByteArray =
-        textContainer(x = 0, y = 0, w = 576, h = 180, f5 = 0, f6 = null, f7 = null, f8 = 6, id = 1,
+        // y=43 (below the menu-header status bar at y=0 h=38), leaving the bottom
+        // band for the options list (confirmList at y=185).
+        textContainer(x = 0, y = 43, w = 576, h = 140, f5 = 0, f6 = null, f7 = null, f8 = 6, id = 1,
             type = "main", scrollFlag = 1, text = text)
 
     /** Confirm-screen options: a `menu-list` in the bottom region. Custom

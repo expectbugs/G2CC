@@ -63,7 +63,7 @@ class EvenHud(
         for (f in EvenHub.COLD_INIT) { frames += f; delays += STAGE_PACE_MS }
         frames += EvenHub.launch(nextSeq(), nextMsgId()); delays += STAGE_PACE_MS
         val content = if (displayHeader != null) {
-            EvenHub.confirmScreen(nextSeq(), nextMsgId(), displayHeader, items)
+            EvenHub.confirmScreen(nextSeq(), nextMsgId(), statusText, displayHeader, items)
         } else {
             EvenHub.menuScreen(nextSeq(), nextMsgId(), statusText, items)
         }
@@ -88,9 +88,9 @@ class EvenHud(
 
     /** Render a confirmation screen: read-only [body] above a selectable
      *  [options] menu-list (firmware reports the choice on `e0-01`). */
-    fun renderConfirm(body: String, options: List<String>, onComplete: (Boolean) -> Unit = {}) {
-        val packets = EvenHub.confirmScreen(nextSeq(), nextMsgId(), body, options)
-        Log.i(TAG, "renderConfirm: ${body.length}c + ${options.size} options → ${packets.size} pkts")
+    fun renderConfirm(statusText: String, body: String, options: List<String>, onComplete: (Boolean) -> Unit = {}) {
+        val packets = EvenHub.confirmScreen(nextSeq(), nextMsgId(), statusText, body, options)
+        Log.i(TAG, "renderConfirm: '${statusText.take(20)}' ${body.length}c + ${options.size} options → ${packets.size} pkts")
         writeR(packets, pacing(packets.size), "renderConfirm", onComplete)
     }
 

@@ -15,7 +15,7 @@
 
 import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { execFile } from 'node:child_process'
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { promisify } from 'node:util'
 import { preprocessAudio } from './audio-preprocess.js'
 import { pcmToWav } from './pcm-wav.js'
@@ -193,32 +193,126 @@ export async function transcribeDji(
   }
 }
 
-/** Phase 8: Parakeet TDT 0.6B v2 via pipeline/parakeet_engine.py.
- *
- *  Calls the project-scoped venv's python with `-m pipeline.parakeet_cli <wav>`.
- *  No timeout (long audio legitimately takes minutes); maxBuffer 16 MB so a
- *  long transcript can't overflow stdout.
- *
- *  REQUIRES: `nemo_toolkit[asr]` installed in the venv (`audio/venv/`). This
- *  is uncommented in audio/requirements.txt only after the CUDA driver/toolkit
- *  divergence is resolved per Phase 0's VERIFIED_ENVIRONMENT.md note. */
-async function transcribeParakeet(wavPath: string, config: G2CCConfig): Promise<string> {
-  const { pythonPath } = config.stt
-  const { stdout } = await execFileAsync(
-    pythonPath,
-    ['-m', 'pipeline.parakeet_cli', wavPath],
-    {
-      encoding: 'utf-8',
-      maxBuffer: 16 * 1024 * 1024,
-      cwd: '/home/user/G2CC/audio',     // so `-m pipeline.parakeet_cli` resolves
-    },
-  )
-  const result = extractSentinelResult(stdout)
-  console.log(`[stt] parakeet result (${result.length} chars): "${result}"`)
+// ---- Warm Parakeet daemon: load the NeMo model ONCE, transcribe many ----
+// The old per-request execFile(parakeet_cli) cold-loaded the model (~12 s) on
+// EVERY call (the "transcribing…" stall). This persistent process loads it once
+// (pipeline/parakeet_daemon.py); subsequent transcriptions are ~0.5 s.
+// Serializes requests (one at a time), respawns loudly on crash, no timeouts.
 
-  // Hallucination denylist: empirical, mostly Whisper-specific YouTube outros.
-  // Phase 8 may extend or replace with a Parakeet-specific list once the model's
-  // failure modes on real DJI captures are documented.
+const DAEMON_RESULT_BEGIN = '___G2CC_RESULT_BEGIN___'
+const DAEMON_RESULT_END = '___G2CC_RESULT_END___'
+const DAEMON_ERROR_BEGIN = '___G2CC_ERROR_BEGIN___'
+const DAEMON_ERROR_END = '___G2CC_ERROR_END___'
+
+class ParakeetDaemon {
+  private proc: ChildProcessWithoutNullStreams | null = null
+  private buf = ''
+  private queue: Array<{ wav: string; resolve: (t: string) => void; reject: (e: Error) => void }> = []
+  private inflight: { resolve: (t: string) => void; reject: (e: Error) => void } | null = null
+
+  constructor(private pythonPath: string, private cwd: string) {}
+
+  transcribe(wavPath: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      this.queue.push({ wav: wavPath, resolve, reject })
+      this.pump()
+    })
+  }
+
+  private ensureProc(): void {
+    if (this.proc) return
+    // -u: unbuffered stdio so each request line is read and each result flushed now.
+    const proc = spawn(this.pythonPath, ['-u', '-m', 'pipeline.parakeet_daemon'], { cwd: this.cwd })
+    this.proc = proc
+    this.buf = ''
+    proc.stdout.setEncoding('utf-8')
+    proc.stdout.on('data', (c: string) => this.onStdout(c))
+    proc.stderr.on('data', () => { /* NeMo / tqdm chatter — ignored unless it dies */ })
+    proc.stdin.on('error', (e: Error) => console.warn(`[stt] parakeet daemon stdin error: ${e}`))
+    const die = (err: Error): void => {
+      this.proc = null
+      if (this.inflight) { const j = this.inflight; this.inflight = null; j.reject(err) }
+      while (this.queue.length) this.queue.shift()!.reject(err)
+    }
+    proc.on('exit', (code, signal) => {
+      console.warn(`[stt] parakeet daemon exited (code=${code} signal=${signal})`)
+      die(new Error(`parakeet daemon exited (code=${code} signal=${signal})`))
+    })
+    proc.on('error', (e) => { console.error(`[stt] parakeet daemon spawn error: ${e}`); die(e) })
+  }
+
+  private pump(): void {
+    if (this.inflight || this.queue.length === 0) return
+    this.ensureProc()
+    const proc = this.proc
+    if (!proc) return                 // spawn failed; the reject already fired
+    const job = this.queue.shift()!
+    this.inflight = { resolve: job.resolve, reject: job.reject }
+    try {
+      proc.stdin.write(job.wav + '\n')
+    } catch (e) {
+      const j = this.inflight; this.inflight = null
+      j.reject(e as Error)
+    }
+  }
+
+  private onStdout(chunk: string): void {
+    this.buf += chunk
+    while (this.inflight) {
+      const rb = this.buf.indexOf(DAEMON_RESULT_BEGIN)
+      const re = rb >= 0 ? this.buf.indexOf(DAEMON_RESULT_END, rb) : -1
+      const eb = this.buf.indexOf(DAEMON_ERROR_BEGIN)
+      const ee = eb >= 0 ? this.buf.indexOf(DAEMON_ERROR_END, eb) : -1
+      const haveRes = rb >= 0 && re >= 0
+      const haveErr = eb >= 0 && ee >= 0
+      if (!haveRes && !haveErr) break
+      const job = this.inflight
+      this.inflight = null
+      if (haveRes && (!haveErr || rb < eb)) {
+        const text = this.buf.substring(rb + DAEMON_RESULT_BEGIN.length, re).trim()
+        this.buf = this.buf.substring(re + DAEMON_RESULT_END.length)
+        job.resolve(text)
+      } else {
+        const m = this.buf.substring(eb + DAEMON_ERROR_BEGIN.length, ee).trim()
+        this.buf = this.buf.substring(ee + DAEMON_ERROR_END.length)
+        job.reject(new Error(m))
+      }
+      this.pump()
+    }
+  }
+}
+
+let parakeetDaemon: ParakeetDaemon | null = null
+function getParakeetDaemon(config: G2CCConfig): ParakeetDaemon {
+  if (!parakeetDaemon) parakeetDaemon = new ParakeetDaemon(config.stt.pythonPath, '/home/user/G2CC/audio')
+  return parakeetDaemon
+}
+
+/** Pre-load the Parakeet model so the FIRST real voice command isn't a ~12 s cold
+ *  load. Sends 1 s of silence through the daemon (which lazy-loads the model on
+ *  its first transcribe). Fire-and-forget at server start; on failure the next
+ *  real request just lazy-loads. */
+export async function warmParakeet(config: G2CCConfig): Promise<void> {
+  if (config.stt.engine !== 'parakeet') return
+  const tmp = join('/tmp', 'g2cc-stt-warmup.wav')
+  writeFileSync(tmp, pcmToWav(Buffer.alloc(16_000 * 2), 16000, 16, 1))   // 1 s silence
+  try {
+    const t0 = Date.now()
+    await getParakeetDaemon(config).transcribe(tmp)
+    console.log(`[stt] Parakeet daemon warm (${Date.now() - t0} ms model load)`)
+  } catch (err) {
+    console.warn(`[stt] Parakeet warm-up failed (lazy-loads on first request): ${err}`)
+  } finally {
+    if (existsSync(tmp)) { try { unlinkSync(tmp) } catch (e) { console.warn(`[stt] warmup cleanup: ${e}`) } }
+  }
+}
+
+/** Phase 8: Parakeet TDT 0.6B v2 via the WARM pipeline/parakeet_daemon.py
+ *  (persistent — model loaded once). No timeout; the daemon is supervised by the
+ *  server lifecycle. REQUIRES `nemo_toolkit[asr]` in audio/venv. */
+async function transcribeParakeet(wavPath: string, config: G2CCConfig): Promise<string> {
+  const result = (await getParakeetDaemon(config).transcribe(wavPath)).trim()
+  console.log(`[stt] parakeet result (${result.length} chars): "${result}"`)
   if (isLikelyHallucination(result)) {
     console.warn(`[stt] Rejected hallucination: "${result}"`)
     throw new Error('No speech detected (likely background noise)')

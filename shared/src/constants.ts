@@ -51,7 +51,7 @@ export const UPGRADE_CHAR_LIMIT = 2000
 // (the Even App's largest observed send was 4 packets / ~900 B). Was 1500
 // (~8 packets), which would hit the same multi-packet wall that hung the HUD
 // on the 83-entry directory list.
-export const PAGE_CHAR_TARGET = 700
+export const PAGE_CHAR_TARGET = 500
 
 // ============================================================
 // Scrollback
