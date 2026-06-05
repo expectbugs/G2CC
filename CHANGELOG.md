@@ -4,6 +4,34 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-17f7cdd — 2026-06-05 — **Paginated directory picker + loud HUD/decode diagnostics**
+
+First real multi-packet HUD send hit its first real wall. After the mtime fix
+(`c55205a`) let the 83-entry directory list *parse*, the picker still hung on
+"loading directories…": the RootMenu model populated (selecting idx 0 spawned CC
+in `__pycache__`) but the glasses never rendered the list. Reading the
+2026-06-03 BTSnoops — per Adam's call, *look at what real DocuLens did* — settled
+it with **zero hardware cycles**: DocuLens's "huge" chapter list was 15 items /
+2 packets, and the Even App's biggest send EVER was 4 packets (~1200 B). Our 83
+dirs ≈ 6 packets — past anything the firmware was ever shown to accept. Per-packet
+framing was byte-correct (232-B chunks, matched the capture); the problem was
+sheer size. So: don't send oversized frames.
+
+- **Paginate** the picker to `DIR_PAGE_SIZE=12` dirs/screen (each ≤ ~3 packets,
+  inside the proven envelope) with ◂ Prev / ▸ More, swapped in place via
+  `replaceCurrentFrame`. Mirrors DocuLens's own short-list behavior.
+- **Loud diagnostics** — the no-silent-failures rule had been violated twice
+  (the mtime drop, this render fail), both invisible over SSH. `EvenHud` now
+  emits render size / packet count / BLE write `OK|FAILED` to the diag stream;
+  `ConnectionManager` echoes inbound decode failures there too. Multi-packet
+  issues now announce themselves in `/tmp/g2cc-server.log`.
+- **Server (no re-flash):** `PAGE_CHAR_TARGET` 1500 → 700 so CC OUTPUT text pages
+  stay inside the same envelope rather than hitting the identical wall (~8 pkts).
+
+Verified: **134/134 tests green**, APK assembles, TS clean. Hardware gate: the
+first paginated multi-packet render — and now the diag stream will say exactly
+what happens if it still misbehaves.
+
 ## v0.0.1-f027423 — 2026-06-04 — **DJI TX mic over Bluetooth (no receiver)**
 
 The DJI Mic 3 *receiver* — the USB dongle the audio path assumed — bricked on
