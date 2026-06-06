@@ -4,6 +4,18 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-3f9b162 — 2026-06-06 — **Glasses-OS menu on glass + renderer kill-guards**
+
+APK v0.5. The first real OS screen: a cursive 4-tile menu, ring-navigable, rendered and hardware-confirmed — and the renderer now guards itself against the limits we've hit.
+
+**The menu.** 5 items in URW Chancery cursive (unmistakably a picture, not HUD text), rendered server-side over the full 576×258 content area as 4× 288×129 tiles, navigated by the title-bar antenna (scroll → `f3` direction → arrow moves; the app's dirty-diff repaints only the changed tiles).
+
+**Bug 1 — an all-black tile kills the glasses (the lesson in not assuming).** The menu first failed: only clock+title painted. I twice wrongly blamed size/packets — but T7 had already painted four 288×129 tiles for 5 min, so size was provably fine. The diag's per-region name-acks settled it: the glasses acked the inked tile `m0`, then went **silent** the instant the all-black `m1` was pushed (the short left-aligned labels left the right tiles blank). They choke on a blank image region. A border (ink in every tile) → the whole menu paints. Process: ten hypotheses → let the data pick the lead → single-variable test to confirm.
+
+**Bug 2 — double-scroll race.** Each server render spawned its own `setScene` coroutine; two fast scrolls ran concurrently and interleaved their BLE writes, corrupting a tile mid-update (the "stuck until one more scroll" wedge). Confirmed in the diag — render C started before render B finished. Fixed with a conflated channel + single consumer: renders serialize, latest scroll wins.
+
+**Renderer guards** (`G2Renderer.validate`, loud-fail before any BLE write): reject >4 image regions, any region >288×129 (a region ≥384×192 drops the link), any all-black tile (`Gray4Bmp.isBlank`). Each hard-won limit is now an automatic API-level rejection instead of a minefield to hand-walk. Also corrected the memory's stale "≤256×128 / ≤180 pkts" notes — both were misattributions (288×129 and 333-pkt frames paint fine).
+
 ## v0.0.1-d3dbb7b — 2026-06-06 — **msgId byte-overflow fixed: the all-day session killer, dead**
 
 APK v0.4. The silent app-drop that ended every session after ~80–190s is **fixed and hardware-verified** — 5+ minutes parked on the full 4-tile T7 screen with zero input, no drop. After days of chasing it, the cause was one byte.
