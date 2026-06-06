@@ -13,7 +13,7 @@
 
 import Fastify from 'fastify'
 import websocket from '@fastify/websocket'
-import { appendFileSync, createReadStream, existsSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { loadConfig } from './config.js'
 import { startDiscovery, stopDiscovery } from './discovery.js'
 import { handleConnection, setWatchdog } from './ws-handler.js'
@@ -99,12 +99,15 @@ server.get('/apk', async (req, reply) => {
     reply.code(404).send({ error: 'harness APK not present on server' })
     return
   }
-  // Stream the ~17 MB APK rather than readFileSync, which blocked the single-threaded
-  // event loop for the entire read on every download. Fastify pipes the stream.
+  // readFileSync (Buffer) so Fastify sets Content-Length and sends the whole file. NOTE: a streamed
+  // reply in this async handler sent 0 bytes (content-length:0) → browsers reported "download
+  // failed" with no reason. The ~17 MB sync read is a few ms on a rare manual download — not worth a
+  // streaming regression. (Review finding #apk-readFileSync intentionally NOT applied; see HANDOFF.)
+  const apk = readFileSync(APK_PATH)
   reply
     .type('application/vnd.android.package-archive')
     .header('Content-Disposition', 'attachment; filename="g2cc-harness.apk"')
-    .send(createReadStream(APK_PATH))
+    .send(apk)
 })
 
 // WebSocket route.

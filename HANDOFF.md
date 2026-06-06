@@ -67,7 +67,9 @@ failed-cold-launch dead-end + untracked teardown coroutines (#4/#5), **the race 
 `--append-system-prompt` (#7), token-in-logs (#8), audio start/end invariant (#9), unbounded audio
 buffer (#10), `@Volatile` watchdog fields (#11), probe `hbMsgId` byte-wrap (#12), BTSnoop
 truncation warning (#13), explicit menu f3 direction (#14), probe null-notify log (#16), ws
-close-on-supersede (#17), `/apk` streaming, and the pool→watchdog eviction unregister.
+close-on-supersede (#17), and the pool→watchdog eviction unregister. (The review's `/apk`
+streaming suggestion was applied then REVERTED — it sent 0 bytes in the async handler and broke the
+download; `readFileSync` restored. The ~ms blocking on a one-time sideload is negligible.)
 
 **Deferred low/dead-code findings (documented so they're NOT re-chased — fix only if you choose):**
 - **#15** G2CCService startForeground early-return — parked code (see below); left with a comment, not
