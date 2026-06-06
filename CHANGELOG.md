@@ -4,6 +4,18 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-d3dbb7b — 2026-06-06 — **msgId byte-overflow fixed: the all-day session killer, dead**
+
+APK v0.4. The silent app-drop that ended every session after ~80–190s is **fixed and hardware-verified** — 5+ minutes parked on the full 4-tile T7 screen with zero input, no drop. After days of chasing it, the cause was one byte.
+
+**The bug.** Every display write (`e0-20` `f1=0/3/5/7/12`) and the `80-00` sync_trigger carry a msgId in protobuf field 2. On the wire it is a **single byte** — the native app increments per write and **wraps 255→0**. Four of our renderers (`G2Renderer`, `HarnessActivity` sync, `Hud`, `EvenHud`) wrapped at `0xFFFF` instead. So at op ~224 the counter crossed 255 and we emitted a **2-byte varint** (`80 02`…); the glasses' parser rejected it and silently reclaimed the app slot — BLE link still up, app still "connected." `seq` and the image `token` already wrapped at `0xFF`; only msgId was wrong.
+
+**How it was finally found (the lesson).** "Compare to the capture, don't theorize" — but pointed at the *right* signal this time. Prior instances anchored on wall-clock and burned days on wrong theories (heavy-render keepalive starvation, re-launch renewal, a fixed ~120s slot lifetime). All red herrings. The truth was sitting in the diag the whole time: the glasses **echo our msgId** on `e0-00`, and across 8 dropped sessions it climbed from our start `0x20` to **exactly 255 — never 256 — then silence**, while we kept transmitting hundreds of frames. The Chess BTSnoop showed the native app writing `mid=255` then `mid=0` (wrapping) and running 6+ min, never exceeding 255. Drop wall-time = (255 − start) ÷ write-rate, which is *why* it looked time-based (~120s) and load-correlated (heavy died ~80s, idle ~190s) — it was **count-based**, not time-based. A counter that overflowed a byte, masquerading as a lifetime, for days.
+
+**Discrepancy sweep = clean.** A field-by-field diff of every shared frame type (launch/image/text/layout, every nesting level) against Chess confirmed msgId was the **sole wire divergence** — all containers, wrappers, text, and image structures match byte-for-structure. (A pre-existing `ReplayKitTest.menuKeepalive_rejectsMultibyteMsgId` shows a prior instance already knew msgId was 1-byte in the replay path but never fixed the live renderers — the knowledge existed in one corner while four counters used the wrong ceiling.)
+
+**Also in this build.** Capability-probe v2 mapped the render envelope (≤4 image regions, single ≤256×128, ≤~180 pkts/frame, 4 tiles cover the full 576×258 content area); the `80-00` sync_trigger (the missing idle keepalive) + the response watchdog + auto-recovery all stand as belt-and-suspenders — now the rare-exception path instead of firing every 2 minutes. Full wire detail in `PROTOCOL_NOTES.md` §"msgId is a SINGLE BYTE".
+
 ## v0.0.1-c5fdd50 — 2026-06-06 — **Pure-image display renderer: decoded, built, HARDWARE-PROVEN**
 
 The pivot paid off. A dedicated region-based gray4 display renderer (`android/.../render/`) + a
