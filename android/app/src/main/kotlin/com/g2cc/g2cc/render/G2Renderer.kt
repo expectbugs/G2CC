@@ -43,6 +43,24 @@ class G2Renderer(
     private fun nextMsgId(): Int = synchronized(lock) { msgId.also { msgId = (msgId + 1) and 0xFF } }  // 1-byte wrap 0xFF→0x00 — a >255 msgId kills the slot (see class doc)
     private fun nextToken(): Int = synchronized(lock) { token.also { token = if (token >= 0xFF) 1 else token + 1 } }
 
+    /** Pre-push guard: reject a scene that would KILL or BLANK the glasses, BEFORE any BLE
+     *  write goes out. Returns the rejection reason, or null if the scene is safe. These are
+     *  hardware-confirmed kill conditions — see memory g2-render-limits / PROTOCOL_NOTES.md.
+     *  The renderer is the API boundary, so callers never have to hand-walk these limits. */
+    private fun validate(scene: Scene): String? {
+        val imgs = scene.imageRegions()
+        if (imgs.size > MAX_IMAGE_REGIONS)
+            return "${imgs.size} image regions exceeds the max $MAX_IMAGE_REGIONS (extras silently drop)"
+        for (r in imgs) {
+            if (r.w > MAX_IMAGE_W || r.h > MAX_IMAGE_H)
+                return "image region '${r.name}' ${r.w}x${r.h} exceeds the safe ${MAX_IMAGE_W}x${MAX_IMAGE_H} (a region ≥384×192 drops the BLE link)"
+            val c = scene.content[r.name]
+            if (c is Content.Image && Gray4Bmp.isBlank(c.bmp))
+                return "image region '${r.name}' is all-black — the glasses choke on a blank image tile and drop the app"
+        }
+        return null
+    }
+
     // ---------------------------------------------------------------- public API
 
     /**
@@ -51,6 +69,7 @@ class G2Renderer(
      * push of every image region's content.
      */
     fun launch(appToken: Int, scene: Scene, prelude: List<ByteArray> = emptyList(), onComplete: (Boolean) -> Unit = {}) {
+        validate(scene)?.let { diag("launch REJECTED — $it"); onComplete(false); return }
         val ops = try {
             val o = ArrayList<List<ByteArray>>()
             for (f in prelude) o += listOf(f)
@@ -86,6 +105,7 @@ class G2Renderer(
             diag("setScene before launch() — cold-launch a session first")
             onComplete(false); return
         }
+        validate(scene)?.let { diag("setScene REJECTED — $it"); onComplete(false); return }
         val d = scene.diff(prev)
         for (name in d.removedRegions) {
             diag("setScene: region '$name' content removed — not auto-cleared; set blank content to clear it")
@@ -151,6 +171,7 @@ class G2Renderer(
             diag("setImage('$name'): no such image region (launched=${scene != null})")
             onComplete(false); return
         }
+        if (Gray4Bmp.isBlank(bmp)) { diag("setImage('$name') REJECTED — all-black tile"); onComplete(false); return }
         val ops = try {
             imageOps(region, bmp)
         } catch (e: IllegalArgumentException) {
@@ -232,6 +253,9 @@ class G2Renderer(
     companion object {
         const val SEQ_START = 0x10          // 0x00..0x0F reserved for auth
         const val MSGID_START = 0x20
+        const val MAX_IMAGE_REGIONS = 4         // glasses paint ≤4 image regions; a 5th+ silently drops
+        const val MAX_IMAGE_W = 288             // proven-safe per-region size; a region ≥384×192 drops the BLE link
+        const val MAX_IMAGE_H = 129
         const val FRAGMENT_PACE_MS = 12L    // between AA fragments WITHIN one message (chunk)
         const val INTER_MESSAGE_PACE_MS = 100L  // after each message — keepalive interleaves here (native ~0.3 s/chunk)
     }

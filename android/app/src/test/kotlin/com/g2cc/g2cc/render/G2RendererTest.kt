@@ -11,7 +11,7 @@ import org.junit.Test
  *  message types emitted, and loud-failure behaviour without any BLE/Android. */
 class G2RendererTest {
 
-    private fun img(w: Int, h: Int) = Gray4Bmp.encode(w, h, ByteArray(w * h))
+    private fun img(w: Int, h: Int) = Gray4Bmp.encode(w, h, ByteArray(w * h) { (it % 16).toByte() })  // non-blank gradient — the renderer guard rejects all-black tiles
     private fun msgType(payload: ByteArray) = payload[1].toInt() and 0xFF   // f1 value byte
 
     @Test
@@ -153,5 +153,43 @@ class G2RendererTest {
         val msgs = sink.messages()
         assertEquals(DisplayProto.MSG_LAYOUT, msgType(msgs[0]))
         assertTrue("rest should be image chunks", msgs.drop(1).all { msgType(it) == DisplayProto.MSG_IMAGE })
+    }
+
+    // ---- pre-push guards (hardware-confirmed kill conditions; see G2Renderer.validate) ----
+
+    @Test
+    fun launch_fifthImageRegion_rejected_noWrites() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        val s = scene {
+            image("a", 0, 0, 40, 40, img(40, 40)); image("b", 50, 0, 40, 40, img(40, 40))
+            image("c", 100, 0, 40, 40, img(40, 40)); image("d", 150, 0, 40, 40, img(40, 40))
+            image("e", 200, 0, 40, 40, img(40, 40))   // 5th image region — over the 4-region cap
+        }
+        var ok = true
+        r.launch(10061, s) { ok = it }
+        assertFalse("5 image regions must be rejected before any write", ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun launch_allBlackImage_rejected_noWrites() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        val blank = Gray4Bmp.encode(64, 64, ByteArray(64 * 64))   // all index 0 = all-black → glasses choke
+        var ok = true
+        r.launch(10061, scene { image("x", 0, 0, 64, 64, blank) }) { ok = it }
+        assertFalse("all-black image tile must be rejected", ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun launch_oversizeImageRegion_rejected_noWrites() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        var ok = true
+        r.launch(10061, scene { image("big", 0, 0, 400, 200, img(400, 200)) }) { ok = it }  // > 288x129
+        assertFalse("an image region ≥384×192 drops the BLE link — must be rejected", ok)
+        assertEquals(0, sink.calls.size)
     }
 }

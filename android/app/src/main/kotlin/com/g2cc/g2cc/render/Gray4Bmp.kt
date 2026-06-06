@@ -107,6 +107,17 @@ object Gray4Bmp {
 
     class Decoded(val width: Int, val height: Int, val indices: ByteArray)
 
+    /** True if the BMP's pixel data is entirely index 0 (an all-black tile). The glasses
+     *  CHOKE on a blank image region (hardware-confirmed 2026-06-06: pushing an all-zero tile
+     *  drops the app slot), so the renderer rejects these. Cheap byte scan — no full decode. */
+    fun isBlank(bmp: ByteArray): Boolean {
+        if (bmp.size < HEADER_SIZE) return true
+        val dataOff = getI32(bmp, 10)
+        if (dataOff < HEADER_SIZE || dataOff > bmp.size) return true
+        for (i in dataOff until bmp.size) if (bmp[i].toInt() != 0) return false
+        return true
+    }
+
     private fun nibble(a: ByteArray, i: Int): Int {
         val v = a[i].toInt()
         require(v in 0..15) { "Gray4Bmp: pixel value $v out of 0..15 at index $i" }

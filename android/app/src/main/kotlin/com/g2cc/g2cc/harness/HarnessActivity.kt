@@ -28,6 +28,7 @@ import com.g2cc.g2cc.ble.Varint
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.ConnectionManager
 import com.g2cc.g2cc.net.ServerMessage
+import com.g2cc.g2cc.net.WireScene
 import com.g2cc.g2cc.os.OsLayout
 import com.g2cc.g2cc.os.SceneCodec
 import com.g2cc.g2cc.render.BleDisplaySink
@@ -37,6 +38,7 @@ import com.g2cc.g2cc.render.G2Renderer
 import com.g2cc.g2cc.render.Scene
 import com.g2cc.g2cc.render.scene
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -76,6 +78,8 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
     private val stateJobs = mutableListOf<Job>()
     private var keepaliveJob: Job? = null
     private var clockJob: Job? = null
+    private var renderConsumerJob: Job? = null       // single serialized consumer of server-pushed scenes
+    private var sceneCh: Channel<WireScene>? = null   // CONFLATED → latest scene wins (no scroll-render pileup/interleave)
     private var syncJob: Job? = null          // 80-00 sync_trigger keepalive (both lenses)
     private var watchdogJob: Job? = null      // glasses-response gap watchdog (silent-drop detector)
     private var renewalJob: Job? = null       // periodic re-takeover (the ~120s app-slot lifetime)
@@ -480,6 +484,30 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
         if (!launched || serverMode) return
         serverMode = true
         updateButtons()
+        // Single serialized render pump: server scenes go through a CONFLATED channel and ONE
+        // consumer renders them one at a time. Without this, rapid scrolls each spawned their own
+        // setScene coroutine and the concurrent BLE writes INTERLEAVED — corrupting a tile
+        // mid-update (the "double-scroll wedge"; confirmed in the diag — render C started before
+        // render B's result). Conflation also drops stale intermediate scrolls so nav stays responsive.
+        val ch = Channel<WireScene>(Channel.CONFLATED)
+        sceneCh = ch
+        renderConsumerJob = lifecycleScope.launch {
+            for (wire in ch) {
+                val r = renderer ?: continue
+                val scene = try {
+                    SceneCodec.toScene(wire, latestClockText)
+                } catch (e: IllegalArgumentException) {
+                    // LOUD AND PROUD — a bad scene from the server is surfaced, not dropped.
+                    DiagLog.log("os", "BAD render scene: ${e.message}")
+                    setStatus("Bad scene from server: ${e.message}")
+                    continue
+                }
+                DiagLog.log("os", "render → setScene (${scene.regions.size} regions: ${scene.regions.joinToString { it.name }})")
+                val ok = awaitSetScene(r, scene)
+                updateMirror(r.currentScene)
+                DiagLog.log("os", "render result=${if (ok) "OK" else "FAIL"}")
+            }
+        }
         val url = "ws://${BuildConfig.SERVER_HOST}:${BuildConfig.SERVER_PORT}/ws"
         DiagLog.log("os", "server mode → connecting $url")
         setStatus("Server mode: connecting to PC…")
@@ -502,21 +530,10 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
     private fun onServerMessage(msg: ServerMessage) {
         when (msg) {
             is ServerMessage.Render -> {
-                val r = renderer ?: return
-                val scene = try {
-                    SceneCodec.toScene(msg.scene, latestClockText)
-                } catch (e: IllegalArgumentException) {
-                    // LOUD AND PROUD — a bad scene from the server is surfaced, not dropped.
-                    DiagLog.log("os", "BAD render scene: ${e.message}")
-                    setStatus("Bad scene from server: ${e.message}")
-                    return
-                }
-                DiagLog.log("os", "render → setScene (${scene.regions.size} regions: ${scene.regions.joinToString { it.name }})")
-                lifecycleScope.launch {
-                    val ok = awaitSetScene(r, scene)
-                    updateMirror(r.currentScene)
-                    DiagLog.log("os", "render result=${if (ok) "OK" else "FAIL"}")
-                }
+                // Hand off to the serialized render pump (see onServerMode). CONFLATED: a newer
+                // scene replaces an unconsumed one, so a burst of scrolls renders only the latest.
+                if (sceneCh?.trySend(msg.scene)?.isSuccess != true)
+                    DiagLog.log("os", "render dropped — render queue not active (not in server mode?)")
             }
             else -> {
                 // config_snapshot / dispatch_target_list / etc. — not used in OS mode.
@@ -583,6 +600,8 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
     private fun teardown() {
         keepaliveJob?.cancel(); keepaliveJob = null
         clockJob?.cancel(); clockJob = null
+        renderConsumerJob?.cancel(); renderConsumerJob = null
+        sceneCh?.close(); sceneCh = null
         syncJob?.cancel(); syncJob = null
         watchdogJob?.cancel(); watchdogJob = null
         renewalJob?.cancel(); renewalJob = null

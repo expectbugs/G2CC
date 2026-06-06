@@ -40,6 +40,7 @@ import { listProjectDirectories, validateProjectPath } from './directory-picker.
 import { CCDispatcher, DISPATCH_TARGETS, type Dispatcher, getDispatchTarget } from './dispatch.js'
 import { ChannelRouter } from './channel-router.js'
 import { probeScene, gTextScene, gImageScene, ensureRendered, isRate, testKind, testLabel, errorScene } from './os-display.js'
+import { menuScene, ensureMenuRendered, menuItemLabel, MENU_ITEM_COUNT } from './os-menu.js'
 
 let watchdog: Watchdog | null = null
 
@@ -85,8 +86,13 @@ export interface WSClient {
    *  (double-tap steps), osFFilled = filled containers in the F fill-test,
    *  osGTimer = the G rate-test interval (cleared on test-change + ws-close). */
   osMode: boolean
+  /** Which OS screen os_attach serves. Default 'menu' (the cursive 4-tile menu);
+   *  'probe' reaches the capability-probe matrix (kept wired for re-runs). */
+  osScreen: 'menu' | 'probe'
   osTest: number
   osFFilled: number
+  /** Current menu selection (menu screen) — moved by antenna-scroll focus events. */
+  osMenuSel: number
   osGTimer: ReturnType<typeof setInterval> | null
 }
 
@@ -149,8 +155,10 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     router: new ChannelRouter(),
     audioFormat: null,
     osMode: false,
+    osScreen: 'menu',
     osTest: 0,
     osFFilled: 0,
+    osMenuSel: 0,
     osGTimer: null,
   }
 
@@ -734,18 +742,26 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'os_attach': {
-      // Glasses-OS capability probe. Render the first test; DOUBLE-TAP steps.
+      // Glasses-OS attach. Default screen = the cursive 4-tile MENU; 'probe'
+      // reaches the capability matrix. Render the first frame.
       client.lastAppActivityMs = Date.now()
       client.osMode = true
       client.osTest = 0
       client.osFFilled = 0
+      client.osMenuSel = 0
       try {
-        await ensureRendered() // rasterize + cache all probe tiles once (~1s first time)
-        sendMsg(client, { type: 'render', scene: probeScene(0, 0) })
-        console.log(`[ws] os_attach — capability probe ON; ${testLabel(0)}`)
+        if (client.osScreen === 'menu') {
+          await ensureMenuRendered() // rasterize + cache all menu tiles once (~1s first time)
+          sendMsg(client, { type: 'render', scene: menuScene(0) })
+          console.log(`[ws] os_attach — MENU ON; sel 0 = "${menuItemLabel(0)}"`)
+        } else {
+          await ensureRendered() // rasterize + cache all probe tiles once (~1s first time)
+          sendMsg(client, { type: 'render', scene: probeScene(0, 0) })
+          console.log(`[ws] os_attach — capability probe ON; ${testLabel(0)}`)
+        }
       } catch (err) {
         const m = err instanceof Error ? err.message : String(err)
-        console.error('[ws] probe render failed:', m)
+        console.error('[ws] os_attach render failed:', m)
         sendMsg(client, { type: 'render', scene: errorScene(m) }) // loud, visible — not a silent blank
       }
       break
@@ -755,6 +771,31 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       client.lastAppActivityMs = Date.now()
       if (!client.osMode) {
         console.warn(`[ws] input '${msg.event}' received but client never sent os_attach — ignoring`)
+        break
+      }
+      if (client.osScreen === 'menu') {
+        if (msg.event === 'focus') {
+          // Antenna scroll → move the selection. f3 (msg.value) is the scroll
+          // DIRECTION (EventParser HubFocus f3): 2 = down/next, 1 = up/prev.
+          // If up/down feel swapped on glass, flip MENU_DOWN_F3 to 1.
+          const MENU_DOWN_F3 = 2
+          const prev = client.osMenuSel
+          client.osMenuSel = msg.value === MENU_DOWN_F3
+            ? Math.min(MENU_ITEM_COUNT - 1, prev + 1)
+            : Math.max(0, prev - 1)
+          if (client.osMenuSel !== prev) {
+            try {
+              sendMsg(client, { type: 'render', scene: menuScene(client.osMenuSel) })
+            } catch (err) {
+              sendMsg(client, { type: 'render', scene: errorScene(err instanceof Error ? err.message : String(err)) })
+            }
+          }
+          console.log(`[ws] menu focus f3=${msg.value} → sel ${client.osMenuSel} "${menuItemLabel(client.osMenuSel)}"`)
+        } else if (msg.event === 'double_tap' || (msg.event === 'hub_gesture' && msg.code === 3)) {
+          console.log(`[ws] menu SELECT → "${menuItemLabel(client.osMenuSel)}" (sel ${client.osMenuSel})`)
+        } else {
+          console.log(`[ws] menu: ${msg.event} (no-op)`)
+        }
         break
       }
       if (msg.event === 'hub_gesture' && msg.code === 3) {
