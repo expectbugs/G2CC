@@ -1159,6 +1159,11 @@ class G2Pipeline(
                     // selection border); informational for bring-up diagnostics.
                     diag("hub-input: gesture code=${event.code}")
                 }
+                is EventParser.Event.HubFocus -> {
+                    // Firmware focus/scroll report (names the container). The
+                    // legacy menu navigates via HubSelect; informational here.
+                    diag("hub-input: focus '${event.name}' (id=${event.containerId} f3=${event.f3})")
+                }
                 is EventParser.Event.Malformed -> {
                     Log.w(TAG, "malformed BLE event: ${event.reason}")
                 }
@@ -1799,6 +1804,12 @@ class G2Pipeline(
             }
             is ServerMessage.ConfigSnapshot -> Log.i(TAG, "config_snapshot received")
             is ServerMessage.DispatchTargetSet -> Log.i(TAG, "dispatch_target_set: ${msg.targetId} flow=${msg.flow}")
+            is ServerMessage.Render -> {
+                // Glasses-OS render path (Phase 1) — only the OS client opts into it
+                // via os_attach. The legacy dispatch app never does, so this is
+                // unexpected here; log loudly rather than drop it silently.
+                Log.w(TAG, "unexpected render msg in legacy dispatch path (${msg.scene.regions.size} regions) — ignoring")
+            }
         }
     }
 

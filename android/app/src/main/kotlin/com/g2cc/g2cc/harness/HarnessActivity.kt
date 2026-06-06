@@ -22,6 +22,11 @@ import com.g2cc.g2cc.ble.ConnectionState
 import com.g2cc.g2cc.ble.EvenHub
 import com.g2cc.g2cc.ble.G2BleClient
 import com.g2cc.g2cc.ble.Side
+import com.g2cc.g2cc.net.ClientMessage
+import com.g2cc.g2cc.net.ConnectionManager
+import com.g2cc.g2cc.net.ServerMessage
+import com.g2cc.g2cc.os.OsLayout
+import com.g2cc.g2cc.os.SceneCodec
 import com.g2cc.g2cc.render.BleDisplaySink
 import com.g2cc.g2cc.render.DisplayProto
 import com.g2cc.g2cc.render.Display
@@ -33,6 +38,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.OkHttpClient
 import kotlin.coroutines.resume
 
 /**
@@ -55,7 +61,9 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
     private lateinit var connectBtn: Button
     private lateinit var testBtn: Button
     private lateinit var disconnectBtn: Button
+    private lateinit var serverBtn: Button
     private lateinit var diagCheck: CheckBox
+    private lateinit var boundsCheck: CheckBox
     private lateinit var mirror: ImageView
 
     private var scanner: BleScanner? = null
@@ -68,8 +76,15 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
     private var launched = false
     private var connecting = false
 
-    private val clockFmt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-    private fun statusLine(): String = "G2CC  ${clockFmt.format(java.util.Date())}"
+    // Glasses-OS "Server Mode": once the glasses are up, open a WS to the PC and
+    // let the server drive the display via render/input.
+    private var connection: ConnectionManager? = null
+    private var serverMode = false
+
+    // Latest HH:MM:SS — ticked into the app-owned clock region every second and
+    // reused whenever a server scene is (re)built so the clock is never blank.
+    private var latestClockText = OsLayout.clockText()
+    private fun nowClock(): String { latestClockText = OsLayout.clockText(); return latestClockText }
 
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -87,8 +102,10 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
             DiagLog.enabled = c
             DiagLog.log("ui", "Diag streaming ${if (c) "ON" else "OFF"}")
         }
+        boundsCheck.setOnCheckedChangeListener { _, _ -> updateMirror(renderer?.currentScene) }
         connectBtn.setOnClickListener { onConnect() }
         testBtn.setOnClickListener { onTest() }
+        serverBtn.setOnClickListener { onServerMode() }
         disconnectBtn.setOnClickListener { onDisconnect() }
         updateButtons()
         updateMirror(null)
@@ -122,10 +139,11 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
 
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         connectBtn = Button(this).apply { text = "Connect" }
-        testBtn = Button(this).apply { text = "Test Display" }
+        testBtn = Button(this).apply { text = "Test" }
+        serverBtn = Button(this).apply { text = "Server" }
         disconnectBtn = Button(this).apply { text = "Disconnect" }
         val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        row.addView(connectBtn, lp); row.addView(testBtn, lp); row.addView(disconnectBtn, lp)
+        row.addView(connectBtn, lp); row.addView(testBtn, lp); row.addView(serverBtn, lp); row.addView(disconnectBtn, lp)
         root.addView(row)
 
         diagCheck = CheckBox(this).apply {
@@ -133,6 +151,12 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
             setTextColor(Color.WHITE)
         }
         root.addView(diagCheck)
+
+        boundsCheck = CheckBox(this).apply {
+            text = "Region bounds — outline regions in the mirror (debug; the glasses show none)"
+            setTextColor(Color.WHITE)
+        }
+        root.addView(boundsCheck)
 
         val label = TextView(this).apply {
             text = "Expected (what the glasses should show) — 576×288:"
@@ -158,12 +182,13 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
 
     private fun updateButtons() {
         connectBtn.isEnabled = !launched && !connecting
-        testBtn.isEnabled = launched
+        testBtn.isEnabled = launched && !serverMode
+        serverBtn.isEnabled = launched && !serverMode
         disconnectBtn.isEnabled = launched || connecting
     }
 
     private fun updateMirror(s: Scene?) {
-        mirror.setImageBitmap(ExpectedMirror.render(s))
+        mirror.setImageBitmap(ExpectedMirror.render(s, boundsCheck.isChecked))
     }
 
     // ----------------------------------------------------------------- connect
@@ -216,7 +241,17 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
             }
         }
         stateJobs += lifecycleScope.launch {
-            client.events.collect { ev -> DiagLog.log("input", "$side $ev") }
+            client.events.collect { ev ->
+                DiagLog.log("input", "$side $ev")
+                // Forward ring input to the PC when the server is driving the display.
+                // Input arrives on the R lens (EventParser service 0x01-01 / e0-01).
+                if (serverMode && side == Side.Right) {
+                    SceneCodec.toInput(ev)?.let { input ->
+                        val sent = connection?.send(input) ?: false
+                        DiagLog.log("os", "input $ev → ${if (sent) "sent" else "DROPPED"}")
+                    }
+                }
+            }
         }
     }
 
@@ -238,9 +273,10 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
         lifecycleScope.launch {
             setStatus("Cold-launching Hub session…")
             val splash = scene {
-                text("status", 0, 0, Display.WIDTH, 28, statusLine(), scroll = false)
-                text("main", 0, 36, Display.WIDTH, Display.HEIGHT - 36,
-                    "G2CC DISPLAY HARNESS\n\nConnected.\n\nTap  Test Display  to run the\nrenderer test sequence.", scroll = false)
+                text("clock", OsLayout.CLOCK_X, OsLayout.CLOCK_Y, OsLayout.CLOCK_WIDTH, OsLayout.CLOCK_HEIGHT,
+                    nowClock(), scroll = false, id = OsLayout.CLOCK_ID)
+                text("main", 0, OsLayout.CONTENT_Y, Display.WIDTH, OsLayout.CONTENT_HEIGHT,
+                    "G2CC HARNESS\n\nConnected.\n\nTap  Test  for the renderer test,\nor  Server  to let the PC drive\nthe display.", scroll = false, id = 2)
             }
             val ok = awaitLaunch(rend, splash)
             if (ok) {
@@ -280,9 +316,15 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
             while (isActive) {
                 delay(1000)
                 val r = renderer ?: break
-                if (r.currentScene?.region("status") != null) {
-                    r.setText("status", statusLine())
-                    updateMirror(r.currentScene)
+                val sc = r.currentScene ?: continue
+                val t = nowClock()
+                // OS/splash scenes carry the tiny top-right "clock"; the renderer
+                // self-test (Test Display) uses a full-width "status" — tick
+                // whichever is present so the never-blank text region keeps
+                // updating in both modes (preserves the proven test behaviour).
+                when {
+                    sc.region(OsLayout.CLOCK_NAME) != null -> { r.setText(OsLayout.CLOCK_NAME, t); updateMirror(r.currentScene) }
+                    sc.region("status") != null -> { r.setText("status", "G2CC  $t"); updateMirror(r.currentScene) }
                 }
             }
         }
@@ -306,6 +348,61 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
             }
             DiagLog.log("test", "═══ Test Display sequence END ═══")
             if (launched) testBtn.isEnabled = true
+        }
+    }
+
+    // ----------------------------------------------------------------- server mode
+
+    /** Glasses-OS Slice 1: open a WS to the PC and let the server drive the
+     *  display. BLE must already be up (we reuse the cold-launched session,
+     *  keepalive + clock). On connect → os_attach; on `render` → setScene; ring
+     *  events → `input`. */
+    private fun onServerMode() {
+        if (!launched || serverMode) return
+        serverMode = true
+        updateButtons()
+        val url = "ws://${BuildConfig.SERVER_HOST}:${BuildConfig.SERVER_PORT}/ws"
+        DiagLog.log("os", "server mode → connecting $url")
+        setStatus("Server mode: connecting to PC…")
+        val cm = ConnectionManager(
+            initialEndpoints = listOf(url),
+            authToken = BuildConfig.AUTH_TOKEN,
+            httpClient = OkHttpClient(),
+            onMessage = { msg -> runOnUiThread { onServerMessage(msg) } },
+            onConnected = {
+                DiagLog.log("os", "WS authed → sending os_attach")
+                connection?.send(ClientMessage.OsAttach)
+                runOnUiThread { setStatus("Server mode: PC connected. Use the ring.") }
+            },
+            onDisconnected = { DiagLog.log("os", "WS disconnected") },
+        )
+        connection = cm
+        cm.connect()
+    }
+
+    private fun onServerMessage(msg: ServerMessage) {
+        when (msg) {
+            is ServerMessage.Render -> {
+                val r = renderer ?: return
+                val scene = try {
+                    SceneCodec.toScene(msg.scene, latestClockText)
+                } catch (e: IllegalArgumentException) {
+                    // LOUD AND PROUD — a bad scene from the server is surfaced, not dropped.
+                    DiagLog.log("os", "BAD render scene: ${e.message}")
+                    setStatus("Bad scene from server: ${e.message}")
+                    return
+                }
+                DiagLog.log("os", "render → setScene (${scene.regions.size} regions: ${scene.regions.joinToString { it.name }})")
+                lifecycleScope.launch {
+                    val ok = awaitSetScene(r, scene)
+                    updateMirror(r.currentScene)
+                    DiagLog.log("os", "render result=${if (ok) "OK" else "FAIL"}")
+                }
+            }
+            else -> {
+                // config_snapshot / dispatch_target_list / etc. — not used in OS mode.
+                DiagLog.log("os", "ignored server msg ${msg::class.simpleName}")
+            }
         }
     }
 
@@ -368,6 +465,8 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
         keepaliveJob?.cancel(); keepaliveJob = null
         clockJob?.cancel(); clockJob = null
         stateJobs.forEach { it.cancel() }; stateJobs.clear()
+        connection?.shutdown(); connection = null
+        serverMode = false
         scanner?.stop(); scanner = null
         left?.shutdownBle(); right?.shutdownBle()
         left = null; right = null; renderer = null

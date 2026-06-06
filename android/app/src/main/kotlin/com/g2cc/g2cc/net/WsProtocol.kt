@@ -74,6 +74,37 @@ data class DirectoryEntry(
     val entryCount: Int? = null,
 )
 
+// ---- Glasses-OS display contract (Phase 1) — mirrors shared/src/protocol.ts.
+// SceneContent is modelled as ONE flat data class (not a sealed hierarchy) so
+// it shares WsJson's `type` classDiscriminator-free: the polymorphism is the
+// `kind` field, validated in os/SceneCodec.kt. Wire JSON is identical to the
+// TS SceneTextContent | SceneImageContent union.
+
+@Serializable
+data class SceneContent(
+    val kind: String,                 // "text" | "image"
+    val text: String? = null,         // kind == "text"
+    val scroll: Boolean? = null,      // kind == "text"
+    val bmpBase64: String? = null,    // kind == "image" — base64 4bpp gray BMP
+)
+
+@Serializable
+data class SceneRegion(
+    val id: Int,
+    val name: String,
+    val x: Int,
+    val y: Int,
+    val w: Int,
+    val h: Int,
+    val kind: String,                 // "text" | "image"
+    val content: SceneContent? = null,
+)
+
+@Serializable
+data class WireScene(
+    val regions: List<SceneRegion>,
+)
+
 // ============================================================
 // Client → Server messages
 // ============================================================
@@ -165,6 +196,23 @@ sealed interface ClientMessage {
      *  needing adb / logcat access. */
     @Serializable @SerialName("diag")
     data class Diag(val text: String) : ClientMessage
+
+    /** Opt into Glasses-OS mode — the server then drives the display via
+     *  `render` and reacts to `input` (Phase 1). */
+    @Serializable @SerialName("os_attach")
+    data object OsAttach : ClientMessage
+
+    /** A ring/gesture input event (from EventParser) forwarded to the PC.
+     *  Optional fields carry per-variant payloads. */
+    @Serializable @SerialName("input")
+    data class Input(
+        val event: String,                  // tap|double_tap|scroll_up|scroll_down|scroll_focus|hub_select|hub_gesture|focus
+        val widgetType: String? = null,     // hub_select
+        val index: Int? = null,             // hub_select
+        val code: Int? = null,              // hub_gesture
+        val region: String? = null,         // focus — the focused region's name
+        val value: Int? = null,             // focus — raw f3 (observed 1/2)
+    ) : ClientMessage
 }
 
 // ============================================================
@@ -263,6 +311,11 @@ sealed interface ServerMessage {
 
     @Serializable @SerialName("confirm_on_hud")
     data class ConfirmOnHud(val requestId: String, val text: String) : ServerMessage
+
+    /** PC → glasses: render this scene (Phase 1 Glasses-OS). The client builds a
+     *  render.Scene from it (injecting the app-owned clock) and drives G2Renderer. */
+    @Serializable @SerialName("render")
+    data class Render(val scene: WireScene) : ServerMessage
 
     @Serializable @SerialName("error")
     data class Error(val message: String) : ServerMessage

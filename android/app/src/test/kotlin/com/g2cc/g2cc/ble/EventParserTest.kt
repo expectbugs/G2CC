@@ -169,4 +169,19 @@ class EventParserTest {
         assertTrue("expected HubGesture, got $ev", ev is EventParser.Event.HubGesture)
         assertEquals(3, (ev as EventParser.Event.HubGesture).code)
     }
+
+    @Test
+    fun parse_hubFocus_namesFocusedRegion() {
+        // hardware capture 2026-06-06 (G2CC server-mode scroll): ring scroll on a
+        // focused container → f13.f2={f1=11(containerId), f2="body", f3=2}. Exact
+        // payload from /tmp/g2cc-harness-diag.log.
+        val payload = byteArrayOf(0x08, 0x02, 0x6A, 0x0C, 0x12, 0x0A, 0x08, 0x0B, 0x12, 0x04) +
+            "body".toByteArray(Charsets.UTF_8) + byteArrayOf(0x18, 0x02)
+        val ev = EventParser.parse(hubNotif(payload))
+        assertTrue("expected HubFocus, got $ev", ev is EventParser.Event.HubFocus)
+        ev as EventParser.Event.HubFocus
+        assertEquals(11, ev.containerId)
+        assertEquals("body", ev.name)
+        assertEquals(2, ev.f3)
+    }
 }

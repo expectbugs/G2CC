@@ -16,13 +16,16 @@ import com.g2cc.g2cc.render.Scene
  * for side-by-side comparison with the real display.
  *
  * Image regions are **pixel-perfect** — the very 4bpp BMP we sent, decoded back to its 16 gray
- * levels. Text regions are **approximate** (the firmware renders them in its own font), so they
- * are drawn with a thin outline + best-effort monospace text and should be treated as a guide,
- * not a pixel reference. The test sequence leans on image regions precisely so the comparison
- * is exact where it matters.
+ * levels. Text regions are **approximate** (the firmware renders them in its own font), so the
+ * text is best-effort monospace and should be treated as a guide, not a pixel reference.
+ *
+ * [outlines] draws a thin box around each region — a layout-debugging overlay only. It is OFF by
+ * default because the real renderer sends NO border data, so the glasses show no boxes; with
+ * outlines off the mirror matches the glasses (confirmed on hardware 2026-06-06, where the only
+ * mirror-vs-glasses discrepancy was these guide lines around text regions).
  */
 object ExpectedMirror {
-    fun render(scene: Scene?): Bitmap {
+    fun render(scene: Scene?, outlines: Boolean = false): Bitmap {
         val out = Bitmap.createBitmap(Display.WIDTH, Display.HEIGHT, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         canvas.drawColor(Color.BLACK)
@@ -36,8 +39,8 @@ object ExpectedMirror {
         for (r in scene.regions) {
             when (val c = scene.content[r.name]) {
                 is Content.Image -> drawImageRegion(out, r, c.bmp)
-                is Content.Text -> drawTextRegion(canvas, r, c.text)
-                null -> outline(canvas, r, Color.rgb(40, 40, 40))
+                is Content.Text -> drawTextRegion(canvas, r, c.text, outlines)
+                null -> if (outlines) outline(canvas, r, Color.rgb(40, 40, 40))
             }
         }
         return out
@@ -54,8 +57,8 @@ object ExpectedMirror {
         out.setPixels(px, 0, d.width, r.x, r.y, d.width, d.height)
     }
 
-    private fun drawTextRegion(canvas: Canvas, r: Region, text: String) {
-        outline(canvas, r, Color.rgb(60, 60, 60))
+    private fun drawTextRegion(canvas: Canvas, r: Region, text: String, outlines: Boolean) {
+        if (outlines) outline(canvas, r, Color.rgb(60, 60, 60))
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE; textSize = 15f; typeface = Typeface.MONOSPACE
         }

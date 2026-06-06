@@ -21,6 +21,33 @@ export const STATUS_CONTAINER_ID = 1
 export const STATUS_CONTAINER_NAME = 'status' // SDK max 16 chars
 export const STATUS_PADDING = 4
 
+// ============================================================
+// Clock cutout (Glasses OS) — app-owned ticking HH:MM:SS in the
+// top-RIGHT corner. The display server MUST lay out content around
+// this reserved rect (never emit a region that overlaps it). The
+// Android client injects it into every Scene and ticks it locally
+// (OFF the WebSocket) — it is also the mandatory always-present text
+// region + never-blank signal the firmware requires to paint a screen
+// (see docs/PROTOCOL_NOTES.md §"Render constraints"). Mirrored in
+// android/.../os/OsLayout.kt.
+//
+// CLOCK_WIDTH is a HARDWARE-VERIFY value: confirm "HH:MM:SS" fits in
+// it without wrap/clip on the real glasses, then tune this one number.
+// ============================================================
+export const CLOCK_CONTAINER_ID = 1
+export const CLOCK_CONTAINER_NAME = 'clock'
+export const CLOCK_HEIGHT = STATUS_BAR_HEIGHT       // 28 — proven-paintable height
+export const CLOCK_WIDTH = 132                      // ~8 glyphs @ 20px; verify on glass
+export const CLOCK_Y = 0
+export const CLOCK_X = SCREEN_WIDTH - CLOCK_WIDTH    // 444 — flush right
+
+// Glasses-OS content area the server is free to compose into: full width
+// BELOW the clock band. The top-left band [0,0 .. CLOCK_X, CLOCK_HEIGHT] is
+// free for a title/status text region beside the clock.
+export const OS_CONTENT_Y = CLOCK_HEIGHT + 2
+export const OS_CONTENT_HEIGHT = SCREEN_HEIGHT - OS_CONTENT_Y
+export const OS_TITLE_WIDTH = CLOCK_X - 2
+
 // Main content
 export const CONTENT_Y = 30                  // 2-px gap below status bar
 export const CONTENT_HEIGHT = 256            // 288 - 30 (gap) - 2 (border)

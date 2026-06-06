@@ -39,6 +39,7 @@ import { markdownToPlaintext, formatToolUse } from './output-parser.js'
 import { listProjectDirectories, validateProjectPath } from './directory-picker.js'
 import { CCDispatcher, DISPATCH_TARGETS, type Dispatcher, getDispatchTarget } from './dispatch.js'
 import { ChannelRouter } from './channel-router.js'
+import { demoScene, nextSceneIndex, describeInput } from './os-display.js'
 
 let watchdog: Watchdog | null = null
 
@@ -80,6 +81,12 @@ export interface WSClient {
   /** Bug-fix-pass-2 #8: format the phone announced on audio_start. Drives
    *  the route taken in audio_end (handleAudio). */
   audioFormat: AudioFormat | null
+  /** Glasses-OS (Phase 1) — set true by os_attach. While true the server
+   *  drives the display via `render` and reacts to `input`. The legacy
+   *  dispatch-menu flow leaves these untouched. */
+  osMode: boolean
+  osScene: number
+  osLastInput: string
 }
 
 export interface AudioFormat {
@@ -119,6 +126,9 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     lastAppActivityMs: Date.now(),
     router: new ChannelRouter(),
     audioFormat: null,
+    osMode: false,
+    osScene: 0,
+    osLastInput: '(none)',
   }
 
   pool.on('background_alert', (alert: { sessionId: string; alertType: string; details?: string }) => {
@@ -696,6 +706,32 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // latency). Critical for distinguishing test runs in `tail -f`.
       const now = new Date().toISOString()
       console.log(`${now} [client-diag] ${msg.text}`)
+      break
+    }
+
+    case 'os_attach': {
+      // Glasses-OS opt-in (Phase 1). The server now owns the display for this
+      // client: it composes Scenes and reacts to input. Send the first scene.
+      client.lastAppActivityMs = Date.now()
+      client.osMode = true
+      client.osScene = 0
+      client.osLastInput = '(none)'
+      sendMsg(client, { type: 'render', scene: demoScene(client.osScene, client.osLastInput) })
+      console.log('[ws] os_attach — glasses-OS mode ON; sent scene 0')
+      break
+    }
+
+    case 'input': {
+      client.lastAppActivityMs = Date.now()
+      if (!client.osMode) {
+        // Loud, not silent: input before os_attach is a client-side ordering bug.
+        console.warn(`[ws] input '${msg.event}' received but client never sent os_attach — ignoring`)
+        break
+      }
+      client.osLastInput = describeInput(msg)
+      client.osScene = nextSceneIndex(client.osScene, msg)
+      sendMsg(client, { type: 'render', scene: demoScene(client.osScene, client.osLastInput) })
+      console.log(`[ws] input ${client.osLastInput} → scene ${((client.osScene % 3) + 3) % 3}`)
       break
     }
 

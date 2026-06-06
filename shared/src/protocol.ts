@@ -64,6 +64,69 @@ export interface DirectoryEntry {
 }
 
 // ============================================================
+// Glasses-OS display contract (Phase 1 — the remote display loop)
+//
+// The PC owns all state and composes the CURRENT screen into a WireScene; the
+// glasses render it and send input back. The model maps 1:1 onto the proven
+// Android render.Scene/Region/Content (android/.../render/Scene.kt). The
+// client injects its own reserved clock region (CLOCK_CONTAINER_* in
+// constants.ts) into every scene — so server regions MUST NOT reuse that
+// id/name nor overlap the clock cutout.
+// ============================================================
+
+/** A region's content kind. Mirrors render.RegionKind on the client. */
+export type SceneRegionKind = 'text' | 'image'
+
+/** Text content — the firmware renders the font. */
+export interface SceneTextContent {
+  kind: 'text'
+  text: string
+  /** Container scroll flag (firmware scrolls overflow). Layout-level — a change
+   *  forces a layout re-push, see Scene.kt. Defaults to false. */
+  scroll?: boolean
+}
+/** Image content: a base64 4bpp-gray BMP the PC already rasterized (the exact
+ *  Gray4Bmp format the firmware accepts). Must be ≤200×100 per the render
+ *  constraints — the PC tiles anything larger into multiple image regions. */
+export interface SceneImageContent {
+  kind: 'image'
+  bmpBase64: string
+}
+/** Reserved for Slice 3 — a `widget` content kind (a small spec the client
+ *  rasterizes locally). NOT part of the Phase-1 contract. */
+export type SceneContent = SceneTextContent | SceneImageContent
+
+/** One region of the composed screen. id + geometry are server-assigned. */
+export interface SceneRegion {
+  id: number
+  name: string
+  x: number
+  y: number
+  w: number
+  h: number
+  kind: SceneRegionKind
+  /** Omit to declare an empty region (content pushed by a later render). */
+  content?: SceneContent
+}
+
+/** The full desired screen. The client diffs it against the current scene and
+ *  re-renders only what changed (dirty-rect diff in G2Renderer.setScene). */
+export interface WireScene {
+  regions: SceneRegion[]
+}
+
+/** A ring/gesture input event forwarded from the client's EventParser. */
+export type InputEventKind =
+  | 'tap'
+  | 'double_tap'
+  | 'scroll_up'
+  | 'scroll_down'
+  | 'scroll_focus'
+  | 'hub_select'
+  | 'hub_gesture'
+  | 'focus'
+
+// ============================================================
 // Client -> Server messages
 // ============================================================
 
@@ -202,6 +265,28 @@ export interface BleAckMsg {
   reason?: string
 }
 
+/** Opt into Glasses-OS mode (Phase 1). After this, the server drives the
+ *  display via `render` and reacts to `input`. The legacy dispatch-menu app
+ *  never sends this, so it is completely unaffected by the OS path. */
+export interface OsAttachMsg { type: 'os_attach' }
+
+/** A ring/gesture input event (from the client's EventParser). The PC owns the
+ *  reaction → updates state → sends a new `render`. Optional fields carry the
+ *  payloads for the variants that have them. */
+export interface InputMsg {
+  type: 'input'
+  event: InputEventKind
+  /** hub_select: the selected container's widget type + index. */
+  widgetType?: string
+  index?: number
+  /** hub_gesture: the raw firmware gesture code. */
+  code?: number
+  /** focus: the region the firmware reports as focused/scrolled (our own
+   *  region name) and its raw f3 value (observed 1/2 — plausibly direction). */
+  region?: string
+  value?: number
+}
+
 export type ClientMessage =
   | AuthMsg
   | ClientHbMsg
@@ -226,6 +311,8 @@ export type ClientMessage =
   | ConfirmOnHudResponseMsg
   | BleAckMsg
   | DiagMsg
+  | OsAttachMsg
+  | InputMsg
 
 // ============================================================
 // Server -> Client messages
@@ -366,6 +453,14 @@ export interface ConfirmOnHudMsg {
   text: string                      // arbitrary length; HUD scrolls (no truncation)
 }
 
+/** PC → glasses: render this scene. The client builds a render.Scene from it
+ *  (injecting the app-owned clock region) and drives G2Renderer.
+ *  Only sent to clients that opted in via `os_attach`. */
+export interface RenderMsg {
+  type: 'render'
+  scene: WireScene
+}
+
 export interface ErrorMsg {
   type: 'error'
   message: string
@@ -393,4 +488,5 @@ export type ServerMessage =
   | BackgroundAlertMsg
   | RewindResultMsg
   | ConfirmOnHudMsg
+  | RenderMsg
   | ErrorMsg

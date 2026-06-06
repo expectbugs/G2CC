@@ -72,6 +72,13 @@ object EventParser {
         /** EvenHub (`e0-01` `f1=2`) low-level gesture (codes 3/4/5/7 observed).
          *  Firmware handles menu scroll natively, so these are informational. */
         data class HubGesture(val code: Int) : Event
+        /** EvenHub (`e0-01` `f1=2`) focus/scroll report — the firmware names the
+         *  currently-focused container by [containerId] + [name] (OUR own region
+         *  id/name, echoed back) with a small [f3] (observed 1/2 — plausibly scroll
+         *  direction; unconfirmed). Emitted as the ring scrolls within a focusable
+         *  container. Decoded 2026-06-06 from a controlled scroll capture:
+         *  `08 02 6a <l> 12 <l> 08 <id> 12 <l> <name> 18 <f3>`. */
+        data class HubFocus(val containerId: Int, val name: String, val f3: Int) : Event
     }
 
     fun parse(packet: ByteArray): Event {
@@ -226,6 +233,7 @@ object EventParser {
             val f13 = payload.copyOfRange(start, start + f13Len)
             when (f13.firstOrNull()?.toInt()?.and(0xFF)) {
                 0x0A -> decodeHubSelection(f13, payload.toHex())   // f13.f1 = selection
+                0x12 -> decodeHubFocus(f13, payload.toHex())       // f13.f2 = focus/scroll
                 0x1A -> decodeHubGesture(f13, payload.toHex())     // f13.f3 = gesture
                 else -> Event.Unknown(svc, payload.toHex())
             }
@@ -277,6 +285,39 @@ object EventParser {
             Event.HubGesture(code)
         } catch (e: IllegalArgumentException) {
             Event.Malformed("hub gesture: ${e.message}", rawHex)
+        }
+    }
+
+    /** f13.f2 submessage = `{f1=containerId, f2="<name>", f3=<dir/state>}` — the
+     *  firmware reporting focus/scroll on a container, naming it by OUR region id
+     *  and name. Decoded 2026-06-06 from a controlled scroll capture. */
+    private fun decodeHubFocus(f13: ByteArray, rawHex: String): Event {
+        return try {
+            val (subLen, used) = Varint.decode(f13, 1)          // f13 = 12 <len> <sub>
+            val s = 1 + used
+            if (s + subLen > f13.size) return Event.Malformed("hub focus: overruns", rawHex)
+            val sub = f13.copyOfRange(s, s + subLen)
+            var containerId = -1
+            var name: String? = null
+            var f3 = -1
+            var i = 0
+            while (i < sub.size) {
+                val tag = sub[i].toInt() and 0xFF; i++
+                when (tag) {
+                    0x08 -> { val (v, u) = Varint.decode(sub, i); i += u; containerId = v }   // f1 containerId
+                    0x12 -> {                                                                  // f2 name string
+                        val (len, u) = Varint.decode(sub, i); i += u
+                        if (i + len > sub.size) return Event.Malformed("hub focus: name overruns", rawHex)
+                        name = String(sub, i, len, Charsets.UTF_8); i += len
+                    }
+                    0x18 -> { val (v, u) = Varint.decode(sub, i); i += u; f3 = v }             // f3 direction/state
+                    else -> return Event.Malformed("hub focus: unexpected tag 0x${"%02x".format(tag)}", rawHex)
+                }
+            }
+            if (name != null) Event.HubFocus(containerId, name, f3)
+            else Event.Malformed("hub focus: no name", rawHex)
+        } catch (e: IllegalArgumentException) {
+            Event.Malformed("hub focus: ${e.message}", rawHex)
         }
     }
 
