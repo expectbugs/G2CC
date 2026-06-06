@@ -4,6 +4,18 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-f189ca7 — 2026-06-06 — **Multi-pass code-review remediation + the scroll-race fix, completed**
+
+APK v0.6. Ran a multi-pass review (8 subsystem finders → adversarial per-finding verification; 41 raw → **26 confirmed**, full plan in `docs/CODE_REVIEW_2026-06-06.md`) and fixed all highs + mediums + most lows.
+
+**The review caught that the previous scroll-race fix was incomplete** — the conflated channel only serialized server-vs-server renders, while the 1 Hz clock and the ~80 s renewal called the renderer directly and could still interleave their BLE writes into a server render mid-push. `G2Renderer` now serializes **all** render ops through an internal send-queue (the single-packet keepalive still interleaves by design), and aborts an op on a write failure instead of pushing chunks into a dying session.
+
+**Other highs:** `queueWrites` no longer tears a healthy session to `Error` on a single `WRITE_NO_RESPONSE` (the BLE-1 fix `sendPacket` already had); the `cc-session` stdout handler no longer swallows listener exceptions (HUD-stuck-on-processing); a rejected render-promise memo now re-arms so one transient `render_menu` failure can't brick the OS screen until restart; a failed cold-launch resets state instead of dead-ending auto-recovery, and the cold-launch/test coroutines are tracked + generation-guarded against teardown.
+
+**Mediums/lows:** `--append-system-prompt` (not `--system-prompt`); auth token no longer logged at startup; audio start/end invariant + a hard byte-ceiling on the in-flight audio buffer; `@Volatile` on the watchdog-recovery fields; probe `hbMsgId` 1-byte wrap (same class as the render msgId kill); BTSnoop parser warns on truncated/FILTERED captures; explicit menu `f3` direction (ignore unknown values, don't guess); `/apk` streamed not `readFileSync`; pool→watchdog eviction unregister; probe null-notify log; ws close-on-supersede.
+
+**Deferred** (low/dead-code, documented in `HANDOFF.md` so they're not re-chased): G2CCService startForeground (parked), ConnectionManager `_events` never-collected (dead infra), FrameReassembler per-fragment CRC, sessions.json lost-update (single-user; needs file locking), faster-whisper stdout sentinel (dev-only), menu SELECT only-logs (feature TODO). `HANDOFF.md` was rewritten for a fresh instance (msgId rule, corrected render limits + guards, all-day backbone, review status, parked-code map).
+
 ## v0.0.1-3f9b162 — 2026-06-06 — **Glasses-OS menu on glass + renderer kill-guards**
 
 APK v0.5. The first real OS screen: a cursive 4-tile menu, ring-navigable, rendered and hardware-confirmed — and the renderer now guards itself against the limits we've hit.
