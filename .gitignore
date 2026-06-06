@@ -4,6 +4,9 @@ dist/
 config.json
 *.log
 
+# Harness build secrets (auth token baked into the APK via BuildConfig — never commit)
+harness-secrets.properties
+
 # Python
 audio/venv/
 __pycache__/

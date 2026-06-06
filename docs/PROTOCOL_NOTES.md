@@ -621,4 +621,130 @@ Our-UI mapping: **menu-header = status bar** (region 1) · **menu-list = menu** 
 
 ---
 
-*Last updated 2026-06-04 (EvenHub session protocol). Update when the i-soxi clone SHA changes or when new behavior is reverse-engineered.*
+## EvenHub display rendering — the IMAGE + REGION model (decoded 2026-06-05)
+
+**Source:** full unfiltered BTSnoop capture `U=19` / `/tmp/g2cc-btsnoop5/btsnoop_hci.log`, 2026-06-05 13:04–13:10, decoded by `scripts/decode_display.py` (+ `decode_deep.py`). Capture covers the Even Hub App launching three on-glasses games — **Chess** (real chessboard image), **Solitaire** (card images), **Paddle** (text-grid animation) — narrated live by Adam. 27 image frames were reassembled and rendered back to PNG byte-for-byte (the chessboard reconstructs perfectly). This section is the make-or-break answer the pure-image pivot needed: **arbitrary-image UI works, the firmware composites independent NAMED REGIONS, and partial-region updates are the native norm.**
+
+This rides the SAME channel as the rest of EvenHub: all frames are `e0-XX` on GATT char `0x5401`/`0x5402`. **The `0x6402` "Display Rendering" channel saw ZERO traffic across all three image-heavy games — it is NOT the image path. Disregard it for rendering.**
+
+### Display geometry
+
+- **Resolution 576 × 288 px, 4-bit grayscale (16 levels).** Full-screen regions are declared `[0,0,576,288]` (Paddle `screen`/`evt`). [parse5 13:09:34 layout]
+- Coordinates are pixels, origin top-left. Regions are placed by `(x, y, w, h)`.
+- Gray level = palette index 0..15, **0 = black, 15 = white**, linear ramp (see BMP palette below).
+
+### The region model (how a screen is built)
+
+A screen is a set of **named regions**, each independently addressable by name. Three operations:
+
+1. **Declare the layout** — `f1=0` (launch) or `f1=7` (content-update) carries the full list of region containers (geometry + name + type). Sent once at app start, re-sent only when the layout itself changes (e.g. Chess added `board-top`/`board-bot` after launch). [parse5 13:05:32.892]
+2. **Update one image region** — `f1=3` pushes a 4bpp BMP to a region **by name** (chunked). Re-pushing one region leaves all others untouched → this is the partial-update path. [parse5 13:05:31.982]
+3. **Update one text region** — `f1=5` pushes UTF-8 text to a region by name. Cheap/fast. [parse5 13:05:30.979]
+
+Proof of partial updates: each Chess move re-pushed **only** `board-bot` (10 KB), never the whole screen; each Solitaire card move re-pushed **only** `tile-br`. Paddle "animated" by re-sending the whole `screen` region as **text** ~6–7×/s (192 text-updates vs 6 image-pushes in its segment). [parse5 13:06–13:08, 13:09]
+
+### Message catalog — `e0-20` (Phone → Glasses), top-level `f1`=msgType, `f2`=msgId (monotonic, echoed in ack)
+
+| `f1` | Name | Payload (wire fields) | Ack (`e0-00`) |
+|------|------|-----------------------|---------------|
+| `0` | **launch** | `f3 = { f1=<containerCount>, f3=<text-container…>, f4=<image-container…>, f5=<appToken> }` | `f1=1` |
+| `3` | **image-push** | `f5 = { f1=<regionId>, f2="<name>", f3=<token>, f4=<totalBytes>, f6=<chunkIdx>, f7=<chunkLen>, f8=<BMP chunk> }` | `f1=4` |
+| `5` | **text-update** | `f9 = { f1=<regionId>, f2="<name>", [f3=<scrollOff>, f4=<contentH>], f5=<utf8 text> }` | `f1=6` |
+| `7` | **layout/content** | `f7 = { f1=<containerCount>, f3=<text-container…>, f4=<image-container…> }` | `f1=8` |
+| `12` | **keepalive** | `08 0c 10 <msgId> 72 00` — send every ~4 s (see §"EvenHub channel") | `f1=12` |
+| `9` | **app-state/exit — DO NOT SEND** | pops the native "End This Feature?" menu | `f1=10` |
+
+**App tokens** (`launch.f3.f5`, stable per app): DocuLens `11417`, Reddit `10217`, **Chess `10061`**. [parse5 13:05:30.652]
+
+### Container schemas (one LVGL widget; geometry `f1–f4` shared)
+
+The wrapper field selects the schema the firmware parses: **`f3` = text container, `f4` = image container** (`f2` = list container per the older EvenHub decode, not exercised here).
+
+**Text container** (wrapper `f3`):
+| Field | Meaning |
+|-------|---------|
+| `f1`/`f2` | x / y (px) |
+| `f3`/`f4` | width / height (px) |
+| `f9` | region id (instance id; echoed in input selection events) |
+| `f10` | **region name** (string) — `"chess-hud"`, `"screen"`, `"info"` |
+| `f11` | scroll flag (varint 0/1) |
+| `f12` | UTF-8 text content (box-drawing/CJK glyphs OK) |
+
+**Image container** (wrapper `f4`):
+| Field | Meaning |
+|-------|---------|
+| `f1`/`f2` | x / y (px) |
+| `f3`/`f4` | width / height (px) |
+| `f5` | region id |
+| `f6` | **region name** (string) — `"board-top"`, `"brand"`, `"tile-br"` |
+
+Example Chess layout (`f1=7` @ 13:05:32.892): `chess-hud` text `[0,8,368,280]`; `board-top` img `[376,44,200,100]` id 2; `board-bot` img `[376,144,200,100]` id 3; `brand` img `[376,4,200,40]` id 4. → text on the left, two stacked board tiles + logo on the right. Matches Adam's "text on left, board on right; only drew half the board" (= the two tiles load independently).
+
+### Image wire format — plain uncompressed 4-bit BMP
+
+Images are **standard Windows BMP** (`BITMAPFILEHEADER` + `BITMAPINFOHEADER`), decodable by stock `ffmpeg`/any BMP reader — no custom packing. Verified header (`board-top`, 200×100): [decode_deep BMP dump]
+
+```
+BITMAPFILEHEADER(14): "BM", bfSize, reserved=0, bfOffBits=118
+BITMAPINFOHEADER(40): biSize=40, biWidth=200, biHeight=+100 (positive ⇒ rows bottom-up),
+                      biPlanes=1, biBitCount=4, biCompression=0 (BI_RGB), biSizeImage,
+                      biXPelsPerMeter=2835, biYPelsPerMeter=2835, biClrUsed=16, biClrImportant=0
+Palette: 16 × BGRA, linear gray ramp — index i → (0x11*i, 0x11*i, 0x11*i, 0x00);
+         index 0 = 00,00,00 (black) … index 15 = ff,ff,ff (white). bfOffBits = 14+40+64 = 118.
+Pixels: 4 bpp, 2 px/byte (high nibble = left pixel), rows BOTTOM-UP, each row padded to a 4-byte boundary.
+        200 px ⇒ 100 B/row (already aligned). 576 px ⇒ 288 B/row.
+```
+
+A full-screen frame = 576×288×4bpp = **82,944 B + 118 header ≈ 83 KB**. A 200×100 tile = **10,118 B**.
+
+**Chunking is two-level:**
+- **App level (`f1=3`):** the BMP is split into chunks of **≤ 4096 B**. Each chunk is its own `f1=3` message: `f5.f6` = chunk index (0,1,2…), `f5.f7` = this chunk's byte count, `f5.f4` = total BMP size (constant across the set), `f5.f8` = the chunk bytes. 10,118 B ⇒ 3 chunks (4096+4096+1926). [parse5 13:05:33.601 board-top P=0/1/2]
+- **Transport level (AA frame):** each `f1=3` message (~4 KB) exceeds MTU 247, so it is AA-multi-packet-framed — non-final packets carry no CRC, the final packet carries one CRC-16/CCITT over the whole reassembled payload (see §"EvenHub channel" multi-packet rule). The first 4096-chunk was observed as `P=18/18`.
+
+**`f5.f3` (the per-push token):** 1-byte value (35–193 observed), **varies per push even for identical image content** (the static `brand` logo pushed twice → `193` then `102`) and matches no checksum of the bytes. ⇒ it is a **transfer correlation nonce**, echoed verbatim in the `f1=4` ack; it is NOT a content hash and is NOT enforced. Our encoder may set it to any per-push value (e.g. low byte of msgId). [decode_deep f3 analysis]
+
+**`f5.f1` (region id)** matches the target container's id (`brand`=4, `board-top`=2, `board-bot`=3) — `f5.f1` and `f5.f2` (name) redundantly identify the region.
+
+### Text update (`f1=5`)
+
+`f9 = { f1=<regionId>, f2="<name>", f5=<UTF-8 text> }`, with optional `f3`/`f4` (scroll offset / content height — present for the scrolling Paddle `screen` as `f3=0 f4=2000`, omitted for `chess-hud`/`info`). Text may be ordinary text or a grid of CJK/box glyphs used as crude graphics (Paddle's ball+paddles are a 849-byte `screen` text blob). [parse5 13:05:30.979, 13:09:34.455]
+
+### Acks & pacing (`e0-00`, Glasses → Phone)
+
+**`ack.f1 = request.f1 + 1`** for content ops (launch 0→1, image 3→4, text 5→6, layout 7→8, exit 9→10); keepalive `12→12`. **`ack.f2` echoes the request `msgId`.** The image ack (`f1=4`) echoes the full image descriptor (`f6 = {regionId, name, token, total, chunkLen, f8=4}`). This gives clean **ack-driven pacing** — wait for the matching `msgId` ack before the next op; no timeouts needed. [decode_deep ack dump]
+
+### Input vocabulary — `e0-01` (Glasses → Phone), `f1=2` (decoded from this capture)
+
+The firmware tracks focus locally and reports input as `f1=2` with an `f13` sub-message:
+
+- **Region-select** — `f13.f2 = { f1=<regionId>, f2="<name>", f3=2 }`. Fires when a selectable region is activated (tap on a focused region). e.g. `{1,"chess-hud",2}`, `{4,"info",2}`, `{1,"evt",2}`. [parse5 13:05:52.980]
+- **Gesture (low-level)** — `f13.f3 = { … }`:
+  - `{ f2=2 }` — the common ring **tap/confirm** (most frequent during play). [13:05:55.470]
+  - `{ f1=3, f2=2 }` — scroll-then-tap combo (seen once). [13:07:57.001]
+  - **`{f1=4} → {f1=5} → {f1=7}`** in quick succession = the **long-press → "End Feature?" menu → confirm-exit** sequence. This exact triple fired at the end of all three games (Chess 13:07:09–12, Solitaire 13:08:35–38, Paddle 13:10:15–17). [decode_deep input dump]
+
+(Exact tap-vs-scroll-up-vs-scroll-down-vs-double-tap separation should still be confirmed on hardware with a controlled gesture capture; the structure above is firm, the per-code semantics are inferred from Adam's narration. `EventParser.kt` consumes these.)
+
+### Throughput (measured) & rendering strategy
+
+- **Image:** a 200×100 tile (10,118 B, 3 chunks) pushes in **~0.5–1.0 s** (~10–18 KB/s effective). A full 576×288 image ≈ 83 KB ≈ **5–8 s**. [parse5 image-push timing]
+- **Text:** a full-screen 849 B text frame every **~0.15 s ≈ 6–7 fps**. [parse5 Paddle `screen`]
+- **Implication:** the glasses are a **region compositor where text is cheap and images are expensive** — NOT a dumb framebuffer. Fast interaction requires **per-region (dirty-rect) updates + image tiling**; full-frame image repaints are static-screen-only. This is exactly how the native games behave, and the G2CC renderer follows the same model. It also moots the old `main`+`menu-list` confirm-screen bug — we compose our own regions and never use the `menu-list` widget.
+
+*Display-blank-on-idle (from the EvenHub section) is unconfirmed under this model but likely mitigated: any per-region content change is a cheap refresh.*
+
+### Render constraints — HARDWARE-CONFIRMED 2026-06-05 (G2CC renderer full pass on real glasses)
+
+The G2CC `render/` module drove the real glasses through a full test (gray ramp, dither, rasterized UI, multi-region, partial image + text updates, animation) — every frame painted on **both lenses** and matched the on-phone mirror exactly. The hard-won constraints, learned from 3 failed passes then proven by the success:
+
+1. **Every screen MUST contain a text region.** An image-ONLY layout is acked (`f1=8`) but **never painted** — the written (R) lens holds the prior frame and the L mirror goes blank. The native games always pair image regions with a text region; G2CC uses a minimal **top status bar** (a text region with a ticking `HH:MM:SS` clock). This is the real form of the old "confirm screens don't paint" wall.
+2. **Image regions ≤ 200×100** (the largest the games ever used). Tile anything bigger into multiple regions; do **not** send a full-screen image to one region.
+3. **Push image chunks as DISCRETE, paced writes, keepalive-interleaved** — each `f1=3` chunk is its own small write (~12 ms between AA fragments, ~100 ms after each chunk ⇒ ~0.3 s/chunk, matching native), with the `f1=12` keepalive slotting between chunks. A single sustained ~360-packet **atomic** batch (a full-frame image) **drops the BLE link mid-push** (`reason=3`) ~7–22 s in, before the image completes. Never hold the BLE queue for a whole image.
+4. **A periodic text change keeps the display live** (the ticking clock = never-blank signal + always-present text region, one stone two birds).
+5. **Both lenses render via firmware R→L mirroring** — but only when a text region is present (an image-only layout broke L's mirror; restoring a text region fixed it). Writing display content to R only is correct.
+
+Implemented in `android/.../render/` (`G2Renderer.sendMessage` = per-message paced writes) + `android/.../harness/` (status-bar clock + ≤200×100 tiled scenes).
+
+---
+
+*Last updated 2026-06-05 (image/region model decoded from capture U=19; render constraints hardware-confirmed by the G2CC renderer full pass). Update when the i-soxi clone SHA changes or when new behavior is reverse-engineered.*

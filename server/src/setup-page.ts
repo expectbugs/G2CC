@@ -130,6 +130,12 @@ export async function renderSetupPage(port: number, token: string): Promise<stri
     <code class="token">${token}</code>
   </div>
 
+  <div class="box">
+    <strong>Display Renderer Harness APK</strong><br>
+    <a href="/apk?token=${encodeURIComponent(token)}">⬇ Download g2cc-harness.apk</a>
+    <p class="subtitle">Sideload to test the new display renderer: Connect / Test Display / Disconnect, with a Diag toggle and a pixel-perfect on-phone preview of what the glasses should show.</p>
+  </div>
+
   <h3>Endpoints (refetched at runtime)</h3>
   <p class="subtitle">The Android client fetches <code>/endpoints</code> on each successful auth and tries them in priority order: Tailscale/WireGuard first, then Ethernet/WiFi, then other.</p>
 </body>

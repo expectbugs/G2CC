@@ -13,6 +13,7 @@
 
 import Fastify from 'fastify'
 import websocket from '@fastify/websocket'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { loadConfig } from './config.js'
 import { startDiscovery, stopDiscovery } from './discovery.js'
 import { handleConnection, setWatchdog } from './ws-handler.js'
@@ -54,6 +55,55 @@ server.get('/endpoints', async (req, reply) => {
     return
   }
   reply.send({ endpoints: getEndpointJson(config.port) })
+})
+
+// Diagnostics sink — the display harness POSTs batched verbose diag lines here
+// when its Diag toggle is on. Token-gated (Bearer), appended verbatim to a
+// dedicated log so it doesn't interleave with the main server stream. Loud on
+// failure per the no-silent-failure rule.
+const DIAG_LOG_PATH = '/tmp/g2cc-harness-diag.log'
+server.post('/diag', async (req, reply) => {
+  const auth = req.headers.authorization
+  if (auth !== `Bearer ${config.authToken}`) {
+    reply.code(401).send({ error: 'unauthorized' })
+    return
+  }
+  const body = req.body as { lines?: unknown } | undefined
+  const lines = body?.lines
+  if (!Array.isArray(lines)) {
+    reply.code(400).send({ error: 'body.lines must be a string array' })
+    return
+  }
+  try {
+    const text = lines.map((l) => String(l)).join('\n')
+    if (text.length > 0) appendFileSync(DIAG_LOG_PATH, text + '\n')
+    reply.send({ ok: true, written: lines.length })
+  } catch (err) {
+    console.error('[g2cc-server] /diag append failed:', err)
+    reply.code(500).send({ error: 'diag append failed' })
+  }
+})
+
+// Harness APK download — token-gated (the APK has the auth token baked in, so it must NOT be
+// served publicly; this keeps it inside the same Tailscale/LAN trust boundary as /setup).
+// Linked from /setup. Token via ?token= (matches the setup-page link) or Authorization: Bearer.
+const APK_PATH = '/tmp/g2cc-harness.apk'
+server.get('/apk', async (req, reply) => {
+  const token = (req.query as { token?: string } | undefined)?.token
+  const bearer = req.headers.authorization
+  if (token !== config.authToken && bearer !== `Bearer ${config.authToken}`) {
+    reply.code(401).send({ error: 'unauthorized' })
+    return
+  }
+  if (!existsSync(APK_PATH)) {
+    reply.code(404).send({ error: 'harness APK not present on server' })
+    return
+  }
+  const apk = readFileSync(APK_PATH)
+  reply
+    .type('application/vnd.android.package-archive')
+    .header('Content-Disposition', 'attachment; filename="g2cc-harness.apk"')
+    .send(apk)
 })
 
 // WebSocket route.

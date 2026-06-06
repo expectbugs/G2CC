@@ -1,0 +1,157 @@
+package com.g2cc.g2cc.render
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/** Orchestration tests for [G2Renderer] via a fake sink — verifies the dirty-rect logic,
+ *  message types emitted, and loud-failure behaviour without any BLE/Android. */
+class G2RendererTest {
+
+    private fun img(w: Int, h: Int) = Gray4Bmp.encode(w, h, ByteArray(w * h))
+    private fun msgType(payload: ByteArray) = payload[1].toInt() and 0xFF   // f1 value byte
+
+    @Test
+    fun launch_emitsLaunchThenImageChunks_andSetsScene() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        val brand = img(200, 40)   // 4118 bytes -> 2 image chunks
+        val s = scene { text("hud", 0, 8, 368, 280, "hi"); image("brand", 376, 4, 200, 40, brand) }
+        var ok = false
+        r.launch(10061, s) { ok = it }
+        assertTrue(ok)
+        assertEquals(3, sink.calls.size)           // per-message: launch + 2 image chunks = 3 discrete writes
+        val msgs = sink.messages()
+        assertEquals(3, msgs.size)                 // launch + 2 image chunks
+        assertEquals(DisplayProto.MSG_LAUNCH, msgType(msgs[0]))
+        assertEquals(DisplayProto.MSG_IMAGE, msgType(msgs[1]))
+        assertEquals(DisplayProto.MSG_IMAGE, msgType(msgs[2]))
+        assertNotNull(r.currentScene)
+    }
+
+    @Test
+    fun setText_emitsSingleTextUpdate_andUpdatesScene() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        r.launch(10061, scene { text("hud", 0, 8, 368, 280, "hi") }) {}
+        sink.calls.clear()
+        var ok = false
+        r.setText("hud", "bye") { ok = it }
+        assertTrue(ok)
+        assertEquals(1, sink.calls.size)
+        val msgs = sink.messages()
+        assertEquals(1, msgs.size)
+        assertEquals(DisplayProto.MSG_TEXT, msgType(msgs[0]))
+        assertTrue(hx(msgs[0]).contains(hx("bye".toByteArray())))
+        assertEquals("bye", (r.currentScene!!.content["hud"] as Content.Text).text)
+    }
+
+    @Test
+    fun setText_unknownRegion_loudFailsWithoutWriting() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        r.launch(10061, scene { text("hud", 0, 0, 100, 50, "x") }) {}
+        sink.calls.clear()
+        var ok = true
+        r.setText("nope", "y") { ok = it }
+        assertFalse(ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun setImage_dimensionMismatch_loudFails() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        r.launch(10061, scene { image("pic", 0, 0, 200, 100, img(200, 100)) }) {}
+        sink.calls.clear()
+        var ok = true
+        r.setImage("pic", img(100, 50)) { ok = it }   // wrong dims for the region
+        assertFalse(ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun setScene_sameLayout_sendsOnlyChangedRegion() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        val pic = img(200, 40)
+        val s1 = scene { text("hud", 0, 8, 368, 280, "hi"); image("brand", 376, 4, 200, 40, pic) }
+        r.launch(10061, s1) {}
+        sink.calls.clear()
+        val s2 = Scene(s1.regions, mapOf("hud" to Content.Text("yo"), "brand" to Content.Image(pic)))
+        r.setScene(s2) {}
+        val msgs = sink.messages()
+        assertEquals(1, msgs.size)                 // only the text region changed
+        assertEquals(DisplayProto.MSG_TEXT, msgType(msgs[0]))
+    }
+
+    @Test
+    fun setScene_layoutChange_pushesLayoutThenImages() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        r.launch(10061, scene { text("a", 0, 0, 100, 50, "x") }) {}
+        sink.calls.clear()
+        r.setScene(scene { text("a", 0, 0, 100, 50, "x"); image("b", 376, 4, 200, 40, img(200, 40)) }) {}
+        val msgs = sink.messages()
+        assertEquals(DisplayProto.MSG_LAYOUT, msgType(msgs[0]))
+        assertTrue("expected image chunks after layout", msgs.drop(1).all { msgType(it) == DisplayProto.MSG_IMAGE })
+    }
+
+    @Test
+    fun writeFailure_propagatesToCaller() {
+        val sink = FakeSink().apply { failNext = true }
+        val r = G2Renderer(sink)
+        var ok = true
+        r.launch(10061, scene { text("a", 0, 0, 100, 50, "x") }) { ok = it }
+        assertFalse(ok)
+    }
+
+    @Test
+    fun keepaliveFrame_advancesSeq() {
+        val r = G2Renderer(FakeSink())
+        val a = r.keepaliveFrame()
+        val b = r.keepaliveFrame()
+        assertNotEquals(a[2], b[2])   // seq byte differs between successive keepalives
+    }
+
+    @Test
+    fun setScene_beforeLaunch_loudFailsWithoutWriting() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        var ok = true
+        r.setScene(scene { text("a", 0, 0, 100, 50, "x") }) { ok = it }
+        assertFalse(ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun launch_badImageInScene_loudFailsNoCrash() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        // Scene.init only checks region KIND, so a non-BMP buffer is constructible; launch must
+        // loud-fail (onComplete(false)) rather than throw out to the caller.
+        val badScene = scene { image("x", 0, 0, 10, 10, byteArrayOf(1, 2, 3)) }
+        var ok = true
+        r.launch(10061, badScene) { ok = it }
+        assertFalse(ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun imagePush_isDiscretePerMessageWrites_notOneAtomicBatch() {
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        r.launch(10061, scene { text("s", 0, 0, 576, 28, "x") }) {}
+        sink.calls.clear()
+        // layout change → 1 layout msg + a 200x100 image (10118 B = 3 chunks) = 4 discrete writes,
+        // so the keepalive can interleave between them (the native pattern) instead of one batch.
+        r.setScene(scene { text("s", 0, 0, 576, 28, "x"); image("pic", 0, 28, 200, 100, img(200, 100)) }) {}
+        assertTrue("expected ≥4 discrete per-message writes, got ${sink.calls.size}", sink.calls.size >= 4)
+        val msgs = sink.messages()
+        assertEquals(DisplayProto.MSG_LAYOUT, msgType(msgs[0]))
+        assertTrue("rest should be image chunks", msgs.drop(1).all { msgType(it) == DisplayProto.MSG_IMAGE })
+    }
+}

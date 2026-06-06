@@ -1,7 +1,18 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.serialization)
+}
+
+// Harness build secrets (gitignored). Bakes the auth token + Tailscale server
+// address into BuildConfig so the sideloaded harness APK needs no setup screen.
+// Falls back to empty/defaults if the file is absent (e.g. CI) — the harness
+// surfaces a missing token loudly at Connect time rather than silently failing.
+val harnessProps = Properties().apply {
+    val f = rootProject.file("harness-secrets.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -23,6 +34,11 @@ android {
         versionName = "0.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Hardcoded harness config (from gitignored harness-secrets.properties).
+        buildConfigField("String", "AUTH_TOKEN", "\"${harnessProps.getProperty("authToken", "")}\"")
+        buildConfigField("String", "SERVER_HOST", "\"${harnessProps.getProperty("serverHost", "100.107.139.121")}\"")
+        buildConfigField("int", "SERVER_PORT", harnessProps.getProperty("serverPort", "7300"))
     }
 
     buildTypes {
@@ -44,6 +60,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 
     sourceSets {

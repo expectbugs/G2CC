@@ -3,61 +3,25 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!--
-      G2CC — direct-BLE G2 glasses companion + Claude Code dispatch.
-      Phase 4: platform plumbing only (no BLE driver, no WebSocket, no HUD).
-      Phases 5/6 add the BLE driver and the network paths.
+      G2CC — Display Renderer Test Harness.
+      Standalone BLE connect + auth + render to the G2 glasses, driven by three buttons
+      (Connect / Test Display / Disconnect) + a Diag checkbox. No foreground service, no
+      setup screen, no probe app — auth token + Tailscale server are baked in via BuildConfig.
     -->
 
-    <!-- BLE (Phase 5 active; declared here so the foreground service of type
-         connectedDevice can reference them). -->
+    <!-- BLE: connect to + scan for the lens pair. -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="s" />
-    <!-- Required for BLE scanning on API < 31; harmless on 31+. -->
+    <!-- BLE scanning on API < 31 requires location. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
 
-    <!-- Network (Phase 6 active). -->
+    <!-- Network: stream the diagnostics log to the server. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Audio capture (Phase 8 active). -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- Required to route the comms capture path to the Bluetooth SCO mic
-         (AudioManager.setCommunicationDevice / MODE_IN_COMMUNICATION) for the
-         DJI Mic 3 TX-over-Bluetooth source. Normal (install-time) permission. -->
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-
-    <!-- Foreground service (Phase 4 active — survives doze). -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <!-- Required for mic capture from FG service on Android 14+ (API 34+).
-         Without this the FG service throws SecurityException when AudioRecord
-         opens. Pixel 10a targets API 34+; this is a hard blocker for any
-         recording. Fix from 4th-pass code review (CRITICAL). -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-
-    <!-- Battery-optimization exemption: required so the FG service survives
-         aggressive doze. Surfaced as a one-time setup prompt. -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <!-- Wake lock: FG service keeps the process alive but DOESN'T prevent
-         coroutine delays from being throttled by the scheduler / Doze.
-         Adam reported heartbeat tick gaps of 13-28s on a 10s cadence in
-         factory conditions — those gaps exceed the firmware's 22s
-         teleprompter session timeout, blanking the HUD. PARTIAL_WAKE_LOCK
-         keeps the CPU alive so delay() fires on schedule. -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-
-    <!-- Auto-start service on boot (Adam mentioned reboot as a real-world scenario). -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
-    <!-- Notification permission (Android 13+). FG service notification is
-         exempt, but POST_NOTIFICATIONS still must be requested for any
-         user-visible notifications we add later. -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- BLE-required hardware. -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <application
@@ -73,84 +37,15 @@
         android:usesCleartextTraffic="true"
         tools:targetApi="34">
 
+        <!-- The harness IS the app — the only launcher activity. -->
         <activity
-            android:name=".MainActivity"
+            android:name=".harness.HarnessActivity"
             android:exported="true"
-            android:label="@string/app_name">
+            android:label="G2CC Harness">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <activity
-            android:name=".setup.SetupActivity"
-            android:exported="false"
-            android:label="@string/setup_title" />
-
-        <!-- Probe activity — separate launcher icon ("G2CC Probe") for the
-             raw-display + raw-input experiment. Does NOT start any
-             foreground service. Standalone BLE connect + auth + probe writes
-             to 0x6402 + notify capture. Removable by deleting this <activity>
-             block and the Kotlin source under com/g2cc/g2cc/probe/. -->
-        <activity
-            android:name=".probe.ProbeActivity"
-            android:exported="true"
-            android:label="G2CC Probe">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-
-        <!-- Foreground service: connectedDevice|microphone type. Sticky so
-             Android restarts it if killed (subject to battery-opt exemption).
-             Including `microphone` so AudioRecord works from within the FG
-             service on Android 14+ (without it, opening the mic throws
-             SecurityException). Even though we don't always record, the FG
-             type bitmask is fixed at startup. -->
-        <service
-            android:name=".service.G2CCService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice|microphone" />
-
-        <!-- BootReceiver: re-launches the service after a reboot. -->
-        <receiver
-            android:name=".service.BootReceiver"
-            android:exported="true"
-            android:directBootAware="false"
-            tools:ignore="ExportedReceiver">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <!-- LOCKED_BOOT_COMPLETED removed: receiver is not directBootAware,
-                     so that broadcast never reached us anyway. 4th-pass review LOW. -->
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
-
-        <!-- IntentReceiver: Tasker / Assistant integration.
-             SECURITY NOTE: deliberately exported with NO custom permission. Any
-             installed app can broadcast these actions. This is an explicit
-             tradeoff per HOLDS.md / INTENTS.md §Threat Model:
-               - Sideloaded distribution (no Play Store) on Adam's single device
-               - Limited app population (curated install list)
-               - Tasker integration is the explicit reason for the open surface
-                 — a signature-level permission would require Adam to sign
-                 Tasker (or a Tasker plugin) with the same cert.
-             If the threat model ever changes (e.g. broader distribution), add
-             android:permission="com.g2cc.permission.CONTROL" and declare a
-             signature-level <permission> element above. See INTENTS.md.
-        -->
-        <receiver
-            android:name=".intents.IntentReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.g2cc.intent.action.START_RECORDING" />
-                <action android:name="com.g2cc.intent.action.STOP_RECORDING" />
-                <action android:name="com.g2cc.intent.action.SHOW_DIRECTORY_PICKER" />
-                <action android:name="com.g2cc.intent.action.SWITCH_DISPATCH_TARGET" />
-                <action android:name="com.g2cc.intent.action.PING" />
-            </intent-filter>
-        </receiver>
     </application>
 </manifest>

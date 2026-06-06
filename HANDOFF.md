@@ -1,95 +1,267 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
-**Last updated: 2026-06-04, after the EvenHub PRODUCTION integration (`v0.0.1-d67022d`) and a verify-first code-review remediation (`v0.0.1-6b52559`). The proven DocuLens-hijack is now the production DEFAULT display path; the wire encoder is byte-verified against real captures and the tree is review-hardened (134 unit tests green). The one remaining gate is the FIRST real-glasses pass on this build. Read this first, then `CHANGELOG.md`, then `docs/PROTOCOL_NOTES.md`.**
+**Last updated: 2026-06-05. MAJOR PIVOT this session.** The EvenHub-widget display
+approach hit a hard wall (confirm screens write OK to the glasses but never PAINT),
+and after a week of fighting the firmware's widget quirks Adam has decided to move to
+**pure image-based display rendering** — a dedicated G2 display renderer that composes
+the entire UI client-side, rasterizes to a gray4 bitmap, and pushes images to the
+glasses as a dumb framebuffer. We handle all input + re-rendering ourselves.
+
+**The immediate next task is NOT coding — it's decoding.** Adam is running a set of
+structured BTSnoop captures (games with images, scrolling, multiple apps) and will walk
+you through his exact actions + what he sees on the glasses so you can decode the
+display protocol end-to-end. The captures decide whether pure-image is smooth-interactive
+or static-only. **Read this, then `CHANGELOG.md`, then `docs/PROTOCOL_NOTES.md`.**
+
+Then the plan is: build a dedicated **G2 display renderer** (owns the display encoding
+entirely) + its docs, **extract the networking** into its own module, and properly
+**segment this monolith into modular functions**.
 
 ---
 
 ## TL;DR — where we are
 
-Adam's goal: open an Android app and it controls the G2 glasses **all day** with **zero use of the glasses' built-in menu**, self-healing on drops (memory `g2cc-app-initiated-goal`).
+**What's PROVEN working on real hardware this session (genuinely — the hard parts):**
+- ✅ **Persistent app-initiated session** (EvenHub DocuLens-hijack): cold-launch, `f1=12`
+  keepalive @4 s, ring input — all working on Adam's glasses. Zero glasses-menu dance.
+- ✅ **DJI mic over Bluetooth** — confirmed on the wire as `src=dji-bt`. TX2 → phone via
+  HFP/SCO, 16 kHz mono, captured by `MicCapture.startBluetoothSco`. No receiver dongle.
+- ✅ **STT works and is now sub-second** — warm Parakeet daemon (load once at server
+  start, ~10 s; every transcription after ≈0.03–0.5 s). Was a 12 s cold load per request.
+- ✅ **The full CC loop functionally runs** — record → STT → send to Claude → response.
+  Adam got real Claude responses ("Testing, testing, one, two, three." transcribed and
+  answered). The pipeline is sound.
+- ✅ **Diagnostic loudness** — every HUD render's packet count + BLE write OK/FAIL, and
+  every inbound decode failure, go to the diag stream (`/tmp/g2cc-server.log`). This made
+  every diagnosis this session possible. READ THE DIAG STREAM, don't theorize.
 
-- ✅ **Breakthrough (probe v12, `v0.0.1-32c7302`):** persistent, phone-initiated Hub session proven on Adam's hardware — cold-launch DocuLens's slot, render OUR menu, hold it with the `f1=12` keepalive, ring input forwards to us. Adam confirmed **ring scroll navigates the hijacked menu off the bat**.
-- ✅ **Production integration (`v0.0.1-d67022d`):** that primitive is now the production **default** display path (`EVENHUB_ENABLED=true`): the g2code-style `menu-list` + status-bar UI, `f1=12` keepalive @4 s, native `e0-01` selection input — all wired into the hardened service (FG-service + wake-lock + 5-defence reconnect). The full server flow (menu → Claude Code → directory pick → prompt → CC output / STT-confirm / confirm-on-hud) is routed through it.
-- ✅ **Review-hardened (`v0.0.1-6b52559`):** a four-lens code review found + fixed 7 verified issues; 3 candidate findings were rejected as false positives (see CHANGELOG).
-- 📡 **NOT yet done — the gate:** the FIRST real-glasses pass on this production EvenHub build. The *encoder* is byte-verified against captures, but the cold-launch / keepalive / input / render *orchestration* is logic-verified only (no hardware pass yet). **This is the path to all-day use.**
+**What's BROKEN (and triggered the pivot):**
+- ❌ **Confirm screens don't DISPLAY.** They write OK (BLE ack) but never paint — the user
+  is stuck on the prior frame while the menu model silently advances underneath (blind taps
+  still "work"). This made the active CC menu, the transcript confirm, the STT-error screen,
+  and the post-response screen all invisible. See "The wall" below.
+- The UI also just looks bare (a list + a selection ring; no borders/frames/chrome) — we
+  only ever used ~5 % of the display's capability (text/list containers, no images, no styling).
 
-## The working recipe (EvenHub `e0-20` — this is the answer)
+**Latest released APK:** `v0.0.1-06cc6d0` (confirm-screen *attempt* + warm STT). The confirm
+fix in it did **not** work (the menu-header theory was wrong — see below). The warm STT in it
+**is** live and good.
 
-All frames ride GATT char `0x5401`; the `e0-XX` service id lives in the AA-frame header. Sequence (proven by probe v12, now implemented in `EvenHud`/`EvenHub`/`G2Pipeline`):
+## The pivot: pure image-based display rendering
 
-1. **Connect + 7-packet auth** to L+R lenses (`AuthSequence`).
-2. **Cold-init prelude** (verbatim from capture, `EvenHub.COLD_INIT`): `81-20` Display Trigger, `04-20` Display Wake, `0e-20` region config.
-3. **Cold launch:** `e0-20` launch `f1=0` (DocuLens token **11417**) → glasses ack on `e0-00` → our first content `f1=7` (menu-list + menu-header).
-4. **Keepalive:** `e0-20` **`f1=12`** (`08 0c 10 <msgId> 72 00`) to R **every ~4 s, forever**. THIS holds the session. **Do NOT send `f1=9`** — it pops the native "End This Feature?" exit menu.
-5. **Input:** the firmware tracks the menu-list focus locally (draws the select border) and reports the chosen item on `e0-01 f1=2` as `f13.f1={containerId, "<widgetType>", index}` → `RootMenu.selectIndex(index)`.
+**The idea (Adam's, and it's sound):** make the glasses a dumb framebuffer. Our renderer
+composes the whole UI (lists of any length, real fonts, HUD, blended imagery), rasterizes
+to a gray4 bitmap, and pushes images. We process ring/gesture input ourselves and re-render.
+This dissolves the entire class of firmware-widget bugs we've been bleeding on, gives total
+pixel freedom, and (because we control refresh) likely also fixes display-blank-on-idle.
 
-Full wire schema (container layout, multi-packet CRC-over-whole-payload convention, input decode): `docs/PROTOCOL_NOTES.md` §"EvenHub channel". The encoder reproduces the captured DocuLens launch + multi-packet Reddit menu + keepalive **byte-for-byte** (`EvenHubTest`).
+**Why it's plausible (VERIFIED, not guessed):** the Even Hub SDK's page model
+(`CreateStartUpPageContainer`) takes `imageObject` (≤4) with raw `imageData`, and its error
+codes include **`imageToGray4Failed`** → the glasses render **4-bit grayscale bitmaps**. So
+arbitrary-image UI is supported at the protocol level. We have simply never sent an image.
 
-## Hardware-validation checklist (THE gate)
+**The ONE make-or-break unknown — measure before committing:** BLE image-push **bandwidth +
+partial-region update support.** A full gray4 frame is order tens of KB; BLE write-without-
+response is order tens of KB/s; native surfaces (teleprompter, menu-list) deliberately send
+content once and let the **firmware scroll locally** for efficiency. Pure-image trades that
+away — every visual change becomes a re-push. If the display supports **partial-region updates**
+(push just the moved highlight = a few KB = snappy) it's smooth-interactive; if it's full-frame-
+only at ~1–4 s/frame, it's great for static screens but sluggish to scroll. **We do not know
+which.** That's what the captures are for.
 
-Read the diag stream live: `/tmp/g2cc-server.log` (the app streams every event there — READ IT, don't theorize). In order:
+## IMMEDIATE NEXT TASK — decode the BTSnoop captures
 
-1. **Cold-launch + keepalive end-to-end** — does the menu come up, and does `f1=12` @4 s hold it? Look for `evenHub: cold-launch done ok=true` → `hb: tick=N (e0 f1=12 keepalive)`.
-2. **Input loop** — ring scroll + select navigates the menu (`hub-input: select '<widget>' idx=N` → action fires). Scroll is proven; the full select→action→re-render loop is new.
-3. **Full Claude Code loop** — tap **Claude Code** → directory list → pick a dir → record/prompt → CC output renders → STT confirm (✓ Send / ⟲ / ✗).
-4. **Multi-packet SEND** — a long menu / CC-output page that spans >1 `e0-20` packet (byte-verified; the Even App did it; our *sending* is new).
-5. **Render geometry** — the status+body and confirm (body+options) px layouts may need tuning (the encoding is exact; only px positions are app-chosen).
-6. **If it misbehaves:** set `EVENHUB_ENABLED=false` in `G2Pipeline.kt` → instant revert to the Phase-D-proven teleprompter path (untouched escape hatch).
+Adam is bringing structured captures and will narrate his exact actions + what he saw. Your
+job: decode the display protocol and answer the make-or-break question. The agreed capture
+plan (Adam has it):
 
-## Code-review remediation (`v0.0.1-6b52559`) — spot-check on hardware
+**3 captures that decide everything** (each its own clean ~30–60 s capture; toggle HCI snoop
+off→on first to clear the ring buffer, which fills fast with image data):
+1. **Static images** → image wire format + resolution + throughput. Two different full-screen
+   images held ~10 s each. Extract: encoding (gray4 packing/compression?), bytes/frame,
+   pixel dimensions (= resolution), push duration (= KB/s).
+2. **Animation** (THE keystone) → a game with a *small thing moving over a static background*,
+   ~20 s. Determines **full-frame vs partial-region updates** and the achievable rate. Smooth
+   animation = partial updates exist (capture their format) = pure-image is viable.
+3. **List scroll** → scroll a list slowly one item at a time. Is a scroll a tiny region push
+   or a full re-render?
 
-7 verified fixes (full WHY + the 3 rejected false positives in CHANGELOG). These are logic-verified + compile-clean but **not hardware-validated** — check on the first real pass:
+**Bonus** (one broader session, with rough phone-clock timestamps to segment): launch 3–5
+different apps (text / game / image / dashboard) for the full container+command vocabulary;
+do varied gestures (tap / double-tap / swipes / long-press) to fully decode the **input**
+vocabulary; toggle glasses BT off/on for the real connect/auth/reconnect sequence; anything
+graphics-heavy so you can hunt for traffic on the **`0x6402` "Display Rendering" channel** we
+have never seen used (it may BE the partial-update path).
 
-1. **confirm_on_hud auto-reject on BLE drop** (`pendingHubConfirmId`) — currently latent (server doesn't send `confirm_on_hud` yet), validate when HITL/permission confirmations are wired.
-2. **reconnect mid-confirm repaints the transcript** (cold-launch passes `displayHeader`) — record a prompt, drop BLE during the confirm, confirm the transcript reappears (not a bare menu).
-3. **edge-detector serialization** (`edgeLock`) + **cold-launch epoch guard** (`evenHubLaunchEpoch`) — force rapid drop/reconnect cycles; confirm no double cold-launch / no heartbeat-against-dead-session.
+**Analysis targets, in priority:** (1) image encoding + resolution, (2) real KB/s throughput,
+(3) full-frame-vs-partial-region, (4) the `0x6402` command format, (5) full input-event
+vocabulary, (6) the launch protocol for arbitrary apps.
 
-Documented-but-not-fixed (real, low, self-healing): a render-vs-teardown race that loses one frame (loud + self-heals); CC-output text screens have no selectable escape until `ResponseComplete` (self-heals via ResponseComplete + reconnect repainting the menu frame).
+**Delivery + tooling:** captures arrive as Android bug reports → emailed → pull via `mbsync -a`,
+parse from `~/Mail/marzello.net/INBOX` (or land in `/tmp/g2cc-btsnoop*/`). `scripts/btsnoop_parse.py`
+decodes BTSnoop→AA-frame→protobuf for the `e0-XX` frames on char `0x5401/0x5402` **only** — you
+will need to EXTEND it to (a) decode `imageObject`/image-container bytes and (b) extract writes
+on char **`0x6402`** (it currently maps ACL handles to lens MACs and decodes `e0` only). Build
+the decoder AFTER you see what's actually on the wire, not before.
 
-## Known issue — display-blank-on-idle (DEFERRED)
+## The wall that triggered the pivot — confirm screens don't display
 
-The display blanks when on-screen content doesn't CHANGE for too long — a firmware **display-refresh** timeout, NOT input/session/disconnect (`f1=12` holds the session, not the lit screen). Matters for voice-only/DJI control (HUD static during a spoken command). Autoscroll-while-reading does NOT blank (content keeps changing). Fix = periodic real content updates. **Adam is deferring this until he can iterate at work.** Mine a sustained-idle Even App capture for the missing refresh signal.
+**Symptom:** `renderConfirm` frames write OK (the diag shows `hud→R renderConfirm: write OK`)
+but the glasses keep showing the previous frame. The menu *model* updates (a blind tap on the
+invisible confirm actually selected the right item and sent a prompt to Claude), but nothing
+paints.
 
-## Dead paths / facts — don't re-investigate
+**Leading hypothesis (strong, from 2 hardware tests — NOT proven):** the firmware will not
+render a **text body (`main`) and a selectable list (`menu-list`) on the same screen.**
+- `menuScreen` = `menu-list` + `menu-header` → **displays.**
+- `textScreen` = `main` + `menu-header` → **displays** (Claude's replies showed fine).
+- `confirmScreen` = `main` + `menu-list` (± `menu-header`) → **does NOT display.**
+This session's "fix" added a `menu-header` to the confirm (theory: every displaying screen has
+one). It did **nothing** — which is what falsified the header theory and points hard at the
+`main`+`menu-list` combo being the real constraint. Pure-image makes this moot.
 
-- **Teleprompter (`0x06-20`) eats ring inputs** (native firmware feature) and needs a heavy 10 s full-re-render keepalive. Kept only as the `EVENHUB_ENABLED=false` escape hatch.
-- **News / `0x01-20` is RULED OUT and REMOVED** (`v0.0.1-a3003d5`). It's a sub-feature of the default HUD, not a self-contained takeover (`PHASE_Y_ENABLED=true` didn't come up on hardware, 6/03). Don't re-attempt News as a display path. (Decode kept in PROTOCOL_NOTES as reference.)
-- **`f1=9` is the exit-menu trigger, NOT a keepalive.** Only `f1=12`.
-- **Session death = glasses revert to native UI** (`01-01` magic-`0x12345678` burst), not a BLE drop. The `e0`/BLE channel survives it.
-- **Don't guess the wire format** — read the captures / `PROTOCOL_NOTES`. The encoder is a structured protobuf builder validated byte-for-byte against captures, NOT hex-patching.
+**LOAD-BEARING LESSON for the next instance:** the diag stream shows `write OK`, it does **NOT**
+show "painted." You CANNOT verify a display fix from the logs — only Adam's eyes can. This
+session claimed "highest confidence" on the menu-header fix and was wrong, twice. Do not tell
+Adam a display change works until he confirms it visually. He has (rightly) low patience for
+"fixed!" that isn't.
 
-## Key files
+## Key technical findings this session (the display model)
 
-- **EvenHub wire encoder:** `android/.../ble/EvenHub.kt` (e0-20 protobuf: launch/content/keepalive/menuScreen/textScreen/confirmScreen, container builders, multi-packet framing, COLD_INIT). Byte-verified by `ble/EvenHubTest.kt`.
-- **Renderer:** `android/.../hud/EvenHud.kt` (g2code two-region layout, R-lens write, cold-launch, keepalive frame).
-- **Input:** `ble/EventParser.kt` (`decodeHubInput` → `HubSelect`/`HubGesture`). **Menu model:** `hud/RootMenu.kt` (`currentRenderModel` + `selectIndex`, lock-guarded stack).
-- **Integration:** `G2Pipeline.kt` — the `EVENHUB_ENABLED` paths (cold-launch on Ready w/ epoch guard, `f1=12` heartbeat, render routing, `e0-01`→`selectIndex`, `showHubConfirm`, `composeStatus`). `dispatchInbound` is exception-guarded.
-- **Server (unchanged this work):** `server/src/` — `dispatch.ts`, `cc-session.ts`, `ws-handler.ts` (22+22 message contract in `shared/src/protocol.ts`), `directory-picker.ts`, `stt.ts`.
-- **Analysis:** `scripts/btsnoop_parse.py` (BTSnoop→AA-frame→protobuf decoder; takes a btsnoop path argv). Captures: `/tmp/g2cc-btsnoop{,3}/` + emailed bug reports (pull via `mbsync -a`, parse from `~/Mail/marzello.net/INBOX`).
-- **Probe (historical, proved the protocol):** `android/.../probe/` (ReplayKit, ProbeActivity).
-- **Protocol reference:** `docs/PROTOCOL_NOTES.md` (§"EvenHub channel").
+- **g2code is an Even Hub *app*, not a BLE driver.** It's a webview/JS app on
+  `@evenrealities/even_hub_sdk`, packed as a `.ehpk`; **Even Hub renders it to the glasses.**
+  So "copy g2code's UI" = BTSnoop **Even Hub** rendering a rich app, and replicate those BLE
+  commands directly. (g2code is text-only — it does not use images, but the SDK *supports* them.)
+- **Even Hub SDK rendering model:** `CreateStartUpPageContainer` / `RebuildPageContainer` /
+  `TextContainerUpgrade` / `ShutDownPageContainer`; page = `textObject` (≤8) + `imageObject`
+  (≤4); images → **gray4**. (`/home/user/g2code/node_modules/@evenrealities/even_hub_sdk/dist/index.d.ts`.)
+- **BLE channels** (`/home/user/G2 Custom/even-g2-protocol/docs/ble-uuids.md`): `0x5401`
+  Write/Commands (what we use — `e0-XX` container frames), `0x5402` Notify/Responses, **`0x6402`
+  Display Rendering — 204-byte binary packets, "positioning, styling" — NEVER captured or used
+  by us.** This is a prime suspect for the richer/partial-update path.
+- **Display resolution is UNKNOWN / ambiguous.** The teleprompter proto says `display_width=267`,
+  `viewport_height=1294`; our EvenHub containers use width up to 576, height to ~288. Different
+  coordinate spaces; the true pixel resolution must come from an image capture (its dimensions).
+- **Native display surfaces** (i-soxi `proto/g2_protocol.proto`, beyond the EvenHub app
+  containers): Teleprompter, **Dashboard + DashboardWidget**, Conversate (transcripts),
+  Notification, **DisplayConfig / DisplaySettings / DisplayRegion** (a *regions* concept — region
+  ids 2–6), DisplayWake. More surfaces than we've touched.
+- **The e0-20 container wire format** (what we DO use) is documented in `docs/PROTOCOL_NOTES.md`
+  §"EvenHub channel": container = geometry (f1–f4) + border/style fields (f5–f8, mostly unused
+  by us) + id (f9) + type string (f10: `menu-header`/`menu-list`/`main`/`doclist`/`toolbar`/…)
+  + content (f11/f12). Multi-packet: non-final packets no CRC, final packet CRC-16/CCITT over the
+  whole reassembled payload.
 
-## Build + release flow
+## The next phase — modular architecture (Adam's directive)
 
-- **Build:** `JAVA_HOME=/opt/openjdk-bin-17 ANDROID_HOME=/opt/android-sdk /home/user/G2CC/android/gradlew -p /home/user/G2CC/android testDebugUnitTest assembleDebug` (cwd resets between Bash calls — always use `-p`). 134 unit tests, keep green.
-- **APK:** `android/app/build/outputs/apk/debug/app-debug.apk`.
-- **Release:** copy the APK to the desired name FIRST (`cp .../app-debug.apk /tmp/g2cc-evenhub-vN.apk`), then `gh release create "v0.0.1-<shortsha>" "/tmp/g2cc-evenhub-vN.apk" --target <FULLSHA> --title … --notes …`. **Two gotchas, both learned 6/04:** (1) `--target` MUST be the FULL 40-char sha — a short sha is rejected with `target_commitish is invalid`; (2) the `path#label` syntax sets only the asset's DISPLAY LABEL, **not** its download filename — the download URL always uses the actual uploaded filename, so **rename the FILE** (don't rely on `#`, or the link 404s). gh authed as `amarzello`, remote `expectbugs/G2CC` (public). Adam installs via phone browser → the asset download URL `…/releases/download/<tag>/<filename>`. **Put the APK link LAST** in your reply (memory `terminal-scroll-links-last`).
-- **Server:** Node on `:7300`; tails app diag into `/tmp/g2cc-server.log`.
+This monolith needs segmenting into specific modular functions:
+- **G2 display renderer** — a dedicated module that owns the display encoding ENTIRELY
+  (compose UI → gray4 bitmap → image/partial-region BLE commands), with its own documentation
+  of the wire format we decode from the captures. This is the centerpiece of the next phase.
+- **Networking** — extract the WebSocket/connection/reconnect/endpoint code into its own module
+  (today it's tangled into `G2Pipeline.kt` + `ConnectionManager.kt`).
+- Keep BLE, audio, STT, dispatch as separate clean modules. The current `G2Pipeline.kt` is a
+  ~1700-line god-object that should be decomposed.
+
+## What works — detail (so you don't re-investigate)
+
+- **BT mic:** `MicCapture.kt` source priority USB receiver → **`DjiBluetooth` (SCO, 16k mono)**
+  → phone mic. The DJI USB receiver bricked (hot white screen, RMA'd) so BT is the live path.
+  Server routes 16k/1ch/int16 through the legacy mono STT path. `MODIFY_AUDIO_SETTINGS` added.
+- **Warm STT:** `audio/pipeline/parakeet_daemon.py` (persistent, loads model once, stdin/stdout
+  framed by `___G2CC_RESULT_BEGIN/END___` sentinels) + `ParakeetDaemon` class in `server/src/stt.ts`
+  (serialized, respawns on crash, no timeouts) + `warmParakeet()` called at server start in
+  `index.ts`. Verified COLD 10.7 s → WARM 0.03 s. **Live on the running server.**
+- **Pagination:** the directory picker pages at `DIR_PAGE_SIZE=12` (the 83-dir list was ~6
+  packets, past the proven 4-packet envelope, and hung the HUD). `PAGE_CHAR_TARGET=500` keeps CC
+  output inside the envelope too. (All of this is moot once pure-image lands, but it's why those
+  constants exist.)
+
+## Build / release / deploy / capture mechanics
+
+- **Build:** `JAVA_HOME=/opt/openjdk-bin-17 ANDROID_HOME=/opt/android-sdk /home/user/G2CC/android/gradlew -p /home/user/G2CC/android testDebugUnitTest assembleDebug` (cwd resets between Bash calls — always `-p`). 134 unit tests, keep green. APK: `android/app/build/outputs/apk/debug/app-debug.apk`.
+- **Server build:** `npm run build` (workspaces: shared + server). TS, no emit errors tolerated.
+- **Server run:** plain detached `node server/dist/index.js` (cwd `/home/user/G2CC`), stdout/stderr
+  → `/tmp/g2cc-server.log` (append). Restart pattern: find pid via `ss -ltnp | grep :7300`, kill,
+  relaunch `setsid nohup node server/dist/index.js >> /tmp/g2cc-server.log 2>&1 < /dev/null &`,
+  wait `/health`. On start it warms Parakeet (~10 s; logs `Parakeet daemon warm (… ms)`).
+- **Release:** copy the APK to a descriptive name FIRST (`cp …/app-debug.apk /tmp/g2cc-<name>.apk`),
+  then `gh release create "v0.0.1-<shortsha>" "/tmp/g2cc-<name>.apk" --target <FULL40charSHA> --title … --notes …`.
+  **Two gotchas (learned 6/04):** `--target` MUST be the FULL 40-char sha (short sha → `target_commitish is invalid`);
+  the `path#label` syntax sets only the asset's DISPLAY label, NOT its download filename, so **rename the FILE**
+  or the link 404s. Verify the URL resolves (`curl -sIL …` → 302→200). gh authed `amarzello`, remote
+  `expectbugs/G2CC` (public). **Put the APK link LAST** in replies (memory `terminal-scroll-links-last`).
+- **Diag:** `/tmp/g2cc-server.log` — client diag (`[client-diag] [<runId> T+Ns] …`) streamed over the WS
+  + server `[ws]`/`[stt]` lines. The single most useful debugging asset. READ IT.
+- **App connect link:** server `/setup` page (unauthenticated) renders the paste URL
+  `http://<addr>:7300/?token=<TOKEN>#token=<TOKEN>` + QR; the app's SetupActivity parses `?token=`/`#token=`.
+  Auth token lives in `~/.g2cc/config.json` (do NOT print it; point Adam at `/setup`). Adam reaches the
+  server from the factory over Tailscale (`100.107.139.121`), LAN `192.168.50.242`.
+- **Captures:** Android bug report (contains `btsnoop_hci.log`) → email → `mbsync -a` → `~/Mail`, or
+  `/tmp/g2cc-btsnoop*/`. Parse with `scripts/btsnoop_parse.py <btsnoop_hci.log>`.
+
+## Dead paths / facts / lessons — don't re-investigate
+
+- **The EvenHub widget approach is being superseded by pure-image**, but the working primitive
+  (cold-launch + `f1=12` keepalive + `e0-01` input) is still the vehicle that gets us a live
+  session — pure-image rendering rides INTO that same hijacked session.
+- **`main` + `menu-list` on one screen does not paint** (leading hypothesis; pure-image moots it).
+- **`f1=9` pops the native exit menu — only `f1=12` keepalives.** Session death = glasses revert to
+  native UI (`01-01` magic-`0x12345678` burst), NOT a BLE drop.
+- **Teleprompter (`0x06-20`) eats ring inputs**; News (`0x01-20`) is RULED OUT (a sub-feature, not a
+  takeover). Both removed/escape-hatch only.
+- **Don't guess the wire format.** Read captures / `PROTOCOL_NOTES`. Don't claim a *display* change
+  works from logs — only Adam's eyes verify paint (this session got burned twice).
+
+## Pending / queued
+
+- **DJI machine-noise baseline recorder** — Adam asked for a main-menu option to record his factory
+  machine noise (via the BT mic) to establish a noise-cancellation baseline for STT. Deferred this
+  session to avoid bundling into a fragile batch. Needs: a menu item + a recording flow marked as
+  noise-capture (a `purpose` field on `audio_start`) + a server handler to save the WAV (and later
+  learn a profile). Note the CLAUDE.md audio rules: profile must be learned with the same mic/codec
+  as live capture (the BT-SCO 16 kHz path), and the OS applies its own NS/AGC on the SCO path.
 
 ## How Adam works / critical rules
 
-- Adam SSHes from his phone at a factory; **he runs every hardware test, you never touch the phone**. Sharp, calls out lazy reasoning, wants data not guesses.
-- **Mr. Awesome canary** (global `~/.claude/CLAUDE.md`): if you stop calling him Mr. Awesome in a long session, context is truncating — tell him.
-- **Ten Explanations rule** (global): on ANY hiccup, generate ≥10 distinct explanations fitting ALL the data before narrowing.
-- **Three absolute rules:** no timeouts (HB/inter-packet pacing is an annotated exception), no silent failures (surface to the diag stream, not just logcat), no truncation (HUD scrolls).
-- **Verify, don't guess the wire format.** **Commit/push only when asked.** Don't touch `/home/user/g2code/` or `/home/user/g2aria/`. Gentoo + OpenRC + Portage, SSH on port 80, venv-only Python.
+- Adam **SSHes from his phone at a factory**; he runs EVERY hardware test, you never touch the phone.
+  Sharp, fast, calls out lazy reasoning and overpromising. Wants data, not guesses. **He nearly went
+  back to g2code this session** out of frustration — the pivot is the recovery. Be honest, be humble,
+  verify before claiming, and never oversell a display fix.
+- **Ten Explanations rule** (global): on ANY hiccup, generate ≥10 distinct explanations fitting ALL
+  the data before narrowing. This session, jumping to conclusions (the "no speech detected" assumption,
+  the menu-header theory) cost real trust.
+- **Three absolute rules:** no timeouts (HB/inter-packet pacing is an annotated exception), no silent
+  failures (surface to the diag stream, not just logcat — a fractional-double mtime silently dropping
+  a message wasted a whole cycle before the loudness was added), no truncation.
+- **Mr. Awesome canary** (global `~/.claude/CLAUDE.md`): if you stop calling him Mr. Awesome in a long
+  session, context is truncating — tell him.
+- **Commit/push only when asked.** Don't touch `/home/user/g2code/` or `/home/user/g2aria/` (working
+  escape hatches; g2code is now also our reference for the Even Hub rendering protocol — read/BTSnoop,
+  don't modify). Gentoo + OpenRC + Portage, SSH on port 80, venv-only Python.
 
-## Recommended next steps
+## Key files
 
-**Audio path changed 2026-06-04 (`v0.0.1-f027423`):** the DJI *receiver* (the USB dongle) bricked on first power-on (hot all-white screen — RMA'd), so the app now also captures the DJI *transmitter* straight over Bluetooth (HFP/SCO, 16k mono, `MicCapture.Source.DjiBluetooth`). The USB 48k path stays the top-priority source for when a replacement receiver arrives. First real audio test on ANY path is still pending — over BT, confirm `src=dji-bt` in `/tmp/g2cc-server.log` and judge whether the OS-forced NS/AGC on the SCO comms path is "good enough" vs the dongle's clean 48 kHz.
+- **Decoder:** `scripts/btsnoop_parse.py` (extend for images + `0x6402`).
+- **Display (current, widget-based — to be superseded by the renderer):** `android/.../ble/EvenHub.kt`
+  (e0-20 encoder), `android/.../hud/EvenHud.kt` (render orchestration), `android/.../hud/RootMenu.kt`
+  (menu model). Byte-tested by `ble/EvenHubTest.kt`.
+- **Input:** `android/.../ble/EventParser.kt` (`e0-01` selection + gestures — to be fully decoded from
+  the gesture captures).
+- **Integration (the god-object to decompose):** `android/.../G2Pipeline.kt`.
+- **Networking (to extract):** `android/.../net/ConnectionManager.kt`, `EndpointFetcher.kt`, `WsProtocol.kt`.
+- **Audio:** `android/.../audio/MicCapture.kt` (incl. `startBluetoothSco`), `AudioStreamer.kt`.
+- **Warm STT:** `audio/pipeline/parakeet_daemon.py`, `server/src/stt.ts` (`ParakeetDaemon`, `warmParakeet`).
+- **Server:** `server/src/{index.ts,ws-handler.ts,dispatch.ts,cc-session.ts,directory-picker.ts,stt.ts}`,
+  `shared/src/{protocol.ts,constants.ts}`.
+- **Protocol reference:** `docs/PROTOCOL_NOTES.md`; i-soxi clone `/home/user/G2 Custom/even-g2-protocol/`
+  (`proto/g2_protocol.proto`, `docs/ble-uuids.md`, `docs/teleprompter.md`). Even Hub SDK types:
+  `/home/user/g2code/node_modules/@evenrealities/even_hub_sdk/dist/index.d.ts`.
 
-1. **Hardware-validate the EvenHub build** (the checklist above) — THE gate to all-day use. Read `/tmp/g2cc-server.log`.
-2. **Fix display-blank-on-idle** (deferred to an at-work session) — critical for voice-only control.
-3. **DJI noise profile capture** at the machine — `audio/profiles/machine.npz` is still a phone-recording prototype; re-record with the DJI TX2.
+---
 
-Welcome aboard. The session-persistence wall is down, the proven primitive is the production default, and the tree is review-hardened. The one thing between here and all-day use is the first real-glasses pass on this build.
+Welcome aboard. The hard infrastructure (app-initiated session, BT mic, sub-second STT, the CC
+loop, the diagnostics) is real and working. The display layer is the open problem, and the plan is
+to stop fighting the firmware's widget model and own the pixels ourselves — pending the one thing
+the captures will tell us: whether the BLE link is fast enough to do it interactively. Decode first,
+build second. Don't guess the wire format, and don't tell Adam a screen renders until he's looking at it.
