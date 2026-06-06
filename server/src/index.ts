@@ -13,7 +13,7 @@
 
 import Fastify from 'fastify'
 import websocket from '@fastify/websocket'
-import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { appendFileSync, createReadStream, existsSync } from 'node:fs'
 import { loadConfig } from './config.js'
 import { startDiscovery, stopDiscovery } from './discovery.js'
 import { handleConnection, setWatchdog } from './ws-handler.js'
@@ -99,11 +99,12 @@ server.get('/apk', async (req, reply) => {
     reply.code(404).send({ error: 'harness APK not present on server' })
     return
   }
-  const apk = readFileSync(APK_PATH)
+  // Stream the ~17 MB APK rather than readFileSync, which blocked the single-threaded
+  // event loop for the entire read on every download. Fastify pipes the stream.
   reply
     .type('application/vnd.android.package-archive')
     .header('Content-Disposition', 'attachment; filename="g2cc-harness.apk"')
-    .send(apk)
+    .send(createReadStream(APK_PATH))
 })
 
 // WebSocket route.
@@ -117,7 +118,7 @@ try {
   await server.listen({ port: config.port, host: config.host })
   console.log(`[g2cc-server] v${VERSION}`)
   console.log(`[g2cc-server] Listening on ${config.host}:${config.port}`)
-  console.log(`[g2cc-server] Auth token: ${config.authToken}`)
+  console.log('[g2cc-server] Auth token configured (distributed via the /setup QR — never logged)')
 
   const ifaces = getLocalInterfaces()
   if (ifaces.length > 0) {

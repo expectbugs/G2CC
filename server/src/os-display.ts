@@ -104,7 +104,11 @@ export function ensureRendered(): Promise<void> {
         cache.set(s.label, encodeGray4Bmp(s.w, s.h, raw.subarray(off, off + n)).toString('base64'))
         off += n
       }
-    })()
+    })().catch((e) => {
+      // Re-arm the memo on failure so a transient render_probe error doesn't brick the probe.
+      rendered = null
+      throw e
+    })
   }
   return rendered
 }

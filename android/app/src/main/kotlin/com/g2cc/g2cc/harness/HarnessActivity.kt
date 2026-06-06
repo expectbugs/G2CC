@@ -83,6 +83,9 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
     private var syncJob: Job? = null          // 80-00 sync_trigger keepalive (both lenses)
     private var watchdogJob: Job? = null      // glasses-response gap watchdog (silent-drop detector)
     private var renewalJob: Job? = null       // periodic re-takeover (the ~120s app-slot lifetime)
+    private var coldLaunchJob: Job? = null    // the cold-launch coroutine — tracked so teardown cancels it
+    private var testJob: Job? = null          // the Test Display sequence coroutine — tracked for teardown
+    private var sessionGen = 0                // bumped on teardown; a stale coroutine re-checks it before mutating
     private var recovering = false            // auto-recovery in progress (guard against re-trigger)
     private var wasServerMode = false         // re-enter server mode after a recovery
     @Volatile private var lastRecoverMs = 0L  // rate-limit auto-recoveries (no thrashing)
@@ -287,7 +290,8 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
         DiagLog.log("conn", "both lenses Ready — R link mtu=${r.lastMtu} phy=${r.lastPhy} conn=${r.lastConnParams}")
         val rend = G2Renderer(BleDisplaySink(r)) { msg -> DiagLog.log("render", msg) }
         renderer = rend
-        lifecycleScope.launch {
+        val gen = sessionGen
+        coldLaunchJob = lifecycleScope.launch {
             setStatus("Cold-launching Hub session…")
             val splash = scene {
                 text("clock", OsLayout.CLOCK_X, OsLayout.CLOCK_Y, OsLayout.CLOCK_WIDTH, OsLayout.CLOCK_HEIGHT,
@@ -296,6 +300,9 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
                     "G2 OS v${OsLayout.OS_VERSION}\n\nConnected.\n\nTap  Test  for the renderer test,\nor  Server  to let the PC drive\nthe display.", scroll = false, id = 2)
             }
             val ok = awaitLaunch(rend, splash)
+            // Bail if teardown ran while we were launching — don't re-arm jobs or set launched
+            // against a torn-down session (that stale completion used to leave recovery stalled).
+            if (gen != sessionGen) { DiagLog.log("conn", "cold-launch result ignored — session torn down"); return@launch }
             if (ok) {
                 DiagLog.log("conn", "cold-launch OK")
                 setStatus("Connected. Tap Test Display.")
@@ -311,8 +318,14 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
                     if (wasServerMode) { wasServerMode = false; onServerMode() }
                 }
             } else {
-                DiagLog.log("conn", "cold-launch FAILED")
-                setStatus("Cold-launch failed — see Diag log.")
+                // Reset so the dead-end can't permanently block recovery: launched stuck true →
+                // onConnect's `if (launched) return` blocked all future reconnects, and the watchdog
+                // never started. Clearing it re-enables Connect + lets the next BLE-ready retry.
+                DiagLog.log("conn", "cold-launch FAILED — resetting (launched=false) so a reconnect can retry")
+                launched = false
+                connecting = false
+                if (recovering) { recovering = false; wasServerMode = false }
+                setStatus("Cold-launch failed — see Diag log. Will retry on next reconnect.")
             }
             updateButtons()
         }
@@ -458,11 +471,11 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
     private fun onTest() {
         if (!launched) return
         testBtn.isEnabled = false
-        lifecycleScope.launch {
+        testJob = lifecycleScope.launch {
             DiagLog.log("test", "═══ Test Display sequence START ═══")
             try {
                 DisplayTestSequence.run(this@HarnessActivity)
-                setStatus("Tests complete. Tap Test Display to repeat.")
+                if (launched) setStatus("Tests complete. Tap Test Display to repeat.")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e   // never swallow structured-concurrency cancellation
             } catch (e: Exception) {
@@ -470,7 +483,7 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
                 setStatus("Test error: ${e.message}")
             }
             DiagLog.log("test", "═══ Test Display sequence END ═══")
-            if (launched) testBtn.isEnabled = true
+            updateButtons()   // re-enable per current state (honors serverMode/launched) — not unconditional
         }
     }
 
@@ -605,6 +618,9 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
         syncJob?.cancel(); syncJob = null
         watchdogJob?.cancel(); watchdogJob = null
         renewalJob?.cancel(); renewalJob = null
+        coldLaunchJob?.cancel(); coldLaunchJob = null
+        testJob?.cancel(); testJob = null
+        sessionGen++   // invalidate any in-flight cold-launch/test coroutine that completes after this
         stateJobs.forEach { it.cancel() }; stateJobs.clear()
         connection?.shutdown(); connection = null
         serverMode = false

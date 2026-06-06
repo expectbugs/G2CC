@@ -133,7 +133,9 @@ export class CCSession extends EventEmitter {
 
     if (this.config.sessionId) args.push('--resume', this.config.sessionId)
     if (this.config.sessionName) args.push('--name', this.config.sessionName)
-    if (this.config.systemPrompt) args.push('--system-prompt', this.config.systemPrompt)
+    // APPEND (not replace) — keeps CC's built-in tool/environment guidance; matches the
+    // config docstring "appended to the default". Verified vs `claude --help` 2026-06-06.
+    if (this.config.systemPrompt) args.push('--append-system-prompt', this.config.systemPrompt)
 
     // [V] Env vars verified from ARIA session_pool.py:122-124 + g2code/cc-session.ts.
     // CLAUDE_CODE_EFFORT_LEVEL=max kept as redundancy with the CLI flag (CLI authoritative).
@@ -159,15 +161,24 @@ export class CCSession extends EventEmitter {
     const rl = createInterface({ input: this.proc.stdout!, crlfDelay: Infinity })
     rl.on('line', (line: string) => {
       if (!line.trim()) return
+      let data: any
       try {
-        const data = JSON.parse(line)
-        this._recentEvents.push(`${data.type}${data.subtype ? '/' + data.subtype : ''}`)
-        if (this._recentEvents.length > 50) this._recentEvents.shift()
-        this.handleStreamEvent(data)
+        data = JSON.parse(line)
       } catch {
         // Deliberate: stream-json emits occasional non-JSON lines (stderr leakage,
         // progress messages). ARIA verified at session_pool.py:274-275. No log —
         // would spam at startup before CC's first valid JSON line.
+        return
+      }
+      this._recentEvents.push(`${data.type}${data.subtype ? '/' + data.subtype : ''}`)
+      if (this._recentEvents.length > 50) this._recentEvents.shift()
+      // LOUD-AND-PROUD: a listener throwing (e.g. turn_complete → persistSessionMeta →
+      // writeFileSync on a full/unwritable disk, which EventEmitter.emit re-throws) must NOT
+      // be silently swallowed — that leaves the HUD stuck on "processing". Log it; keep streaming.
+      try {
+        this.handleStreamEvent(data)
+      } catch (e) {
+        console.error('[cc-session] handleStreamEvent threw:', e)
       }
     })
 

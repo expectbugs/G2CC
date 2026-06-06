@@ -36,6 +36,14 @@ class G2Renderer(
     private var token = 1
     private var current: Scene? = null
 
+    // Serialize full render ops so two ops' multi-message AA writes can't interleave on the BLE
+    // queue (the clock/renewal-vs-server-render wedge — the conflated server channel only covers
+    // server-vs-server). The single-packet keepalive heartbeat writes OUTSIDE this path and still
+    // interleaves between chunks by design.
+    private data class SendJob(val ops: List<List<ByteArray>>, val label: String, val onComplete: (Boolean) -> Unit)
+    private val sendQueue = ArrayDeque<SendJob>()
+    private var sending = false
+
     /** The scene last handed to the glasses (after the in-flight write was issued). */
     val currentScene: Scene? get() = synchronized(lock) { current }
 
@@ -90,7 +98,7 @@ class G2Renderer(
             onComplete(false); return
         }
         synchronized(lock) { current = scene }
-        sendOps(ops, "launch", onComplete)
+        enqueueSend(ops, "launch", onComplete)
     }
 
     /**
@@ -137,7 +145,7 @@ class G2Renderer(
             onComplete(false); return
         }
         synchronized(lock) { current = scene }
-        sendOps(ops, "setScene(layout=${d.layoutChanged}, dirty=${d.changedRegions.size})", onComplete)
+        enqueueSend(ops, "setScene(layout=${d.layoutChanged}, dirty=${d.changedRegions.size})", onComplete)
     }
 
     /** Update a single text region by name (cheap f1=5). Loud-fails if the region is unknown
@@ -159,7 +167,7 @@ class G2Renderer(
         val existingScroll = (scene.content[name] as? Content.Text)?.scroll ?: false
         val c = Content.Text(text, existingScroll, scrollOffset, contentHeight)
         synchronized(lock) { current = scene.withContent(name, c) }
-        sendOps(listOf(textOp(region, c)), "text:$name", onComplete)
+        enqueueSend(listOf(textOp(region, c)), "text:$name", onComplete)
     }
 
     /** Update a single image region by name from a pre-encoded 4bpp BMP (chunked f1=3). The
@@ -178,7 +186,7 @@ class G2Renderer(
             diag("setImage('$name'): ${e.message}"); onComplete(false); return
         }
         synchronized(lock) { current = scene.withContent(name, Content.Image(bmp)) }
-        sendOps(ops, "image:$name", onComplete)
+        enqueueSend(ops, "image:$name", onComplete)
     }
 
     /** A keepalive frame (f1=12) to hold the Hub session; mint one every ~4 s and write to R. */
@@ -245,8 +253,35 @@ class G2Renderer(
         // keepalive (and the next chunk's ack) slot into, matching the native ~0.3 s/chunk cadence.
         for (k in msg.indices) delays += if (k == msg.size - 1) INTER_MESSAGE_PACE_MS else FRAGMENT_PACE_MS
         sink.write(msg, delays, "$label#${i + 1}/${ops.size}") { wok ->
-            if (!wok) diag("render $label#${i + 1}: WRITE FAILED")
-            sendMessage(ops, i + 1, label, ok && wok, onComplete)
+            if (!wok) {
+                // Abort on a write failure rather than pushing the remaining chunks into a
+                // possibly-dying session (coordinated with the queueWrites BLE-1 fix).
+                diag("render $label#${i + 1}: WRITE FAILED — aborting ${ops.size - i - 1} remaining message(s)")
+                onComplete(false)
+                return@write
+            }
+            sendMessage(ops, i + 1, label, ok, onComplete)
+        }
+    }
+
+    /** Serialize full render ops: only one op's messages sit on the BLE queue at a time, so a
+     *  clock tick / renewal / server render can't interleave its AA writes into another op's. */
+    private fun enqueueSend(ops: List<List<ByteArray>>, label: String, onComplete: (Boolean) -> Unit) {
+        synchronized(lock) {
+            sendQueue.addLast(SendJob(ops, label, onComplete))
+            if (sending) return
+            sending = true
+        }
+        pumpNext()
+    }
+
+    private fun pumpNext() {
+        val job = synchronized(lock) {
+            if (sendQueue.isEmpty()) { sending = false; null } else sendQueue.removeFirst()
+        } ?: return
+        sendOps(job.ops, job.label) { ok ->
+            job.onComplete(ok)
+            pumpNext()
         }
     }
 

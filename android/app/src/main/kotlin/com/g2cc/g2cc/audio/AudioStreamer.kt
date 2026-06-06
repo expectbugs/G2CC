@@ -30,10 +30,16 @@ class AudioStreamer(
     var isStreaming: Boolean = false
         private set
 
+    // Did we actually send audio_start? A synchronous capture failure fires BEFORE Started, so
+    // audio_end must be gated on this to keep the server's start→end invariant. @Volatile: set on
+    // the MicCapture callback thread, read under the streamer lock.
+    @Volatile private var startSent = false
+
     fun start() {
         synchronized(this) {
             if (isStreaming) return
             isStreaming = true
+            startSent = false
             // Bug-fix-pass-2 #8: defer audio_start until MicCapture reports the
             // actual format. The phone-mic fallback path is 16 kHz / 1 ch / int16
             // (server's existing pipeline handles directly). The DJI USB path is
@@ -63,6 +69,7 @@ class AudioStreamer(
                                 source = sourceName,
                             ),
                         )
+                        startSent = true
                     }
                     is MicCapture.Event.Frame -> {
                         // Hold the streamer lock around the isStreaming check + sendBinary
@@ -82,8 +89,15 @@ class AudioStreamer(
                         // AudioEnd messages (server-side protocol violation).
                         synchronized(this@AudioStreamer) {
                             if (isStreaming) {
-                                connection.send(ClientMessage.AudioEnd)
+                                // Only send audio_end if audio_start actually went out. The three
+                                // synchronous failure paths (no RECORD_AUDIO, no source,
+                                // startRecording() failed) fire BEFORE Started, so a bare audio_end
+                                // here breaks the server's start→end invariant ("audio_end without
+                                // prior audio_start"). Real reason is logged above (Phase 8: forward
+                                // it as a structured wire message).
+                                if (startSent) connection.send(ClientMessage.AudioEnd)
                                 isStreaming = false
+                                startSent = false
                                 mic.stop()
                             }
                         }
@@ -101,7 +115,8 @@ class AudioStreamer(
             if (!isStreaming) return
             isStreaming = false
             mic.stop()
-            connection.send(ClientMessage.AudioEnd)
+            if (startSent) connection.send(ClientMessage.AudioEnd)   // don't send a bogus end if start never went out
+            startSent = false
         }
     }
 

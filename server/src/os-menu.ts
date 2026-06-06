@@ -79,7 +79,13 @@ export function ensureMenuRendered(): Promise<void> {
           off += tileBytes
         }
       }
-    })()
+    })().catch((e) => {
+      // Re-arm the memo on failure: a transient render_menu error (Python non-zero exit,
+      // maxBuffer exceeded, byte-count assertion) must NOT permanently brick the OS screen —
+      // the next os_attach retries instead of replaying the cached rejection forever.
+      rendered = null
+      throw e
+    })
   }
   return rendered
 }

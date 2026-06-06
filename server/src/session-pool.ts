@@ -170,6 +170,7 @@ export class SessionPool extends EventEmitter {
         console.warn(`[pool] evicting dead pool entry ${entry.id} for ${projectPath} (crash-loop or kill); creating fresh`)
         this.sessions.delete(entry.id)
         if (this.activeId === entry.id) this.activeId = null
+        this.emit('session_evicted', entry.id)   // let the ws-handler unregister it from the Watchdog (avoid a zombie ref)
         break
       }
       this.activeId = entry.id

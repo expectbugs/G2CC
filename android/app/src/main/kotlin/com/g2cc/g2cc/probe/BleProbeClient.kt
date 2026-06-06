@@ -158,7 +158,7 @@ class BleProbeClient(
             val hasIndicate = (props and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
             if (hasNotify || hasIndicate) {
                 setNotificationCallback(char).with { _, data ->
-                    val raw = data.value ?: return@with
+                    val raw = data.value ?: run { Log.w(TAG, "[$side] null notify value on $uuid — dropped"); return@with }
                     val event = RawNotify(uuid, raw, System.currentTimeMillis())
                     if (!_notifies.tryEmit(event)) {
                         Log.w(TAG, "[$side] notify flow overflow — dropped ${raw.size}B from $uuid")

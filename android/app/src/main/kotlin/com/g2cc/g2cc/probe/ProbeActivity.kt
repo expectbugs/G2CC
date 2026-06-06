@@ -805,7 +805,7 @@ class ProbeActivity : ComponentActivity() {
         } ?: return
         val frame = Teleprompter.buildSyncTrigger(hbSeq, hbMsgId)
         hbSeq = (hbSeq + 1) and 0xFF
-        hbMsgId = (hbMsgId + 1) and 0x7FFF
+        hbMsgId = if (hbMsgId >= 0x7F) 0x60 else hbMsgId + 1   // 1-byte: >0x7F varint-encodes as 2 bytes → corrupts the keepalive msgId (same class as the render msgId kill)
         ble.sendToChar(G2Constants.CHAR_WRITE, frame, "hb:$side") { ok, detail ->
             if (!ok) log("[$side] *** hb sync_trigger WRITE FAILED: $detail ***")
         }

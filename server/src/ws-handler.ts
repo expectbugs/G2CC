@@ -42,6 +42,10 @@ import { ChannelRouter } from './channel-router.js'
 import { probeScene, gTextScene, gImageScene, ensureRendered, isRate, testKind, testLabel, errorScene } from './os-display.js'
 import { menuScene, ensureMenuRendered, menuItemLabel, MENU_ITEM_COUNT } from './os-menu.js'
 
+// Hard ceiling on a single in-flight audio buffer (a resource guard, NOT an I/O timeout — allowed):
+// ~6.5 min of 48 kHz/2ch/float32 (~384 KB/s). Bounds memory if audio_end never arrives.
+const MAX_AUDIO_BYTES = 150 * 1024 * 1024
+
 let watchdog: Watchdog | null = null
 
 export function setWatchdog(w: Watchdog): void { watchdog = w }
@@ -52,6 +56,8 @@ export interface WSClient {
   authTimer: ReturnType<typeof setTimeout> | null
   audioChunks: Buffer[]
   collectingAudio: boolean
+  /** Running byte total of the in-flight audio buffer — bounds memory if audio_end never arrives. */
+  audioBytes: number
   // In-flight STT pipeline counter. Incremented when audio_end fires AND we
   // actually launch handleAudio with non-empty audio; decremented in the
   // matching .finally. Blocks audio_start while ANY transcription is still
@@ -139,6 +145,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     authTimer: null,
     audioChunks: [],
     collectingAudio: false,
+    audioBytes: 0,
     sttInFlightCount: 0,
     pool,
     selectedTargetId: 'cc',
@@ -170,6 +177,10 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
       details: alert.details,
     })
   })
+
+  // When the pool internally evicts a dead (crash-looped) entry in getOrCreateByDirectory,
+  // unregister it from the Watchdog so it doesn't keep a zombie reference to the dead session.
+  pool.on('session_evicted', (id: string) => { watchdog?.unregister(id) })
 
   // L4: surface watchdog crash-loop give-ups to THIS client. The Watchdog is a
   // single global instance but pools are per-connection, so each client filters
@@ -204,7 +215,20 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     if (isBinary) {
       if (!client.authenticated) return
       if (client.collectingAudio) {
-        client.audioChunks.push(Buffer.from(raw as Buffer))
+        const chunk = Buffer.from(raw as Buffer)
+        client.audioBytes += chunk.length
+        if (client.audioBytes > MAX_AUDIO_BYTES) {
+          // Resource guard: a frozen-stop phone, a dropped audio_end, or a malicious authed
+          // peer must not OOM the single-threaded server. Loud-fail + discard.
+          console.warn(`[ws] audio buffer hit ${client.audioBytes}B without audio_end — discarding`)
+          client.collectingAudio = false
+          client.audioChunks = []
+          client.audioBytes = 0
+          client.audioFormat = null
+          sendMsg(client, { type: 'stt_error', error: `audio stream exceeded ${MAX_AUDIO_BYTES} bytes without audio_end; discarded` })
+        } else {
+          client.audioChunks.push(chunk)
+        }
       } else {
         // Loud-fail per LOUD AND PROUD rule: a binary frame outside the
         // audio_start/audio_end window indicates a misbehaving client or
@@ -411,6 +435,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         break
       }
       client.audioChunks = []
+      client.audioBytes = 0
       client.collectingAudio = true
       client.audioFormat = {
         sampleRate: sr,
@@ -436,6 +461,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       const pcmBuffer = Buffer.concat(client.audioChunks)
       const format = client.audioFormat ?? { sampleRate: 16_000, channels: 1, encoding: 'int16' as const }
       client.audioChunks = []
+      client.audioBytes = 0
       client.audioFormat = null
       // Counter-based in-flight tracking (R2-CRITICAL): the handler increments
       // on entry and the .finally decrements. Only callers that actually go
@@ -775,14 +801,15 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       }
       if (client.osScreen === 'menu') {
         if (msg.event === 'focus') {
-          // Antenna scroll → move the selection. f3 (msg.value) is the scroll
-          // DIRECTION (EventParser HubFocus f3): 2 = down/next, 1 = up/prev.
-          // If up/down feel swapped on glass, flip MENU_DOWN_F3 to 1.
-          const MENU_DOWN_F3 = 2
+          // Antenna scroll → move the selection. f3 (msg.value) is the scroll DIRECTION,
+          // but EventParser flags f3 semantics as "direction OR scroll-speed, UNCONFIRMED",
+          // so treat ONLY the two known values as up/down and ignore anything else (incl. the
+          // f3=-1 no-direction default) rather than silently scrolling the wrong way. If up/down
+          // feel swapped on glass, swap the 1/2 below.
           const prev = client.osMenuSel
-          client.osMenuSel = msg.value === MENU_DOWN_F3
-            ? Math.min(MENU_ITEM_COUNT - 1, prev + 1)
-            : Math.max(0, prev - 1)
+          if (msg.value === 2) client.osMenuSel = Math.min(MENU_ITEM_COUNT - 1, prev + 1)   // down / next
+          else if (msg.value === 1) client.osMenuSel = Math.max(0, prev - 1)                // up / prev
+          else { console.warn(`[ws] menu focus unknown f3=${msg.value}; not moving`); break }
           if (client.osMenuSel !== prev) {
             try {
               sendMsg(client, { type: 'render', scene: menuScene(client.osMenuSel) })

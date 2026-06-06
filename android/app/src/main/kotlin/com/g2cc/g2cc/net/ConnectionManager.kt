@@ -93,10 +93,15 @@ class ConnectionManager(
     // atomicity needed since the value is a monotonically increasing timestamp
     // and a single relaxed read+compare is fine.
     @Volatile private var lastMessageReceivedAt = System.currentTimeMillis()
-    private var lastAuthedAt: Long? = null
-    private var offlineSince: Long? = null
+    // @Volatile: written on OkHttp dispatcher threads (onMessage AuthResult / onClosed / onFailure),
+    // read+written by the Dispatchers.IO liveness watchdog. Restores the happens-before edge so the
+    // defence-#5 reset (reloadAttempted=false on re-auth) is visible and last-resort recovery can't
+    // stay permanently disarmed. (Each site is a single read or single write; the only test-then-set,
+    // reloadAttempted, is single-threaded within the watchdog coroutine.)
+    @Volatile private var lastAuthedAt: Long? = null
+    @Volatile private var offlineSince: Long? = null
     private var attemptCount = 0
-    private var reloadAttempted = false
+    @Volatile private var reloadAttempted = false
 
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected.asStateFlow()
@@ -132,6 +137,11 @@ class ConnectionManager(
         // directly — OkHttp's WebSocket doesn't expose readyState. Use our
         // `_connected` flag, which flips true on auth_result success.)
         if (ws != null && _connected.value) return
+        // Defensive: close a superseded, not-yet-authed socket (reconnectJob vs forceReconnect race —
+        // Job.cancel() can't abort connect()'s non-suspending body). The wsGen bump already neutralizes
+        // its listener; closing prevents a transient half-open socket leak. Empty catch is OK here:
+        // best-effort close of an already-superseded socket whose listener is dead.
+        ws?.let { old -> try { old.close(4101, "superseded") } catch (_: Exception) {} }
         // 4th-pass-final review HIGH: read (endpoints, idx) pair inside the
         // same lock that gates setEndpoints/onClosed/onFailure rotations.
         // Without this lock, a concurrent setEndpoints could shrink the

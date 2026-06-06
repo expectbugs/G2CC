@@ -454,8 +454,11 @@ class G2BleClient(
                     packet,
                     BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
                 ).fail { _, status ->
+                    // BLE-1: do NOT flip _state to Error on a single WRITE_NO_RESPONSE failure — that
+                    // tore a HEALTHY session into a rescan storm on one bad write (same fix as
+                    // sendPacket). Report via onComplete(false); real link loss arrives through
+                    // ConnectionObserver.onDeviceDisconnected.
                     anyFailed = true
-                    _state.value = ConnectionState.Error(side, "$label: write status=$status")
                     Log.e(TAG, "[$side] $label write failed status=$status")
                 },
             )

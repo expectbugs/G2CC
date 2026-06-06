@@ -90,6 +90,7 @@ def records(path):
         assert hdr[:8] == b"btsnoop\0", "bad magic"
         ver, datalink = struct.unpack(">II", hdr[8:16])
         n = 0
+        truncated = 0
         while True:
             rh = f.read(24)
             if len(rh) < 24:
@@ -98,9 +99,19 @@ def records(path):
             data = f.read(incl_len)
             if len(data) < incl_len:
                 break
+            if orig_len != incl_len:
+                truncated += 1
             n += 1
             yield flags, ts, data
         sys.stderr.write(f"# version={ver} datalink={datalink} records={n}\n")
+        if truncated:
+            # LOUD-AND-PROUD: GMS can force a FILTERED snoop that strips payloads (orig_len !=
+            # incl_len). Decoding those as complete silently produces garbage wire analysis.
+            sys.stderr.write(
+                f"# WARNING: {truncated}/{n} records FILTERED/truncated (orig_len != incl_len) — "
+                "payloads INCOMPLETE. Re-capture with Dev Options HCI snoop=Enabled + BT off/on "
+                "(see memory btsnoop-capture-gotcha).\n"
+            )
 
 
 def mac_from_le(b6):
