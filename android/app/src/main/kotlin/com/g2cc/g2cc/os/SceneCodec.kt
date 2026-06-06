@@ -34,9 +34,16 @@ object SceneCodec {
         val content = HashMap<String, Content>()
 
         // App-owned clock first — always present, so every screen has a text region.
+        // The clock also doubles as the UNIVERSAL INPUT ANTENNA: make it scrollable
+        // (a focus target → ring scroll + tap) ONLY when the scene carries no other
+        // focusable (scrollable) region. So pure-image screens become navigable via
+        // the clock, while text/list screens keep their own region as the scroll
+        // target (no focus ambiguity). A zero-range single-line scrollable fires a
+        // focus boundary event on every notch (hardware-confirmed 2026-06-06).
+        val clockIsAntenna = wire.regions.none { it.kind == "text" && it.content?.scroll == true }
         val clock = OsLayout.clockRegion()
         regions += clock
-        content[clock.name] = Content.Text(clockText, scroll = false)
+        content[clock.name] = Content.Text(clockText, scroll = clockIsAntenna)
 
         for (wr in wire.regions) {
             require(wr.id != OsLayout.CLOCK_ID) {
@@ -65,7 +72,11 @@ object SceneCodec {
     private fun toContent(name: String, kind: RegionKind, c: SceneContent): Content = when (c.kind) {
         "text" -> {
             require(kind == RegionKind.TEXT) { "text content on non-text region '$name'" }
-            Content.Text(c.text ?: "", c.scroll ?: false)
+            // The antenna ("ant") doubles as the version indicator: its text is decorative
+            // (it's just a zero-range scroll target), so show the CLIENT APK version there so
+            // Adam can confirm on-glass that the right build installed.
+            val text = if (name == "ant") "G2 OS v${OsLayout.OS_VERSION}" else (c.text ?: "")
+            Content.Text(text, c.scroll ?: false)
         }
         "image" -> {
             require(kind == RegionKind.IMAGE) { "image content on non-image region '$name'" }

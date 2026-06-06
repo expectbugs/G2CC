@@ -39,7 +39,7 @@ import { markdownToPlaintext, formatToolUse } from './output-parser.js'
 import { listProjectDirectories, validateProjectPath } from './directory-picker.js'
 import { CCDispatcher, DISPATCH_TARGETS, type Dispatcher, getDispatchTarget } from './dispatch.js'
 import { ChannelRouter } from './channel-router.js'
-import { demoScene, nextSceneIndex, describeInput } from './os-display.js'
+import { probeScene, gTextScene, gImageScene, ensureRendered, isRate, testKind, testLabel, errorScene } from './os-display.js'
 
 let watchdog: Watchdog | null = null
 
@@ -81,12 +81,13 @@ export interface WSClient {
   /** Bug-fix-pass-2 #8: format the phone announced on audio_start. Drives
    *  the route taken in audio_end (handleAudio). */
   audioFormat: AudioFormat | null
-  /** Glasses-OS (Phase 1) — set true by os_attach. While true the server
-   *  drives the display via `render` and reacts to `input`. The legacy
-   *  dispatch-menu flow leaves these untouched. */
+  /** Glasses-OS capability probe — set by os_attach. osTest = current test index
+   *  (double-tap steps), osFFilled = filled containers in the F fill-test,
+   *  osGTimer = the G rate-test interval (cleared on test-change + ws-close). */
   osMode: boolean
-  osScene: number
-  osLastInput: string
+  osTest: number
+  osFFilled: number
+  osGTimer: ReturnType<typeof setInterval> | null
 }
 
 export interface AudioFormat {
@@ -100,6 +101,27 @@ export function sendMsg(client: WSClient, msg: ServerMessage): void {
   if (client.ws.readyState === 1) {
     client.ws.send(JSON.stringify(msg))
   }
+}
+
+// Glasses-OS probe — G (update-rate) tests push renders on a fixed interval
+// (text fast, image slower so the BLE queue doesn't back up). Auto-stops after
+// 40 frames; cleared on test-change + ws-close so no orphan timer.
+function clearGTimer(client: WSClient): void {
+  if (client.osGTimer) { clearInterval(client.osGTimer); client.osGTimer = null }
+}
+function startGTimer(client: WSClient, kind: 'rate-text' | 'rate-image'): void {
+  let counter = 0
+  const intervalMs = kind === 'rate-text' ? 250 : 600
+  client.osGTimer = setInterval(() => {
+    counter++
+    if (counter > 40) { clearGTimer(client); return }
+    try {
+      sendMsg(client, { type: 'render', scene: kind === 'rate-text' ? gTextScene(counter) : gImageScene(counter) })
+    } catch (e) {
+      console.error('[ws] G-timer render failed:', e instanceof Error ? e.message : String(e))
+      clearGTimer(client)
+    }
+  }, intervalMs)
 }
 
 export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
@@ -127,8 +149,9 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     router: new ChannelRouter(),
     audioFormat: null,
     osMode: false,
-    osScene: 0,
-    osLastInput: '(none)',
+    osTest: 0,
+    osFFilled: 0,
+    osGTimer: null,
   }
 
   pool.on('background_alert', (alert: { sessionId: string; alertType: string; details?: string }) => {
@@ -212,6 +235,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     if (client.streamTimer) clearTimeout(client.streamTimer)
     if (client.hbInterval) clearInterval(client.hbInterval)
     if (client.livenessInterval) clearInterval(client.livenessInterval)
+    clearGTimer(client) // Glasses-OS probe G-timer (rate test)
     // Drop the crash-loop listener registered for this client (else the global
     // Watchdog accumulates one dead closure per past connection).
     watchdog?.off('crash_loop', onCrashLoop)
@@ -710,28 +734,57 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'os_attach': {
-      // Glasses-OS opt-in (Phase 1). The server now owns the display for this
-      // client: it composes Scenes and reacts to input. Send the first scene.
+      // Glasses-OS capability probe. Render the first test; DOUBLE-TAP steps.
       client.lastAppActivityMs = Date.now()
       client.osMode = true
-      client.osScene = 0
-      client.osLastInput = '(none)'
-      sendMsg(client, { type: 'render', scene: demoScene(client.osScene, client.osLastInput) })
-      console.log('[ws] os_attach — glasses-OS mode ON; sent scene 0')
+      client.osTest = 0
+      client.osFFilled = 0
+      try {
+        await ensureRendered() // rasterize + cache all probe tiles once (~1s first time)
+        sendMsg(client, { type: 'render', scene: probeScene(0, 0) })
+        console.log(`[ws] os_attach — capability probe ON; ${testLabel(0)}`)
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err)
+        console.error('[ws] probe render failed:', m)
+        sendMsg(client, { type: 'render', scene: errorScene(m) }) // loud, visible — not a silent blank
+      }
       break
     }
 
     case 'input': {
       client.lastAppActivityMs = Date.now()
       if (!client.osMode) {
-        // Loud, not silent: input before os_attach is a client-side ordering bug.
         console.warn(`[ws] input '${msg.event}' received but client never sent os_attach — ignoring`)
         break
       }
-      client.osLastInput = describeInput(msg)
-      client.osScene = nextSceneIndex(client.osScene, msg)
-      sendMsg(client, { type: 'render', scene: demoScene(client.osScene, client.osLastInput) })
-      console.log(`[ws] input ${client.osLastInput} → scene ${((client.osScene % 3) + 3) % 3}`)
+      if (msg.event === 'hub_gesture' && msg.code === 3) {
+        // DOUBLE-TAP = next test (global gesture; works even when a test didn't paint).
+        clearGTimer(client)
+        client.osTest += 1
+        client.osFFilled = 0
+        const k = testKind(client.osTest)
+        try {
+          const scene = k === 'rate-text' ? gTextScene(0) : k === 'rate-image' ? gImageScene(0) : probeScene(client.osTest, 0)
+          sendMsg(client, { type: 'render', scene })
+        } catch (err) {
+          sendMsg(client, { type: 'render', scene: errorScene(err instanceof Error ? err.message : String(err)) })
+        }
+        if (isRate(client.osTest)) startGTimer(client, k as 'rate-text' | 'rate-image')
+        console.log(`[ws] → ${testLabel(client.osTest)}`)
+      } else if (msg.event === 'tap' && testKind(client.osTest) === 'fill') {
+        // F fill-test: each tap fills one more declared container (content-only update).
+        client.osFFilled = Math.min(9, client.osFFilled + 1)
+        try {
+          sendMsg(client, { type: 'render', scene: probeScene(client.osTest, client.osFFilled) })
+        } catch (err) {
+          console.error('[ws] fill render failed:', err instanceof Error ? err.message : String(err))
+        }
+        console.log(`[ws] F fill ${client.osFFilled}/9`)
+      } else {
+        // Log everything else (incl. focus on the antenna tests) without advancing.
+        const detail = msg.value !== undefined ? `(${msg.region ?? '?'}:${msg.value})` : msg.code !== undefined ? `(${msg.code})` : ''
+        console.log(`[ws] ${msg.event}${detail} on ${testLabel(client.osTest)}`)
+      }
       break
     }
 

@@ -61,6 +61,21 @@ class SceneCodecTest {
         assertEquals("12:34:56", (s.content[OsLayout.CLOCK_NAME] as Content.Text).text)
         // clock is the always-present mandatory text region
         assertTrue(s.textRegions().any { it.name == OsLayout.CLOCK_NAME })
+        // body here is non-scrollable, so the clock becomes the input antenna
+        assertEquals(true, (s.content[OsLayout.CLOCK_NAME] as Content.Text).scroll)
+    }
+
+    @Test
+    fun clockIsAntennaOnlyWhenNoOtherScrollable() {
+        // pure-image scene (no focusable region) → clock becomes the antenna (scroll=true)
+        val img = SceneRegion(20, "img", 0, OsLayout.CONTENT_Y, 40, 24, "image", SceneContent("image", bmpBase64 = b64(40, 24)))
+        val s1 = SceneCodec.toScene(WireScene(listOf(img)), "00:00:00")
+        assertEquals(true, (s1.content[OsLayout.CLOCK_NAME] as Content.Text).scroll)
+
+        // a scrollable body present → clock stays passive so the body is the scroll target
+        val body = SceneRegion(21, "body", 0, OsLayout.CONTENT_Y, 200, 80, "text", SceneContent("text", text = "x", scroll = true))
+        val s2 = SceneCodec.toScene(WireScene(listOf(body)), "00:00:00")
+        assertEquals(false, (s2.content[OsLayout.CLOCK_NAME] as Content.Text).scroll)
     }
 
     @Test

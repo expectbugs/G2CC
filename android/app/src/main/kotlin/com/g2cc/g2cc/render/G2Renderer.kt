@@ -17,9 +17,12 @@ fun interface DisplaySink {
  * path). Layout (region geometry) is pushed via f1=0/f1=7 only when it actually changes;
  * region content updates go via f1=5 (text, cheap) and f1=3 (image, chunked).
  *
- * Sequence / msgId / image-token counters live here and wrap exactly like the proven EvenHud
- * path (seq 0x10..0xFF, msgId 0x20..0xFFFF). No Android dependency — the [DisplaySink]
- * abstracts the BLE transport, so the orchestration is fully unit-tested with a fake sink.
+ * Sequence / msgId / image-token counters live here. ALL THREE ARE SINGLE BYTES that wrap at
+ * 0xFF (seq→0x10, token→1, msgId→0x00). msgId MUST stay 1 byte: native Chess wraps it 255→0
+ * mid-session and survives, but a >255 (2-byte varint) msgId silently kills the hijacked app
+ * slot — verified across 8 sessions each dying exactly at msgId==255 (Chess BTSnoop vs our
+ * diag, 2026-06-06; see memory g2-render-limits "ROOT CAUSE (CORRECTED)"). No Android
+ * dependency — the [DisplaySink] abstracts the BLE transport, so it's fully unit-tested.
  *
  * See docs/PROTOCOL_NOTES.md §"EvenHub display rendering".
  */
@@ -37,7 +40,7 @@ class G2Renderer(
     val currentScene: Scene? get() = synchronized(lock) { current }
 
     private fun nextSeq(): Int = synchronized(lock) { seq.also { seq = if (seq >= 0xFF) SEQ_START else seq + 1 } }
-    private fun nextMsgId(): Int = synchronized(lock) { msgId.also { msgId = if (msgId >= 0xFFFF) MSGID_START else msgId + 1 } }
+    private fun nextMsgId(): Int = synchronized(lock) { msgId.also { msgId = (msgId + 1) and 0xFF } }  // 1-byte wrap 0xFF→0x00 — a >255 msgId kills the slot (see class doc)
     private fun nextToken(): Int = synchronized(lock) { token.also { token = if (token >= 0xFF) 1 else token + 1 } }
 
     // ---------------------------------------------------------------- public API

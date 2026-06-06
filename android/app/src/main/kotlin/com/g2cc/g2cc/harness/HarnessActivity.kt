@@ -21,7 +21,10 @@ import com.g2cc.g2cc.ble.BleScanner
 import com.g2cc.g2cc.ble.ConnectionState
 import com.g2cc.g2cc.ble.EvenHub
 import com.g2cc.g2cc.ble.G2BleClient
+import com.g2cc.g2cc.ble.G2Constants
+import com.g2cc.g2cc.ble.G2Frame
 import com.g2cc.g2cc.ble.Side
+import com.g2cc.g2cc.ble.Varint
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.ConnectionManager
 import com.g2cc.g2cc.net.ServerMessage
@@ -73,6 +76,15 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
     private val stateJobs = mutableListOf<Job>()
     private var keepaliveJob: Job? = null
     private var clockJob: Job? = null
+    private var syncJob: Job? = null          // 80-00 sync_trigger keepalive (both lenses)
+    private var watchdogJob: Job? = null      // glasses-response gap watchdog (silent-drop detector)
+    private var renewalJob: Job? = null       // periodic re-takeover (the ~120s app-slot lifetime)
+    private var recovering = false            // auto-recovery in progress (guard against re-trigger)
+    private var wasServerMode = false         // re-enter server mode after a recovery
+    @Volatile private var lastRecoverMs = 0L  // rate-limit auto-recoveries (no thrashing)
+    @Volatile private var lastNotifyMs = 0L   // last notify (incl e0-00 ack) from R lens
+    private var syncSeq = 0x10
+    private var syncMsgId = 0x20
     private var launched = false
     private var connecting = false
 
@@ -103,10 +115,10 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
             DiagLog.log("ui", "Diag streaming ${if (c) "ON" else "OFF"}")
         }
         boundsCheck.setOnCheckedChangeListener { _, _ -> updateMirror(renderer?.currentScene) }
-        connectBtn.setOnClickListener { onConnect() }
-        testBtn.setOnClickListener { onTest() }
-        serverBtn.setOnClickListener { onServerMode() }
-        disconnectBtn.setOnClickListener { onDisconnect() }
+        connectBtn.setOnClickListener { DiagLog.log("btn", "Connect tapped"); onConnect() }
+        testBtn.setOnClickListener { DiagLog.log("btn", "Test tapped"); onTest() }
+        serverBtn.setOnClickListener { DiagLog.log("btn", "Server tapped"); onServerMode() }
+        disconnectBtn.setOnClickListener { DiagLog.log("btn", "Disconnect tapped (MANUAL)"); onDisconnect() }
         updateButtons()
         updateMirror(null)
     }
@@ -242,6 +254,7 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
         }
         stateJobs += lifecycleScope.launch {
             client.events.collect { ev ->
+                if (side == Side.Right) lastNotifyMs = System.currentTimeMillis()  // liveness for the watchdog
                 DiagLog.log("input", "$side $ev")
                 // Forward ring input to the PC when the server is driving the display.
                 // Input arrives on the R lens (EventParser service 0x01-01 / e0-01).
@@ -276,7 +289,7 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
                 text("clock", OsLayout.CLOCK_X, OsLayout.CLOCK_Y, OsLayout.CLOCK_WIDTH, OsLayout.CLOCK_HEIGHT,
                     nowClock(), scroll = false, id = OsLayout.CLOCK_ID)
                 text("main", 0, OsLayout.CONTENT_Y, Display.WIDTH, OsLayout.CONTENT_HEIGHT,
-                    "G2CC HARNESS\n\nConnected.\n\nTap  Test  for the renderer test,\nor  Server  to let the PC drive\nthe display.", scroll = false, id = 2)
+                    "G2 OS v${OsLayout.OS_VERSION}\n\nConnected.\n\nTap  Test  for the renderer test,\nor  Server  to let the PC drive\nthe display.", scroll = false, id = 2)
             }
             val ok = awaitLaunch(rend, splash)
             if (ok) {
@@ -284,7 +297,15 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
                 setStatus("Connected. Tap Test Display.")
                 startKeepalive()
                 startClock()
+                startSyncTrigger()
+                startWatchdog()
+                startRenewal()
                 updateMirror(rend.currentScene)
+                if (recovering) {
+                    recovering = false
+                    DiagLog.log("recover", "reconnect + cold-launch OK after silent drop")
+                    if (wasServerMode) { wasServerMode = false; onServerMode() }
+                }
             } else {
                 DiagLog.log("conn", "cold-launch FAILED")
                 setStatus("Cold-launch failed — see Diag log.")
@@ -302,6 +323,104 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
                 val rend = renderer ?: break
                 r.sendPacket(rend.keepaliveFrame(), "HB:f1=12") { ok ->
                     DiagLog.log("hb", "keepalive write=${if (ok) "OK" else "FAIL"}")
+                }
+            }
+        }
+    }
+
+    private fun nextSyncTrigger(): ByteArray {
+        // sync_trigger: service 0x80-00, type 14 — payload `08 0E 10 <msgId-varint> 6A 00`.
+        // Verbatim from the native Chess BTSnoop. This is a SESSION keepalive packet, NOT
+        // teleprompter display mode (06-20, the input-swallowing path we rejected). Inlined
+        // here so there's zero coupling to the teleprompter code.
+        val payload = byteArrayOf(0x08, 0x0E, 0x10) + Varint.encode(syncMsgId) + byteArrayOf(0x6A, 0x00)
+        val f = G2Frame.command(syncSeq, G2Constants.Services.AUTH_CONTROL, payload)
+        syncSeq = if (syncSeq >= 0xFF) 0x10 else syncSeq + 1
+        syncMsgId = (syncMsgId + 1) and 0xFF        // 1-byte wrap (same constraint as G2Renderer.nextMsgId)
+        return f
+    }
+
+    /** The session-extend keepalive we were MISSING: sync_trigger (service 80-00, type 14)
+     *  to BOTH lenses every ~15 s, staggered ~2 s — exactly as native Chess does (BTSnoop
+     *  /tmp/g2cc-btsnoop5). We previously sent only the e0-20 f1=12 (R lens); the glasses use
+     *  this 80-00 packet for their session-extend logic, so without it they reclaim our app. */
+    private fun startSyncTrigger() {
+        syncJob?.cancel()
+        syncJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(13000)
+                left?.sendPacket(nextSyncTrigger(), "SYNC:80-00:L") { ok -> DiagLog.log("sync", "L write=${if (ok) "OK" else "FAIL"}") }
+                delay(2000)                                  // L→R stagger ~2s (Chess pattern)
+                right?.sendPacket(nextSyncTrigger(), "SYNC:80-00:R") { ok -> DiagLog.log("sync", "R write=${if (ok) "OK" else "FAIL"}") }
+            }
+        }
+    }
+
+    /** Glasses-response watchdog. The glasses ack our writes (~1/s on e0-00). If those
+     *  responses STOP while we keep writing, the EvenHub app slot was likely SILENTLY dropped
+     *  (link stays up, no BLE event). Log it loudly with timing — this is the detector for the
+     *  silent app-drop (and the hook future auto-recovery will trigger on). */
+    private fun startWatchdog() {
+        watchdogJob?.cancel()
+        lastNotifyMs = System.currentTimeMillis()
+        watchdogJob = lifecycleScope.launch {
+            var lastWarn = 0L
+            var bad = 0
+            while (isActive) {
+                delay(1000)
+                val gap = System.currentTimeMillis() - lastNotifyMs
+                if (gap > 3000) {
+                    bad++
+                    if (System.currentTimeMillis() - lastWarn > 2000) {
+                        DiagLog.log("watch", "NO glasses response for ${gap}ms (bad=$bad) — possible SILENT app-drop")
+                        lastWarn = System.currentTimeMillis()
+                    }
+                    // Sustained (~12 s of no healthy acks) → auto-recover. A normal heavy-render
+                    // ack pause (~6 s) won't reach this; rate-limited to 1 per 30 s (no thrash).
+                    if (bad >= 12 && !recovering && System.currentTimeMillis() - lastRecoverMs > 30_000) {
+                        runOnUiThread { recoverSession() }
+                    }
+                } else {
+                    bad = 0
+                }
+            }
+        }
+    }
+
+    /** Auto-recovery. The silent app-drop leaves the BLE link "up" (nothing else notices) and
+     *  re-launching into the dead slot does nothing — only a FRESH BLE session revives it. So
+     *  force a full teardown + reconnect + cold-launch, then re-attach server mode. The
+     *  all-day-unattended backbone: heals regardless of the drop's (still-unconfirmed) root cause. */
+    private fun recoverSession() {
+        if (recovering) return
+        recovering = true
+        wasServerMode = serverMode
+        lastRecoverMs = System.currentTimeMillis()
+        DiagLog.log("recover", "SILENT DROP — auto-recovering: BLE reconnect + cold-launch${if (wasServerMode) " + re-attach server" else ""}")
+        setStatus("Auto-recovering (silent drop)…")
+        teardown()        // full BLE teardown (clears launched/serverMode, cancels jobs)
+        onConnect()       // re-scan + connect -> Ready -> maybeColdLaunch (clears `recovering`)
+    }
+
+    /** Session RENEWAL — the hijacked EvenHub app slot has a ~120 s lifetime (drops measured
+     *  ~110–134 s after cold-launch, independent of renders). Native Chess renews it by
+     *  re-running the f1=0 launch + re-pushing the current frame every ~113–118 s (BTSnoop
+     *  /tmp/g2cc-btsnoop5: launches at +0 / +118.5 / +231.8 s). We do the same at ~100 s
+     *  (margin under expiry). Re-paints the CURRENT scene, so it resumes exactly where it
+     *  left off. Empty prelude (just f1=0 + content), matching Chess's re-launch. */
+    private fun startRenewal() {
+        renewalJob?.cancel()
+        renewalJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(80_000)                                // ~80s, margin under the ~120s app-slot lifetime
+                val r = renderer ?: break
+                val scene = r.currentScene ?: continue
+                // FULL takeover: COLD_INIT prelude (hijack re-establishment) + f1=0 + content.
+                // The empty-prelude version did NOT reset the ~120s timer (measured 2026-06-06);
+                // re-running the full COLD_INIT is the actual "full takeover protocol".
+                DiagLog.log("renew", "re-takeover (COLD_INIT) — resubmit current frame (${scene.regions.size} regions)")
+                r.launch(DisplayProto.TOKEN_DOCULENS, scene, EvenHub.COLD_INIT) { ok ->
+                    DiagLog.log("renew", "re-takeover result=${if (ok) "OK" else "FAIL"}")
                 }
             }
         }
@@ -464,6 +583,9 @@ class HarnessActivity : AppCompatActivity(), TestHarness {
     private fun teardown() {
         keepaliveJob?.cancel(); keepaliveJob = null
         clockJob?.cancel(); clockJob = null
+        syncJob?.cancel(); syncJob = null
+        watchdogJob?.cancel(); watchdogJob = null
+        renewalJob?.cancel(); renewalJob = null
         stateJobs.forEach { it.cancel() }; stateJobs.clear()
         connection?.shutdown(); connection = null
         serverMode = false

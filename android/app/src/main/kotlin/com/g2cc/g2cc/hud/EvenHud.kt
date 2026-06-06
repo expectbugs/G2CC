@@ -34,7 +34,8 @@ class EvenHud(
     private val counterLock = Any()
     // Persistent monotonic counters (NOT reset per render) so overlapping renders
     // never collide on a seq/msgId. seq wraps within [0x10,0xFF] to stay clear of
-    // the auth seq range (0x00-0x0F); msgId wraps within [0x20,0xFFFF].
+    // the auth seq range (0x00-0x0F); msgId wraps within [0x20,0xFF] — a >255
+    // (2-byte varint) msgId silently kills the hijacked slot (see G2Renderer doc).
     private var seq: Int = 0x10
     private var msgId: Int = 0x20
 
@@ -43,7 +44,7 @@ class EvenHud(
     }
 
     private fun nextMsgId(): Int = synchronized(counterLock) {
-        val m = msgId; msgId = if (msgId >= 0xFFFF) 0x20 else msgId + 1; m
+        val m = msgId; msgId = if (msgId >= 0xFF) 0x20 else msgId + 1; m   // 1-byte: >255 msgId kills the slot
     }
 
     /** Phone-initiated COLD launch: display prelude → DocuLens launch (`f1=0`) →

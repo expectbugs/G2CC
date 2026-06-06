@@ -380,7 +380,19 @@ Wire format (matches existing `Teleprompter.buildSyncTrigger`):
 aa 21 [seq] 08 01 01 80 00 08 0e 10 [msg_id_varint] 6a 00 [crc-LE]
 ```
 
-**Counterintuitive lesson:** more keepalive traffic destabilized the session. Our prior approach (full 14-page re-render every 4-15s) was 50-300× more BLE wire time than the Even App and made things worse, not better. The firmware appears to interpret high-bandwidth writes as "interactive update in progress" and skips its normal session-extend logic.
+**⚠️ DISPUTED / UNVERIFIED (flagged 2026-06-06):** the claim below — "more keepalive traffic destabilized the session; the firmware skips session-extend during high-bandwidth writes" — was a **prior instance's guess from one disconnect, never verified.** Log forensics on the 2026-06-06 capability-probe session found **no evidence** for it (the 1 Hz clock tick did not correlate with drops; all real drops were either manual or self-inflicted over-limit `reason=3`). Do NOT treat as fact. The verified finding is the OPPOSITE direction: we were MISSING this `80-00` sync_trigger entirely (the EvenHub hijack sends only `f1=12`, not the sync_trigger), and that absence is the leading suspect for the silent app-drop. See memory `g2-render-limits`.
+
+~~More keepalive traffic destabilized the session. Our prior approach (full 14-page re-render every 4-15s) was 50-300× more BLE wire time than the Even App and made things worse, not better. The firmware appears to interpret high-bandwidth writes as "interactive update in progress" and skips its normal session-extend logic.~~ *(unverified guess — see warning above)*
+
+### msgId is a SINGLE BYTE — the real session-longevity killer (HARDWARE-VERIFIED 2026-06-06)
+
+Every display payload (`e0-20` `f1=0/3/5/7/12`) and the `80-00` sync_trigger carry a msgId in **protobuf field 2** (`10 <varint>`). **It MUST be a single byte (0x00–0xFF).** The native app increments it per write and **wraps 255 → 0**; a msgId ≥ 256 (which encodes as a 2-byte varint, `80 02` …) **silently kills the hijacked app slot** — the glasses stop acking, the BLE link stays UP, the app still thinks it's connected (this IS the "silent app-drop" that plagued every session). Likely a fixed-width / `uint8` field parser on the glasses; a 2-byte varint mis-aligns or overflows it.
+
+**Lineage (the two captures that nailed it):**
+- **Chess BTSnoop** (`/tmp/g2cc-btsnoop5`, capture U=19): the msgId is one shared counter across all services/both directions. At `+288.8s` Chess writes `80-00` `mid=255`, at `+290.8s` `mid=0` (WRAP), then `e0-20 f1=0 mid=1` — it wraps the byte and runs 6+ min. Max msgId ever sent = 249; **never exceeds 255.**
+- **Our diag** (`/tmp/g2cc-harness-diag.log`): across 8 dropped sessions the glasses-echoed msgId on `e0-00` climbed from our start `0x20` to **exactly 255 (~223 acked ops), never 256, then silence** — while we kept writing hundreds of frames (so it's the glasses dropping us, not us stopping). Drop wall-time = (255 − start) ÷ write-rate, so heavy renders died ~80s and idle ~190s — it *looked* time-based for days but was **count-based.**
+
+**The bug & fix (APK v0.4).** Four renderers wrapped msgId at `0xFFFF` instead of `0xFF`: `render/G2Renderer.nextMsgId`, `harness/HarnessActivity.syncMsgId` (deployed path) + `hud/Hud.nextMsgIdLocked`, `hud/EvenHud.nextMsgId` (production path). All now wrap at `0xFF`. (`seq` 0x10–0xFF and the image `token` 1–0xFF already wrapped correctly — only msgId was broken.) **Verified: 5+ min parked on the full 4-tile T7 screen, zero input, no drop.** A field-by-field diff of every shared frame type vs Chess found msgId was the SOLE wire divergence — all containers/wrappers/text/image structures match.
 
 ### Init flow observed (steps the Even App does before display)
 

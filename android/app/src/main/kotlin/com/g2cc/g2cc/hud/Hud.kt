@@ -28,7 +28,7 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
     // overlap (e.g. heartbeat re-render racing a server Output) used to both
     // reset to 0x10 and emit colliding seq ranges. Keeping a monotonic counter
     // — guarded by counterLock during each render's build — gives every render a
-    // distinct, contiguous block. Wraps within [0x10,0xFF] / [0x20,0xFFFF] so it
+    // distinct, contiguous block. Wraps within [0x10,0xFF] / [0x20,0xFF] so it
     // never re-enters the auth seq range (0x00-0x0F).
     private var seq: Int = 0x10        // server reserves 0x00-0x0F for auth; we start higher
     private var msgId: Int = 0x20
@@ -165,10 +165,10 @@ class Hud(private val left: G2BleClient, private val right: G2BleClient) {
     }
 
     /** MUST be called inside `synchronized(counterLock)`. Wraps within
-     *  [0x20, 0xFFFF]. */
+     *  [0x20, 0xFF] — a >255 (2-byte varint) msgId silently kills the slot. */
     private fun nextMsgIdLocked(): Int {
         val m = msgId
-        msgId = if (msgId >= 0xFFFF) 0x20 else msgId + 1
+        msgId = if (msgId >= 0xFF) 0x20 else msgId + 1   // 1-byte: >255 msgId kills the slot
         return m
     }
 
