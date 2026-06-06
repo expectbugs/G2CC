@@ -4,6 +4,50 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-c5fdd50 — 2026-06-06 — **Pure-image display renderer: decoded, built, HARDWARE-PROVEN**
+
+The pivot paid off. A dedicated region-based gray4 display renderer (`android/.../render/`) + a
+standalone test harness (`android/.../harness/`), decoded from one clean BTSnoop capture and
+validated end-to-end on the real glasses — both lenses, every test frame matching the on-phone
+pixel-perfect mirror. This is the foundation for the "glasses OS" (`docs/GLASSES_OS.md`).
+
+**The decode (capture U=19).** First, a capture-mechanics trap: Google Play services had pushed a
+Phenotype flag forcing HCI snoop into FILTERED mode — headers only, payloads stripped, useless. Fix
+was Developer-Options "Enabled" + BT off/on (memory `btsnoop-capture-gotcha`). With a full capture,
+the whole display protocol fell out: **576×288 4-bit grayscale, named regions, images = plain
+uncompressed 4bpp Windows BMP pushed on `e0-20 f1=3` (chunked ≤4096 B, by region name), text on
+`f1=5`, layout on `f1=7`** — all on the `0x5401` channel we already drive (`0x6402` is unused). 27
+captured BMPs were reconstructed byte-identical (the chessboard rebuilt perfectly). Full wire spec in
+`PROTOCOL_NOTES.md` §"EvenHub display rendering".
+
+**The build.** `Gray4Bmp` (4bpp BMP, byte-verified vs the wire), `Quantize` (ARGB→gray4 + Bayer
+dither), `DisplayProto` (`f1=0/3/5/7/12` encoders, byte-matched to capture), `Scene` (named-region
+model + dirty-rect diff), `G2Renderer`, `Rasterizer` (Canvas→gray4). 176 unit tests. A four-finding
+code review (2 mine + 2 from an independent reviewer) caught silent-content-removal, an uncaught
+bad-BMP throw, a missing pre-launch guard, and a scroll-flag-can't-update bug — all fixed.
+
+**The hardware fight (the real lesson).** Three failed passes: glasses blanked on Test Display, no
+image ever painted. The win came from **comparing our packets to the Chess capture instead of
+theorizing** — which *disproved* the first theory (keepalive starvation; the native app tolerated
+44–53 s keepalive gaps) and revealed the two things we did that the native app NEVER does:
+1. **Image-only screens.** Every native layout pairs an image with a *text* region; an image-only
+   `f1=7` is acked but **never painted** (the written lens holds the prior frame, the other lens's
+   mirror blanks) — the real form of the old "confirm screens don't paint" wall.
+2. **A full-frame image in one giant atomic write batch** (367 packets), which holds the BLE queue
+   ~20 s and drops the link mid-push. The games only ever tile ≤200×100 and send chunks as discrete,
+   paced, keepalive-interleaved writes.
+Fix: every scene carries a top **status bar with a ticking clock** (always-present text region +
+never-blank signal), all images are **≤200×100 tiles**, and `G2Renderer.sendMessage` now sends each
+chunk as its **own paced write** so the keepalive interleaves — exactly the native pattern. Result:
+**full success, every test, both lenses.** Constraints recorded HARDWARE-CONFIRMED in
+`PROTOCOL_NOTES.md` so they're never re-bled-for.
+
+**Also:** standalone harness (Connect / Test Display / Disconnect + Diag toggle streaming verbose
+diag to the server, + the pixel-perfect mirror); no setup/probe (token + Tailscale server baked via
+gitignored `BuildConfig`); server `POST /diag` + token-gated `GET /apk` (the APK has the token baked
+in, so it's served from `/setup` over Tailscale, never the public GitHub releases). Memories:
+`g2-display-protocol-decoded`, `g2cc-display-harness`.
+
 ## v0.0.1-9f210ee — 2026-06-05 — **Bug-audit remediation: 25 fixes, 8 false positives rejected**
 
 A full-codebase audit (the now-removed `bugs.txt` — 7 parallel auditors, 54
