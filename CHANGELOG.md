@@ -4,7 +4,7 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
-## v0.0.1-PENDING — 2026-06-06 — **APK v0.7 — connection loop moved to a foreground service + recovery hardening**
+## v0.0.1-137887c — 2026-06-06 — **APK v0.7 — connection loop moved to a foreground service + recovery hardening**
 
 APK v0.7. Adam's factory testing (heavy EM, phone pocketed) showed the BLE session dropping often and taking "really really long" to notice + recover. **Hardware-verified fix: recovery + stability "much better."**
 
@@ -16,7 +16,7 @@ APK v0.7. Adam's factory testing (heavy EM, phone pocketed) showed the BLE sessi
 
 196/196 unit tests green; wire/protocol/render code untouched. **Deferred:** `autoConnect` true/false A/B + a write-failure fast-path (optional — recovery already much better). `HANDOFF.md` still describes the FGS as "parked / no foreground service" — now stale, pending its own update at commit.
 
-*(SHA pending — stamp `v0.0.1-<sha>` at commit; uncommitted alongside the parallel glasses-display capability research.)*
+*(Committed in 137887c.)*
 
 ## v0.0.1-f189ca7 — 2026-06-06 — **Multi-pass code-review remediation + the scroll-race fix, completed**
 
