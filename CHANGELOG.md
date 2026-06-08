@@ -4,6 +4,20 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v0.0.1-PENDING — 2026-06-06 — **APK v0.7 — connection loop moved to a foreground service + recovery hardening**
+
+APK v0.7. Adam's factory testing (heavy EM, phone pocketed) showed the BLE session dropping often and taking "really really long" to notice + recover. **Hardware-verified fix: recovery + stability "much better."**
+
+**Root cause — the loop had no foreground service.** The whole connection loop (BLE scan/auth, keepalive, `80-00` sync, watchdog, ~80 s renewal, render pump, auto-recovery) lived in `HarnessActivity.lifecycleScope`. Whenever the harness wasn't foreground — pocketed, screen-off, or behind the SSH terminal Adam drives the server from — Android froze the process / restricted background BLE, so keepalive + watchdog + recovery all **stopped**; the glasses reclaimed the Hub slot and nothing noticed or recovered until the Activity came back. The manifest had no FGS at all.
+
+**The fix — a dedicated foreground service.** New `service/ConnectionService.kt` (type `connectedDevice`) owns the loop on its own scope and holds a **`PARTIAL_WAKE_LOCK`** — load-bearing, because an FGS stops process-kill but **not** Doze CPU-throttling of the `delay()` loops (the parked `G2CCService` already carried this lesson: 13–28 s tick gaps on a 10 s cadence). `HarnessActivity` is now a thin bound client (observes `StateFlow`s, forwards taps) that requests BLE perms + `POST_NOTIFICATIONS` + the **battery-opt exemption** on first Connect (without it Doze kills even the FGS). The old `G2Pipeline`-bound `G2CCService` stays parked — this is a new minimal service.
+
+**Recovery hardening** (all in the service): **re-launch-on-reconnect** — a hard drop used to reconnect the *link* via autoConnect but leave the display dead (the Hub slot died with the drop and was never re-established); now a dropped lens returning to Ready re-runs COLD_INIT to revive the slot, no full teardown. **Faster silent-drop detection** — watchdog ~14 s → ~9 s (`WATCHDOG_BAD_THRESHOLD`, kept above the ~6 s heavy-render ack pause). **Direct reconnect** to the cached lens addresses on recovery (skips the rescan + its can-stall-forever hole). **Stuck-`recovering` cleared** on the scan/connect-failure paths. Tunables (`WATCHDOG_BAD_THRESHOLD`, `RECOVERY_RATELIMIT_MS`) are named constants to tune from factory diag.
+
+196/196 unit tests green; wire/protocol/render code untouched. **Deferred:** `autoConnect` true/false A/B + a write-failure fast-path (optional — recovery already much better). `HANDOFF.md` still describes the FGS as "parked / no foreground service" — now stale, pending its own update at commit.
+
+*(SHA pending — stamp `v0.0.1-<sha>` at commit; uncommitted alongside the parallel glasses-display capability research.)*
+
 ## v0.0.1-f189ca7 — 2026-06-06 — **Multi-pass code-review remediation + the scroll-race fix, completed**
 
 APK v0.6. Ran a multi-pass review (8 subsystem finders → adversarial per-finding verification; 41 raw → **26 confirmed**, full plan in `docs/CODE_REVIEW_2026-06-06.md`) and fixed all highs + mediums + most lows.

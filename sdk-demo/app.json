@@ -1,0 +1,16 @@
+{
+  "package_id": "com.g2cc.cap",
+  "edition": "202601",
+  "name": "G2 Capability Demo",
+  "version": "0.1.0",
+  "min_sdk_version": "0.0.10",
+  "min_app_version": "0.1.0",
+  "tagline": "Decode the G2 display+input wire protocol",
+  "description": "Steps through every Even Hub SDK display + input capability so a BTSnoop reveals the e0-XX wire frames our custom renderer targets.",
+  "author": "g2cc",
+  "entrypoint": "index.html",
+  "permissions": [
+    { "name": "network", "desc": "App is loaded from the dev server over Tailscale; it makes no outbound calls of its own.", "whitelist": ["*"] }
+  ],
+  "supported_languages": ["en"]
+}

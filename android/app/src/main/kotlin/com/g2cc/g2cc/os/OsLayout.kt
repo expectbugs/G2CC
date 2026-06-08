@@ -23,7 +23,7 @@ import java.util.Locale
 object OsLayout {
     /** Bump on EVERY APK build so Adam can confirm on-glass that the new build installed.
      *  Shown in the top-left antenna ("G2 OS vX.Y") + the connect splash. */
-    const val OS_VERSION = "0.6"
+    const val OS_VERSION = "0.7"
     const val CLOCK_ID = 1
     const val CLOCK_NAME = "clock"
     const val CLOCK_HEIGHT = 28                 // = STATUS_BAR_HEIGHT (proven-paintable)

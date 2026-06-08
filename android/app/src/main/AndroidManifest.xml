@@ -4,9 +4,10 @@
 
     <!--
       G2CC — Display Renderer Test Harness.
-      Standalone BLE connect + auth + render to the G2 glasses, driven by three buttons
-      (Connect / Test Display / Disconnect) + a Diag checkbox. No foreground service, no
-      setup screen, no probe app — auth token + Tailscale server are baked in via BuildConfig.
+      Standalone BLE connect + auth + render to the G2 glasses, driven by buttons + a Diag
+      checkbox. The connection loop runs in a FOREGROUND SERVICE (ConnectionService) so it
+      survives the harness being backgrounded/pocketed — auth token + Tailscale server are
+      baked in via BuildConfig.
     -->
 
     <!-- BLE: connect to + scan for the lens pair. -->
@@ -21,6 +22,18 @@
     <!-- Network: stream the diagnostics log to the server. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Foreground service: keep the BLE connection loop alive when the harness isn't
+         foregrounded (pocket / screen-off / SSH-terminal app) — the recovery fix. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- PARTIAL_WAKE_LOCK so the keepalive/sync/watchdog delay() loops aren't Doze-throttled
+         (FG type stops process-kill, NOT CPU throttling — factory finding). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- API 33+: the FG-service notification + the battery-opt re-grant prompt. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Battery-opt exemption: without it Doze kills even the FG service. Sideloaded app. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
@@ -47,5 +60,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Owns the BLE connection loop (scan/auth/keepalive/sync/watchdog/renewal/render/
+             auto-recovery); survives the Activity being backgrounded or destroyed. -->
+        <service
+            android:name=".service.ConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
     </application>
 </manifest>

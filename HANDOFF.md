@@ -1,8 +1,9 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
-**Last updated 2026-06-06 (APK v0.6).** Read this first, then **`docs/GLASSES_OS.md`** (the plan),
-then **`docs/PROTOCOL_NOTES.md`** (the wire protocol + the hardware-confirmed render constraints +
-the msgId rule). For the latest review status: **`docs/CODE_REVIEW_2026-06-06.md`**.
+**Last updated 2026-06-08.** `OsLayout.OS_VERSION` is at **0.7** (the recovery refactor — hardware-verified). Read this first, then
+**`docs/GLASSES_OS.md`** (the plan), then **`docs/PROTOCOL_NOTES.md`** (the wire protocol + the
+hardware-confirmed render constraints + the msgId rule). For the latest review status:
+**`docs/CODE_REVIEW_2026-06-06.md`**.
 
 ## Where we are
 
@@ -21,6 +22,11 @@ Proven on hardware (Adam's eyes), in order this session:
 - **The renderer now guards itself** against the hardware limits we hit (no more hand-walking the
   minefield), and a **multi-pass code review** (`docs/CODE_REVIEW_2026-06-06.md`) was run and its
   confirmed findings fixed.
+- **The connection loop now survives the background (v0.7, HARDWARE-VERIFIED).** It moved out of the
+  Activity into a foreground service (`service/ConnectionService.kt`) + a `PARTIAL_WAKE_LOCK`, so it
+  keeps running while the harness is pocketed / screen-off / behind the SSH terminal; recovery is also
+  faster + more robust. Adam confirmed factory "recovery + stability much better." See "The all-day
+  backbone" + "Live vs PARKED code" below.
 
 ## THE msgId RULE (read this — it cost days)
 
@@ -51,11 +57,21 @@ Corrected from earlier wrong guesses (the menu episode disproved "≤256×128 / 
 
 ## The all-day backbone (keeps the session alive unattended)
 
+**All of this runs in the foreground service `service/ConnectionService.kt`** (type `connectedDevice`)
+holding a `PARTIAL_WAKE_LOCK` — required, because an FG service stops process-kill but NOT Doze
+CPU-throttling of the `delay()` loops (factory diag: 13–28 s tick gaps without it). The loop survives
+the harness being backgrounded/pocketed (v0.7, HARDWARE-VERIFIED).
+
 1. **sync_trigger keepalive** — `80-00` type `0x0E` to BOTH lenses ~15 s, staggered ~2 s. Fixes idle
-   drops. 2. **Watchdog** — tracks the R-lens ack stream; fires when acks stop ~3 s (silent-drop
-   detector). 3. **Auto-recovery** — on a sustained silent drop, teardown + reconnect + cold-launch +
-   re-attach server (rate-limited). Adam confirmed auto-recovery self-heals a firmware "End feature"
-   quit. With the msgId fix, recovery is now the rare-exception path, not every-2-minutes.
+   drops. 2. **Watchdog** — tracks the R-lens ack stream; silent-drop recovery now at ~9 s
+   (`WATCHDOG_BAD_THRESHOLD`, was ~14 s), kept above the ~6 s heavy-render ack pause. 3. **Recovery** —
+   a SILENT drop (link up, acks stop) → full teardown + **direct reconnect to the cached lens
+   addresses** (no rescan) + cold-launch. A HARD drop (link down) → let autoConnect bring the link
+   back, then **re-launch the Hub slot** (the slot dies with the drop; reconnecting the link alone used
+   to leave the display dead). `recovering` clears on every failure path (no stuck state); re-attaches
+   server mode after recovery (Adam earlier confirmed auto-recovery self-heals a firmware "End feature"
+   quit). Tunables: `WATCHDOG_BAD_THRESHOLD` / `RECOVERY_RATELIMIT_MS` in ConnectionService — tune from
+   factory diag. Deferred: `autoConnect` true/false A/B, a write-failure fast-path.
 
 ## The code review (2026-06-06) — `docs/CODE_REVIEW_2026-06-06.md`
 
@@ -85,15 +101,22 @@ download; `readFileSync` restored. The ~ms blocking on a one-time sideload is ne
 - **ws-handler menu SELECT only logs** — by design; menu actions aren't implemented yet (a TODO, not a
   bug).
 
-## PARKED code (dead at runtime by design — don't mistake for live)
+## Live vs PARKED code
 
-The standalone-harness `AndroidManifest.xml` registers only `HarnessActivity` (LAUNCHER). These are
-NOT wired in and don't run — kept for the eventual full-app re-enable: `service/G2CCService.kt`,
+**The harness now runs a LIVE foreground service** (v0.7): `service/ConnectionService.kt` (registered
+in `AndroidManifest.xml`, type `connectedDevice`) owns the connection loop; `HarnessActivity`
+(LAUNCHER) is a thin client that binds to it. The manifest now also carries `FOREGROUND_SERVICE` /
+`FOREGROUND_SERVICE_CONNECTED_DEVICE` / `WAKE_LOCK` / `POST_NOTIFICATIONS` /
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. `setup/BatteryOptimization.kt` is **also LIVE now**
+(HarnessActivity prompts for the exemption + notifications on first Connect). **This is a NEW minimal
+service — the old `G2CCService` was NOT un-parked** (it's welded to the replaced `G2Pipeline`/ARIA/audio
+path).
+
+**Still PARKED (dead at runtime — don't mistake for live):** `service/G2CCService.kt`,
 `service/BootReceiver.kt`, `service/BluetoothStateReceiver.kt`, `intents/IntentReceiver.kt`,
-`MainActivity.kt`, `setup/SetupActivity.kt`, `setup/BatteryOptimization.kt`, `probe/ProbeActivity.kt`
-(+ `probe/`). Re-enabling them (foreground service, Tasker intents, first-run setup) is a separate
-authorized effort that must restore the service/receiver registrations + the
-FOREGROUND_SERVICE*/RECORD_AUDIO/POST_NOTIFICATIONS/BOOT/battery permissions.
+`MainActivity.kt`, `setup/SetupActivity.kt`, `probe/ProbeActivity.kt` (+ `probe/`). Re-enabling those
+(the full G2Pipeline app, Tasker intents, boot auto-start) is a separate authorized effort. Reboot
+auto-start (`BootReceiver`) is NOT wired for the harness — a deferred item.
 
 ## Critical rules
 
@@ -129,7 +152,9 @@ terminal is hard to scroll).
 - **Android build/test** (cwd resets between Bash calls — use the absolute path):
   `JAVA_HOME=/opt/openjdk-bin-17 ANDROID_HOME=/opt/android-sdk /home/user/G2CC/android/gradlew -p /home/user/G2CC/android testDebugUnitTest assembleDebug`.
   Keep tests green. APK: `android/app/build/outputs/apk/debug/app-debug.apk`. **Bump `OsLayout.OS_VERSION`
-  every build** — it shows top-left on glass so Adam can confirm the new build installed (now `0.6`).
+  every build** — it shows top-left on glass so Adam can confirm the new build installed (now `0.7`).
+  First Connect on a fresh install prompts for BLE perms + notifications + the battery-opt exemption
+  (the FG service needs the exemption or Doze still kills it).
 - **Server build/run:** `npm run build -w server` (TS, no emit errors). Restart: find pid via
   `ss -ltnp | grep :7300`, kill, relaunch `nohup setsid node /home/user/G2CC/server/dist/index.js > /tmp/g2cc-server.log 2>&1 < /dev/null & disown`
   (cwd `/home/user/G2CC`). The server defaults the OS screen to the **menu** (`os-menu.ts`); flip
@@ -146,11 +171,14 @@ terminal is hard to scroll).
 ## Key files
 
 - **Plan/design:** `docs/GLASSES_OS.md`. **Wire protocol + render limits + msgId rule:**
-  `docs/PROTOCOL_NOTES.md`. **Review:** `docs/CODE_REVIEW_2026-06-06.md`. **Changelog:** `CHANGELOG.md`.
+  `docs/PROTOCOL_NOTES.md`. **Even Hub SDK capability map + RE-via-BTSnoop plan (in progress):**
+  `docs/SDK_CAPABILITY_MAP.md`. **Review:** `docs/CODE_REVIEW_2026-06-06.md`. **Changelog:** `CHANGELOG.md`.
 - **Renderer + guards:** `android/.../render/` (G2Renderer.validate, Gray4Bmp.isBlank, Scene, DisplayProto).
-- **Deployed app:** `android/.../harness/HarnessActivity.kt` (connect / cold-launch / server-mode /
-  watchdog / sync / clock / the conflated render pump / auto-recovery), `os/SceneCodec.kt` (WS scene →
-  render Scene + clock/antenna injection), `os/OsLayout.kt`.
+- **Deployed app:** `android/.../service/ConnectionService.kt` (the foreground service — owns connect /
+  cold-launch / keepalive / sync / watchdog / ~80 s renewal / clock / conflated render pump /
+  server-mode WS / auto-recovery, + the wake lock), `harness/HarnessActivity.kt` (thin UI client: binds
+  + observes StateFlows + forwards button taps + first-run permission/battery-opt prompts),
+  `os/SceneCodec.kt` (WS scene → render Scene + clock/antenna injection), `os/OsLayout.kt`.
 - **Server OS path:** `server/src/os-menu.ts` (the cursive menu), `os-display.ts` (capability probe),
   `ws-handler.ts` (router + os_attach/input/menu-nav), `gray4bmp.ts` (byte-matched encoder),
   `index.ts` (/setup /apk /diag), `session-pool.ts` + `cc-session.ts` + `dispatch.ts` (the CC bridge).

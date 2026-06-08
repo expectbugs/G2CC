@@ -1,0 +1,21 @@
+{
+  "name": "g2cap",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "qr": "evenhub qr --http --ip 100.107.139.121 --port 5173",
+    "pack": "npm run build && evenhub pack app.json dist -o g2cap.ehpk"
+  },
+  "dependencies": {
+    "@evenrealities/even_hub_sdk": "^0.0.10"
+  },
+  "devDependencies": {
+    "@evenrealities/evenhub-cli": "^0.1.11",
+    "typescript": "^5.8.0",
+    "vite": "^6.0.0"
+  }
+}
