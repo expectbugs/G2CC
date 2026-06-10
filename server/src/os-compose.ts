@@ -158,7 +158,10 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   // right (Adam cal 2026-06-10 vs the conservative glyph estimate) — if the
   // tabs CLIP on real glass, reduce the trim.
   const tabText = tabs.map((t) => (t.active ? `[${t.label}]` : t.label)).join('  ')
-  const tabW = Math.min(Math.max(40, fwTextWidth(tabText) + 12 - DE_TAB_RIGHT_TRIM), SCREEN_WIDTH - 120)
+  // padding 4 insets the tab text ~5px off the status bar's right border (Adam
+  // 2026-06-10 — un-padded it sat on the border line); +4 on the width keeps
+  // the right-edge calibration unchanged.
+  const tabW = Math.min(Math.max(40, fwTextWidth(tabText) + 12 - DE_TAB_RIGHT_TRIM + 4), SCREEN_WIDTH - 120)
   const tabX = SCREEN_WIDTH - tabW
   regions.push({
     id: DE_REGION_IDS.status, name: 'status', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: tabX, h: DE_BAR_H,
@@ -167,11 +170,19 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   })
   regions.push({
     id: DE_REGION_IDS.tabs, name: 'tabs', x: tabX, y: SCREEN_HEIGHT - DE_BAR_H, w: tabW, h: DE_BAR_H,
-    kind: 'text',
+    kind: 'text', style: { padding: 4 },
     content: { kind: 'text', text: tabText },
   })
 
   return { regions }
+}
+
+/** The blanked screen (double-tap at Main root — Adam 2026-06-10): no server
+ *  regions at all. The client injects its minute clock (the firmware refuses
+ *  to paint a page with NO text region, so the clock is the floor), which also
+ *  becomes the input antenna; the global double-tap gesture restores. */
+export function blankScene(): WireScene {
+  return { regions: [] }
 }
 
 /** Loud, visible error screen (rasterizer/window failure) — never a silent

@@ -363,4 +363,47 @@ class G2RendererTest {
         r.abort("test teardown")              // the watchdog/teardown unblock
         assertEquals("a parked image send is released as a failure, never left hanging", false, done)
     }
+
+    // ---- preemption (a superseding scene must not wait behind a multi-tile push) ----
+
+    @Test
+    fun preempt_skipsAtRegionBoundary_thenDiffResendsSkipped() {
+        val sink = FakeSink()                 // manual acks — we control the chunk chain
+        val r = G2Renderer(sink)
+        // Launch a text-only base (no image chunks → completes immediately, ungated).
+        r.launch(10061, scene { text("s", 0, 0, 576, 28, "x") }) {}
+        sink.calls.clear()
+
+        // setScene adds two single-chunk image regions: msgs = [layout, imgA, imgB].
+        val picA = img(64, 64)
+        val picB = img(64, 64)
+        val s2 = scene {
+            text("s", 0, 0, 576, 28, "x")
+            image("a", 0, 40, 64, 64, picA)
+            image("b", 100, 40, 64, 64, picB)
+        }
+        var done: Boolean? = null
+        r.setScene(s2) { done = it }
+        // layout (ungated) + imgA chunk are out; imgA parks on its ack.
+        assertEquals(2, sink.messages().size)
+        assertNull(done)
+
+        // A newer scene supersedes → preempt. The IN-FLIGHT region (a) must still finish
+        // (never interrupt a mid-image transfer); the NOT-YET-STARTED region (b) is skipped.
+        r.preempt()
+        r.onImageAck(msgIdOf(sink.messages()[1]))   // a's ack → boundary check → skip b
+        assertEquals("preempted: b's chunk must NOT have been sent", 2, sink.messages().size)
+        assertEquals("preempted op completes false", false, done)
+
+        // The superseding scene (same content) re-sends ONLY the rolled-back region b.
+        sink.calls.clear()
+        var done2: Boolean? = null
+        r.setScene(s2) { done2 = it }
+        val resent = sink.messages()
+        assertEquals("only b re-sends (a was delivered; layout unchanged)", 1, resent.size)
+        assertEquals(DisplayProto.MSG_IMAGE, msgType(resent[0]))
+        assertTrue("the re-sent region is b (image f2 name field `12 01 62`)", hx(resent[0]).contains("120162"))
+        r.onImageAck(msgIdOf(resent[0]))
+        assertEquals(true, done2)
+    }
 }

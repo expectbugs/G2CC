@@ -4,7 +4,28 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
-## (unstamped) — 2026-06-10 — **APK v1.0 + server: Adam's UI cal + the full-review hardening pass**
+## (unstamped) — 2026-06-10 — **APK v1.1 + server: text insets, preemptable renders, blank-screen toggle**
+
+Adam's on-glass follow-ups to v1.0. **Insets:** the clock and tab-strip text sat ON the
+neighboring bar's border line (both regions were borderless with padding 0) — both get
+padding 4 (~5px visual gap; tab width compensated so the right-edge cal holds).
+**Preemptable renders (the big one):** a menu tap's new scene used to queue behind the
+in-flight ack-gated 4-tile push (~4 s). The client render pump now `select`s over
+{completion, newer-scene}: a newer scene calls `G2Renderer.preempt()`, which stops the
+in-flight job at the next REGION boundary — the current tile's chunk chain always finishes
+(interrupting a mid-image transfer is unprobed firmware territory), remaining regions are
+skipped and their content ROLLED BACK from the renderer's `current` scene before the job
+completes, so the superseding scene's diff re-sends exactly what the glasses never got
+(no stale-tile lies; layout/launch frames are never skipped). Worst-case tap latency drops
+to ~one tile. Chrome text ops also emit before image ops within a render. New unit test
+pins skip-at-boundary + rollback-resend; 221/221.
+**Blank toggle:** double-tap at Main's root now blanks the screen to clock-only (a page
+with NO text region won't paint — the injected minute clock is the floor) and double-tap
+wakes back to Main; renders arriving while blanked stay dark (state still updates).
+
+---
+
+## (superseded same-day) — 2026-06-10 — **APK v1.0 + server: Adam's UI cal + the full-review hardening pass**
 
 Same-day follow-up to v0.9 (below): Adam's UI calibration + a comprehensive 4-agent code
 review (Fable, max effort) with every finding verified before fixing.

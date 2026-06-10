@@ -175,6 +175,12 @@ class Scene(
 
     fun withContent(name: String, c: Content): Scene =
         Scene(regions, content.toMutableMap().apply { put(name, c) })
+
+    /** Same regions with [names]' content REMOVED — the preemption rollback: a region whose
+     *  push was skipped must read as never-delivered so the next diff re-sends it. */
+    fun withoutContent(names: Collection<String>): Scene =
+        if (names.isEmpty()) this
+        else Scene(regions, content.toMutableMap().apply { names.forEach { remove(it) } })
 }
 
 /** Result of [Scene.diff]: layout change, which region contents changed, and which regions had

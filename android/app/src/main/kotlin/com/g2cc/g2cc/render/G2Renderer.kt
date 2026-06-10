@@ -42,11 +42,26 @@ class G2Renderer(
     // interleaves between chunks by design.
     /** One renderer message (its AA fragments) + optionally the msgId whose `e0-00` ack must
      *  arrive before the NEXT message goes out. Image chunks set it (ack-gated, matching the
-     *  official app's 0/100 overlap); everything else leaves it null (fixed inter-message pacing). */
-    private data class RenderMsg(val packets: List<ByteArray>, val ackMsgId: Int? = null)
-    private data class SendJob(val msgs: List<RenderMsg>, val label: String, val onComplete: (Boolean) -> Unit)
+     *  official app's 0/100 overlap); everything else leaves it null (fixed inter-message
+     *  pacing). [regionName] marks SKIPPABLE per-region content messages for preemption —
+     *  null (layout/launch frames) means the message must always complete. */
+    private data class RenderMsg(val packets: List<ByteArray>, val ackMsgId: Int? = null, val regionName: String? = null)
+    private data class SendJob(
+        val msgs: List<RenderMsg>,
+        val label: String,
+        val onComplete: (Boolean) -> Unit,
+        /** The scene this job is delivering + the one on the glasses before it — preemption
+         *  rolls `current` back for regions whose content never went out. */
+        val sceneRef: Scene? = null,
+        val prevScene: Scene? = null,
+    )
     private val sendQueue = ArrayDeque<SendJob>()
     private var sending = false
+    // Preemption (menu taps must not wait ~4 s behind a 4-tile push): when set, the in-flight
+    // job stops at the next REGION boundary — the current region's chunk chain always finishes
+    // (an interrupted mid-image transfer is unprobed firmware territory), remaining regions'
+    // messages are skipped and their content rolled back so the next diff re-sends them.
+    @Volatile private var preemptRequested = false
 
     // Image ack-gate. A sent image chunk parks its continuation here until its `e0-00` ack
     // (onImageAck) — or until abort() releases it (teardown/recovery; the watchdog is the external
@@ -174,15 +189,16 @@ class G2Renderer(
                 ))
                 o += imageContentOps(scene, scene.imageRegions().map { it.name })
             } else {
-                for (name in d.changedRegions) {
-                    when (val c = scene.content[name]) {
-                        is Content.Text -> o += textOp(scene.region(name)!!, c)
-                        is Content.Image -> o += imageOps(scene.region(name)!!, c.bmp)
-                        // Unreachable: Scene.diff reports any list change as layoutChanged
-                        // (items ride the layout frame). Defensive diag, never silent.
-                        is Content.ListItems -> diag("setScene: list '$name' changed without layoutChanged — diff bug?")
-                        null -> {}
-                    }
+                // Text before images: the cheap chrome updates (title/status/tabs, ~62 ms
+                // each) land first instead of queueing behind a multi-second tile push.
+                val changed = d.changedRegions.mapNotNull { name -> scene.content[name]?.let { name to it } }
+                for ((name, c) in changed) if (c is Content.Text) o += textOp(scene.region(name)!!, c)
+                for ((name, c) in changed) when (c) {
+                    is Content.Image -> o += imageOps(scene.region(name)!!, c.bmp)
+                    is Content.Text -> {}   // already emitted above
+                    // Unreachable: Scene.diff reports any list change as layoutChanged
+                    // (items ride the layout frame). Defensive diag, never silent.
+                    is Content.ListItems -> diag("setScene: list '$name' changed without layoutChanged — diff bug?")
                 }
             }
             o
@@ -190,8 +206,19 @@ class G2Renderer(
             diag("setScene: bad region content — ${e.message}")
             onComplete(false); return
         }
-        synchronized(lock) { current = scene }
-        enqueueSend(ops, "setScene(layout=${d.layoutChanged}, dirty=${d.changedRegions.size})", onComplete)
+        val prev2 = synchronized(lock) { current.also { current = scene } }
+        enqueueSend(ops, "setScene(layout=${d.layoutChanged}, dirty=${d.changedRegions.size})", onComplete, sceneRef = scene, prevScene = prev2)
+    }
+
+    /** Request preemption of the in-flight render op (a NEWER scene supersedes it). The
+     *  current region's chunk chain still completes (never interrupt a mid-image transfer);
+     *  messages for regions not yet started are skipped, their content rolled back from
+     *  [current] so the superseding setScene's diff re-sends whatever the glasses never got.
+     *  No-op when nothing is in flight. */
+    fun preempt() {
+        preemptRequested = true
+        // If the op is parked on an image ack, the resume path checks the flag; if it's
+        // between paced packets, the next sendMessage boundary checks it. Nothing to wake.
     }
 
     /** Update a single text region by name (cheap f1=5). Loud-fails if the region is unknown
@@ -258,7 +285,7 @@ class G2Renderer(
     }
 
     private fun textOp(r: Region, c: Content.Text): RenderMsg =
-        RenderMsg(DisplayProto.frame(nextSeq(), DisplayProto.textPayload(nextMsgId(), r.id, r.name, c.text, c.contentOffset, c.contentLength)))
+        RenderMsg(DisplayProto.frame(nextSeq(), DisplayProto.textPayload(nextMsgId(), r.id, r.name, c.text, c.contentOffset, c.contentLength)), regionName = r.name)
 
     /** Chunk a BMP at MAX_IMAGE_CHUNK and frame each chunk as its own f1=3 message. Each chunk is
      *  ack-gated on its own msgId so the NEXT chunk waits for this one's `e0-00` ack (the official
@@ -278,6 +305,7 @@ class G2Renderer(
             ops += RenderMsg(
                 DisplayProto.frame(nextSeq(), DisplayProto.imagePayload(mid, r.id, r.name, tok, bmp.size, idx, chunk)),
                 ackMsgId = mid,
+                regionName = r.name,
             )
             off = end; idx++
         }
@@ -300,14 +328,34 @@ class G2Renderer(
      * keepalive, and dropped the link mid-push. Per-message writes let the keepalive (a separate
      * enqueue) interleave between chunks, exactly like the app the firmware expects.
      */
-    private fun sendOps(msgs: List<RenderMsg>, label: String, onComplete: (Boolean) -> Unit) {
-        if (msgs.isEmpty()) { onComplete(true); return }
-        diag("render $label: ${msgs.size} messages / ${msgs.sumOf { it.packets.size }} packets (discrete, keepalive-interleavable)")
-        sendMessage(msgs, 0, label, onComplete)
+    private fun sendOps(job: SendJob) {
+        if (job.msgs.isEmpty()) { job.onComplete(true); return }
+        diag("render ${job.label}: ${job.msgs.size} messages / ${job.msgs.sumOf { it.packets.size }} packets (discrete, keepalive-interleavable)")
+        sendMessage(job, 0)
     }
 
-    private fun sendMessage(msgs: List<RenderMsg>, i: Int, label: String, onComplete: (Boolean) -> Unit) {
-        if (i >= msgs.size) { onComplete(true); return }
+    private fun sendMessage(job: SendJob, i: Int) {
+        val msgs = job.msgs
+        val label = job.label
+        if (i >= msgs.size) { job.onComplete(true); return }
+        // Preemption boundary (preempt()): a superseding scene wants the BLE queue. Only
+        // per-region CONTENT messages are skippable (regionName != null — layout/launch
+        // frames always complete), and only at a REGION boundary: the in-flight region's
+        // chunk chain finishes (an interrupted mid-image transfer is unprobed firmware
+        // territory). Skipped regions roll back from `current` BEFORE onComplete fires, so
+        // the superseding setScene's diff (computed after this completes) re-sends them.
+        if (i > 0 && preemptRequested && job.sceneRef != null) {
+            val msg = msgs[i]
+            if (msg.regionName != null && msg.regionName != msgs[i - 1].regionName) {
+                val skipped = msgs.drop(i).mapNotNull { it.regionName }.distinct()
+                synchronized(lock) {
+                    if (current === job.sceneRef) current = job.sceneRef.withoutContent(skipped)
+                }
+                diag("render $label: PREEMPTED at msg ${i + 1}/${msgs.size} — regions $skipped deferred to the next diff")
+                job.onComplete(false)
+                return
+            }
+        }
         val msg = msgs[i]
         val packets = msg.packets
         val delays = ArrayList<Long>(packets.size)
@@ -323,17 +371,17 @@ class G2Renderer(
                 // Abort on a write failure rather than pushing the remaining chunks into a
                 // possibly-dying session (coordinated with the queueWrites BLE-1 fix).
                 diag("render $label#${i + 1}: WRITE FAILED — aborting ${msgs.size - i - 1} remaining message(s)")
-                onComplete(false)
+                job.onComplete(false)
                 return@write
             }
             val ackId = msg.ackMsgId
             if (ackId == null) {
-                sendMessage(msgs, i + 1, label, onComplete)
+                sendMessage(job, i + 1)
             } else {
                 // Ack-gate: hold the next chunk until this one's e0-00 ack (or abort()).
                 awaitImageAck(ackId) { acked ->
-                    if (acked) sendMessage(msgs, i + 1, label, onComplete)
-                    else { diag("render $label#${i + 1}: ack-wait released by abort — stopping"); onComplete(false) }
+                    if (acked) sendMessage(job, i + 1)
+                    else { diag("render $label#${i + 1}: ack-wait released by abort — stopping"); job.onComplete(false) }
                 }
             }
         }
@@ -341,10 +389,13 @@ class G2Renderer(
 
     /** Serialize full render ops: only one op's messages sit on the BLE queue at a time, so a
      *  clock tick / renewal / server render can't interleave its AA writes into another op's. */
-    private fun enqueueSend(msgs: List<RenderMsg>, label: String, onComplete: (Boolean) -> Unit) {
+    private fun enqueueSend(
+        msgs: List<RenderMsg>, label: String, onComplete: (Boolean) -> Unit,
+        sceneRef: Scene? = null, prevScene: Scene? = null,
+    ) {
         synchronized(lock) {
             aborting = false                       // a fresh op means we're live again (post-recovery)
-            sendQueue.addLast(SendJob(msgs, label, onComplete))
+            sendQueue.addLast(SendJob(msgs, label, onComplete, sceneRef, prevScene))
             if (sending) return
             sending = true
         }
@@ -355,10 +406,12 @@ class G2Renderer(
         val job = synchronized(lock) {
             if (sendQueue.isEmpty()) { sending = false; null } else sendQueue.removeFirst()
         } ?: return
-        sendOps(job.msgs, job.label) { ok ->
+        preemptRequested = false   // preemption targets the job in flight WHEN preempt() fired
+        val wrapped = SendJob(job.msgs, job.label, { ok ->
             job.onComplete(ok)
             pumpNext()
-        }
+        }, job.sceneRef, job.prevScene)
+        sendOps(wrapped)
     }
 
     /** Feed every `e0-00` ack's msgId here (the connection layer parses `ack.f2`). Resumes the

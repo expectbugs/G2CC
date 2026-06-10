@@ -48,8 +48,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
@@ -232,10 +234,18 @@ class ConnectionService : Service(), TestHarness {
         // consumer renders them one at a time. Without this, rapid scrolls each spawned their own
         // setScene coroutine and the concurrent BLE writes INTERLEAVED — corrupting a tile
         // mid-update. Conflation also drops stale intermediate scrolls so nav stays responsive.
+        //
+        // PREEMPTION (Adam 2026-06-10): while a scene render is in flight (a 4-tile push can
+        // take ~4 s ack-gated), a NEWER scene arriving — a menu tap's response — preempts it:
+        // the renderer stops at the next region boundary (skipped regions re-send via the
+        // next diff) and the newer scene renders immediately instead of queueing behind tiles.
         val ch = Channel<WireScene>(Channel.CONFLATED)
         sceneCh = ch
         renderConsumerJob = scope.launch {
-            for (wire in ch) {
+            var next: WireScene? = null
+            while (isActive) {
+                val wire = next ?: ch.receiveCatching().getOrNull() ?: break
+                next = null
                 val r = renderer ?: continue
                 val sceneObj = try {
                     SceneCodec.toScene(wire, latestClockText)
@@ -246,9 +256,22 @@ class ConnectionService : Service(), TestHarness {
                     continue
                 }
                 DiagLog.log("os", "render → setScene (${sceneObj.regions.size} regions: ${sceneObj.regions.joinToString { it.name }})")
-                val ok = awaitSetScene(r, sceneObj)
+                val done = CompletableDeferred<Boolean>()
+                r.setScene(sceneObj) { ok -> done.complete(ok) }
+                // Wait for completion — but a newer scene preempts the in-flight push.
+                while (!done.isCompleted) {
+                    select<Unit> {
+                        done.onAwait { /* finished (or preempted/failed) */ }
+                        ch.onReceiveCatching { res ->
+                            val newer = res.getOrNull() ?: return@onReceiveCatching
+                            next = newer            // conflated: the latest scene wins
+                            DiagLog.log("os", "newer scene while rendering — preempting the in-flight push")
+                            r.preempt()
+                        }
+                    }
+                }
                 _scene.value = r.currentScene
-                DiagLog.log("os", "render result=${if (ok) "OK" else "FAIL"}")
+                DiagLog.log("os", "render result=${if (done.await()) "OK" else "PREEMPTED/FAIL"}")
             }
         }
         val url = "ws://${BuildConfig.SERVER_HOST}:${BuildConfig.SERVER_PORT}/ws"

@@ -24,6 +24,8 @@ implementation builds against. Wire truth: `docs/G2_BLE_PROTOCOL.md`. OS archite
 
 If "12:59 PM" clips at 102px or the tabs clip/wrap, widen `CLOCK_WIDTH` / reduce
 `DE_TAB_RIGHT_TRIM` — both are single tunables from the 2026-06-10 eyeball cal.
+The clock and the tab strip carry **padding 4** so their text sits ~5px off the
+neighboring bar's border line (un-padded text rendered ON the border — Adam cal).
 
 No region overlaps anything (SceneCodec loud-fails on clock-cutout overlap — and on a
 server/client GEOMETRY-SKEW: a new-geometry server vs an old APK rejects every scene with
@@ -57,8 +59,16 @@ content text=7, tiles=10..13 (`t0..t3`).
   G2CC logo in the content tiles (Adam 2026-06-10).
 - **Taps resolve against the last-RENDERED view** (WM `lastView`), and the WM-level labels
   (`Retry/Reload/Back/Main`) work in every window and state — incl. error screens.
-- **Double-tap = back (pop one level)** — reading → list → window root; at root → Main.
-  (Decided over always-jump-to-Main.) `Main` also stays as a menu item everywhere.
+- **Double-tap = back (pop one level)** — reading → list → window root; at root → Main; at
+  MAIN's root → **blank the screen** (clock-only: the firmware refuses to paint a page with
+  no text region, so the minute clock is the floor); double-tap again wakes back to Main.
+  `Main` also stays as a menu item everywhere.
+- **Renders are preemptable** (Adam 2026-06-10): a newer scene (a menu tap's response) does
+  NOT wait behind an in-flight 4-tile push. The client preempts at the next REGION boundary —
+  the current tile's chunk chain finishes (an interrupted mid-image transfer is unprobed
+  firmware territory), remaining regions are skipped + rolled back so the next diff re-sends
+  them. Worst-case tap latency ≈ one tile (~1 s) instead of a full page (~4 s). Cheap chrome
+  text ops are also emitted BEFORE image ops within a render.
 - **Dictation = the prompt input** (v1): menu `Dictate`/`Ask` → server sends `audio_request
   start` → phone streams mic (existing AudioStreamer/STT path) → result routes to the session
   that's transcribing (stale/canceled results discard loudly). Menu swaps to `Done/Cancel`

@@ -3,6 +3,7 @@ package com.g2cc.g2cc.os
 import com.g2cc.g2cc.render.Display
 import com.g2cc.g2cc.render.Region
 import com.g2cc.g2cc.render.RegionKind
+import com.g2cc.g2cc.render.RegionStyle
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -23,7 +24,7 @@ import java.util.Locale
 object OsLayout {
     /** Bump on EVERY APK build so Adam can confirm on-glass that the new build installed.
      *  Shown in the top-left antenna ("G2 OS vX.Y") + the connect splash. */
-    const val OS_VERSION = "1.0"
+    const val OS_VERSION = "1.1"
     const val CLOCK_ID = 1
     const val CLOCK_NAME = "clock"
     // 33 = the DE title-bar height (DE_BAR_H in shared/src/constants.ts) — the clock cutout
@@ -41,9 +42,13 @@ object OsLayout {
     /** Top-left title band width, beside the clock. */
     val TITLE_WIDTH = CLOCK_X - 2
 
-    /** The app-owned clock region (always id/name/geometry-stable across scenes). */
+    /** The app-owned clock region (always id/name/geometry-stable across scenes).
+     *  padding 4 insets the text ~5px off the title bar's right border (Adam
+     *  2026-06-10: the un-padded text sat ON the border line). 33−2·4 = 25px of
+     *  vertical room for the ~20px glyphs. */
     fun clockRegion(): Region =
-        Region(CLOCK_ID, CLOCK_NAME, CLOCK_X, CLOCK_Y, CLOCK_WIDTH, CLOCK_HEIGHT, RegionKind.TEXT)
+        Region(CLOCK_ID, CLOCK_NAME, CLOCK_X, CLOCK_Y, CLOCK_WIDTH, CLOCK_HEIGHT, RegionKind.TEXT,
+            RegionStyle(padding = 4))
 
     // 12-hour minute-tick ("1:04 PM") — decided 2026-06-10 (docs/DE_DESIGN.md §1). One BLE
     // text write per MINUTE instead of per second: 60× less clock traffic on the link (the

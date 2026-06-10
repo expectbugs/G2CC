@@ -21,7 +21,7 @@ import type { WireScene } from '@g2cc/shared'
 import type { G2CCConfig } from './config.js'
 import { listProjectDirectories } from './directory-picker.js'
 import { parseMarkdown, renderBlocks, type Block, type RenderedContent } from './os-content.js'
-import { composeScene, paginateText, errorView, type WinView } from './os-compose.js'
+import { composeScene, paginateText, errorView, blankScene, type WinView } from './os-compose.js'
 import type { SessionPool, PoolEntry } from './session-pool.js'
 import { hostname } from 'node:os'
 
@@ -1063,7 +1063,9 @@ class MainWindow implements OsWindow {
     this.ctx.log(`[os] main: browse select ${index} but Main has no browse list — ignored`)
   }
 
-  async onBack(): Promise<boolean> { return true }   // double-tap at Main: stay (consume)
+  // false = at root: the WM blanks the screen (double-tap toggles it back —
+  // Adam 2026-06-10; replaces the old stay-consumed behavior).
+  async onBack(): Promise<boolean> { return false }
 }
 
 // ============================================================ WindowManager
@@ -1081,6 +1083,9 @@ export class WindowManager {
    *  a row onto a different action (review 2026-06-10: errorView's 'Retry'
    *  used to land on 'Dictate' and turn the mic on). */
   private lastView: WinView | null = null
+  /** Screen blanked (double-tap at Main root). Double-tap restores; renders
+   *  while blanked stay blank (clock-only — the client injects it). */
+  private blanked = false
 
   constructor(private ctx: WmContext) {
     // Each window's requestRender only fires while it IS the active window — a
@@ -1108,6 +1113,12 @@ export class WindowManager {
    *  one in flight, at most one queued (the latest state wins — view() always
    *  reads current state, so collapsing intermediate renders is correct). */
   requestRender(): void {
+    if (this.blanked) {
+      // Stay dark until the user double-taps back (background events keep
+      // updating state; the wake render re-derives everything).
+      this.ctx.send(blankScene())
+      return
+    }
     if (this.rendering) { this.renderQueued = true; return }
     this.rendering = true
     void (async () => {
@@ -1221,11 +1232,26 @@ export class WindowManager {
     }
   }
 
-  /** Double-tap: pop one level; at root → Main (docs/DE_DESIGN.md §2). */
+  /** Double-tap: pop one level; at a window's root → Main; at MAIN's root →
+   *  toggle the blank screen (Adam 2026-06-10). While blanked, the next
+   *  double-tap wakes back to Main. */
   async onBackGesture(): Promise<void> {
+    if (this.blanked) {
+      this.blanked = false
+      this.ctx.log('[os] screen WAKE (double-tap)')
+      this.requestRender()
+      return
+    }
     try {
       const consumed = await this.active.onBack()
-      if (!consumed) this.switchTo('main')
+      if (consumed) return
+      if (this.active.id === 'main') {
+        this.blanked = true
+        this.ctx.log('[os] screen BLANK (double-tap at Main root) — double-tap again to wake')
+        this.ctx.send(blankScene())
+        return
+      }
+      this.switchTo('main')
     } catch (e) {
       this.ctx.log(`[os] back handler failed (${this.active.id}): ${(e as Error).message}`)
       this.requestRender()
