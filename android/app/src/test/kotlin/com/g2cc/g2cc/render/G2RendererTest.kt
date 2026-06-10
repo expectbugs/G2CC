@@ -367,7 +367,7 @@ class G2RendererTest {
     // ---- preemption (a superseding scene must not wait behind a multi-tile push) ----
 
     @Test
-    fun preempt_skipsAtRegionBoundary_thenDiffResendsSkipped() {
+    fun preempt_neverAbandonsImagePark_skipsAtRegionBoundary_thenDiffResends() {
         val sink = FakeSink()                 // manual acks — we control the chunk chain
         val r = G2Renderer(sink)
         // Launch a text-only base (no image chunks → completes immediately, ungated).
@@ -375,44 +375,67 @@ class G2RendererTest {
         sink.calls.clear()
 
         // setScene adds two single-chunk image regions: msgs = [layout, imgA, imgB].
-        val picA = img(64, 64)
-        val picB = img(64, 64)
         val s2 = scene {
             text("s", 0, 0, 576, 28, "x")
-            image("a", 0, 40, 64, 64, picA)
-            image("b", 100, 40, 64, 64, picB)
+            image("a", 0, 40, 64, 64, img(64, 64))
+            image("b", 100, 40, 64, 64, img(64, 64))
         }
         var done: Boolean? = null
         r.setScene(s2) { done = it }
-        // The layout frame is ACK-GATED now (multi-packet-wall protection): it goes out
-        // and parks until its f1=8 ack.
+        // The layout frame is ack-gated (multi-packet-wall protection): ack it.
         assertEquals(1, sink.messages().size)
         r.onImageAck(msgIdOf(sink.messages()[0]))   // layout ack → imgA chunk goes out, parks
         assertEquals(2, sink.messages().size)
         assertNull(done)
 
-        // A newer scene supersedes → preempt. The IN-FLIGHT region (a) must still finish
-        // (never interrupt a mid-image transfer); the NOT-YET-STARTED region (b) is skipped.
-        // NOTE preempt() releases PARKED waits — but region a's chunk was WRITTEN and is
-        // awaiting its ack, so releasing it marks a undelivered too; to exercise the
-        // boundary path we ack a FIRST, then preempt before b starts… preempt() between
-        // messages is async-unobservable here, so instead verify the release semantics:
-        r.preempt()                                  // releases a's parked ack-wait
-        assertEquals("released: b's chunk must NOT have been sent", 2, sink.messages().size)
+        // A newer scene supersedes → preempt. CRASH GUARD (hardware 2026-06-10 r4):
+        // the parked IMAGE chunk must NOT be released — abandoning a mid-image
+        // transfer and rebuilding on top of it crashed the glasses outright.
+        r.preempt()
+        assertNull("image park survives preempt — the job is still in flight", done)
+        assertEquals(2, sink.messages().size)
+
+        // a's ack arrives naturally → the boundary check skips the NOT-YET-STARTED b.
+        r.onImageAck(msgIdOf(sink.messages()[1]))
+        assertEquals("preempted at the region boundary: b never sent", 2, sink.messages().size)
         assertEquals("preempted op completes false", false, done)
 
-        // The superseding scene re-sends BOTH rolled-back regions: a's delivery was
-        // UNKNOWN at release (parked on its ack), so it must re-send too — re-pushing a
-        // possibly-delivered tile is harmless; lying about delivery is not. Layout was
-        // acked, so no rebuild.
+        // The superseding scene re-sends ONLY b (a was fully delivered + acked).
         sink.calls.clear()
         var done2: Boolean? = null
         r.setScene(s2) { done2 = it }
-        assertEquals("a re-sends first (ack-gated)", 1, sink.messages().size)
+        assertEquals("only b re-sends", 1, sink.messages().size)
         assertEquals(DisplayProto.MSG_IMAGE, msgType(sink.messages()[0]))
+        assertTrue("the re-send is region b (image f2 name `12 01 62`)", hx(sink.messages()[0]).contains("120162"))
         r.onImageAck(msgIdOf(sink.messages()[0]))
-        assertEquals("then b", 2, sink.messages().size)
-        assertTrue("the second re-send is region b (image f2 name `12 01 62`)", hx(sink.messages()[1]).contains("120162"))
+        assertEquals(true, done2)
+    }
+
+    @Test
+    fun preempt_releasesParkedLayoutAck_rollsBackToPrevScene() {
+        // The wall-ignore wedge: a layout frame the firmware silently ignored parks
+        // forever — preempt() (the user's next tap) releases THAT park (nothing is
+        // mid-transfer) and rolls back to the previous scene so the next diff
+        // re-sends the full layout.
+        val sink = FakeSink()
+        val r = G2Renderer(sink)
+        r.launch(10061, scene { text("s", 0, 0, 576, 28, "x") }) {}
+        sink.calls.clear()
+        val s2 = scene { text("s", 0, 0, 576, 28, "x"); image("a", 0, 40, 64, 64, img(64, 64)) }
+        var done: Boolean? = null
+        r.setScene(s2) { done = it }
+        assertEquals("layout written, parked on its (never-arriving) ack", 1, sink.messages().size)
+        assertNull(done)
+        r.preempt()
+        assertEquals("layout park released → job fails", false, done)
+        assertNull("rolled back: region 'a' is NOT on the glasses", r.currentScene!!.region("a"))
+        // The next setScene re-sends the full layout (+ the image after its ack).
+        sink.calls.clear()
+        var done2: Boolean? = null
+        r.setScene(s2) { done2 = it }
+        assertEquals(DisplayProto.MSG_LAYOUT, msgType(sink.messages()[0]))
+        r.onImageAck(msgIdOf(sink.messages()[0]))
+        assertEquals(2, sink.messages().size)
         r.onImageAck(msgIdOf(sink.messages()[1]))
         assertEquals(true, done2)
     }

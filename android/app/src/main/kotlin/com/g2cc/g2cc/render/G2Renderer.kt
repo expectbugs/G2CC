@@ -68,6 +68,11 @@ class G2Renderer(
     // supervisor, so a never-arriving ack can't wedge the pump). NO timeout (per the three rules).
     private var ackWaitMsgId: Int? = null
     private var ackWaitResume: ((Boolean) -> Unit)? = null
+    // Is the parked message a LAYOUT frame (regionName == null)? preempt() may release ONLY
+    // those (the wall-ignore wedge). Releasing a parked IMAGE chunk abandons a mid-image
+    // transfer and the follow-up rebuild lands on the half-fed image — HARDWARE 2026-06-10 r4:
+    // that CRASHED THE GLASSES OUTRIGHT (Main→Aria tap mid-tile-load).
+    private var ackWaitIsLayout = false
     private var lastAckedMsgId: Int = -1     // most recent e0-00 ack msgId (handles ack-arrives-before-park)
     private var aborting = false             // set by abort(); cleared by the next enqueueSend
 
@@ -224,18 +229,20 @@ class G2Renderer(
     }
 
     /** Request preemption of the in-flight render op (a NEWER scene supersedes it). The
-     *  current region's chunk chain still completes when actively writing (never interrupt
-     *  a mid-image transfer); messages for regions not yet started are skipped, and a job
-     *  PARKED on a never-arriving ack (the firmware silently ignoring a frame — observed
-     *  with the oversize Mail rebuild) is released immediately. Rolled-back regions re-send
-     *  via the superseding scene's diff. No-op when nothing is in flight. */
+     *  in-flight region's chunk chain ALWAYS completes — its image park resolves on the
+     *  ~176 ms ack and the boundary check then skips the remaining regions. NEVER abandon a
+     *  mid-image transfer: releasing an image park + rebuilding on the half-fed transfer
+     *  CRASHED THE GLASSES (hardware 2026-06-10 r4). Only a parked LAYOUT ack is released
+     *  immediately — that park only persists when the firmware silently ignored the frame
+     *  (the multi-packet wall), where nothing is mid-transfer and the rollback is clean.
+     *  Rolled-back regions re-send via the superseding scene's diff. */
     fun preempt() {
         preemptRequested = true
-        // Release a parked ack-wait so a frame the firmware ignored can't wedge the pump —
-        // the release path rolls back undelivered regions before completing the job.
         val resume = synchronized(lock) {
-            ackWaitMsgId = null
-            ackWaitResume.also { ackWaitResume = null }
+            if (ackWaitResume != null && ackWaitIsLayout) {
+                ackWaitMsgId = null
+                ackWaitResume.also { ackWaitResume = null }
+            } else null
         }
         resume?.invoke(false)
     }
@@ -411,9 +418,10 @@ class G2Renderer(
                 sendMessage(job, i + 1)
             } else {
                 // Ack-gate: hold the next message until this one's e0-00 ack — released
-                // early by abort() (teardown/recovery) or preempt() (superseding scene /
-                // a frame the firmware silently ignored, e.g. past the multi-packet wall).
-                awaitImageAck(ackId) { acked ->
+                // early by abort() (teardown/recovery) or, for LAYOUT frames only, by
+                // preempt() (the wall-ignore wedge). Image parks are never force-released
+                // (abandoning a mid-image transfer crashed the glasses — 2026-06-10 r4).
+                awaitImageAck(ackId, isLayout = msg.regionName == null) { acked ->
                     if (acked) sendMessage(job, i + 1)
                     else {
                         diag("render $label#${i + 1}: ack-wait released (abort/preempt) — stopping")
@@ -478,15 +486,16 @@ class G2Renderer(
         resume?.invoke(false)
     }
 
-    /** Park [resume] until the [msgId] ack arrives (→ resume(true)) or abort() fires (→ resume(false)).
+    /** Park [resume] until the [msgId] ack arrives (→ resume(true)) or abort() fires (→ resume(false));
+     *  [isLayout] parks may additionally be released by preempt() (wall-ignore unstick).
      *  Resolves immediately if the ack already arrived (race) or an abort is in progress. */
-    private fun awaitImageAck(msgId: Int, resume: (Boolean) -> Unit) {
+    private fun awaitImageAck(msgId: Int, isLayout: Boolean = false, resume: (Boolean) -> Unit) {
         var fire: Boolean? = null
         synchronized(lock) {
             when {
                 aborting -> fire = false                   // teardown underway → don't park, fail fast
                 lastAckedMsgId == msgId -> fire = true      // ack already arrived → proceed now
-                else -> { ackWaitMsgId = msgId; ackWaitResume = resume }
+                else -> { ackWaitMsgId = msgId; ackWaitResume = resume; ackWaitIsLayout = isLayout }
             }
         }
         fire?.let { resume(it) }

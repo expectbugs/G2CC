@@ -987,25 +987,31 @@ class FilesWindow implements OsWindow {
 
   private cwd(): string { return this.stack[this.stack.length - 1] ?? FILES_ROOT }
 
-  /** The common areas (Adam's list) + every mounted drive, re-scanned per entry. */
+  /** The common areas (Adam's list: 'DL' = Downloads — full word wraps the
+   *  96px antenna) + drives that are ACTUALLY MOUNTED per /proc/mounts (an
+   *  unmounted /mnt/* mountpoint is just an empty dir — don't list it). */
   private refreshLocations(): void {
     const out = [
       { label: 'Root', path: '/' },
       { label: 'Home', path: '/home/user' },
-      { label: 'Downloads', path: '/home/user/Downloads' },
+      { label: 'DL', path: '/home/user/Downloads' },
       { label: 'G2CC', path: '/home/user/G2CC' },
     ]
-    for (const base of ['/mnt', '/run/media/user']) {
-      try {
-        for (const n of readdirSync(base)) {
-          try {
-            const p = join(base, n)
-            if (statSync(p).isDirectory()) out.push({ label: n, path: p })
-          } catch { /* unreadable mount entry — skip (loud below if ALL fail) */ }
+    try {
+      // /proc/mounts: "<dev> <mountpoint> <fstype> …" — mountpoints octal-escape
+      // spaces etc. (\040). Keep real mounts under /mnt/ or /run/media/user/.
+      const seen = new Set<string>()
+      for (const line of readFileSync('/proc/mounts', 'utf8').split('\n')) {
+        const mp = line.split(' ')[1]
+        if (!mp) continue
+        const path = mp.replace(/\\([0-7]{3})/g, (_, o: string) => String.fromCharCode(parseInt(o, 8)))
+        if ((path.startsWith('/mnt/') || path.startsWith('/run/media/user/')) && !seen.has(path)) {
+          seen.add(path)
+          out.push({ label: basename(path), path })
         }
-      } catch (e) {
-        this.ctx.log(`[os] files: cannot scan ${base}: ${(e as Error).message}`)
       }
+    } catch (e) {
+      this.ctx.log(`[os] files: cannot read /proc/mounts: ${(e as Error).message}`)
     }
     this.locs = out
     if (this.locIndex >= out.length) this.locIndex = out.length - 1
