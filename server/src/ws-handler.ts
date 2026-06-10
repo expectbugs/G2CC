@@ -802,13 +802,12 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       if (client.osScreen === 'menu') {
         if (msg.event === 'focus') {
           // Antenna scroll → move the selection. f3 (msg.value) is the scroll DIRECTION,
-          // but EventParser flags f3 semantics as "direction OR scroll-speed, UNCONFIRMED",
-          // so treat ONLY the two known values as up/down and ignore anything else (incl. the
-          // f3=-1 no-direction default) rather than silently scrolling the wrong way. If up/down
-          // feel swapped on glass, swap the 1/2 below.
+          // CONFIRMED 2026-06-10 from the g2cap capture: f3=1 = scroll-up, f3=2 = scroll-down
+          // (docs/G2_BLE_PROTOCOL.md §6.6). Still treat ONLY 1/2 as up/down and ignore anything
+          // else (incl. the f3=-1 no-direction default) rather than scrolling the wrong way.
           const prev = client.osMenuSel
-          if (msg.value === 2) client.osMenuSel = Math.min(MENU_ITEM_COUNT - 1, prev + 1)   // down / next
-          else if (msg.value === 1) client.osMenuSel = Math.max(0, prev - 1)                // up / prev
+          if (msg.value === 2) client.osMenuSel = Math.min(MENU_ITEM_COUNT - 1, prev + 1)   // 2 = down / next
+          else if (msg.value === 1) client.osMenuSel = Math.max(0, prev - 1)                // 1 = up / prev
           else { console.warn(`[ws] menu focus unknown f3=${msg.value}; not moving`); break }
           if (client.osMenuSel !== prev) {
             try {

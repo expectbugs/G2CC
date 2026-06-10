@@ -19,6 +19,7 @@ import com.g2cc.g2cc.R
 import com.g2cc.g2cc.ble.BleScanner
 import com.g2cc.g2cc.ble.ConnectionState
 import com.g2cc.g2cc.ble.EvenHub
+import com.g2cc.g2cc.ble.EventParser
 import com.g2cc.g2cc.ble.G2BleClient
 import com.g2cc.g2cc.ble.G2Constants
 import com.g2cc.g2cc.ble.G2Frame
@@ -348,7 +349,12 @@ class ConnectionService : Service(), TestHarness {
         }
         stateJobs += scope.launch {
             client.events.collect { ev ->
-                if (side == Side.Right) lastNotifyMs = System.currentTimeMillis()  // liveness for the watchdog
+                if (side == Side.Right) {
+                    lastNotifyMs = System.currentTimeMillis()  // liveness for the watchdog
+                    // Feed e0-00 acks to the renderer's image ack-gate (it matches only the parked
+                    // image-chunk msgId; other acks just advance its liveness marker).
+                    if (ev is EventParser.Event.HubAck) renderer?.onImageAck(ev.msgId)
+                }
                 DiagLog.log("input", "$side $ev")
                 // Forward ring input to the PC when the server is driving the display.
                 if (_serverMode.value && side == Side.Right) {
@@ -402,7 +408,7 @@ class ConnectionService : Service(), TestHarness {
         lastNotifyMs = System.currentTimeMillis()    // fresh link — don't let the watchdog insta-fire
         DiagLog.log("recover", "lens reconnected — re-launching Hub (COLD_INIT) to revive the slot")
         setStatus("Link back — re-launching…")
-        r.launch(DisplayProto.TOKEN_DOCULENS, sc, EvenHub.COLD_INIT) { ok ->
+        r.launch(DisplayProto.LAUNCH_TOKEN, sc, EvenHub.COLD_INIT) { ok ->
             DiagLog.log("recover", "re-launch result=${if (ok) "OK" else "FAIL"}")
             if (ok) setStatus("Reconnected.")
         }
@@ -550,7 +556,7 @@ class ConnectionService : Service(), TestHarness {
                 val r = renderer ?: break
                 val sc = r.currentScene ?: continue
                 DiagLog.log("renew", "re-takeover (COLD_INIT) — resubmit current frame (${sc.regions.size} regions)")
-                r.launch(DisplayProto.TOKEN_DOCULENS, sc, EvenHub.COLD_INIT) { ok ->
+                r.launch(DisplayProto.LAUNCH_TOKEN, sc, EvenHub.COLD_INIT) { ok ->
                     DiagLog.log("renew", "re-takeover result=${if (ok) "OK" else "FAIL"}")
                 }
             }
@@ -579,6 +585,7 @@ class ConnectionService : Service(), TestHarness {
 
     private fun teardown() {
         tearingDown = true   // our own shutdownBle() disconnects must NOT trigger auto-recovery
+        renderer?.abort("teardown")   // release any parked image-chunk ack-wait so the pump can't wedge
         keepaliveJob?.cancel(); keepaliveJob = null
         clockJob?.cancel(); clockJob = null
         renderConsumerJob?.cancel(); renderConsumerJob = null
@@ -649,7 +656,7 @@ class ConnectionService : Service(), TestHarness {
     // ----------------------------------------------------------------- await helpers
 
     private suspend fun awaitLaunch(r: G2Renderer, s: Scene): Boolean =
-        suspendCancellableCoroutine { c -> r.launch(DisplayProto.TOKEN_DOCULENS, s, EvenHub.COLD_INIT) { if (c.isActive) c.resume(it) } }
+        suspendCancellableCoroutine { c -> r.launch(DisplayProto.LAUNCH_TOKEN, s, EvenHub.COLD_INIT) { if (c.isActive) c.resume(it) } }
 
     private suspend fun awaitSetScene(r: G2Renderer, s: Scene): Boolean =
         suspendCancellableCoroutine { c -> r.setScene(s) { if (c.isActive) c.resume(it) } }

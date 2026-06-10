@@ -111,6 +111,7 @@ object SceneCodec {
             if (ev.code == -1) ClientMessage.Input("tap")                       // empty-code hub gesture = single tap
             else ClientMessage.Input("hub_gesture", code = ev.code)
         is EventParser.Event.HubFocus -> ClientMessage.Input("focus", region = ev.name, value = ev.f3)
+        is EventParser.Event.HubAck -> null          // display-write ack — handled by the renderer, not input
         is EventParser.Event.Unknown -> null
         is EventParser.Event.Malformed -> null
         is EventParser.Event.InternalMenuEvent -> null

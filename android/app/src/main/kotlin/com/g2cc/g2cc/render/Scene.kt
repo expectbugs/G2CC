@@ -35,8 +35,12 @@ sealed interface Content {
     data class Text(
         val text: String,
         val scroll: Boolean = false,
-        val scrollOffset: Int? = null,
-        val contentHeight: Int? = null,
+        // Partial in-place text replace (f1=5 wire f3/f4). Confirmed from the g2cap UPGRADE
+        // capture as the SDK's textContainerUpgrade(contentOffset, contentLength) — NOT a scroll
+        // position (the old "scrollOffset/contentHeight" labels were wrong; docs/G2_BLE_PROTOCOL.md
+        // §6.3). null/null = full replace.
+        val contentOffset: Int? = null,
+        val contentLength: Int? = null,
     ) : Content
 
     /** A pre-encoded 4bpp gray BMP sized to the region's WxH (build via Rasterizer/Gray4Bmp). */

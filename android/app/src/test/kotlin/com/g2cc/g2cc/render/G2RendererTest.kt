@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -17,7 +18,7 @@ class G2RendererTest {
     @Test
     fun launch_emitsLaunchThenImageChunks_andSetsScene() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         val brand = img(200, 40)   // 4118 bytes -> 2 image chunks
         val s = scene { text("hud", 0, 8, 368, 280, "hi"); image("brand", 376, 4, 200, 40, brand) }
         var ok = false
@@ -35,7 +36,7 @@ class G2RendererTest {
     @Test
     fun setText_emitsSingleTextUpdate_andUpdatesScene() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         r.launch(10061, scene { text("hud", 0, 8, 368, 280, "hi") }) {}
         sink.calls.clear()
         var ok = false
@@ -52,7 +53,7 @@ class G2RendererTest {
     @Test
     fun setText_unknownRegion_loudFailsWithoutWriting() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         r.launch(10061, scene { text("hud", 0, 0, 100, 50, "x") }) {}
         sink.calls.clear()
         var ok = true
@@ -64,7 +65,7 @@ class G2RendererTest {
     @Test
     fun setImage_dimensionMismatch_loudFails() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         r.launch(10061, scene { image("pic", 0, 0, 200, 100, img(200, 100)) }) {}
         sink.calls.clear()
         var ok = true
@@ -76,7 +77,7 @@ class G2RendererTest {
     @Test
     fun setScene_sameLayout_sendsOnlyChangedRegion() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         val pic = img(200, 40)
         val s1 = scene { text("hud", 0, 8, 368, 280, "hi"); image("brand", 376, 4, 200, 40, pic) }
         r.launch(10061, s1) {}
@@ -91,7 +92,7 @@ class G2RendererTest {
     @Test
     fun setScene_layoutChange_pushesLayoutThenImages() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         r.launch(10061, scene { text("a", 0, 0, 100, 50, "x") }) {}
         sink.calls.clear()
         r.setScene(scene { text("a", 0, 0, 100, 50, "x"); image("b", 376, 4, 200, 40, img(200, 40)) }) {}
@@ -103,7 +104,7 @@ class G2RendererTest {
     @Test
     fun writeFailure_propagatesToCaller() {
         val sink = FakeSink().apply { failNext = true }
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         var ok = true
         r.launch(10061, scene { text("a", 0, 0, 100, 50, "x") }) { ok = it }
         assertFalse(ok)
@@ -120,7 +121,7 @@ class G2RendererTest {
     @Test
     fun setScene_beforeLaunch_loudFailsWithoutWriting() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         var ok = true
         r.setScene(scene { text("a", 0, 0, 100, 50, "x") }) { ok = it }
         assertFalse(ok)
@@ -130,7 +131,7 @@ class G2RendererTest {
     @Test
     fun launch_badImageInScene_loudFailsNoCrash() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         // Scene.init only checks region KIND, so a non-BMP buffer is constructible; launch must
         // loud-fail (onComplete(false)) rather than throw out to the caller.
         val badScene = scene { image("x", 0, 0, 10, 10, byteArrayOf(1, 2, 3)) }
@@ -143,7 +144,7 @@ class G2RendererTest {
     @Test
     fun imagePush_isDiscretePerMessageWrites_notOneAtomicBatch() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         r.launch(10061, scene { text("s", 0, 0, 576, 28, "x") }) {}
         sink.calls.clear()
         // layout change → 1 layout msg + a 200x100 image (10118 B = 3 chunks) = 4 discrete writes,
@@ -160,7 +161,7 @@ class G2RendererTest {
     @Test
     fun launch_fifthImageRegion_rejected_noWrites() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         val s = scene {
             image("a", 0, 0, 40, 40, img(40, 40)); image("b", 50, 0, 40, 40, img(40, 40))
             image("c", 100, 0, 40, 40, img(40, 40)); image("d", 150, 0, 40, 40, img(40, 40))
@@ -175,7 +176,7 @@ class G2RendererTest {
     @Test
     fun launch_allBlackImage_rejected_noWrites() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         val blank = Gray4Bmp.encode(64, 64, ByteArray(64 * 64))   // all index 0 = all-black → glasses choke
         var ok = true
         r.launch(10061, scene { image("x", 0, 0, 64, 64, blank) }) { ok = it }
@@ -186,10 +187,52 @@ class G2RendererTest {
     @Test
     fun launch_oversizeImageRegion_rejected_noWrites() {
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        val r = mkRenderer(sink)
         var ok = true
         r.launch(10061, scene { image("big", 0, 0, 400, 200, img(400, 200)) }) { ok = it }  // > 288x129
         assertFalse("an image region ≥384×192 drops the BLE link — must be rejected", ok)
         assertEquals(0, sink.calls.size)
+    }
+
+    // ---- ack-gated image pacing (matches the official app; hang-safe via abort) ----
+
+    @Test
+    fun imageChunks_ackGated_nextChunkWaitsForPriorAck() {
+        val sink = FakeSink()                 // acker NOT wired → chunks park; we drive acks manually
+        val r = G2Renderer(sink)
+        var done: Boolean? = null
+        // 200×100 = 10118 B → 3 image chunks; the launch frame is NOT ack-gated and flows first.
+        r.launch(10061, scene { text("s", 0, 0, 576, 28, "x"); image("pic", 0, 28, 200, 100, img(200, 100)) }) { done = it }
+
+        // After launch: the (ungated) launch frame + the FIRST image chunk are out; chunk 1 is parked.
+        run {
+            val m = sink.messages()
+            assertEquals("launch + chunk1 only (chunk2/3 gated on chunk1's ack)", 2, m.size)
+            assertEquals(DisplayProto.MSG_LAUNCH, msgType(m[0]))
+            assertEquals(DisplayProto.MSG_IMAGE, msgType(m[1]))
+            assertNull("job must not complete while parked on an image ack", done)
+        }
+        // Ack chunk 1 → chunk 2 goes out, then parks.
+        r.onImageAck(msgIdOf(sink.messages()[1]))
+        assertEquals(3, sink.messages().size)
+        assertNull(done)
+        // Ack chunk 2 → chunk 3 goes out, then parks.
+        r.onImageAck(msgIdOf(sink.messages()[2]))
+        assertEquals(4, sink.messages().size)
+        assertNull(done)
+        // Ack chunk 3 (the last) → the whole launch completes.
+        r.onImageAck(msgIdOf(sink.messages()[3]))
+        assertEquals(true, done)
+    }
+
+    @Test
+    fun abort_releasesParkedImageChunk_completesFalse_noHang() {
+        val sink = FakeSink()                 // no auto-ack → the first chunk parks until abort
+        val r = G2Renderer(sink)
+        var done: Boolean? = null
+        r.launch(10061, scene { text("s", 0, 0, 576, 28, "x"); image("pic", 0, 28, 200, 100, img(200, 100)) }) { done = it }
+        assertNull("parked on the first image ack", done)
+        r.abort("test teardown")              // the watchdog/teardown unblock
+        assertEquals("a parked image send is released as a failure, never left hanging", false, done)
     }
 }

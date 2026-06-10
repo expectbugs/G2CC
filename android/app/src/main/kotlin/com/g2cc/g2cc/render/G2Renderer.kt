@@ -40,9 +40,21 @@ class G2Renderer(
     // queue (the clock/renewal-vs-server-render wedge — the conflated server channel only covers
     // server-vs-server). The single-packet keepalive heartbeat writes OUTSIDE this path and still
     // interleaves between chunks by design.
-    private data class SendJob(val ops: List<List<ByteArray>>, val label: String, val onComplete: (Boolean) -> Unit)
+    /** One renderer message (its AA fragments) + optionally the msgId whose `e0-00` ack must
+     *  arrive before the NEXT message goes out. Image chunks set it (ack-gated, matching the
+     *  official app's 0/100 overlap); everything else leaves it null (fixed inter-message pacing). */
+    private data class RenderMsg(val packets: List<ByteArray>, val ackMsgId: Int? = null)
+    private data class SendJob(val msgs: List<RenderMsg>, val label: String, val onComplete: (Boolean) -> Unit)
     private val sendQueue = ArrayDeque<SendJob>()
     private var sending = false
+
+    // Image ack-gate. A sent image chunk parks its continuation here until its `e0-00` ack
+    // (onImageAck) — or until abort() releases it (teardown/recovery; the watchdog is the external
+    // supervisor, so a never-arriving ack can't wedge the pump). NO timeout (per the three rules).
+    private var ackWaitMsgId: Int? = null
+    private var ackWaitResume: ((Boolean) -> Unit)? = null
+    private var lastAckedMsgId: Int = -1     // most recent e0-00 ack msgId (handles ack-arrives-before-park)
+    private var aborting = false             // set by abort(); cleared by the next enqueueSend
 
     /** The scene last handed to the glasses (after the in-flight write was issued). */
     val currentScene: Scene? get() = synchronized(lock) { current }
@@ -79,16 +91,16 @@ class G2Renderer(
     fun launch(appToken: Int, scene: Scene, prelude: List<ByteArray> = emptyList(), onComplete: (Boolean) -> Unit = {}) {
         validate(scene)?.let { diag("launch REJECTED — $it"); onComplete(false); return }
         val ops = try {
-            val o = ArrayList<List<ByteArray>>()
-            for (f in prelude) o += listOf(f)
-            o += DisplayProto.frame(
+            val o = ArrayList<RenderMsg>()
+            for (f in prelude) o += RenderMsg(listOf(f))
+            o += RenderMsg(DisplayProto.frame(
                 nextSeq(),
                 DisplayProto.launchPayload(
                     nextMsgId(), appToken,
                     scene.textRegions().map { textContainer(scene, it) },
                     scene.imageRegions().map { imageContainer(it) },
                 ),
-            )
+            ))
             o += imageContentOps(scene, scene.imageRegions().map { it.name })
             o
         } catch (e: IllegalArgumentException) {
@@ -119,16 +131,16 @@ class G2Renderer(
             diag("setScene: region '$name' content removed — not auto-cleared; set blank content to clear it")
         }
         val ops = try {
-            val o = ArrayList<List<ByteArray>>()
+            val o = ArrayList<RenderMsg>()
             if (d.layoutChanged) {
-                o += DisplayProto.frame(
+                o += RenderMsg(DisplayProto.frame(
                     nextSeq(),
                     DisplayProto.layoutPayload(
                         nextMsgId(),
                         scene.textRegions().map { textContainer(scene, it) },
                         scene.imageRegions().map { imageContainer(it) },
                     ),
-                )
+                ))
                 o += imageContentOps(scene, scene.imageRegions().map { it.name })
             } else {
                 for (name in d.changedRegions) {
@@ -151,12 +163,14 @@ class G2Renderer(
     /** Update a single text region by name (cheap f1=5). Loud-fails if the region is unknown
      *  or not a text region — never silently drops the update.
      *
-     *  Note: a text region's `scroll` flag (f11) is a CONTAINER property and cannot change via
-     *  an f1=5 update, so it is intentionally NOT a parameter here — the region keeps its
-     *  launch-time scroll. To change scroll, re-push the layout via [setScene]. */
+     *  [contentOffset]+[contentLength] do a PARTIAL in-place replace (the SDK's
+     *  textContainerUpgrade(contentOffset, contentLength) — efficient for streaming a growing
+     *  tail); both null = full replace. A text region's `scroll` flag (f11/isEventCapture) is a
+     *  CONTAINER property that cannot change via f1=5, so it is intentionally NOT a parameter
+     *  here — the region keeps its launch-time scroll. To change scroll, re-push via [setScene]. */
     fun setText(
         name: String, text: String,
-        scrollOffset: Int? = null, contentHeight: Int? = null, onComplete: (Boolean) -> Unit = {},
+        contentOffset: Int? = null, contentLength: Int? = null, onComplete: (Boolean) -> Unit = {},
     ) {
         val scene = synchronized(lock) { current }
         val region = scene?.region(name)
@@ -165,7 +179,7 @@ class G2Renderer(
             onComplete(false); return
         }
         val existingScroll = (scene.content[name] as? Content.Text)?.scroll ?: false
-        val c = Content.Text(text, existingScroll, scrollOffset, contentHeight)
+        val c = Content.Text(text, existingScroll, contentOffset, contentLength)
         synchronized(lock) { current = scene.withContent(name, c) }
         enqueueSend(listOf(textOp(region, c)), "text:$name", onComplete)
     }
@@ -202,29 +216,35 @@ class G2Renderer(
     private fun imageContainer(r: Region): ByteArray =
         DisplayProto.imageContainer(r.x, r.y, r.w, r.h, r.id, r.name)
 
-    private fun textOp(r: Region, c: Content.Text): List<ByteArray> =
-        DisplayProto.frame(nextSeq(), DisplayProto.textPayload(nextMsgId(), r.id, r.name, c.text, c.scrollOffset, c.contentHeight))
+    private fun textOp(r: Region, c: Content.Text): RenderMsg =
+        RenderMsg(DisplayProto.frame(nextSeq(), DisplayProto.textPayload(nextMsgId(), r.id, r.name, c.text, c.contentOffset, c.contentLength)))
 
-    /** Chunk a BMP at MAX_IMAGE_CHUNK and frame each chunk as its own f1=3 message. */
-    private fun imageOps(r: Region, bmp: ByteArray): List<List<ByteArray>> {
+    /** Chunk a BMP at MAX_IMAGE_CHUNK and frame each chunk as its own f1=3 message. Each chunk is
+     *  ack-gated on its own msgId so the NEXT chunk waits for this one's `e0-00` ack (the official
+     *  push pattern). */
+    private fun imageOps(r: Region, bmp: ByteArray): List<RenderMsg> {
         val dec = Gray4Bmp.decode(bmp)   // throws loudly if not a 4bpp BM
         require(dec.width == r.w && dec.height == r.h) {
             "image ${dec.width}x${dec.height} != region '${r.name}' ${r.w}x${r.h}"
         }
         val tok = nextToken()
-        val ops = ArrayList<List<ByteArray>>()
+        val ops = ArrayList<RenderMsg>()
         var off = 0; var idx = 0
         while (off < bmp.size) {
             val end = minOf(off + DisplayProto.MAX_IMAGE_CHUNK, bmp.size)
             val chunk = bmp.copyOfRange(off, end)
-            ops += DisplayProto.frame(nextSeq(), DisplayProto.imagePayload(nextMsgId(), r.id, r.name, tok, bmp.size, idx, chunk))
+            val mid = nextMsgId()
+            ops += RenderMsg(
+                DisplayProto.frame(nextSeq(), DisplayProto.imagePayload(mid, r.id, r.name, tok, bmp.size, idx, chunk)),
+                ackMsgId = mid,
+            )
             off = end; idx++
         }
         return ops
     }
 
-    private fun imageContentOps(scene: Scene, names: List<String>): List<List<ByteArray>> {
-        val ops = ArrayList<List<ByteArray>>()
+    private fun imageContentOps(scene: Scene, names: List<String>): List<RenderMsg> {
+        val ops = ArrayList<RenderMsg>()
         for (name in names) (scene.content[name] as? Content.Image)?.let { ops += imageOps(scene.region(name)!!, it.bmp) }
         return ops
     }
@@ -239,36 +259,51 @@ class G2Renderer(
      * keepalive, and dropped the link mid-push. Per-message writes let the keepalive (a separate
      * enqueue) interleave between chunks, exactly like the app the firmware expects.
      */
-    private fun sendOps(ops: List<List<ByteArray>>, label: String, onComplete: (Boolean) -> Unit) {
-        if (ops.isEmpty()) { onComplete(true); return }
-        diag("render $label: ${ops.size} messages / ${ops.sumOf { it.size }} packets (discrete, keepalive-interleavable)")
-        sendMessage(ops, 0, label, true, onComplete)
+    private fun sendOps(msgs: List<RenderMsg>, label: String, onComplete: (Boolean) -> Unit) {
+        if (msgs.isEmpty()) { onComplete(true); return }
+        diag("render $label: ${msgs.size} messages / ${msgs.sumOf { it.packets.size }} packets (discrete, keepalive-interleavable)")
+        sendMessage(msgs, 0, label, onComplete)
     }
 
-    private fun sendMessage(ops: List<List<ByteArray>>, i: Int, label: String, ok: Boolean, onComplete: (Boolean) -> Unit) {
-        if (i >= ops.size) { onComplete(ok); return }
-        val msg = ops[i]
-        val delays = ArrayList<Long>(msg.size)
-        // pace fragments within the message; a longer pause AFTER the last fragment is the gap the
-        // keepalive (and the next chunk's ack) slot into, matching the native ~0.3 s/chunk cadence.
-        for (k in msg.indices) delays += if (k == msg.size - 1) INTER_MESSAGE_PACE_MS else FRAGMENT_PACE_MS
-        sink.write(msg, delays, "$label#${i + 1}/${ops.size}") { wok ->
+    private fun sendMessage(msgs: List<RenderMsg>, i: Int, label: String, onComplete: (Boolean) -> Unit) {
+        if (i >= msgs.size) { onComplete(true); return }
+        val msg = msgs[i]
+        val packets = msg.packets
+        val delays = ArrayList<Long>(packets.size)
+        // Pace fragments within the message. The last-fragment pause is the inter-message gap that
+        // the keepalive slots into. An ack-gated (image) message uses only a small floor here and
+        // then WAITS for its e0-00 ack before the next chunk — matching the official ack-gated push
+        // and self-adapting to link speed (faster ack ⇒ faster next chunk). Tune for the hat in
+        // HAT_BRIDGE_SPEC.md §13. A non-ack-gated message keeps the fixed inter-message pace.
+        val lastPace = if (msg.ackMsgId != null) IMAGE_INTER_CHUNK_FLOOR_MS else INTER_MESSAGE_PACE_MS
+        for (k in packets.indices) delays += if (k == packets.size - 1) lastPace else FRAGMENT_PACE_MS
+        sink.write(packets, delays, "$label#${i + 1}/${msgs.size}") { wok ->
             if (!wok) {
                 // Abort on a write failure rather than pushing the remaining chunks into a
                 // possibly-dying session (coordinated with the queueWrites BLE-1 fix).
-                diag("render $label#${i + 1}: WRITE FAILED — aborting ${ops.size - i - 1} remaining message(s)")
+                diag("render $label#${i + 1}: WRITE FAILED — aborting ${msgs.size - i - 1} remaining message(s)")
                 onComplete(false)
                 return@write
             }
-            sendMessage(ops, i + 1, label, ok, onComplete)
+            val ackId = msg.ackMsgId
+            if (ackId == null) {
+                sendMessage(msgs, i + 1, label, onComplete)
+            } else {
+                // Ack-gate: hold the next chunk until this one's e0-00 ack (or abort()).
+                awaitImageAck(ackId) { acked ->
+                    if (acked) sendMessage(msgs, i + 1, label, onComplete)
+                    else { diag("render $label#${i + 1}: ack-wait released by abort — stopping"); onComplete(false) }
+                }
+            }
         }
     }
 
     /** Serialize full render ops: only one op's messages sit on the BLE queue at a time, so a
      *  clock tick / renewal / server render can't interleave its AA writes into another op's. */
-    private fun enqueueSend(ops: List<List<ByteArray>>, label: String, onComplete: (Boolean) -> Unit) {
+    private fun enqueueSend(msgs: List<RenderMsg>, label: String, onComplete: (Boolean) -> Unit) {
         synchronized(lock) {
-            sendQueue.addLast(SendJob(ops, label, onComplete))
+            aborting = false                       // a fresh op means we're live again (post-recovery)
+            sendQueue.addLast(SendJob(msgs, label, onComplete))
             if (sending) return
             sending = true
         }
@@ -279,10 +314,50 @@ class G2Renderer(
         val job = synchronized(lock) {
             if (sendQueue.isEmpty()) { sending = false; null } else sendQueue.removeFirst()
         } ?: return
-        sendOps(job.ops, job.label) { ok ->
+        sendOps(job.msgs, job.label) { ok ->
             job.onComplete(ok)
             pumpNext()
         }
+    }
+
+    /** Feed every `e0-00` ack's msgId here (the connection layer parses `ack.f2`). Resumes the
+     *  parked image-chunk send if it was waiting on this msgId; other acks just record liveness.
+     *  All `e0-20` writes (launch/image/text/layout/keepalive) share one msgId counter, so an
+     *  image chunk's msgId is unique within the ack window — no cross-op false match. */
+    fun onImageAck(msgId: Int) {
+        val resume = synchronized(lock) {
+            lastAckedMsgId = msgId
+            if (ackWaitMsgId == msgId) { ackWaitMsgId = null; ackWaitResume.also { ackWaitResume = null } } else null
+        }
+        resume?.invoke(true)
+    }
+
+    /** Release any parked image-chunk send (failing it) and drop queued ops — call on teardown /
+     *  before recovery so a never-arriving ack can't wedge the render pump. The watchdog supervises
+     *  the session externally; this is the local unblock. Safe when nothing is parked. */
+    fun abort(reason: String) {
+        val resume = synchronized(lock) {
+            aborting = true
+            sendQueue.clear()
+            ackWaitMsgId = null
+            ackWaitResume.also { ackWaitResume = null }
+        }
+        if (resume != null) diag("renderer abort ($reason): releasing parked image-chunk send")
+        resume?.invoke(false)
+    }
+
+    /** Park [resume] until the [msgId] ack arrives (→ resume(true)) or abort() fires (→ resume(false)).
+     *  Resolves immediately if the ack already arrived (race) or an abort is in progress. */
+    private fun awaitImageAck(msgId: Int, resume: (Boolean) -> Unit) {
+        var fire: Boolean? = null
+        synchronized(lock) {
+            when {
+                aborting -> fire = false                   // teardown underway → don't park, fail fast
+                lastAckedMsgId == msgId -> fire = true      // ack already arrived → proceed now
+                else -> { ackWaitMsgId = msgId; ackWaitResume = resume }
+            }
+        }
+        fire?.let { resume(it) }
     }
 
     companion object {
@@ -292,6 +367,10 @@ class G2Renderer(
         const val MAX_IMAGE_W = 288             // proven-safe per-region size; a region ≥384×192 drops the BLE link
         const val MAX_IMAGE_H = 129
         const val FRAGMENT_PACE_MS = 12L    // between AA fragments WITHIN one message (chunk)
-        const val INTER_MESSAGE_PACE_MS = 100L  // after each message — keepalive interleaves here (native ~0.3 s/chunk)
+        const val INTER_MESSAGE_PACE_MS = 100L  // after a NON-ack-gated message (text/layout) — keepalive interleaves here
+        // After an image chunk, before its ack-gate. Just a small floor — the real inter-chunk gap
+        // is the e0-00 ack (so it self-adapts to link speed). The knob the hat pacing sweep tunes
+        // toward the glasses' true ingestion ceiling once the link is rock-solid (HAT_BRIDGE_SPEC.md §13).
+        const val IMAGE_INTER_CHUNK_FLOOR_MS = 12L
     }
 }

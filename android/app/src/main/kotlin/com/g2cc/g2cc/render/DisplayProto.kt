@@ -37,8 +37,24 @@ object DisplayProto {
     const val MSG_LAYOUT = 7
     const val MSG_KEEPALIVE = 12
 
-    /** Known Hub app tokens (launch wrapper f5). Chess = 10061, Reddit = 10217. */
+    // ---- launch app token (launch wrapper f5) ----
+    // The token labels which Hub-app slot the cold-launch takes over. Known catalog tokens
+    // (from the official app's 03-20 enumeration, docs/G2_BLE_PROTOCOL.md §4.1):
+    //   DocuLens 11417, Reddit 10217, Chess 10061, Solitaire 10060, Books 11313, …
+    /** DocuLens — a catalog token, HARDWARE-PROVEN to cold-launch over our DIRECT BLE link. */
     const val TOKEN_DOCULENS = 11417
+    /** Our own token (the g2cap demo launched with it). It is NOT in the glasses' installed-app
+     *  catalog, so it can't collide with a real app — the clean "don't impersonate DocuLens"
+     *  choice. **UNVERIFIED on the direct-BLE path:** g2cap launched 10000 *through the Even App
+     *  SDK*, which may have registered it; a direct cold-launch with a non-catalog token is
+     *  untested and could fail to bring up the display. Flip [LAUNCH_TOKEN] to this and verify on
+     *  glass (Adam's eyes) before trusting it; revert to TOKEN_DOCULENS if it doesn't launch. */
+    const val TOKEN_G2CC = 10000
+    /** The token the app actually cold-launches with — single source of truth. Set to our own
+     *  [TOKEN_G2CC] to test the un-impersonated direct-BLE launch (UNVERIFIED on hardware — see its
+     *  note). **If the display fails to cold-launch, revert this one line to [TOKEN_DOCULENS]** (the
+     *  HARDWARE-PROVEN catalog token). */
+    const val LAUNCH_TOKEN = TOKEN_G2CC
 
     // ---------- protobuf field primitives (wire 0 = varint, wire 2 = length-delimited) ----------
     private fun key(field: Int, wire: Int) = Varint.encode((field shl 3) or wire)
@@ -75,13 +91,16 @@ object DisplayProto {
     fun layoutPayload(msgId: Int, texts: List<ByteArray>, images: List<ByteArray>): ByteArray =
         cat(v(1, MSG_LAYOUT), v(2, msgId), l(7, wrapper(texts, images, null)))
 
-    /** f1=5 text-update: replace one text region's content by name. */
+    /** f1=5 text-update: replace one text region's content by name. With [contentOffset]+
+     *  [contentLength] set, this is a PARTIAL in-place replace (wire f3/f4 = the SDK's
+     *  textContainerUpgrade(contentOffset, contentLength), confirmed from the g2cap UPGRADE
+     *  capture — docs/G2_BLE_PROTOCOL.md §6.3); both null = full replace. */
     fun textPayload(msgId: Int, regionId: Int, name: String, text: String,
-                    scrollOffset: Int? = null, contentHeight: Int? = null): ByteArray {
+                    contentOffset: Int? = null, contentLength: Int? = null): ByteArray {
         val inner = ArrayList<ByteArray>(5)
         inner += v(1, regionId); inner += s(2, name)
-        if (scrollOffset != null) inner += v(3, scrollOffset)
-        if (contentHeight != null) inner += v(4, contentHeight)
+        if (contentOffset != null) inner += v(3, contentOffset)
+        if (contentLength != null) inner += v(4, contentLength)
         inner += s(5, text)
         return cat(v(1, MSG_TEXT), v(2, msgId), l(9, cat(inner)))
     }

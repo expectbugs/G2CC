@@ -1164,6 +1164,9 @@ class G2Pipeline(
                     // legacy menu navigates via HubSelect; informational here.
                     diag("hub-input: focus '${event.name}' (id=${event.containerId} f3=${event.f3})")
                 }
+                is EventParser.Event.HubAck -> {
+                    // e0-00 ack for a display write — not user input (the renderer ack-gates on it).
+                }
                 is EventParser.Event.Malformed -> {
                     Log.w(TAG, "malformed BLE event: ${event.reason}")
                 }

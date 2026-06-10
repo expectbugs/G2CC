@@ -19,13 +19,13 @@ import android.util.Log
  *     layer. Surface as InternalMenuEvent for now; not actionable for our
  *     menu navigation.
  *
- * **Direction encoding unconfirmed.** Adam's BTSnoop capture was browsing
- * the Even App News feed, scrolling mostly downward. The sub-event field
- * structure is `[f1=v[2|3|4] f2=v[incrementing]]` — `f1` may encode
- * direction OR scroll speed; we don't have a controlled up-then-down
- * capture to distinguish. For now: any non-empty scroll event emits
- * ScrollDown with a TODO to revisit. Going wrong-direction is recoverable
- * (user scrolls back); silently dropping events is not.
+ * **Direction encoding — scoped status.** The LIVE path ([HubFocus] on `e0-01`)
+ * is now CONFIRMED: f3=1 = scroll-up, f3=2 = scroll-down (g2cap capture 2026-06-10,
+ * docs/G2_BLE_PROTOCOL.md §6.6). The legacy ring channel `0x01-01` ([decodeScroll]
+ * below) is a DIFFERENT path that these captures did not exercise (the hijack gets
+ * input via `e0-01`, not `0x01-01`); its direction stays provisional — any non-empty
+ * 0x01-01 scroll emits ScrollDown. Going wrong-direction is recoverable (user scrolls
+ * back); silently dropping events is not.
  *
  * Frames from OTHER services (auth acks 0x80-01, display config 0x0e-00,
  * device info 0x09-00 etc.) still surface as Unknown so we don't silently
@@ -74,11 +74,18 @@ object EventParser {
         data class HubGesture(val code: Int) : Event
         /** EvenHub (`e0-01` `f1=2`) focus/scroll report — the firmware names the
          *  currently-focused container by [containerId] + [name] (OUR own region
-         *  id/name, echoed back) with a small [f3] (observed 1/2 — plausibly scroll
-         *  direction; unconfirmed). Emitted as the ring scrolls within a focusable
-         *  container. Decoded 2026-06-06 from a controlled scroll capture:
+         *  id/name, echoed back) with a small [f3] = scroll direction.
+         *  **CONFIRMED 2026-06-10** from the g2cap capture (each scroll ground-truthed
+         *  against the on-screen breadcrumb): **f3=1 = scroll-up (SCROLL_TOP), f3=2 =
+         *  scroll-down (SCROLL_BOTTOM)** — the SDK `OsEventTypeList`. (docs/G2_BLE_PROTOCOL.md
+         *  §6.6.) The server (ws-handler) already maps 1→prev / 2→next. Wire:
          *  `08 02 6a <l> 12 <l> 08 <id> 12 <l> <name> 18 <f3>`. */
         data class HubFocus(val containerId: Int, val name: String, val f3: Int) : Event
+        /** EvenHub (`e0-00`) ack for one of our `e0-20` writes: [ackType] = `req.f1 + 1`
+         *  (launch 0→1, image 3→4, text 5→6, layout 7→8, keepalive 12→12), [msgId] = the echoed
+         *  request msgId (`ack.f2`). The renderer ack-gates image chunks on these (G2Renderer.onImageAck).
+         *  Decoded 2026-06-10 — docs/G2_BLE_PROTOCOL.md §5. */
+        data class HubAck(val ackType: Int, val msgId: Int) : Event
     }
 
     fun parse(packet: ByteArray): Event {
@@ -101,6 +108,11 @@ object EventParser {
         // Service 0xe0-01 = EvenHub Hub-app input channel (the hijack path).
         if (service.first == 0xE0.toByte() && service.second == 0x01.toByte()) {
             return decodeHubInput(payload)
+        }
+        // Service 0xe0-00 = EvenHub ack channel (acks for our display writes). The renderer
+        // ack-gates image chunks on these, so decode the (ackType, msgId).
+        if (service.first == 0xE0.toByte() && service.second == 0x00.toByte()) {
+            return decodeHubAck(payload)
         }
         // Everything else (auth acks, display config responses, etc.) — surface
         // as Unknown so the caller can filter quietly without us losing data.
@@ -209,6 +221,22 @@ object EventParser {
             i++
         }
         return Event.InternalMenuEvent(counter, payload.toHex())
+    }
+
+    /** Decode an EvenHub ack on service 0xe0-00: `08 <ackType> 10 <msgId varint> …`
+     *  (f1=ackType, f2=echoed msgId). Tolerant of trailing descriptor fields (the image ack
+     *  carries f6). Falls back to Unknown if the prefix doesn't match. */
+    private fun decodeHubAck(payload: ByteArray): Event {
+        val svc = 0xE0.toByte() to 0x00.toByte()
+        if (payload.size < 2 || payload[0] != 0x08.toByte()) return Event.Unknown(svc, payload.toHex())
+        val (ackType, n1) = Varint.decode(payload, 1)
+        val i = 1 + n1
+        if (i >= payload.size || payload[i] != 0x10.toByte()) {
+            // ackType present but no msgId field — still useful as a typed ack (msgId=-1).
+            return Event.HubAck(ackType, -1)
+        }
+        val (msgId, _) = Varint.decode(payload, i + 1)
+        return Event.HubAck(ackType, msgId)
     }
 
     /** Decode an EvenHub input event on service 0xe0-01 (`f1=2`). Two shapes

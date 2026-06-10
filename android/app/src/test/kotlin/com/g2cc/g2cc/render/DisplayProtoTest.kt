@@ -38,8 +38,9 @@ class DisplayProtoTest {
 
     @Test
     fun textUpdate_pscore_matchesCapture() {
-        // f1=5 to "p-score": regionId 3, scrollOffset 0, contentHeight 10, text "0", msgId 11.
-        val payload = DisplayProto.textPayload(0x0b, 3, "p-score", "0", scrollOffset = 0, contentHeight = 10)
+        // f1=5 to "p-score": regionId 3, contentOffset 0, contentLength 10, text "0", msgId 11.
+        // (Chess cleared the 10-char score field then wrote the new value — partial in-place replace.)
+        val payload = DisplayProto.textPayload(0x0b, 3, "p-score", "0", contentOffset = 0, contentLength = 10)
         assertEquals(CAP_TEXT_PSCORE, hx(payload))
     }
 
