@@ -36,14 +36,17 @@ export const STATUS_PADDING = 4
 // ============================================================
 export const CLOCK_CONTAINER_ID = 1
 export const CLOCK_CONTAINER_NAME = 'clock'
-// 38 = DE_BAR_H: the clock cutout is the right end of the DE title bar, so the
-// two must match (visual seam otherwise). ≥38px also avoids the firmware
-// overflow scrollbar on short bars (docs/SIM_TOOLING.md gotcha 5). Format is
-// 12-hour minute-tick ("1:04 PM") — decided 2026-06-10 (docs/DE_DESIGN.md §1).
-export const CLOCK_HEIGHT = 38
-export const CLOCK_WIDTH = 132                      // "12:59 PM" fits w/ margin; verify on glass
+// 33 = DE_BAR_H: the clock cutout is the right end of the DE title bar, so the
+// two must match (visual seam otherwise). 33px + padding 4 leaves ~25px for the
+// ~20px firmware glyphs — believed over the overflow-scrollbar threshold
+// (docs/SIM_TOOLING.md gotcha 5); HARDWARE-VERIFY. Format is 12-hour
+// minute-tick ("1:04 PM"). Width 102 / x 474 = Adam's 2026-06-10 eyeball cal
+// (+30px right vs the first cut); "12:59 PM" estimates ~91px incl padding —
+// if it clips on glass, widen CLOCK_WIDTH back toward 132.
+export const CLOCK_HEIGHT = 33
+export const CLOCK_WIDTH = 102
 export const CLOCK_Y = 0
-export const CLOCK_X = SCREEN_WIDTH - CLOCK_WIDTH    // 444 — flush right
+export const CLOCK_X = SCREEN_WIDTH - CLOCK_WIDTH    // 474 — flush right
 
 // Glasses-OS content area the server is free to compose into: full width
 // BELOW the clock band. The top-left band [0,0 .. CLOCK_X, CLOCK_HEIGHT] is
@@ -58,22 +61,29 @@ export const OS_TITLE_WIDTH = CLOCK_X - 2
 // the right end of the DE title bar. Stable region ids in DE_REGION_IDS keep
 // window switches diffing as content-only updates wherever possible.
 // ============================================================
-export const DE_BAR_H = 38                                  // title + status bar height
+export const DE_BAR_H = 33                                  // title + status bar height (Adam cal 2026-06-10)
 export const DE_MENU_W = 96                                 // left action-menu width
 export const DE_CONTENT_X = DE_MENU_W                       // 96
-export const DE_CONTENT_Y = DE_BAR_H                        // 38
+export const DE_CONTENT_Y = DE_BAR_H                        // 33
 export const DE_CONTENT_W = SCREEN_WIDTH - DE_MENU_W        // 480
-export const DE_CONTENT_H = SCREEN_HEIGHT - 2 * DE_BAR_H    // 212
+export const DE_CONTENT_H = SCREEN_HEIGHT - 2 * DE_BAR_H    // 222
 export const DE_TILE_W = DE_CONTENT_W / 2                   // 240 (≤288 cap ✓)
-export const DE_TILE_H = DE_CONTENT_H / 2                   // 106 (≤144 cap ✓)
-export const DE_TITLE_W = SCREEN_WIDTH - CLOCK_WIDTH        // 444 (title ends at the clock cutout)
+export const DE_TILE_H = DE_CONTENT_H / 2                   // 111 (≤129 cap ✓)
+export const DE_TITLE_W = SCREEN_WIDTH - CLOCK_WIDTH        // 474 (title ends at the clock cutout)
+/** Right-trim on the tab strip's estimated width — pushes the right-aligned
+ *  tabs ~30px farther right (Adam's 2026-06-10 eyeball cal vs the conservative
+ *  glyph estimate). If the tabs CLIP/wrap on real glass, reduce this. */
+export const DE_TAB_RIGHT_TRIM = 30
 /** Stable container ids — identical across windows (docs/DE_DESIGN.md §1). */
 export const DE_REGION_IDS = {
   title: 2, menu: 3, status: 4, tabs: 5, browse: 6, contentText: 7,
   tile0: 10, tile1: 11, tile2: 12, tile3: 13,
 } as const
-/** Menu items that fit without firmware list scrolling (212px / ~40px rows). */
+/** Menu items that fit without firmware list scrolling (~40px rows in 222px). */
 export const DE_MENU_VISIBLE_ITEMS = 5
+// Native-list hard caps: MAX_MENU_ITEMS / MAX_ITEM_NAME_LENGTH below (§"Menu
+// limits") apply to EVERY native list — G2_BLE_PROTOCOL.md §6.1 proved exactly
+// 20 items; beyond 20/64 is unprobed firmware territory (validate rejects).
 
 // Main content
 export const CONTENT_Y = 30                  // 2-px gap below status bar

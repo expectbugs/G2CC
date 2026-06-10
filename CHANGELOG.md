@@ -4,7 +4,50 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
-## (unstamped) — 2026-06-10 — **APK v0.9 + server: the DE ships — window manager, native list, content pipeline, dictation, Mail/Files**
+## (unstamped) — 2026-06-10 — **APK v1.0 + server: Adam's UI cal + the full-review hardening pass**
+
+Same-day follow-up to v0.9 (below): Adam's UI calibration + a comprehensive 4-agent code
+review (Fable, max effort) with every finding verified before fixing.
+
+**Adam's UI changes.** Bars 38→**33px**; clock cutout → **x474/w102** (+30px right); tabs get
+`DE_TAB_RIGHT_TRIM=30`; title text +5px (leading space — padding would eat vertical room);
+content grows to **480×222** (tiles 240×111). **The left menu is ALWAYS a real list** — browse
+windows show a non-capturing `Back/Main` list (no selection ring; one capture region per page
+is a hardware rule). **Main** = window list in the menu + a drawn **G2CC logo** in the content
+tiles. **Reload everywhere**: every reading menu has it; every browse list gets a
+compose-injected row 0; it sends the new **`display_reload`** message — the client aborts any
+wedged render op (releases a stuck image ack-wait) and re-runs the COLD_INIT re-takeover with
+its current scene (the proven renewal path), then the server recomposes. ⚠ Geometry changes
+require APK+server in lockstep: an old APK rejects every new-geometry scene with "overlaps the
+clock cutout" (Adam hit this live; the error was the version skew working as designed).
+
+**Review fixes (the ones that mattered).** Client: `decodeHubAck` now defaults an absent ack
+msgId to **0** per protobuf semantics — an image chunk parked on msgId 0 (every 256th message)
+could otherwise deadlock the ack-gated pump ~2 min until slot expiry; validate gains
+every-page-needs-text + list caps (≤20 items, ≤64-char names); mic capture failures now reach
+the server as `[audio-error]` diags (they were logcat-only — the server's dictation state
+machine waited forever); the mic FGS fallback is remembered and `audio_request` refuses loudly
+instead of recording Android-14 silence; minute-clock ticks only mark written on a CONFIRMED
+write. Server: `respawn()` used `permissionMode:'default'` (would permission-prompt every tool
+call — openInner was fixed, respawn missed); session listeners guard against the killed
+process's late `close` event poisoning the fresh session; `ccSessionId` now persists on
+`turn_complete` (DE sessions never reached sessions.json → every WS drop silently lost the
+conversation); STT results only land while `transcribing` (kills the canceled-result race);
+**leaving a window stops the mic** (it used to stream until the 150 MB guard); doc renders are
+sequence-tokened (a slow prompt-echo can't overwrite a fast turn_complete); compose failures
+can't crash the server (it did — empty-dir browse lists threw outside the try); error-screen
+taps misrouting into live actions (Retry→mic-on) fixed by resolving taps against the
+**last-rendered** view + WM-level labels; Files preview reads a bounded 256 KB head (a multi-GB
+`readFileSync` blocked the event loop); Mail list scans headers only (2.4 s → 0.04 s on the
+303 MB inbox) and decodes RFC2047/folded headers (`=?UTF-8?Q?…?=` showed raw on-glass);
+stripInline no longer eats prose asterisks; >3 stat cards chunk instead of dropping; markdown
+numbered lists render as lists; labels clamp at 64 UTF-8 **bytes**. Deferred (documented in
+DE_DESIGN §7): scene-version echo for the tap-vs-rebuild race (mitigated by menu ordering),
+probe-screen geometry re-tune.
+
+---
+
+## (superseded same-day) — 2026-06-10 — **APK v0.9 + server: the DE ships — window manager, native list, content pipeline, dictation, Mail/Files**
 
 The window-manager DE went from sim mockup to implemented in one session, against the finalized
 contract in **`docs/DE_DESIGN.md`** (decided with Adam: v1 windows = Main/CC/Aria/Mail/Files;

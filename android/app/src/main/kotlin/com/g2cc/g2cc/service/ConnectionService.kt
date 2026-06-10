@@ -116,6 +116,12 @@ class ConnectionService : Service(), TestHarness {
     private var syncMsgId = 0x20
     private var connection: ConnectionManager? = null
     private var audioStreamer: AudioStreamer? = null      // server-driven dictation (audio_request)
+    // Did startForeground succeed WITH the microphone FGS type? When the mic-typed start
+    // is denied (background START_STICKY restart on Android 12+/14) we fall back to
+    // connectedDevice-only — and Android 14+ then feeds AudioRecord SILENCE instead of
+    // throwing. Gate audio_request on this so the server gets a loud refusal, not a
+    // well-formed stream of zeros that STT "transcribes" to nothing.
+    @Volatile private var micFgsGranted = false
     private var lastLeftDevice: BluetoothDevice? = null   // cached so recovery can reconnect directly (no rescan)
     private var lastRightDevice: BluetoothDevice? = null
     @Volatile private var tearingDown = false             // suppress auto-recovery during intentional teardown
@@ -272,6 +278,22 @@ class ConnectionService : Service(), TestHarness {
                 if (sceneCh?.trySend(msg.scene)?.isSuccess != true)
                     DiagLog.log("os", "render dropped — render queue not active (not in server mode?)")
             }
+            is ServerMessage.DisplayReload -> {
+                // DE 'Reload': recover a possibly-stuck display. Abort releases a wedged
+                // image ack-wait + drops queued ops; then re-run the COLD_INIT re-takeover
+                // with the current scene (the proven ~80 s renewal path) — full re-push.
+                val r = renderer
+                val sc = r?.currentScene
+                if (r == null || sc == null) {
+                    DiagLog.log("os", "display_reload but no live renderer/scene — ignored (LOUD)")
+                    return
+                }
+                DiagLog.log("os", "display_reload → abort + COLD_INIT re-takeover (${sc.regions.size} regions)")
+                r.abort("display_reload")
+                r.launch(DisplayProto.LAUNCH_TOKEN, sc, EvenHub.COLD_INIT) { ok ->
+                    DiagLog.log("os", "display_reload re-takeover result=${if (ok) "OK" else "FAIL"}")
+                }
+            }
             is ServerMessage.AudioRequest -> {
                 // DE dictation: the server (menu 'Dictate'/'Ask') drives the phone mic.
                 // AudioStreamer owns audio_start/binary/audio_end; MicCapture failures
@@ -288,9 +310,23 @@ class ConnectionService : Service(), TestHarness {
                             DiagLog.log("os", "audio_request start — already streaming (ignored)")
                             return
                         }
+                        if (!micFgsGranted) {
+                            // Android 14+ would feed AudioRecord SILENCE here (no exception) —
+                            // refuse loudly so the server's dictation state machine unwinds
+                            // instead of "transcribing" a stream of zeros.
+                            val reason = "mic FGS type was denied at service start (background restart?) — reopen the app once to restore dictation"
+                            DiagLog.log("os", "audio_request start REFUSED: $reason")
+                            conn.send(ClientMessage.Diag("[audio-error] $reason"))
+                            return
+                        }
                         // Fresh streamer per start: binds the CURRENT ConnectionManager (a WS
                         // reconnect creates a new one; a cached streamer would talk to the corpse).
-                        val s = AudioStreamer(MicCapture(applicationContext), conn)
+                        // Capture failures go back to the server as an [audio-error] diag —
+                        // logcat-only failures left the server waiting forever (review 2026-06-10).
+                        val s = AudioStreamer(MicCapture(applicationContext), conn, onFailure = { reason ->
+                            DiagLog.log("os", "audio capture FAILED: $reason")
+                            conn.send(ClientMessage.Diag("[audio-error] $reason"))
+                        })
                         audioStreamer = s
                         DiagLog.log("os", "audio_request start → mic streaming")
                         s.start()
@@ -611,9 +647,14 @@ class ConnectionService : Service(), TestHarness {
                 val sc = r.currentScene ?: continue
                 val t = nowClock()
                 if (t == lastWritten) continue
+                // Mark the minute written only on a CONFIRMED write — a failed tick (transient
+                // body-block) retries next second instead of leaving the clock a minute stale
+                // (there's no 1 Hz self-heal anymore). Write failures are logged by the sink.
                 when {
-                    sc.region(OsLayout.CLOCK_NAME) != null -> { r.setText(OsLayout.CLOCK_NAME, t); _scene.value = r.currentScene; lastWritten = t }
-                    sc.region("status") != null -> { r.setText("status", "G2CC  $t"); _scene.value = r.currentScene; lastWritten = t }
+                    sc.region(OsLayout.CLOCK_NAME) != null ->
+                        r.setText(OsLayout.CLOCK_NAME, t) { ok -> if (ok) lastWritten = t; _scene.value = r.currentScene }
+                    sc.region("status") != null ->
+                        r.setText("status", "G2CC  $t") { ok -> if (ok) lastWritten = t; _scene.value = r.currentScene }
                 }
             }
         }
@@ -728,8 +769,10 @@ class ConnectionService : Service(), TestHarness {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
             }
             startForeground(NOTIF_ID, buildNotification(_status.value), typeMask)
+            micFgsGranted = true
         } catch (e: Exception) {
             DiagLog.log("svc", "startForeground with mic type FAILED (${e.message}) — retrying connectedDevice-only (dictation unavailable this run)")
+            micFgsGranted = false
             startForeground(NOTIF_ID, buildNotification(_status.value), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         }
     }

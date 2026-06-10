@@ -59,6 +59,9 @@ function renderAll(): Promise<Buffer> {
       if (err) { reject(new Error(`render_menu failed: ${err.message}${stderr ? ' :: ' + stderr.toString() : ''}`)); return }
       resolve(stdout as Buffer)
     })
+    // EPIPE guard: a child dying before draining stdin must not crash the server
+    // (uncaught 'error' on the stdin stream — same class as the CCSession spawn fix).
+    child.stdin?.on('error', (e: Error) => console.error(`[os-menu] render_menu stdin: ${e.message}`))
     child.stdin?.end(req)
   })
 }

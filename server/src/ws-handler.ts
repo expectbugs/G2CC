@@ -769,6 +769,15 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // latency). Critical for distinguishing test runs in `tail -f`.
       const now = new Date().toISOString()
       console.log(`${now} [client-diag] ${msg.text}`)
+      // '[audio-error]' is the structured marker the client puts on mic-capture
+      // failures (AudioStreamer onFailure / mic-FGS refusal). Without routing it
+      // into the window manager, a phone-side mic failure left the DE's
+      // dictation state machine waiting forever (review 2026-06-10): no
+      // audio_start ever arrives, so no stt_result/stt_error can fire.
+      if (client.osMode && client.osScreen === 'de' && client.wm && msg.text.includes('[audio-error]')) {
+        const reason = msg.text.slice(msg.text.indexOf('[audio-error]') + '[audio-error]'.length).trim()
+        void client.wm.onSttError(reason || 'mic capture failed (see client diag)')
+      }
       break
     }
 
@@ -787,6 +796,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
             client.wm = new WindowManager({
               send: (scene) => sendMsg(client, { type: 'render', scene }),
               audio: (action) => sendMsg(client, { type: 'audio_request', action }),
+              displayReload: () => sendMsg(client, { type: 'display_reload' }),
               log: (msg) => console.log(msg),
               pool: client.pool,
               config,

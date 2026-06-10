@@ -22,6 +22,7 @@ export type Block =
   | { t: 'code'; lines: string[] }
   | { t: 'stats'; cards: { value: string; label: string }[] }
   | { t: 'rule' }
+  | { t: 'logo'; title: string; sub: string }
 
 export interface RenderedContent {
   pages: number
@@ -31,13 +32,16 @@ export interface RenderedContent {
 
 // ---- markdown subset -> blocks -------------------------------------------------
 
-/** Strip inline markers the v1 renderer flattens: **bold**, *em*, `code`, [t](url). */
+/** Strip inline markers the v1 renderer flattens: **bold**, *em*, `code`, [t](url).
+ *  Review-hardened 2026-06-10: `**` strips first and may CONTAIN single `*`
+ *  (nested emphasis); single `*` requires non-space flanking so prose
+ *  asterisks ("5 * 3 * 2") survive; link URLs may contain balanced parens. */
 function stripInline(s: string): string {
   return s
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\*\*([^]+?)\*\*/g, '$1')
+    .replace(/\*(\S(?:[^*]*?\S)?)\*/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^()]*(?:\([^()]*\)[^()]*)*\)/g, '$1')
 }
 
 /** Parse the supported markdown subset (docs/CONTENT_API.md) into blocks.
@@ -69,11 +73,19 @@ export function parseMarkdown(md: string): Block[] {
       if (lang === 'stat' || lang === 'stats') {
         try {
           const parsed = JSON.parse(body.join('\n')) as unknown
-          const cards = (Array.isArray(parsed) ? parsed : [parsed]) as { label?: unknown; value?: unknown }[]
-          blocks.push({
-            t: 'stats',
-            cards: cards.slice(0, 3).map((c) => ({ value: String(c.value ?? ''), label: String(c.label ?? '') })),
+          const raw = Array.isArray(parsed) ? parsed : [parsed]
+          // Primitives become value-only cards; >3 cards chunk into extra rows
+          // (never silently dropped — the no-truncation rule).
+          const cards = raw.map((c) => {
+            if (c !== null && typeof c === 'object') {
+              const o = c as { label?: unknown; value?: unknown }
+              return { value: String(o.value ?? ''), label: String(o.label ?? '') }
+            }
+            return { value: String(c), label: '' }
           })
+          for (let k = 0; k < cards.length; k += 3) {
+            blocks.push({ t: 'stats', cards: cards.slice(k, k + 3) })
+          }
         } catch (e) {
           // Malformed stat JSON degrades to a visible code block — loud on-glass, not dropped.
           blocks.push({ t: 'code', lines: [`(bad \`\`\`stat JSON: ${(e as Error).message})`, ...body] })
@@ -88,13 +100,16 @@ export function parseMarkdown(md: string): Block[] {
     if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flushAll(); blocks.push({ t: 'rule' }); continue }
     const b = line.match(/^\s*[-*•]\s+(.*)$/)
     if (b) { flushPara(); bullets.push(stripInline(b[1])); continue }
+    // Numbered lists keep their ordinals but render as list items, not a glued paragraph.
+    const n = line.match(/^\s*(\d+[.)])\s+(.*)$/)
+    if (n) { flushPara(); bullets.push(`${n[1]} ${stripInline(n[2])}`); continue }
     if (/^\s*\|.*\|\s*$/.test(line)) {
       // Table rows -> aligned mono lines (readable v1 fallback; real grid later).
       flushAll()
       const rows: string[] = []
       while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
         const cells = lines[i].trim().replace(/^\||\|$/g, '').split('|').map((c) => stripInline(c.trim()))
-        if (!cells.every((c) => /^:?-{2,}:?$/.test(c))) rows.push(cells.join('  ')) // skip separator rows
+        if (!cells.every((c) => /^:?-+:?$/.test(c))) rows.push(cells.join('  ')) // skip separator rows (incl |-|)
         i++
       }
       i--
@@ -130,6 +145,11 @@ function runRenderer(blocks: Block[]): Promise<Buffer> {
       if (err) { reject(new Error(`render_content failed: ${err.message}${stderr?.length ? ' :: ' + stderr.toString() : ''}`)); return }
       resolve(stdout as Buffer)
     })
+    // A renderer that dies before draining stdin (broken venv, import error) EPIPEs the
+    // write — without this handler that's an UNCAUGHT exception that kills the whole
+    // server (proven on Node 24; review 2026-06-10). The execFile callback still fires
+    // with the real error; this just keeps the EPIPE from escaping.
+    child.stdin?.on('error', (e: Error) => console.error(`[os-content] render_content stdin: ${e.message}`))
     child.stdin?.end(req)
   })
 }

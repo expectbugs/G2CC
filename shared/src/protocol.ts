@@ -87,8 +87,9 @@ export interface SceneTextContent {
   scroll?: boolean
 }
 /** Image content: a base64 4bpp-gray BMP the PC already rasterized (the exact
- *  Gray4Bmp format the firmware accepts). Must be ≤288×144 per the render
- *  constraints — the PC tiles anything larger into multiple image regions. */
+ *  Gray4Bmp format the firmware accepts). Must be ≤288×129 — the cap the
+ *  client renderer ENFORCES (G2Renderer MAX_IMAGE_W/H; the official SDK's 144
+ *  is unproven on our direct-BLE path) — the PC tiles anything larger. */
 export interface SceneImageContent {
   kind: 'image'
   bmpBase64: string
@@ -495,10 +496,20 @@ export interface RenderMsg {
  *  menu actions — docs/DE_DESIGN.md §2). The client drives AudioStreamer,
  *  which sends audio_start / binary frames / audio_end back; STT results
  *  return via stt_result and the server routes them to the active window.
- *  Mic failures surface as diag messages (loud), never silently. */
+ *  Capture failures surface back as a diag message with the '[audio-error]'
+ *  prefix, which the server routes to the active window (loud, never silent). */
 export interface AudioRequestMsg {
   type: 'audio_request'
   action: 'start' | 'stop'
+}
+
+/** Server → client: the DE 'Reload' action — recover a possibly-stuck display.
+ *  The client ABORTS any in-flight/queued render ops (releasing a wedged image
+ *  ack-wait), then re-runs the COLD_INIT re-takeover with its current scene
+ *  (the same proven path as the ~80 s slot renewal), re-pushing everything.
+ *  The server follows with a fresh `render` of the recomposed state. */
+export interface DisplayReloadMsg {
+  type: 'display_reload'
 }
 
 export interface ErrorMsg {
@@ -530,4 +541,5 @@ export type ServerMessage =
   | ConfirmOnHudMsg
   | RenderMsg
   | AudioRequestMsg
+  | DisplayReloadMsg
   | ErrorMsg

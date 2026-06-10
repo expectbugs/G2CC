@@ -134,6 +134,16 @@ class SceneCodecTest {
     }
 
     @Test
+    fun styledImageRegion_loudFails() {
+        // The official image container has no f5–f8 — a styled image would silently
+        // render bare, so the codec rejects it (server bug made visible).
+        val img = SceneRegion(20, "pic", 0, OsLayout.CLOCK_HEIGHT, 40, 24, "image",
+            SceneContent(kind = "image", bmpBase64 = b64(40, 24)),
+            com.g2cc.g2cc.net.WireRegionStyle(borderWidth = 1))
+        expectFail("image containers have no border") { SceneCodec.toScene(WireScene(listOf(img)), "1:04 PM") }
+    }
+
+    @Test
     fun mapsTextContent_withScrollDefault() {
         val s = SceneCodec.toScene(
             WireScene(listOf(

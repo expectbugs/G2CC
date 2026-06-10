@@ -5,29 +5,34 @@ Decisions locked with Adam this session (mockups: `sdk-demo/src/mockup.ts`, scre
 implementation builds against. Wire truth: `docs/G2_BLE_PROTOCOL.md`. OS architecture:
 `docs/GLASSES_OS.md` (this doc refines its Phase-2+ design; where they differ, THIS wins).
 
-## 1. Geometry (576×288 — constants in `shared/src/constants.ts` `DE_*`)
+## 1. Geometry (576×288 — constants in `shared/src/constants.ts` `DE_*`; Adam cal 2026-06-10)
 
 ```
-┌────────────────────────────────────────────────┬──────────┐
-│ title (0,0,444,38)  "Claude Code · aria · 3/3" │ clock    │ 38px bars (≥38 avoids the
-├──────────┬─────────────────────────────────────┤(444,0,   │ firmware overflow scrollbar)
-│ menu     │ content pane (96,38,480,212)        │ 132,38)  │
-│ (0,38,   │  tiles: 2×2 of 240×106  (≤288×144✓) │"1:04 PM" │ clock = CLIENT-OWNED cutout,
-│  96,212) │  browse: native list 480×212        ├──────────┘ 12-hour, MINUTE-tick
-│ 5 items  │  text:   text region 480×212        │            (60× less BLE clock traffic;
-│ visible  │                                     │            hat power win)
-├──────────┴──────────────────────┬──────────────┤
-│ status (0,250,tabsX,38)         │ tabs (right- │ tabs right-aligned via fwTextWidth
-│ "● beardos · G2 78%"            │ aligned, 38) │ estimate; active tab [bracketed]
-└─────────────────────────────────┴──────────────┘
+┌──────────────────────────────────────────────────┬─────────┐
+│ title (0,0,474,33)  " Claude Code · aria · 3/3"  │ clock   │ 33px bars (HW-verify the
+├──────────┬───────────────────────────────────────┤(474,0,  │ overflow-scrollbar margin)
+│ menu     │ content pane (96,33,480,222)          │ 102,33) │ title text leads with a
+│ (0,33,   │  tiles: 2×2 of 240×111  (≤288×129 ✓)  │"1:04 PM"│ space (+5px, Adam cal)
+│  96,222) │  browse: native list 480×222          ├─────────┘ clock = CLIENT-OWNED cutout,
+│ 5 items  │  text:   text region 480×222          │           12-hour, MINUTE-tick
+│ visible  │                                       │           (hat power win)
+├──────────┴───────────────────────┬───────────────┤
+│ status (0,255,tabsX,33)          │ tabs (right-  │ tabs right-aligned: fwTextWidth
+│ "● beardos · 1 cc"               │ aligned, 33)  │ estimate − DE_TAB_RIGHT_TRIM(30);
+└──────────────────────────────────┴───────────────┘ active tab [bracketed]
 ```
 
-No region overlaps anything (SceneCodec loud-fails on clock-cutout overlap). Region budget in
-the worst (tile) mode: clock + title + menu + status + tabs + 4 tiles = **9 ≤ 12** containers,
-**4 ≤ 8** text, **4 ≤ 4** image, exactly **one** event-capture. ✓
+If "12:59 PM" clips at 102px or the tabs clip/wrap, widen `CLOCK_WIDTH` / reduce
+`DE_TAB_RIGHT_TRIM` — both are single tunables from the 2026-06-10 eyeball cal.
+
+No region overlaps anything (SceneCodec loud-fails on clock-cutout overlap — and on a
+server/client GEOMETRY-SKEW: a new-geometry server vs an old APK rejects every scene with
+"overlaps the clock cutout"; rebuild + reinstall the APK when CLOCK_* changes). Region budget
+in the worst (tile) mode: clock + title + menu + status + tabs + 4 tiles = **9 ≤ 12**
+containers, **4 ≤ 8** text, **4 ≤ 4** image, exactly **one** event-capture. ✓
 
 **Stable region ids** (server-assigned, identical across windows so switches diff small):
-clock=1 (client), title=2, menu=3 (list OR hint text), status=4, tabs=5, browse list=6,
+clock=1 (client), title=2, menu=3 (ALWAYS a list), status=4, tabs=5, browse list=6,
 content text=7, tiles=10..13 (`t0..t3`).
 
 ## 2. Interaction model
@@ -35,23 +40,34 @@ content text=7, tiles=10..13 (`t0..t3`).
 - **Exactly one event-capture region** per screen (wire: text `f11` / list `f12`):
   - **Reading windows (tiles/text content): the MENU list** holds focus. Scroll moves the
     firmware selection, tap selects. Items are the window's **current action set** — they
-    change with state (CC idle: `Next/Prev/Dictate/Pick dir/Main`; CC permission-pending:
-    `Approve/Deny/Next/Prev/Main`). Tap does NOT rebuild the menu → selection stays put →
-    repeated taps repeat the action (tap-tap-tap through pages on `Next`).
-  - **Browse windows (Main switcher, Mail list, Files): the CONTENT list** holds focus
+    change with state (CC idle: `Dictate/Next/Prev/Options/Reload/Main`; permission-pending:
+    `Next/Prev/Approve/Deny/Reload/Main` — Approve/Deny deliberately NOT at index 0/1, so a
+    tap racing a busy→permission rebuild lands on Next/Prev, never an unread Approve). Tap
+    does NOT rebuild the menu → selection stays put → tap-tap-tap through pages on `Next`.
+  - **Browse windows (CC picker, Mail list, Files): the CONTENT list** holds focus
     (amendment to the old "menu always holds focus" — decided 2026-06-10). Firmware draws the
-    selection ring on the actual rows + reports the tapped index. Menu becomes passive hints
-    (`tap open / 2tap back`). >~20 items page via a trailing `— more —` item.
+    selection ring on the actual rows + reports the tapped index. The left menu is still a
+    REAL list (Adam 2026-06-10: never hint text) — non-capturing, no selection ring, showing
+    `Back / Main` (both double-tap-backed). >~17 rows page via `— prev — / — more —` rows.
+- **Reload everywhere** (Adam 2026-06-10): every reading menu has `Reload`; every browse list
+  gets a compose-injected `Reload` row at index 0. Reload = `display_reload` to the client
+  (abort any wedged render op + COLD_INIT re-takeover with the current scene — the proven
+  renewal path) + the active window clears stuck transients (mic, errors) + recompose.
+- **Main** = menu list of windows (`Aria/CC/Mail/Files/Reload`, capture on the menu) + the
+  G2CC logo in the content tiles (Adam 2026-06-10).
+- **Taps resolve against the last-RENDERED view** (WM `lastView`), and the WM-level labels
+  (`Retry/Reload/Back/Main`) work in every window and state — incl. error screens.
 - **Double-tap = back (pop one level)** — reading → list → window root; at root → Main.
-  (Decided over always-jump-to-Main.) Window switching = Main (browse list of windows w/ live
-  status). `Main` also stays as a menu item in reading windows.
+  (Decided over always-jump-to-Main.) `Main` also stays as a menu item everywhere.
 - **Dictation = the prompt input** (v1): menu `Dictate`/`Ask` → server sends `audio_request
-  start` → phone streams mic (existing AudioStreamer/STT path) → `stt_result` routes to the
-  active window as the prompt. Menu swaps to a `Stop`-style action while listening.
+  start` → phone streams mic (existing AudioStreamer/STT path) → result routes to the session
+  that's transcribing (stale/canceled results discard loudly). Menu swaps to `Done/Cancel`
+  while listening. **Leaving the window (switch/pop/reload) stops the mic** — phone-side
+  capture failures come back as `[audio-error]` diags so the server never waits forever.
 
 ## 3. Content modes (per window state — "browsing → firmware text/list; reading → image tiles")
 
-- **tiles**: PC rasterizes a 480×212 canvas page (real typography → gray4) → 4× 240×106 BMP
+- **tiles**: PC rasterizes a 480×222 canvas page (real typography → gray4) → 4× 240×111 BMP
   tiles. ~1 s/tile — for content you *read* (CC/Aria responses). Pages via Next/Prev; the
   title bar carries `· page/pages`. Every tile carries ink (hairline frame — all-black tile
   kills the slot).
@@ -64,7 +80,7 @@ content text=7, tiles=10..13 (`t0..t3`).
 
 | id | tab | modes | notes |
 |---|---|---|---|
-| `main` | Main | browse | windows + live status; tap switches. Double-tap target at every root. |
+| `main` | Main | tiles | menu = window list + Reload (tap switches); content = the G2CC logo. Double-tap target at every root. |
 | `cc` | CC | browse→tiles | root = directory picker (browse /home/user/*); then the CC session: response→tiles, dynamic action menu, permission flow via menu. |
 | `aria` | Aria | tiles | CC subprocess, cwd `/home/user/aria`, `--append-system-prompt` = `server/prompts/aria-g2.md` (the display-format prompt). Free-form content area. |
 | `mail` | Mail | browse→text | Maildir `~/Mail/marzello.net/` (mbsync cron, every 5 min). List = INBOX newest-first; read = text/plain body, text mode. `scripts/read_maildir.py` (stdlib). |
@@ -95,12 +111,20 @@ Deferred: SMS (needs phone-side bridge), Settings.
 - Paging (Next/Prev) changes only title text + tiles — no rebuild.
 - Browse windows have no images — rebuilds are ~free there.
 
-## 7. v0.9 hardware checklist (Adam, next test window)
+## 7. v1.0 hardware checklist (Adam, next test window)
 
-1. Cold-launch + the DE chrome paints (title/clock/menu/status/tabs, bordered).
+1. Cold-launch + the DE chrome paints (title/clock/menu/status/tabs, bordered, 33px bars —
+   watch for the firmware overflow scrollbar on the shorter bars).
 2. Native LIST on our hijacked slot: paints, scroll moves selection, tap → `hub_select`
-   round-trip (first direct-BLE list ever — wire-spec'd from g2cap but unverified).
-3. Clock 12h at 38 px: fits, no overflow scrollbar, minute tick visible.
+   round-trip (first direct-BLE list ever — wire-spec'd from g2cap but unverified). Also the
+   NON-capturing menu list in browse windows (selectBorder=0, f12=0 — also never probed).
+3. Clock 12h at x474/w102: "12:59 PM" fits; tabs don't clip with the 30px right-trim
+   (tunables: `CLOCK_WIDTH`, `DE_TAB_RIGHT_TRIM`). Minute tick visible.
 4. Rebuild-retention probe: menu item swap on a tile screen — do the tiles stay painted?
-5. 240×106 tile page push: timing + jank vs the v0.8 fullscreen finding.
-6. Dictate: menu → mic → STT → prompt → response tiles (the full loop).
+5. 240×111 tile page push: timing + jank vs the v0.8 fullscreen finding.
+6. Dictate: menu → mic → STT → prompt → response tiles (the full loop). Also: leave the
+   window mid-listening → mic stops (audio_request stop in diag).
+7. Reload (any menu / browse row 0): display re-takeover repaints a wedged screen.
+8. Tap-vs-rebuild race feel: menu changes rebuild (~86 ms + BLE); the known residual is a tap
+   landing exactly inside the rebuild window resolving against the NEW menu (mitigated by
+   menu ordering; full fix = scene-version echo, deferred).

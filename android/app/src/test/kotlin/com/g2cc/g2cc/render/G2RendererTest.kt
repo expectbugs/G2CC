@@ -242,11 +242,16 @@ class G2RendererTest {
 
     // ---- pre-push guards (hardware-confirmed kill conditions; see G2Renderer.validate) ----
 
+    // (each guard scene includes a text region so the image rule under test is
+    // the one that fires — image-ONLY scenes are rejected earlier by the
+    // every-page-needs-text rule, tested separately below)
+
     @Test
     fun launch_fifthImageRegion_rejected_noWrites() {
         val sink = FakeSink()
         val r = mkRenderer(sink)
         val s = scene {
+            text("s", 0, 100, 576, 28, "x")
             image("a", 0, 0, 40, 40, img(40, 40)); image("b", 50, 0, 40, 40, img(40, 40))
             image("c", 100, 0, 40, 40, img(40, 40)); image("d", 150, 0, 40, 40, img(40, 40))
             image("e", 200, 0, 40, 40, img(40, 40))   // 5th image region — over the 4-region cap
@@ -263,7 +268,7 @@ class G2RendererTest {
         val r = mkRenderer(sink)
         val blank = Gray4Bmp.encode(64, 64, ByteArray(64 * 64))   // all index 0 = all-black → glasses choke
         var ok = true
-        r.launch(10061, scene { image("x", 0, 0, 64, 64, blank) }) { ok = it }
+        r.launch(10061, scene { text("s", 0, 100, 576, 28, "x"); image("x", 0, 0, 64, 64, blank) }) { ok = it }
         assertFalse("all-black image tile must be rejected", ok)
         assertEquals(0, sink.calls.size)
     }
@@ -273,8 +278,47 @@ class G2RendererTest {
         val sink = FakeSink()
         val r = mkRenderer(sink)
         var ok = true
-        r.launch(10061, scene { image("big", 0, 0, 400, 200, img(400, 200)) }) { ok = it }  // > 288x129
+        r.launch(10061, scene { text("s", 0, 220, 576, 28, "x"); image("big", 0, 0, 400, 200, img(400, 200)) }) { ok = it }  // > 288x129
         assertFalse("an image region ≥384×192 drops the BLE link — must be rejected", ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun launch_imageOnlyScene_rejected_noWrites() {
+        // §7 rule 1: image-only layouts ack but never paint — must reject pre-wire.
+        val sink = FakeSink()
+        val r = mkRenderer(sink)
+        var ok = true
+        r.launch(10061, scene { image("x", 0, 0, 64, 64, img(64, 64)) }) { ok = it }
+        assertFalse("a scene with no text region must be rejected", ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun launch_listOverTwentyItems_rejected_noWrites() {
+        val sink = FakeSink()
+        val r = mkRenderer(sink)
+        val s = scene {
+            text("t", 0, 0, 444, 33, "x")
+            list("menu", 0, 33, 96, 222, (1..21).map { "row $it" }, eventCapture = true)
+        }
+        var ok = true
+        r.launch(10000, s) { ok = it }
+        assertFalse("21 list items must be rejected (SDK cap 20)", ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun launch_listItemOver64Chars_rejected_noWrites() {
+        val sink = FakeSink()
+        val r = mkRenderer(sink)
+        val s = scene {
+            text("t", 0, 0, 444, 33, "x")
+            list("menu", 0, 33, 96, 222, listOf("ok", "y".repeat(65)), eventCapture = true)
+        }
+        var ok = true
+        r.launch(10000, s) { ok = it }
+        assertFalse("a 65-char list item must be rejected (SDK cap 64)", ok)
         assertEquals(0, sink.calls.size)
     }
 

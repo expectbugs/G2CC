@@ -25,6 +25,12 @@ import com.g2cc.g2cc.net.ConnectionManager
 class AudioStreamer(
     private val mic: MicCapture,
     private val connection: ConnectionManager,
+    /** Invoked on ANY capture failure (incl. the synchronous never-started paths:
+     *  RECORD_AUDIO missing, no source, startRecording() failed). The DE wires this
+     *  to a server-bound '[audio-error]' diag so the failure is NEVER logcat-only —
+     *  without it the server's dictation state machine waits forever for audio
+     *  that will never come. */
+    private val onFailure: (String) -> Unit = {},
 ) {
     @get:Synchronized @set:Synchronized
     var isStreaming: Boolean = false
@@ -93,14 +99,15 @@ class AudioStreamer(
                                 // synchronous failure paths (no RECORD_AUDIO, no source,
                                 // startRecording() failed) fire BEFORE Started, so a bare audio_end
                                 // here breaks the server's start→end invariant ("audio_end without
-                                // prior audio_start"). Real reason is logged above (Phase 8: forward
-                                // it as a structured wire message).
+                                // prior audio_start").
                                 if (startSent) connection.send(ClientMessage.AudioEnd)
                                 isStreaming = false
                                 startSent = false
                                 mic.stop()
                             }
                         }
+                        // Outside the lock (callback may do I/O): surface to the server.
+                        onFailure(event.reason)
                     }
                     is MicCapture.Event.Stopped -> {
                         Log.i(TAG, "capture stopped")

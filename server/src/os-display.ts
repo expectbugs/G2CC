@@ -17,6 +17,12 @@
 //
 // All server-only; the deployed APK renders arbitrary scenes + has the
 // clock-as-antenna logic, so no reinstall.
+//
+// ⚠ STALE GEOMETRY (2026-06-10): these tests were tuned for CLOCK_HEIGHT 28
+// (OS_CONTENT_Y 30); the DE moved it to 33 (OS_CONTENT_Y 35), which shifts the
+// grids: H6/H7's bottom row now overflows and gets skipped (2 tiles, not 4),
+// and the F fill test's 9 image regions are rejected by the client's
+// MAX_IMAGE_REGIONS=4 validate. Re-tune before the next probe re-run.
 
 import { SCREEN_WIDTH, SCREEN_HEIGHT, OS_CONTENT_Y, CLOCK_HEIGHT } from '@g2cc/shared'
 import type { WireScene, SceneRegion } from '@g2cc/shared'
@@ -88,6 +94,8 @@ function renderTiles(specs: ImgSpec[]): Promise<Buffer> {
       if (err) { reject(new Error(`render_probe failed: ${err.message}${stderr ? ' :: ' + stderr.toString() : ''}`)); return }
       resolve(stdout as Buffer)
     })
+    // EPIPE guard: a child dying before draining stdin must not crash the server.
+    child.stdin?.on('error', (e: Error) => console.error(`[os-display] render_probe stdin: ${e.message}`))
     child.stdin?.end(req)
   })
 }

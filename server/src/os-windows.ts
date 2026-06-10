@@ -15,7 +15,7 @@
 // window switches (each window object persists for the client's lifetime).
 
 import { execFile } from 'node:child_process'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import type { WireScene } from '@g2cc/shared'
 import type { G2CCConfig } from './config.js'
@@ -23,6 +23,7 @@ import { listProjectDirectories } from './directory-picker.js'
 import { parseMarkdown, renderBlocks, type Block, type RenderedContent } from './os-content.js'
 import { composeScene, paginateText, errorView, type WinView } from './os-compose.js'
 import type { SessionPool, PoolEntry } from './session-pool.js'
+import { hostname } from 'node:os'
 
 const PY = '/home/user/G2CC/audio/venv/bin/python'
 const MAILDIR_SCRIPT = '/home/user/G2CC/scripts/read_maildir.py'
@@ -32,13 +33,26 @@ const ARIA_PROMPT_PATH = '/home/user/G2CC/server/prompts/aria-g2.md'
 const FILES_ROOT = '/home/user'
 
 const MODELS = ['opus', 'sonnet', 'haiku']
-const EFFORTS = ['low', 'medium', 'high', 'max'] as const
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 type Effort = (typeof EFFORTS)[number]
 
-/** Rows per browse page (firmware list scrolls ~5 visible; 18 + nav rows ≤ the 20-item SDK cap). */
-const BROWSE_PAGE = 18
+/** Next item in a cycle list; an unknown current value (e.g. a full model name
+ *  from config) restarts at index 0 instead of silently landing wherever
+ *  `indexOf(-1)+1` points. */
+function cycleNext<T>(list: readonly T[], current: T): T {
+  const i = list.indexOf(current)
+  return list[i === -1 ? 0 : (i + 1) % list.length]
+}
+
+/** Rows per browse page. Budget against the HARD 20-item SDK cap
+ *  (G2_BLE_PROTOCOL.md §6.1 proved exactly 20): compose injects 'Reload' at
+ *  index 0, plus up to prev+more nav rows → 1 + 1 + 17 + 1 = 20. (The first
+ *  cut put 18 here and Mail's extra row hit 21 — review 2026-06-10.) */
+const BROWSE_PAGE = 17
 const MORE_ROW = '— more —'
 const PREV_ROW = '— prev —'
+/** Files window head-preview bound (event-loop-blocking read guard). */
+const FILE_PREVIEW_BYTES = 256 * 1024
 
 /** What the WM needs from ws-handler (kept narrow so windows stay testable). */
 export interface WmContext {
@@ -46,6 +60,9 @@ export interface WmContext {
   send(scene: WireScene): void
   /** Drive the phone mic (dictation). */
   audio(action: 'start' | 'stop'): void
+  /** Tell the client to abort + COLD_INIT-relaunch its current scene (the
+   *  'Reload' unstick — display_reload on the wire). */
+  displayReload(): void
   log(msg: string): void
   pool: SessionPool
   config: G2CCConfig
@@ -60,10 +77,20 @@ export interface OsWindow {
   /** One-line live status for the Main switcher row. */
   summary(): string
   view(): Promise<WinView>
-  onMenuSelect(index: number): Promise<void>
+  /** A tap on the window's OWN menu rows. The WM resolves the label from the
+   *  last-RENDERED view (so taps can't misroute across state changes) and
+   *  handles the global labels (Retry/Reload/Back/Main) before delegating. */
+  onMenuSelect(label: string): Promise<void>
+  /** A tap on browse row `index` INTO THE WINDOW'S OWN items (the WM already
+   *  stripped the injected Reload row at index 0). */
   onBrowseSelect(index: number): Promise<void>
   /** Pop one level. false = already at root (WM goes to Main). */
   onBack(): Promise<boolean>
+  /** The Reload action: clear any stuck transient state; view() re-derives. */
+  onReload?(): Promise<void>
+  /** Called when the WM switches AWAY from this window — stop anything that
+   *  must not outlive focus (the dictation mic, review 2026-06-10). */
+  onDeactivate?(): void
   onStt?(text: string): Promise<void>
   onSttError?(error: string): Promise<void>
 }
@@ -116,12 +143,20 @@ class SessionLevel {
   page = 0
   busy = false
   listening = false
+  /** True only between 'Done' and the result. onStt discards results that
+   *  arrive with this false (Cancel / a newer Dictate / a window pop cleared
+   *  it) — the single source of truth that kills the canceled-result race. */
   transcribing = false
-  sttCancelPending = false
   pendingPermissionId: string | null = null
   permDoc: Block[] | null = null
   toolLine = ''
   lastError: string | null = null
+  private opening: Promise<void> | null = null   // concurrent-open guard (double-tap during spawn)
+  /** Entry ids THIS level wired. getOrCreateByDirectory returning wired=true
+   *  for an id not in here means ANOTHER consumer (the Aria window / legacy
+   *  path) owns the session's listeners — adopting it would split-brain the
+   *  events (review 2026-06-10), so open() refuses loudly instead. */
+  private myEntryIds = new Set<string>()
 
   constructor(
     private ctx: WmContext,
@@ -129,27 +164,48 @@ class SessionLevel {
     opts: SessionOpts,
     private requestRender: () => void,
     private who: string,
+    /** The dictation verb shown in the menu ('Dictate' for CC, 'Ask' for Aria). */
+    private verb: string = 'Dictate',
   ) {
     this.opts = opts
-    const verb = who === 'Aria' ? 'Ask' : 'Dictate'
     this.doc = [
       { t: 'heading', text: who, meta: basename(projectPath) },
       { t: 'para', text: `Ready. Menu → ${verb} to prompt; responses render here.` },
     ]
   }
 
-  /** Spawn (or resume) the subprocess and wire events. Loud-throws on failure. */
-  async open(): Promise<void> {
-    if (this.entry && this.entry.session.isAlive()) return
+  /** Spawn (or resume) the subprocess and wire events. Loud-throws on failure.
+   *  Concurrent calls share one in-flight spawn (rapid double-taps on the
+   *  picker would otherwise race getOrCreate/spawn). */
+  open(): Promise<void> {
+    if (this.entry?.session.isAlive()) return Promise.resolve()
+    const inflight = this.opening
+    if (inflight) return inflight
+    const p = this.openInner().finally(() => { this.opening = null })
+    this.opening = p
+    return p
+  }
+
+  private async openInner(): Promise<void> {
     const { entry, resumed, wired } = this.ctx.pool.getOrCreateByDirectory(this.projectPath, {
-      permissionMode: 'default',
+      // The user's configured mode (bypassPermissions on Adam's box) — the first
+      // cut hardcoded 'default', which would permission-prompt EVERY tool call
+      // on the glasses (review 2026-06-10).
+      permissionMode: this.ctx.config.claude.defaultMode,
       effort: this.opts.effort,
       model: this.opts.model,
       systemPrompt: this.opts.systemPrompt,
     })
+    if (wired && !this.myEntryIds.has(entry.id)) {
+      // A live session for this directory exists but ANOTHER consumer wired it
+      // (e.g. /home/user/aria belongs to the Aria window). Adopting it would
+      // leave this level event-blind (split-brain) — refuse loudly instead.
+      throw new Error(`directory ${this.projectPath} is owned by another window — use that window`)
+    }
     this.entry = entry
     if (!wired) {
       this.wire(entry)
+      this.myEntryIds.add(entry.id)
       await entry.session.spawn()
       this.ctx.registerWatchdog(entry)
       this.ctx.pool.persistSessionMeta()
@@ -159,60 +215,89 @@ class SessionLevel {
 
   private wire(entry: PoolEntry): void {
     const session = entry.session
+    // Every handler checks it still speaks for the CURRENT session: respawn()/
+    // close() SIGKILL the old process, whose async 'close' event would otherwise
+    // fire AFTER the fresh spawn and poison the live state with a spurious
+    // "process died" error (review 2026-06-10).
+    const stale = () => this.entry?.session !== session
     session.on('tool_use', (info: { name: string; summary: string }) => {
+      if (stale()) return
       this.toolLine = `${info.name} ${info.summary}`.trim()
       this.requestRender()   // title-only text update — cheap on the wire
     })
     session.on('turn_complete', (info: { text: string; toolCalls: string[] }) => {
+      if (stale()) return
       this.busy = false
       this.toolLine = ''
+      // Persist NOW — ccSessionId arrives via the async init event AFTER the
+      // post-spawn persist, so without this no DE session ever lands in
+      // sessions.json and a WS drop loses the conversation (review 2026-06-10;
+      // mirrors the legacy path's persist-on-turn_complete).
+      this.ctx.pool.persistSessionMeta()
       void this.setDoc([
         { t: 'heading', text: this.who, meta: info.toolCalls.length ? `${info.toolCalls.length} tools` : 'done' },
         ...parseMarkdown(info.text || '(empty response)'),
       ])
     })
     session.on('permission_request', (info: { requestId: string; rawEvent: Record<string, unknown> }) => {
+      if (stale()) return
       this.pendingPermissionId = info.requestId
       this.permDoc = permissionSummary(info.rawEvent)
       void this.renderPermDoc()
     })
     session.on('error', (message: string) => {
+      if (stale()) return
       this.lastError = message
       this.busy = false
       this.requestRender()
     })
     session.on('process_died', (code: number | null) => {
+      if (stale()) return
       this.lastError = `CC process died (code=${code}) — Options → New session`
       this.busy = false
       this.requestRender()
     })
   }
 
+  // Monotonic render token: concurrent setDoc/renderPermDoc calls (prompt echo
+  // racing a fast turn_complete racing a permission_request) resolve in
+  // last-STARTED order, not last-FINISHED — a slow older render can no longer
+  // overwrite a newer one (review 2026-06-10).
+  private renderSeq = 0
+
   private async renderPermDoc(): Promise<void> {
     if (!this.permDoc) return
+    const seq = ++this.renderSeq
     try {
-      this.rendered = await renderBlocks(this.permDoc)
+      const r = await renderBlocks(this.permDoc)
+      if (seq !== this.renderSeq) return   // a newer doc superseded this render
+      this.rendered = r
       this.page = 0
     } catch (e) {
-      this.lastError = `permission render failed: ${(e as Error).message}`
+      if (seq === this.renderSeq) this.lastError = `permission render failed: ${(e as Error).message}`
     }
     this.requestRender()
   }
 
   async setDoc(blocks: Block[]): Promise<void> {
     this.doc = blocks
+    const seq = ++this.renderSeq
     try {
-      this.rendered = await renderBlocks(this.doc)
+      const r = await renderBlocks(this.doc)
+      if (seq !== this.renderSeq) return   // a newer doc superseded this render
+      this.rendered = r
       this.page = 0
       this.lastError = null
     } catch (e) {
-      this.lastError = `render failed: ${(e as Error).message}`
+      if (seq === this.renderSeq) this.lastError = `render failed: ${(e as Error).message}`
     }
     this.requestRender()
   }
 
   async view(tab: string): Promise<WinView> {
-    if (!this.rendered && !this.lastError) await this.setDocQuiet()
+    // Re-attempt whenever nothing is rendered — even after a failure, so
+    // 'Retry' actually retries (the old lastError gate made it a no-op here).
+    if (!this.rendered) await this.setDocQuiet()
     if (this.lastError && !this.rendered) {
       return errorView(`${this.who} · error`, this.lastError)
     }
@@ -222,7 +307,8 @@ class SessionLevel {
     const state = this.pendingPermissionId ? ' · permission'
       : this.listening ? ' · listening'
       : this.transcribing ? ' · transcribing'
-      : this.busy ? (this.toolLine ? ` · ${this.toolLine}` : ' · working') : ''
+      : this.busy ? (this.toolLine ? ` · ${this.toolLine}` : ' · working')
+      : this.lastError ? ' · ERROR' : ''   // stale tiles + a buried error must still show
     return {
       mode: 'tiles',
       title: `${tab} · ${basename(this.projectPath)}${pageSuffix}${state}`,
@@ -232,23 +318,36 @@ class SessionLevel {
   }
 
   private async setDocQuiet(): Promise<void> {
+    const seq = ++this.renderSeq
     try {
-      this.rendered = await renderBlocks(this.doc)
+      const r = await renderBlocks(this.doc)
+      if (seq !== this.renderSeq) return
+      this.rendered = r
+      this.lastError = null
     } catch (e) {
-      this.lastError = `render failed: ${(e as Error).message}`
+      if (seq === this.renderSeq) this.lastError = `render failed: ${(e as Error).message}`
     }
   }
 
+  // Reload + Main are WM-level labels (handled before delegation); they appear
+  // here only so they RENDER in every state (Adam 2026-06-10: every menu has
+  // Reload). >5 items scrolls on firmware — fine.
+  //
+  // Approve/Deny sit at index 2/3, NOT 0/1: the busy menu shows Interrupt/Next
+  // at 0/1, and a tap landing exactly as busy→permission rebuilds would
+  // otherwise hit Approve where the user saw Interrupt — auto-approving a
+  // permission they never read (review 2026-06-10). With this order the same
+  // race lands on Next/Prev (harmless). Full fix = scene-version echo, later.
   menu(): string[] {
-    if (this.pendingPermissionId) return ['Approve', 'Deny', 'Next', 'Prev', 'Main']
-    if (this.listening) return ['Done', 'Cancel', 'Main']
-    if (this.busy) return ['Interrupt', 'Next', 'Prev', 'Main']
-    return ['Dictate', 'Next', 'Prev', 'Options', 'Main']
+    if (this.pendingPermissionId) return ['Next', 'Prev', 'Approve', 'Deny', 'Reload', 'Main']
+    if (this.listening) return ['Done', 'Cancel', 'Reload', 'Main']
+    if (this.busy) return ['Interrupt', 'Next', 'Prev', 'Reload', 'Main']
+    return [this.verb, 'Next', 'Prev', 'Options', 'Reload', 'Main']
   }
 
-  /** Handle a menu tap by label. Returns 'main' to switch, 'options' to push
-   *  the options level, null otherwise. */
-  async onMenu(label: string): Promise<'main' | 'options' | null> {
+  /** Handle a window-level menu tap by label (WM already took Retry/Reload/
+   *  Back/Main). Returns 'options' to push the options level, null otherwise. */
+  async onMenu(label: string): Promise<'options' | null> {
     switch (label) {
       case 'Next': {
         const r = this.rendered
@@ -259,9 +358,9 @@ class SessionLevel {
         if (this.page > 0) { this.page--; this.requestRender() }
         return null
       }
-      case 'Dictate': {
+      case this.verb: {
         this.listening = true
-        this.sttCancelPending = false
+        this.transcribing = false   // anything still in flight is now stale (discarded in onStt)
         this.ctx.audio('start')
         this.requestRender()
         return null
@@ -275,7 +374,7 @@ class SessionLevel {
       }
       case 'Cancel': {
         this.listening = false
-        this.sttCancelPending = true
+        this.transcribing = false   // onStt only prompts while transcribing → canceled result discards
         this.ctx.audio('stop')
         this.requestRender()
         return null
@@ -289,43 +388,66 @@ class SessionLevel {
       case 'Approve':
       case 'Deny': {
         const id = this.pendingPermissionId
+        let failure: string | null = null
         if (id && this.entry) {
           try {
             this.entry.session.respondToPermission(id, label === 'Approve')
           } catch (e) {
-            this.lastError = `permission response failed: ${(e as Error).message}`
+            failure = `permission response failed: ${(e as Error).message}`
           }
         }
         this.pendingPermissionId = null
         this.permDoc = null
-        this.busy = true   // the turn continues after the permission decision
-        // restore the doc view (the permission doc replaced it)
+        // Only mark busy if the response actually reached CC — a dead-stdin
+        // failure must show the error, not hide behind "· working" forever.
+        this.busy = failure === null
+        // restore the doc view (the permission doc replaced it); set the error
+        // AFTER (setDoc clears lastError on success)
         await this.setDoc(this.doc)
+        if (failure) { this.lastError = failure; this.requestRender() }
         return null
       }
       case 'Options': return 'options'
-      case 'Main': return 'main'
       default:
         this.ctx.log(`[os] ${this.who}: unknown menu label '${label}' — ignored (LOUD)`)
         return null
     }
   }
 
+  /** The Reload action: unstick any wedged dictation state + clear the error
+   *  banner (the WM separately re-takes the display and recomposes). */
+  async onReload(): Promise<void> {
+    this.stopDictation('reload')
+    this.lastError = null
+  }
+
+  /** Kill any active dictation (mic OFF) — called on Cancel-equivalents: window
+   *  switch, level pop, reload. Leaving the window must never leave the phone
+   *  mic streaming (review 2026-06-10). A result already in flight discards
+   *  (transcribing=false → onStt drops it loudly). */
+  stopDictation(why: string): void {
+    if (this.listening || this.transcribing) {
+      this.ctx.log(`[os] ${this.who}: dictation stopped (${why})`)
+      if (this.listening) this.ctx.audio('stop')
+      this.listening = false
+      this.transcribing = false
+    }
+  }
+
   async onStt(text: string): Promise<void> {
-    this.transcribing = false
-    if (this.sttCancelPending) {
-      this.sttCancelPending = false
-      this.ctx.log(`[os] ${this.who}: STT result discarded (Cancel): "${text}"`)
+    if (!this.transcribing) {
+      // Cancel / a newer Dictate / a pop already invalidated this result.
+      this.ctx.log(`[os] ${this.who}: STT result discarded (not transcribing): "${text}"`)
       this.requestRender()
       return
     }
+    this.transcribing = false
     await this.prompt(text)
   }
 
   async onSttError(error: string): Promise<void> {
     this.listening = false
     this.transcribing = false
-    this.sttCancelPending = false
     this.lastError = `dictation failed: ${error}`
     this.requestRender()
   }
@@ -356,16 +478,19 @@ class SessionLevel {
 
   /** Respawn with current opts (Options model/effort change; resumes context). */
   async respawn(fresh = false): Promise<void> {
+    this.stopDictation('respawn')
     const old = this.entry
     const ccSessionId = !fresh ? old?.session.ccSessionId ?? null : null
     if (old) {
       this.ctx.unregisterWatchdog(old.id)
-      old.session.kill()
+      old.session.kill()                 // its late 'close' event is ignored via the stale() guard
       this.ctx.pool.closeSession(old.id)
       this.entry = null
+      this.myEntryIds.delete(old.id)
     }
     const options = {
-      permissionMode: 'default' as const,
+      // the configured mode, NOT 'default' — same fix as openInner (review 2026-06-10)
+      permissionMode: this.ctx.config.claude.defaultMode,
       effort: this.opts.effort,
       model: this.opts.model,
       systemPrompt: this.opts.systemPrompt,
@@ -375,28 +500,33 @@ class SessionLevel {
       : this.ctx.pool.createSession(this.projectPath, options)
     this.entry = entry
     this.wire(entry)
+    this.myEntryIds.add(entry.id)
     await entry.session.spawn()
     this.ctx.registerWatchdog(entry)
     this.ctx.pool.persistSessionMeta()
     this.busy = false
     this.pendingPermissionId = null
+    this.permDoc = null
     if (fresh) {
       await this.setDoc([
         { t: 'heading', text: this.who, meta: basename(this.projectPath) },
-        { t: 'para', text: 'Fresh session. Menu → Dictate to prompt.' },
+        { t: 'para', text: `Fresh session. Menu → ${this.verb} to prompt.` },
       ])
     } else {
-      this.requestRender()
+      // restore the conversation doc (a pending permission doc may be on screen)
+      await this.setDoc(this.doc)
     }
   }
 
   close(): void {
+    this.stopDictation('close')
     const old = this.entry
     if (old) {
       this.ctx.unregisterWatchdog(old.id)
-      old.session.kill()
+      old.session.kill()                 // late 'close' event ignored via stale() guard
       this.ctx.pool.closeSession(old.id)
       this.entry = null
+      this.myEntryIds.delete(old.id)
     }
   }
 
@@ -426,20 +556,28 @@ class SessionOptions {
     const rows = this.items()
     const label = rows[index]
     if (label === undefined) { this.log(`[os] options: index ${index} out of range — ignored (LOUD)`); return null }
-    if (label.startsWith('Model: ')) {
-      l.opts.model = MODELS[(MODELS.indexOf(l.opts.model) + 1) % MODELS.length]
-      await l.respawn()
+    try {
+      if (label.startsWith('Model: ')) {
+        l.opts.model = cycleNext(MODELS, l.opts.model)
+        await l.respawn()
+        this.requestRender()
+        return null
+      }
+      if (label.startsWith('Effort: ')) {
+        l.opts.effort = cycleNext(EFFORTS, l.opts.effort)
+        await l.respawn()
+        this.requestRender()
+        return null
+      }
+      if (label === 'New session') {
+        await l.respawn(true)
+        return null
+      }
+    } catch (e) {
+      // The old entry is already dead at this point — make the failure visible
+      // on-glass (it used to vanish into the WM log; review 2026-06-10).
+      l.lastError = `respawn failed: ${(e as Error).message}`
       this.requestRender()
-      return null
-    }
-    if (label.startsWith('Effort: ')) {
-      l.opts.effort = EFFORTS[(EFFORTS.indexOf(l.opts.effort) + 1) % EFFORTS.length]
-      await l.respawn()
-      this.requestRender()
-      return null
-    }
-    if (label === 'New session') {
-      await l.respawn(true)
       return null
     }
     return 'close'
@@ -483,23 +621,23 @@ class CcWindow implements OsWindow {
     if (this.level === 'picker') {
       this.dirs = listProjectDirectories().map((e) => ({ name: e.name, path: e.path }))
       const { items } = browsePageItems(this.dirs.map((d) => d.name), this.pickerOffset)
-      return { mode: 'browse', title: 'Claude Code · pick directory', items, hint: 'tap\nopen\n\n2tap\nback' }
+      return { mode: 'browse', title: 'Claude Code · pick directory', items }
     }
     if (this.level === 'options') {
-      return { mode: 'browse', title: 'Claude Code · options', items: this.options.items(), hint: 'tap\nset\n\n2tap\nback' }
+      return { mode: 'browse', title: 'Claude Code · options', items: this.options.items() }
     }
     const c = this.current
     if (!c) { this.level = 'picker'; return this.view() }
     return c.view(this.label)
   }
 
-  async onMenuSelect(index: number): Promise<void> {
-    if (this.level !== 'session' || !this.current) return
-    const label = this.current.menu()[index]
-    if (label === undefined) { this.ctx.log(`[os] cc: menu index ${index} out of range`); return }
+  async onMenuSelect(label: string): Promise<void> {
+    if (this.level !== 'session' || !this.current) {
+      this.ctx.log(`[os] cc: menu '${label}' outside session level — ignored`)
+      return
+    }
     const r = await this.current.onMenu(label)
     if (r === 'options') { this.level = 'options'; this.requestRender() }
-    if (r === 'main') throw new SwitchToMain()
   }
 
   async onBrowseSelect(index: number): Promise<void> {
@@ -533,7 +671,12 @@ class CcWindow implements OsWindow {
     if (this.level === 'options') {
       const r = await this.options.onSelect(index)
       if (r === 'close') {
-        this.current?.close()
+        const closing = this.current
+        closing?.close()
+        // Drop the cached level too: re-picking the dir should start CLEAN
+        // (stale doc/flags on a closed session confused re-entry; sessions.json
+        // still allows --resume of the conversation itself).
+        if (closing) this.sessions.delete(closing.projectPath)
         this.current = null
         this.level = 'picker'
         this.requestRender()
@@ -543,15 +686,33 @@ class CcWindow implements OsWindow {
 
   async onBack(): Promise<boolean> {
     if (this.level === 'options') { this.level = 'session'; this.requestRender(); return true }
-    if (this.level === 'session') { this.level = 'picker'; this.requestRender(); return true }   // session stays alive in the pool
+    if (this.level === 'session') {
+      this.current?.stopDictation('left session')   // mic must not outlive the level
+      this.level = 'picker'
+      this.requestRender()
+      return true   // session stays alive in the pool
+    }
     return false
   }
 
+  onDeactivate(): void {
+    this.current?.stopDictation('window switch')
+  }
+
+  async onReload(): Promise<void> {
+    await this.current?.onReload()
+  }
+
+  // Delegate regardless of level: the SessionLevel's transcribing flag decides
+  // (a stale result discards LOUDLY there — a level gate here would eat it
+  // silently; review 2026-06-10).
   async onStt(text: string): Promise<void> {
-    if (this.level === 'session') await this.current?.onStt(text)
+    if (this.current) await this.current.onStt(text)
+    else this.ctx.log(`[os] cc: STT result with no session — discarded: "${text}"`)
   }
   async onSttError(error: string): Promise<void> {
-    if (this.level === 'session') await this.current?.onSttError(error)
+    if (this.current) await this.current.onSttError(error)
+    else this.ctx.log(`[os] cc: STT error with no session — ${error}`)
   }
 }
 
@@ -566,7 +727,10 @@ class AriaWindow implements OsWindow {
   private options: SessionOptions
   private opened = false
 
+  private log: (m: string) => void
+
   constructor(ctx: WmContext, private requestRender: () => void) {
+    this.log = ctx.log
     let prompt: string
     try {
       prompt = readFileSync(ARIA_PROMPT_PATH, 'utf8')
@@ -579,10 +743,7 @@ class AriaWindow implements OsWindow {
       model: ctx.config.claude.model ?? 'opus',
       effort: 'max',
       systemPrompt: prompt,
-    }, requestRender, this.label)
-    // Aria's menu wording: Ask instead of Dictate (same flow).
-    const origMenu = this.session.menu.bind(this.session)
-    this.session.menu = () => origMenu().map((m) => (m === 'Dictate' ? 'Ask' : m))
+    }, requestRender, this.label, 'Ask')   // Aria's dictation verb
     this.options = new SessionOptions(() => this.session, {}, requestRender, ctx.log)
   }
 
@@ -593,28 +754,28 @@ class AriaWindow implements OsWindow {
 
   async view(): Promise<WinView> {
     if (this.level === 'options') {
-      return { mode: 'browse', title: 'Aria · options', items: this.options.items(), hint: 'tap\nset\n\n2tap\nback' }
+      return { mode: 'browse', title: 'Aria · options', items: this.options.items() }
     }
     if (!this.opened) {
       this.opened = true
-      // open lazily on first view; loud error view on failure
+      // open lazily on first view; loud error view on failure — and CLEAR the
+      // flag so the next render (Retry/Reload) re-attempts the spawn instead
+      // of showing "Ready." over a dead session (review 2026-06-10).
       try { await this.session.open() } catch (e) {
+        this.opened = false
         return errorView('Aria · error', `spawn failed: ${(e as Error).message}`)
       }
     }
     return this.session.view(this.label)
   }
 
-  async onMenuSelect(index: number): Promise<void> {
-    const label = this.session.menu()[index]
-    if (label === undefined) return
-    const r = await this.session.onMenu(label === 'Ask' ? 'Dictate' : label)
+  async onMenuSelect(label: string): Promise<void> {
+    const r = await this.session.onMenu(label)
     if (r === 'options') { this.level = 'options'; this.requestRender() }
-    if (r === 'main') throw new SwitchToMain()
   }
 
   async onBrowseSelect(index: number): Promise<void> {
-    if (this.level !== 'options') return
+    if (this.level !== 'options') { this.log(`[os] aria: browse select ${index} outside options — ignored`); return }
     await this.options.onSelect(index)   // no close row for Aria
   }
 
@@ -623,6 +784,8 @@ class AriaWindow implements OsWindow {
     return false
   }
 
+  onDeactivate(): void { this.session.stopDictation('window switch') }
+  async onReload(): Promise<void> { await this.session.onReload() }
   async onStt(text: string): Promise<void> { await this.session.onStt(text) }
   async onSttError(error: string): Promise<void> { await this.session.onSttError(error) }
 }
@@ -638,6 +801,7 @@ class MailWindow implements OsWindow {
   private level: 'list' | 'read' = 'list'
   private rows: MailRow[] = []
   private total = 0
+  private unreadTotal = 0
   private offset = 0
   private pages: string[] = []
   private page = 0
@@ -647,8 +811,7 @@ class MailWindow implements OsWindow {
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
   summary(): string {
-    const unread = this.rows.filter((r) => r.unread).length
-    return this.rows.length ? `${unread} unread of ${this.total}` : 'inbox'
+    return this.total ? `${this.unreadTotal} unread of ${this.total}` : 'inbox'
   }
 
   private runMaildir(args: string[]): Promise<string> {
@@ -662,8 +825,9 @@ class MailWindow implements OsWindow {
 
   private async refresh(): Promise<void> {
     const out = await this.runMaildir(['list', MAILDIR_PATH, String(BROWSE_PAGE), String(this.offset)])
-    const parsed = JSON.parse(out) as { total: number; rows: MailRow[] }
+    const parsed = JSON.parse(out) as { total: number; unreadTotal?: number; rows: MailRow[] }
     this.total = parsed.total
+    this.unreadTotal = parsed.unreadTotal ?? 0
     this.rows = parsed.rows
     this.lastError = null
   }
@@ -674,17 +838,18 @@ class MailWindow implements OsWindow {
       return {
         mode: 'text',
         title: `Mail · ${this.readSubject}${pageSuffix}`,
-        menu: ['Next', 'Prev', 'Back', 'Main'],
+        menu: ['Next', 'Prev', 'Back', 'Reload', 'Main'],
         text: this.pages[this.page] ?? '',
       }
     }
     try {
-      await this.refresh()
+      await this.refresh()   // header-only scan, ~40 ms — fine per render
     } catch (e) {
       this.lastError = (e as Error).message
     }
     if (this.lastError) return errorView('Mail · error', this.lastError)
-    const items = ['↻ Refresh']
+    // (the compose-injected Reload row doubles as refresh — view() re-fetches)
+    const items: string[] = []
     if (this.offset > 0) items.push(PREV_ROW)
     for (const r of this.rows) items.push(`${r.unread ? '● ' : ''}${r.from} — ${r.subject}`)
     if (this.offset + BROWSE_PAGE < this.total) items.push(MORE_ROW)
@@ -693,18 +858,16 @@ class MailWindow implements OsWindow {
       mode: 'browse',
       title: `Mail · ${this.offset + 1}-${last} of ${this.total}`,
       items,
-      hint: 'tap\nopen\n\n2tap\nback',
     }
   }
 
   async onBrowseSelect(index: number): Promise<void> {
-    const items: (MailRow | 'refresh' | 'prev' | 'more')[] = ['refresh']
+    const items: (MailRow | 'prev' | 'more')[] = []
     if (this.offset > 0) items.push('prev')
     for (const r of this.rows) items.push(r)
     if (this.offset + BROWSE_PAGE < this.total) items.push('more')
     const sel = items[index]
     if (sel === undefined) { this.ctx.log(`[os] mail: index ${index} out of range`); return }
-    if (sel === 'refresh') { this.requestRender(); return }   // view() re-fetches
     if (sel === 'prev') { this.offset = Math.max(0, this.offset - BROWSE_PAGE); this.requestRender(); return }
     if (sel === 'more') { this.offset += BROWSE_PAGE; this.requestRender(); return }
     try {
@@ -721,16 +884,17 @@ class MailWindow implements OsWindow {
     }
   }
 
-  async onMenuSelect(index: number): Promise<void> {
-    if (this.level !== 'read') return
-    const label = ['Next', 'Prev', 'Back', 'Main'][index]
+  async onMenuSelect(label: string): Promise<void> {
+    if (this.level !== 'read') { this.ctx.log(`[os] mail: menu '${label}' outside read level — ignored`); return }
     switch (label) {
       case 'Next': if (this.page < this.pages.length - 1) { this.page++; this.requestRender() } break
       case 'Prev': if (this.page > 0) { this.page--; this.requestRender() } break
-      case 'Back': this.level = 'list'; this.requestRender(); break
-      case 'Main': throw new SwitchToMain()
-      default: this.ctx.log(`[os] mail read: index ${index} out of range`)
+      default: this.ctx.log(`[os] mail read: unknown menu label '${label}' — ignored (LOUD)`)
     }
+  }
+
+  async onReload(): Promise<void> {
+    this.lastError = null   // view() refetches the list / re-renders the page
   }
 
   async onBack(): Promise<boolean> {
@@ -776,7 +940,7 @@ class FilesWindow implements OsWindow {
       return {
         mode: 'text',
         title: `Files · ${this.readName}${pageSuffix}`,
-        menu: ['Next', 'Prev', 'Back', 'Main'],
+        menu: ['Next', 'Prev', 'Back', 'Reload', 'Main'],
         text: this.pages[this.page] ?? '',
       }
     }
@@ -787,7 +951,7 @@ class FilesWindow implements OsWindow {
     }
     const labels = this.entries.map((e) => (e.isDir ? e.name + '/' : e.name))
     const { items } = browsePageItems(labels, this.offset)
-    return { mode: 'browse', title: `Files · ${this.cwd()}`, items, hint: 'tap\nopen\n\n2tap\nup' }
+    return { mode: 'browse', title: `Files · ${this.cwd()}`, items }
   }
 
   async onBrowseSelect(index: number): Promise<void> {
@@ -806,12 +970,28 @@ class FilesWindow implements OsWindow {
       return
     }
     try {
-      const buf = readFileSync(path)
+      // Bounded HEAD PREVIEW (DE_DESIGN §4) — an unbounded readFileSync on a
+      // multi-GB file blocks the whole event loop for seconds (review
+      // 2026-06-10). Read ONLY the head from disk. This is a navigational
+      // preview, clearly labeled; full content is reachable via a CC session.
+      const size = statSync(path).size
+      const fd = openSync(path, 'r')
+      let buf: Buffer
+      try {
+        buf = Buffer.alloc(Math.min(size, FILE_PREVIEW_BYTES))
+        readSync(fd, buf, 0, buf.length, 0)
+      } finally {
+        closeSync(fd)
+      }
       const head = buf.subarray(0, 8192)
       if (head.includes(0)) {
-        this.pages = [`(binary file)\n\n${e.name}\n${buf.length} bytes`]
+        this.pages = [`(binary file)\n\n${e.name}\n${size} bytes`]
       } else {
-        this.pages = paginateText(buf.toString('utf8'))
+        const text = buf.toString('utf8')
+        const banner = size > FILE_PREVIEW_BYTES
+          ? `(head preview — first ${FILE_PREVIEW_BYTES} of ${size} bytes; open via CC for the rest)\n\n`
+          : ''
+        this.pages = paginateText(banner + text)
       }
       this.page = 0
       this.readName = e.name
@@ -826,15 +1006,12 @@ class FilesWindow implements OsWindow {
     }
   }
 
-  async onMenuSelect(index: number): Promise<void> {
-    if (this.level !== 'read') return
-    const label = ['Next', 'Prev', 'Back', 'Main'][index]
+  async onMenuSelect(label: string): Promise<void> {
+    if (this.level !== 'read') { this.ctx.log(`[os] files: menu '${label}' outside read level — ignored`); return }
     switch (label) {
       case 'Next': if (this.page < this.pages.length - 1) { this.page++; this.requestRender() } break
       case 'Prev': if (this.page > 0) { this.page--; this.requestRender() } break
-      case 'Back': this.level = 'browse'; this.requestRender(); break
-      case 'Main': throw new SwitchToMain()
-      default: this.ctx.log(`[os] files read: index ${index} out of range`)
+      default: this.ctx.log(`[os] files read: unknown menu label '${label}' — ignored (LOUD)`)
     }
   }
 
@@ -847,11 +1024,16 @@ class FilesWindow implements OsWindow {
 
 // ============================================================ Main window (switcher)
 
+/** Main = the switcher + the wordmark (Adam 2026-06-10: "a cool logo in the
+ *  content area and the list of stuff in the menu list"). Menu list = the
+ *  windows (capture lives here — Main has no browse list); content = the
+ *  logo rendered through the normal tile pipeline (cached by content hash). */
 class MainWindow implements OsWindow {
   readonly id = 'main'
   readonly tab = 'Main'
   readonly label = 'Main'
   private others: () => OsWindow[]
+  private logo: RenderedContent | null = null
 
   constructor(private ctx: WmContext, others: () => OsWindow[]) {
     this.others = others
@@ -860,28 +1042,33 @@ class MainWindow implements OsWindow {
   summary(): string { return 'switcher' }
 
   async view(): Promise<WinView> {
+    if (!this.logo) {
+      this.logo = await renderBlocks([{ t: 'logo', title: 'G2CC', sub: `glasses os · ${hostname()}` }])
+    }
     return {
-      mode: 'browse',
+      mode: 'tiles',
       title: 'Main',
-      items: this.others().map((w) => `${w.label} — ${w.summary()}`),
-      hint: 'tap\nopen\n\n2tap\nstay',
+      menu: [...this.others().map((w) => w.tab), 'Reload'],   // Reload = WM-level
+      tiles: this.logo.tiles(0),
     }
   }
 
-  async onBrowseSelect(index: number): Promise<void> {
-    const w = this.others()[index]
-    if (!w) { this.ctx.log(`[os] main: index ${index} out of range`); return }
+  async onMenuSelect(label: string): Promise<void> {
+    const w = this.others().find((x) => x.tab === label)
+    if (!w) { this.ctx.log(`[os] main: unknown menu label '${label}' — ignored (LOUD)`); return }
     throw new SwitchTo(w.id)
   }
 
-  async onMenuSelect(): Promise<void> { /* main has no menu list */ }
+  async onBrowseSelect(index: number): Promise<void> {
+    this.ctx.log(`[os] main: browse select ${index} but Main has no browse list — ignored`)
+  }
+
   async onBack(): Promise<boolean> { return true }   // double-tap at Main: stay (consume)
 }
 
 // ============================================================ WindowManager
 
-/** Control-flow signals thrown by windows; caught by the WM. */
-class SwitchToMain extends Error { constructor() { super('switch-to-main') } }
+/** Control-flow signal thrown by windows; caught by the WM. */
 class SwitchTo extends Error { constructor(readonly windowId: string) { super(`switch-to-${windowId}`) } }
 
 export class WindowManager {
@@ -889,16 +1076,30 @@ export class WindowManager {
   private active: OsWindow
   private renderQueued = false
   private rendering = false
+  /** The view as last RENDERED (menu normalized) — taps resolve against THIS,
+   *  not live state, so a state change between render and tap can't misroute
+   *  a row onto a different action (review 2026-06-10: errorView's 'Retry'
+   *  used to land on 'Dictate' and turn the mic on). */
+  private lastView: WinView | null = null
 
   constructor(private ctx: WmContext) {
-    const requestRender = () => this.requestRender()
+    // Each window's requestRender only fires while it IS the active window — a
+    // background session's tool_use stream otherwise recomposes (and re-sends)
+    // whatever window the user is actually looking at, per event (review
+    // 2026-06-10). State still updates; switching back re-derives the view.
+    const mk = <T extends OsWindow>(build: (rr: () => void) => T): T => {
+      let w: T | null = null
+      const rr = () => { if (w !== null && this.active === w) this.requestRender() }
+      w = build(rr)
+      return w
+    }
     const main = new MainWindow(ctx, () => this.windows.filter((w) => w.id !== 'main'))
     this.windows = [
       main,
-      new AriaWindow(ctx, requestRender),
-      new CcWindow(ctx, requestRender),
-      new MailWindow(ctx, requestRender),
-      new FilesWindow(ctx, requestRender),
+      mk((rr) => new AriaWindow(ctx, rr)),
+      mk((rr) => new CcWindow(ctx, rr)),
+      mk((rr) => new MailWindow(ctx, rr)),
+      mk((rr) => new FilesWindow(ctx, rr)),
     ]
     this.active = main
   }
@@ -921,8 +1122,26 @@ export class WindowManager {
             view = errorView(`${this.active.label} · error`, (e as Error).message)
           }
           const tabs = this.windows.map((w) => ({ label: w.tab, active: w === this.active }))
-          this.ctx.send(composeScene(view, tabs, this.statusLeft()))
+          let scene: WireScene
+          try {
+            scene = composeScene(view, tabs, this.statusLeft())
+          } catch (e) {
+            // A compose failure must NEVER escape (it used to crash the whole
+            // server as an unhandled rejection — review 2026-06-10). errorView
+            // composes by construction: text mode + a non-empty menu.
+            this.ctx.log(`[os] compose failed for ${this.active.id}: ${(e as Error).message}`)
+            view = errorView(`${this.active.label} · error`, (e as Error).message)
+            scene = composeScene(view, tabs, this.statusLeft())
+          }
+          // Normalize the menu the user actually SEES (browse default Back/Main).
+          this.lastView = { ...view, menu: view.mode === 'browse' ? (view.menu ?? ['Back', 'Main']) : view.menu }
+          this.ctx.send(scene)
         } while (this.renderQueued)
+      } catch (e) {
+        // Insurance: nothing in the loop should throw past the per-step
+        // handling, but an escape here would otherwise be an unhandled
+        // rejection (the IIFE is void-ed) and silently drop a queued render.
+        this.ctx.log(`[os] render loop threw: ${(e as Error).message}`)
       } finally {
         this.rendering = false
       }
@@ -930,24 +1149,72 @@ export class WindowManager {
   }
 
   private statusLeft(): string {
-    return `● beardos · ${this.ctx.pool.count} cc`
+    return `● ${hostname()} · ${this.ctx.pool.count} cc`
   }
 
   switchTo(id: string): void {
     const w = this.windows.find((x) => x.id === id)
     if (!w) { this.ctx.log(`[os] switchTo unknown window '${id}'`); return }
+    if (w !== this.active) {
+      try {
+        this.active.onDeactivate?.()   // mic OFF etc. — focus must not leak
+      } catch (e) {
+        this.ctx.log(`[os] onDeactivate failed (${this.active.id}): ${(e as Error).message}`)
+      }
+    }
     this.active = w
     this.requestRender()
   }
 
-  /** hub_select from the glasses: region name + tapped index. */
+  /** The Reload action (any window, any state): tell the client to abort +
+   *  COLD_INIT-relaunch its current scene (the BLE-level unstick), let the
+   *  active window clear its stuck transients, then recompose fresh state. */
+  reload(): void {
+    this.ctx.log('[os] RELOAD — display re-takeover + state recompose')
+    this.ctx.displayReload()
+    const w = this.active
+    void (async () => {
+      try {
+        await w.onReload?.()
+      } catch (e) {
+        this.ctx.log(`[os] onReload failed (${w.id}): ${(e as Error).message}`)
+      }
+      this.requestRender()
+    })()
+  }
+
+  /** hub_select from the glasses: region name + tapped index, resolved against
+   *  the last-RENDERED view. Global labels (Retry/Reload/Back/Main) are
+   *  handled here so they work in EVERY window and state — incl. errorView. */
   async onSelect(region: string, index: number): Promise<void> {
     try {
-      if (region === 'menu') await this.active.onMenuSelect(index)
-      else if (region === 'browse') await this.active.onBrowseSelect(index)
-      else this.ctx.log(`[os] select on unknown region '${region}' idx=${index} — ignored`)
+      if (region === 'menu') {
+        const label = this.lastView?.menu?.[index]
+        if (label === undefined) {
+          this.ctx.log(`[os] menu tap [${index}] doesn't resolve against the rendered view — resyncing`)
+          this.requestRender()
+          return
+        }
+        switch (label) {
+          case 'Main': this.switchTo('main'); return
+          case 'Reload': this.reload(); return
+          case 'Retry': this.requestRender(); return
+          case 'Back': await this.onBackGesture(); return
+        }
+        await this.active.onMenuSelect(label)
+      } else if (region === 'browse') {
+        if (this.lastView?.mode !== 'browse') {
+          this.ctx.log(`[os] browse tap [${index}] but the rendered view is ${this.lastView?.mode ?? 'none'} — resyncing`)
+          this.requestRender()
+          return
+        }
+        // Index 0 = the compose-injected Reload row; windows see 0-based rows after it.
+        if (index === 0) { this.reload(); return }
+        await this.active.onBrowseSelect(index - 1)
+      } else {
+        this.ctx.log(`[os] select on unknown region '${region}' idx=${index} — ignored`)
+      }
     } catch (e) {
-      if (e instanceof SwitchToMain) { this.switchTo('main'); return }
       if (e instanceof SwitchTo) { this.switchTo(e.windowId); return }
       this.ctx.log(`[os] select handler failed (${this.active.id}/${region}/${index}): ${(e as Error).message}`)
       this.requestRender()   // view() surfaces the error state; never a dead screen

@@ -17,7 +17,8 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 576, 288
-CLOCK = {"x": 444, "y": 0, "w": 132, "h": 38}
+# Mirrors shared/src/constants.ts CLOCK_* (33px bars / x474 — Adam cal 2026-06-10).
+CLOCK = {"x": 474, "y": 0, "w": 102, "h": 33}
 SANS = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", 15)
 
 
@@ -43,8 +44,21 @@ def main(out_path):
     captures = [r["name"] for r in regions
                 if (r["kind"] == "text" and (r.get("content") or {}).get("scroll"))
                 or (r["kind"] == "list" and (r.get("content") or {}).get("eventCapture"))]
-    if len(captures) != 1:
-        problems.append(f"event-capture regions = {captures} (need exactly 1)")
+    # Mirror the client exactly: >1 is the hard reject; 0 renders but input is
+    # dead (G2Renderer warns) — warn here too, don't fail.
+    if len(captures) > 1:
+        problems.append(f"event-capture regions = {captures} (a page allows exactly ONE)")
+    elif len(captures) == 0:
+        print("warn: no event-capture region — input will be dead on this page")
+    # Native-list caps (mirrors G2Renderer.validate)
+    for r in lists:
+        c = r.get("content") or {}
+        items = c.get("items") or []
+        if len(items) > 20:
+            problems.append(f"list '{r['name']}' has {len(items)} items (SDK max 20)")
+        for it in items:
+            if len(it) > 64:
+                problems.append(f"list '{r['name']}' item >64 chars: {it[:40]}…")
     ids = [r["id"] for r in regions]
     if len(set(ids)) != len(ids) or 1 in ids:
         problems.append(f"region id problem (dup or reserved clock id 1): {ids}")

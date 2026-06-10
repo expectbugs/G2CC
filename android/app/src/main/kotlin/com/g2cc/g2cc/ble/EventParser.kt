@@ -232,8 +232,13 @@ object EventParser {
         val (ackType, n1) = Varint.decode(payload, 1)
         val i = 1 + n1
         if (i >= payload.size || payload[i] != 0x10.toByte()) {
-            // ackType present but no msgId field — still useful as a typed ack (msgId=-1).
-            return Event.HubAck(ackType, -1)
+            // ackType present but no msgId field. Protobuf semantics: an ABSENT varint
+            // field means 0 — and the glasses' encoder omits zero-valued fields
+            // (G2_BLE_PROTOCOL.md §6.6 "f4 omitted ⇒ index 0"). msgId wraps 0xFF→0x00
+            // every 256 messages, so an image chunk parked on msgId 0 whose ack came
+            // back f2-less would NEVER match a -1 — wedging the ack-gated render pump
+            // until the app slot expired (~2 min frozen HUD). Default to 0.
+            return Event.HubAck(ackType, 0)
         }
         val (msgId, _) = Varint.decode(payload, i + 1)
         return Event.HubAck(ackType, msgId)

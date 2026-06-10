@@ -1818,6 +1818,10 @@ class G2Pipeline(
                 // dispatch app drives its own mic via UI buttons. Loud, not silent.
                 Log.w(TAG, "unexpected audio_request '${msg.action}' in legacy dispatch path — ignoring")
             }
+            is ServerMessage.DisplayReload -> {
+                // Glasses-OS (os_attach) feature — the legacy path never attaches.
+                Log.w(TAG, "unexpected display_reload in legacy dispatch path — ignoring")
+            }
         }
     }
 

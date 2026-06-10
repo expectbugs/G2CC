@@ -14,7 +14,8 @@
 import {
   SCREEN_WIDTH, SCREEN_HEIGHT,
   DE_BAR_H, DE_MENU_W, DE_CONTENT_X, DE_CONTENT_Y, DE_CONTENT_W, DE_CONTENT_H,
-  DE_TILE_W, DE_TILE_H, DE_TITLE_W, DE_REGION_IDS,
+  DE_TILE_W, DE_TILE_H, DE_TITLE_W, DE_REGION_IDS, DE_TAB_RIGHT_TRIM,
+  MAX_ITEM_NAME_LENGTH,
 } from '@g2cc/shared'
 import type { WireScene, SceneRegion, RegionStyle } from '@g2cc/shared'
 
@@ -25,11 +26,12 @@ export interface WinView {
   mode: WinMode
   /** Title-bar text (window name + state + page indicator). */
   title: string
-  /** tiles/text modes: the action list (THE focus region). ≤5 visible; longer scrolls. */
+  /** tiles/text modes: the action list (THE focus region). ≤5 visible; longer
+   *  scrolls. In browse mode this is the NON-capturing menu list (defaults to
+   *  ['Back','Main'] — both double-tap-backed). */
   menu?: string[]
-  /** browse mode: passive hint text in the menu slot. */
-  hint?: string
-  /** browse mode: the content list rows (THE focus region). */
+  /** browse mode: the content list rows (THE focus region). compose() injects
+   *  a 'Reload' row at index 0; the WM strips it before windows see indexes. */
   items?: string[]
   /** text mode: pre-paginated page content. */
   text?: string
@@ -59,26 +61,55 @@ export function fwTextWidth(s: string): number {
   return Math.ceil(w)
 }
 
+/** The Reload row compose() injects at INDEX 0 of every browse list (Adam
+ *  2026-06-10: "every menu list should contain a reload option"). The WM
+ *  intercepts index 0 and decrements before delegating to the window —
+ *  windows never see the row. */
+export const BROWSE_RELOAD_ROW = 'Reload'
+
+/** Clamp a native-list label to the SDK item-name cap (64), measured in UTF-8
+ *  BYTES — the firmware's "64" was proven with ASCII names, so the byte
+ *  interpretation is the safe one for `●`/`—`/accents (≤4 B/char). This is a
+ *  NAVIGATIONAL summary clamp (the full content is always reachable in the
+ *  row's read view) — not content truncation. Logged so it never happens
+ *  silently. */
+function clampLabel(s: string, what: string): string {
+  if (Buffer.byteLength(s, 'utf8') <= MAX_ITEM_NAME_LENGTH) return s
+  let out = ''
+  for (const ch of s) {   // iterate code points so we never split a glyph
+    if (Buffer.byteLength(out + ch, 'utf8') > MAX_ITEM_NAME_LENGTH - 3) break   // '…' = 3 bytes
+    out += ch
+  }
+  console.warn(`[os-compose] ${what} label clamped to ${MAX_ITEM_NAME_LENGTH} UTF-8 bytes: "${s.slice(0, 40)}…"`)
+  return out + '…'
+}
+
 /** Compose the full screen for the active window. */
 export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string): WireScene {
   const regions: SceneRegion[] = []
 
-  // Title bar — ends at the client-owned clock cutout (444px).
+  // Title bar — ends at the client-owned clock cutout (474px). The leading
+  // space nudges the text ~5px right (Adam cal 2026-06-10) without raising
+  // paddingLength, which would also eat VERTICAL room in the 33px bar.
   regions.push({
     id: DE_REGION_IDS.title, name: 'title', x: 0, y: 0, w: DE_TITLE_W, h: DE_BAR_H,
     kind: 'text', style: CHROME,
-    content: { kind: 'text', text: view.title },
+    content: { kind: 'text', text: ' ' + view.title },
   })
 
-  // Menu slot: the action list (focus) OR passive browse hints.
+  // Menu slot — ALWAYS a real list (Adam 2026-06-10). Reading/tiles windows:
+  // the action list, the page's single focus region. Browse windows: focus
+  // lives on the content list (only ONE capture region is allowed per page —
+  // §6.1), so the menu renders as a non-capturing list (no selection ring) of
+  // the gesture-backed actions: Back / Main are both double-tap behaviors.
   if (view.mode === 'browse') {
     regions.push({
       id: DE_REGION_IDS.menu, name: 'menu', x: 0, y: DE_BAR_H, w: DE_MENU_W, h: DE_CONTENT_H,
-      kind: 'text', style: { ...CHROME, padding: 6 },
-      content: { kind: 'text', text: view.hint ?? 'tap\nopen\n\n2tap\nback' },
+      kind: 'list', style: { ...CHROME, padding: 3 },
+      content: { kind: 'list', items: view.menu ?? ['Back', 'Main'], selectBorder: false, eventCapture: false },
     })
   } else {
-    const menu = view.menu ?? []
+    const menu = (view.menu ?? []).map((m) => clampLabel(m, 'menu'))
     if (menu.length === 0) throw new Error(`compose: '${view.title}' is ${view.mode} mode but has no menu items (the focus region)`)
     regions.push({
       id: DE_REGION_IDS.menu, name: 'menu', x: 0, y: DE_BAR_H, w: DE_MENU_W, h: DE_CONTENT_H,
@@ -105,12 +136,13 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
       })
     })
   } else if (view.mode === 'browse') {
-    const items = view.items ?? []
-    if (items.length === 0) throw new Error(`compose: '${view.title}' is browse mode but has no items (the focus region)`)
+    const items = (view.items ?? []).map((s) => clampLabel(s, 'browse'))
+    // Injected Reload at index 0 (see BROWSE_RELOAD_ROW). An empty window list
+    // still composes (Reload-only) instead of throwing the screen away.
     regions.push({
       id: DE_REGION_IDS.browse, name: 'browse', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: DE_CONTENT_W, h: DE_CONTENT_H,
       kind: 'list', style: { ...CHROME, padding: 4 },
-      content: { kind: 'list', items, eventCapture: true },
+      content: { kind: 'list', items: [BROWSE_RELOAD_ROW, ...items], eventCapture: true },
     })
   } else {
     regions.push({
@@ -122,9 +154,11 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
 
   // Status bar: connection/status left, right-aligned window tabs (own region —
   // firmware text is left-aligned only, so the tabs region starts at
-  // SCREEN_W - textWidth; no overlap with the status region).
+  // SCREEN_W - textWidth). DE_TAB_RIGHT_TRIM pushes the strip ~30px farther
+  // right (Adam cal 2026-06-10 vs the conservative glyph estimate) — if the
+  // tabs CLIP on real glass, reduce the trim.
   const tabText = tabs.map((t) => (t.active ? `[${t.label}]` : t.label)).join('  ')
-  const tabW = Math.min(fwTextWidth(tabText) + 12, SCREEN_WIDTH - 120)
+  const tabW = Math.min(Math.max(40, fwTextWidth(tabText) + 12 - DE_TAB_RIGHT_TRIM), SCREEN_WIDTH - 120)
   const tabX = SCREEN_WIDTH - tabW
   regions.push({
     id: DE_REGION_IDS.status, name: 'status', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: tabX, h: DE_BAR_H,
@@ -140,13 +174,15 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   return { regions }
 }
 
-/** Loud, visible error screen (rasterizer/window failure) — never a silent blank.
- *  Keeps the menu list so input survives ('Main' recovers). */
+/** Loud, visible error screen (rasterizer/window failure) — never a silent
+ *  blank. Its menu uses ONLY WindowManager-level labels (Retry/Reload/Main),
+ *  so the taps work in ANY window state — review 2026-06-10 found per-window
+ *  label resolution misrouted errorView taps into live actions (mic on). */
 export function errorView(title: string, message: string): WinView {
   return {
     mode: 'text',
     title,
-    menu: ['Retry', 'Main'],
+    menu: ['Retry', 'Reload', 'Main'],
     text: `ERROR\n\n${message}`,
   }
 }

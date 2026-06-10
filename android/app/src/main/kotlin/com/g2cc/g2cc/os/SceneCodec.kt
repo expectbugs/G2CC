@@ -65,7 +65,7 @@ object SceneCodec {
                     "[${OsLayout.CLOCK_X},${OsLayout.CLOCK_Y},${OsLayout.CLOCK_WIDTH},${OsLayout.CLOCK_HEIGHT}]"
             }
             val kind = parseKind(wr.kind)
-            regions += Region(wr.id, wr.name, wr.x, wr.y, wr.w, wr.h, kind, toStyle(wr.name, wr.style))
+            regions += Region(wr.id, wr.name, wr.x, wr.y, wr.w, wr.h, kind, toStyle(wr.name, kind, wr.style))
             wr.content?.let { content[wr.name] = toContent(wr.name, kind, it) }
         }
         return Scene(regions, content)
@@ -78,8 +78,14 @@ object SceneCodec {
         else -> throw IllegalArgumentException("unknown region kind '$s'")
     }
 
-    private fun toStyle(name: String, s: WireRegionStyle?): RegionStyle {
+    private fun toStyle(name: String, kind: RegionKind, s: WireRegionStyle?): RegionStyle {
         if (s == null) return RegionStyle.NONE
+        // The official IMAGE container has no style fields (f5–f8 absent from its schema,
+        // docs/G2_BLE_PROTOCOL.md §6.1) — a styled image region would silently render bare.
+        // Loud-fail instead so the server bug is visible.
+        require(kind != RegionKind.IMAGE) {
+            "region '$name' is an image — image containers have no border/padding fields (§6.1); remove the style"
+        }
         return try {
             RegionStyle(s.borderWidth ?: 0, s.borderColor ?: 0, s.borderRadius ?: 0, s.padding ?: 0)
         } catch (e: IllegalArgumentException) {

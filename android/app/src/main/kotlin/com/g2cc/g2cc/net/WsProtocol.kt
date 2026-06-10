@@ -335,9 +335,16 @@ sealed interface ServerMessage {
     data class Render(val scene: WireScene) : ServerMessage
 
     /** Server → client: start/stop streaming the phone mic (DE 'Dictate'/'Ask').
-     *  Drives AudioStreamer; capture failures surface via diag (loud). */
+     *  Drives AudioStreamer; capture failures surface back to the server as a
+     *  '[audio-error]'-prefixed diag message (loud, never logcat-only). */
     @Serializable @SerialName("audio_request")
     data class AudioRequest(val action: String) : ServerMessage   // 'start' | 'stop'
+
+    /** Server → client: the DE 'Reload' action — abort any wedged render op and
+     *  re-run the COLD_INIT re-takeover with the current scene (the proven
+     *  renewal path), re-pushing the whole display. */
+    @Serializable @SerialName("display_reload")
+    data object DisplayReload : ServerMessage
 
     @Serializable @SerialName("error")
     data class Error(val message: String) : ServerMessage

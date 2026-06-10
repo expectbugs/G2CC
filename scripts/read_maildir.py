@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """Maildir reader for the DE Mail window (docs/DE_DESIGN.md §4).
 
-Reads the local mbsync-synced Maildir (~/Mail/marzello.net, cron every 5 min) —
-stdlib only (mailbox + email). Loud-fails to stderr + nonzero exit.
+Reads the local mbsync-synced Maildir (~/Mail/marzello.net/INBOX, cron every
+5 min) — stdlib only. Loud-fails to stderr + nonzero exit.
+
+The LIST path scans cur/+new/ directly (filenames carry the maildir flags) and
+parses HEADERS ONLY (read up to the first blank line) — the 2026-06-10 review
+measured 2.4 s/page when the old mailbox.Maildir path fed entire 40 MB
+bugreport mails through FeedParser for four header fields. Headers are parsed
+with policy.default so RFC2047 encoded-words decode and folded headers unfold
+(the old compat32 path leaked raw '=?UTF-8?Q?…?=' and embedded newlines into
+the on-glass list).
 
 Usage:
   read_maildir.py list <maildir> <limit> <offset>
       -> JSON {"total": N, "rows": [{"key","from","subject","date","unread"}]}
-         rows sorted newest-first by Date header (file mtime fallback).
+         rows sorted newest-first by Date header (file-mtime fallback).
   read_maildir.py read <maildir> <key>
       -> JSON {"from","to","subject","date","body"}
          body = the text/plain part (decoded); falls back to a crude HTML
@@ -16,10 +24,13 @@ Usage:
 import html.parser
 import io
 import json
-import mailbox
+import os
 import sys
 from email import policy
+from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
+
+HEADER_READ_CAP = 256 * 1024   # headers end at the first blank line; cap the scan defensively
 
 
 class _HtmlText(html.parser.HTMLParser):
@@ -65,26 +76,86 @@ def html_to_text(s):
     return "\n".join(out).strip()
 
 
-def msg_date(m, fallback):
-    try:
-        d = m.get("Date")
-        if d:
-            return parsedate_to_datetime(d).timestamp()
-    except Exception:
-        pass
-    return fallback
+def unfold(value, fallback):
+    """Collapse any whitespace runs (incl. fold newlines) to single spaces."""
+    if value is None:
+        return fallback
+    return " ".join(str(value).split())
 
 
 def short_addr(value):
     """'Display Name <a@b>' -> 'Display Name'; bare address stays."""
-    if value is None:
-        return "(unknown)"
-    s = str(value)
+    s = unfold(value, "(unknown)")
     if "<" in s:
         name = s.split("<")[0].strip().strip('"')
         if name:
             return name
-    return s.strip()
+    return s
+
+
+# ---- maildir scanning (filenames carry the flags: <key>:2,<flags>) -------------
+
+def scan_messages(md_path):
+    """Yield (key, path, unread, mtime) for every message in new/ + cur/."""
+    out = []
+    for sub, default_unread in (("new", True), ("cur", False)):
+        d = os.path.join(md_path, sub)
+        if not os.path.isdir(d):
+            if sub == "cur":   # a maildir without cur/ is not a maildir
+                raise FileNotFoundError(f"{d} missing — not a Maildir?")
+            continue
+        with os.scandir(d) as it:
+            for ent in it:
+                if not ent.is_file():
+                    continue
+                name = ent.name
+                if ":2," in name:
+                    key, flags = name.rsplit(":2,", 1)
+                    unread = "S" not in flags
+                else:
+                    key, unread = name, default_unread
+                out.append((key, ent.path, unread, ent.stat().st_mtime))
+    return out
+
+
+def parse_headers(path):
+    """Header-only parse (reads to the first blank line; never the body)."""
+    buf = bytearray()
+    with open(path, "rb") as fh:
+        while len(buf) < HEADER_READ_CAP:
+            line = fh.readline()
+            if not line or line in (b"\n", b"\r\n"):
+                break
+            buf += line
+    return BytesParser(policy=policy.default).parsebytes(bytes(buf))
+
+
+def find_message(md_path, key):
+    for k, path, _unread, _mt in scan_messages(md_path):
+        if k == key:
+            return path
+    raise KeyError(f"no message with key {key!r}")
+
+
+def cmd_list(md_path, limit, offset):
+    rows = []
+    for key, path, unread, mtime in scan_messages(md_path):
+        h = parse_headers(path)
+        try:
+            d = h.get("Date")
+            ts = parsedate_to_datetime(d).timestamp() if d else mtime
+        except Exception:
+            ts = mtime   # unparseable Date header → file mtime, not epoch 0
+        rows.append({
+            "key": key,
+            "from": short_addr(h.get("From")),
+            "subject": unfold(h.get("Subject"), "(no subject)"),
+            "date": ts,
+            "unread": unread,
+        })
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    unread_total = sum(1 for r in rows if r["unread"])
+    print(json.dumps({"total": len(rows), "unreadTotal": unread_total, "rows": rows[offset:offset + limit]}))
 
 
 def body_text(msg):
@@ -94,7 +165,6 @@ def body_text(msg):
     part = msg.get_body(preferencelist=("html",))
     if part is not None:
         return html_to_text(part.get_content())
-    # multipart with no body parts we understand — walk for any text/*
     for p in msg.walk():
         if p.get_content_maintype() == "text":
             try:
@@ -104,34 +174,15 @@ def body_text(msg):
     return "(no readable body)"
 
 
-def cmd_list(md_path, limit, offset):
-    md = mailbox.Maildir(md_path, factory=None, create=False)
-    rows = []
-    for key in md.keys():
-        m = md.get_message(key)
-        ts = msg_date(m, 0)
-        rows.append({
-            "key": key,
-            "from": short_addr(m.get("From")),
-            "subject": str(m.get("Subject", "(no subject)")),
-            "date": ts,
-            "unread": "S" not in m.get_flags(),
-        })
-    rows.sort(key=lambda r: r["date"], reverse=True)
-    total = len(rows)
-    print(json.dumps({"total": total, "rows": rows[offset:offset + limit]}))
-
-
 def cmd_read(md_path, key):
-    md = mailbox.Maildir(md_path, factory=None, create=False)
-    raw = md.get_bytes(key)
-    import email
-    msg = email.message_from_bytes(raw, policy=policy.default)
+    path = find_message(md_path, key)
+    with open(path, "rb") as fh:
+        msg = BytesParser(policy=policy.default).parse(fh)
     print(json.dumps({
-        "from": str(msg.get("From", "(unknown)")),
-        "to": str(msg.get("To", "")),
-        "subject": str(msg.get("Subject", "(no subject)")),
-        "date": str(msg.get("Date", "")),
+        "from": unfold(msg.get("From"), "(unknown)"),
+        "to": unfold(msg.get("To"), ""),
+        "subject": unfold(msg.get("Subject"), "(no subject)"),
+        "date": unfold(msg.get("Date"), ""),
         "body": body_text(msg),
     }))
 

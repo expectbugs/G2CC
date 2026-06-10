@@ -69,7 +69,13 @@ def text_w(font, s):
 
 
 def wrap(font, text, max_w):
-    """Greedy word-wrap; force-breaks words wider than max_w (no truncation)."""
+    """Greedy word-wrap; force-breaks words wider than max_w (no truncation).
+
+    max_w is clamped to one glyph minimum: with max_w below any glyph width the
+    hard-break loop's binary search still emits ≥1 char per line (lo starts at
+    1), and the `while w and …` guard terminates on empty — a negative max_w
+    used to spin forever here (review 2026-06-10: a long heading `meta` drove
+    the computed width negative)."""
     out = []
     for raw in text.split("\n"):
         words = raw.split(" ")
@@ -81,8 +87,8 @@ def wrap(font, text, max_w):
                 continue
             if line:
                 out.append(line)
-            # the word itself may overflow — hard-break it
-            while text_w(font, w) > max_w:
+            # the word itself may overflow — hard-break it (≥1 char per line)
+            while w and text_w(font, w) > max_w:
                 lo, hi = 1, len(w)
                 while lo < hi:
                     mid = (lo + hi + 1) // 2
@@ -104,15 +110,24 @@ def wrap(font, text, max_w):
 # tops) prefer not to sit alone at a page bottom but are NOT forced to fit.
 
 class Atom:
-    def __init__(self, h, draw_fn):
+    def __init__(self, h, draw_fn, is_gap=False):
         self.h = h
         self.draw = draw_fn
+        self.is_gap = is_gap
 
 
 def heading_atoms(f, cw, blk):
     text = blk.get("text", "")
     meta = blk.get("meta", "")
-    lines = wrap(f.heading, text, cw - (text_w(f.meta, meta) + 16 if meta else 0))
+    # Clamp the title's width so a long meta can't drive it negative (≥80px of
+    # title always survives); an over-wide meta is itself shortened to fit.
+    meta_w = text_w(f.meta, meta) if meta else 0
+    if meta and meta_w > cw - 96:
+        while meta and text_w(f.meta, meta + "…") > cw - 96:
+            meta = meta[:-1]
+        meta += "…"
+        meta_w = text_w(f.meta, meta)
+    lines = wrap(f.heading, text, max(80, cw - (meta_w + 16 if meta else 0)))
     atoms = []
 
     def draw_first(d, y, line=lines[0]):
@@ -121,10 +136,23 @@ def heading_atoms(f, cw, blk):
             d.text((MARGIN + cw - text_w(f.meta, meta), y + 2), meta, font=f.meta, fill=INK_DIM)
 
     atoms.append(Atom(22, draw_first))
-    for line in lines[1:]:
+    # Middle lines, then the LAST line fused with the divider — keep-together,
+    # so a page break can't strand the divider alone at the top of page N+1
+    # (review 2026-06-10: an orphaned divider was page 2's only ink).
+    for line in lines[1:-1]:
         atoms.append(Atom(22, lambda d, y, s=line: d.text((MARGIN, y), s, font=f.heading, fill=INK_HEAD)))
-    # divider under the heading
-    atoms.append(Atom(8, lambda d, y: d.line([(MARGIN, y + 4), (MARGIN + cw, y + 4)], fill=RULE, width=1)))
+    if len(lines) > 1:
+        def draw_last(d, y, s=lines[-1]):
+            d.text((MARGIN, y), s, font=f.heading, fill=INK_HEAD)
+            d.line([(MARGIN, y + 26), (MARGIN + cw, y + 26)], fill=RULE, width=1)
+        atoms.append(Atom(30, draw_last))
+    else:
+        # single-line heading: fuse the divider into the same atom
+        first = atoms[0]
+        def draw_first_with_rule(d, y, base=first.draw):
+            base(d, y)
+            d.line([(MARGIN, y + 26), (MARGIN + cw, y + 26)], fill=RULE, width=1)
+        atoms[0] = Atom(30, draw_first_with_rule)
     return atoms
 
 
@@ -195,6 +223,40 @@ def rule_atoms(f, cw, blk):
     return [Atom(9, lambda d, y: d.line([(MARGIN, y + 4), (MARGIN + cw, y + 4)], fill=RULE, width=1))]
 
 
+def logo_atoms(f, cw, blk):
+    """The Main-screen logo (Adam 2026-06-10): centered wordmark + glasses glyph,
+    drawn as one full-pane atom (it owns the page)."""
+    title = str(blk.get("title", "G2CC"))
+    sub = str(blk.get("sub", "glasses os"))
+    big = ImageFont.truetype(SANS_BOLD, 52)
+    small = ImageFont.truetype(SANS, 15)
+    H_LOGO = 180
+
+    def draw(d, y):
+        cx = MARGIN + cw // 2
+        # glasses glyph: two rounded lens rects + bridge + temples
+        gy = y + 12
+        lw, lh, gap = 54, 30, 14
+        lx = cx - lw - gap // 2
+        rx = cx + gap // 2
+        d.rounded_rectangle([lx, gy, lx + lw, gy + lh], radius=8, outline=INK_HEAD, width=2)
+        d.rounded_rectangle([rx, gy, rx + lw, gy + lh], radius=8, outline=INK_HEAD, width=2)
+        d.arc([lx + lw - 2, gy + 4, rx + 2, gy + lh], start=200, end=340, fill=INK_HEAD, width=2)
+        d.line([(lx - 14, gy + 6), (lx, gy + 8)], fill=INK_DIM, width=2)
+        d.line([(rx + lw, gy + 8), (rx + lw + 14, gy + 6)], fill=INK_DIM, width=2)
+        # wordmark
+        tw = text_w(big, title)
+        d.text((cx - tw // 2, gy + lh + 14), title, font=big, fill=INK_HEAD)
+        # flourish rules + subtitle
+        sy = gy + lh + 14 + 62
+        sw = text_w(small, sub)
+        d.text((cx - sw // 2, sy), sub, font=small, fill=INK_DIM)
+        d.line([(MARGIN + 30, sy + 9), (cx - sw // 2 - 12, sy + 9)], fill=RULE, width=1)
+        d.line([(cx + sw // 2 + 12, sy + 9), (MARGIN + cw - 30, sy + 9)], fill=RULE, width=1)
+
+    return [Atom(H_LOGO, draw)]
+
+
 BLOCKS = {
     "heading": heading_atoms,
     "para": para_atoms,
@@ -202,6 +264,7 @@ BLOCKS = {
     "code": code_atoms,
     "stats": stats_atoms,
     "rule": rule_atoms,
+    "logo": logo_atoms,
 }
 
 
@@ -230,6 +293,8 @@ def paginate(atoms, width, height):
         if y + a.h > height - 6 and y > top:   # doesn't fit (and page isn't empty)
             finish_page()
             new_page()
+        if a.is_gap and y == top:
+            continue   # an inter-block gap that landed at a page top: skip (consistent top margin)
         a.draw(d, y)
         y += a.h
     finish_page()
@@ -252,7 +317,7 @@ def main():
             raise ValueError(f"unknown block type '{kind}' at index {i}")
         got = fn(f, cw, blk)
         if atoms and got:
-            atoms.append(Atom(GAP, lambda d, y: None))   # inter-block gap
+            atoms.append(Atom(GAP, lambda d, y: None, is_gap=True))   # inter-block gap
         atoms.extend(got)
     if not atoms:
         atoms = [Atom(19, lambda d, y: d.text((MARGIN, y), "(empty)", font=f.body, fill=INK_DIM))]

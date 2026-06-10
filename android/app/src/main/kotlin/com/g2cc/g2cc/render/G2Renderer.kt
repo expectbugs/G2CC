@@ -74,6 +74,11 @@ class G2Renderer(
         val texts = scene.textRegions()
         if (texts.size > MAX_TEXT_REGIONS)
             return "${texts.size} text regions exceeds the max $MAX_TEXT_REGIONS"
+        // Every page MUST contain a text region — image/list-only layouts ack but never
+        // paint (and break the L-mirror): G2_BLE_PROTOCOL.md §7 rule 1. The OS path is
+        // covered by the injected clock; this guards the harness/direct-renderer paths.
+        if (texts.isEmpty())
+            return "scene has no text region — image-only layouts ack but never paint (§7)"
         val imgs = scene.imageRegions()
         if (imgs.size > MAX_IMAGE_REGIONS)
             return "${imgs.size} image regions exceeds the max $MAX_IMAGE_REGIONS (extras silently drop)"
@@ -83,6 +88,16 @@ class G2Renderer(
             val c = scene.content[r.name]
             if (c is Content.Image && Gray4Bmp.isBlank(c.bmp))
                 return "image region '${r.name}' is all-black — the glasses choke on a blank image tile and drop the app"
+        }
+        // Native-list caps: §6.1 proved exactly 20 items; >20 items or >64-char item
+        // names are unprobed firmware territory — reject before any byte goes out.
+        for (r in scene.listRegions()) {
+            val c = scene.content[r.name] as? Content.ListItems ?: continue
+            if (c.items.size > MAX_LIST_ITEMS)
+                return "list '${r.name}' has ${c.items.size} items — SDK max is $MAX_LIST_ITEMS"
+            c.items.firstOrNull { it.length > MAX_LIST_ITEM_CHARS }?.let {
+                return "list '${r.name}' item exceeds $MAX_LIST_ITEM_CHARS chars: \"${it.take(70)}\""
+            }
         }
         // Exactly one input-capture region per page (text f11 / list f12 — wire rule §6.1).
         // >1 is a hard reject; 0 renders fine but leaves input dead, so warn loudly only.
@@ -119,9 +134,9 @@ class G2Renderer(
             o += imageContentOps(scene, scene.imageRegions().map { it.name })
             o
         } catch (e: IllegalArgumentException) {
-            // A bad/wrong-size image in the scene loud-fails gracefully (matches setImage)
-            // instead of throwing out to a BLE callback / coroutine.
-            diag("launch: bad image in scene — ${e.message}")
+            // Bad region content (wrong-size/garbage image, list without items, …) loud-fails
+            // gracefully (matches setImage) instead of throwing out to a BLE callback.
+            diag("launch: bad region content — ${e.message}")
             onComplete(false); return
         }
         synchronized(lock) { current = scene }
@@ -172,7 +187,7 @@ class G2Renderer(
             }
             o
         } catch (e: IllegalArgumentException) {
-            diag("setScene: bad image in scene — ${e.message}")
+            diag("setScene: bad region content — ${e.message}")
             onComplete(false); return
         }
         synchronized(lock) { current = scene }
@@ -392,6 +407,8 @@ class G2Renderer(
         const val MAX_IMAGE_REGIONS = 4         // glasses paint ≤4 image regions; a 5th+ silently drops
         const val MAX_TEXT_REGIONS = 8          // SDK cap (docs/G2_BLE_PROTOCOL.md §7, ramp-12 proven)
         const val MAX_CONTAINERS = 12           // SDK total-container cap (§7)
+        const val MAX_LIST_ITEMS = 20           // SDK list cap (§6.1 proved exactly 20)
+        const val MAX_LIST_ITEM_CHARS = 64      // SDK item-name cap (MAX_ITEM_NAME_LENGTH)
         const val MAX_IMAGE_W = 288             // proven-safe per-region size; a region ≥384×192 drops the BLE link
         const val MAX_IMAGE_H = 129
         const val FRAGMENT_PACE_MS = 12L    // between AA fragments WITHIN one message (chunk)
