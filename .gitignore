@@ -36,3 +36,4 @@ local.properties
 
 # Build artifacts
 *.tsbuildinfo
+scripts/simtools/*.so
