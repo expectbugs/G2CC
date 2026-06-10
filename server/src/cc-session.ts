@@ -16,7 +16,11 @@ import { createInterface } from 'node:readline'
 import { EventEmitter } from 'node:events'
 import type { CcEffort } from './config.js'
 
-const CLAUDE_CLI = process.env.CLAUDE_CLI ?? '/usr/bin/claude'
+// Default = the version-tracking symlink claude's installer maintains on this box
+// (verified 2026-06-10: `which claude` → ~/.local/bin/claude → versions/2.1.170).
+// The old '/usr/bin/claude' default was never valid here — it ENOENT'd on the first
+// real DE spawn. Override with the CLAUDE_CLI env var.
+const CLAUDE_CLI = process.env.CLAUDE_CLI ?? '/home/user/.local/bin/claude'
 
 export type CCPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
 
@@ -188,6 +192,20 @@ export class CCSession extends EventEmitter {
       if (this._recentStderr.length > 30) this._recentStderr.shift()
     })
 
+    // A spawn-level failure (ENOENT bad CLI path, EACCES, …) emits 'error' on the
+    // ChildProcess — WITHOUT a listener that's an uncaught exception that takes the
+    // WHOLE SERVER down (it did, 2026-06-10, on the bad /usr/bin/claude default).
+    // Surface it loudly through the same death path instead. 'close' may or may not
+    // follow an 'error'; diedEmitted guards double process_died emission.
+    let diedEmitted = false
+    this.proc.on('error', (err) => {
+      console.error(`[cc-session] spawn/process error (cwd=${this.config.projectPath}): ${err.message}`)
+      this.proc = null
+      this._isProcessingTurn = false
+      this.emit('error', `CC spawn failed: ${err.message}`)
+      if (!diedEmitted) { diedEmitted = true; this.emit('process_died', null) }
+    })
+
     this.proc.on('close', (code, signal) => {
       const recentEvents = this._recentEvents.slice(-15).join(', ')
       const stderr = this._recentStderr.slice(-20).join('\n  ')
@@ -196,7 +214,7 @@ export class CCSession extends EventEmitter {
       if (stderr) console.log(`[cc-session] Last stderr:\n  ${stderr}`)
       this.proc = null
       this._isProcessingTurn = false   // a dead process is not mid-turn
-      this.emit('process_died', code)
+      if (!diedEmitted) { diedEmitted = true; this.emit('process_died', code) }
     })
 
     // S-H3: do NOT reset consecutiveFailures here. The watchdog owns this counter

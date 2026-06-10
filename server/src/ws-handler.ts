@@ -41,6 +41,7 @@ import { CCDispatcher, DISPATCH_TARGETS, type Dispatcher, getDispatchTarget } fr
 import { ChannelRouter } from './channel-router.js'
 import { probeScene, gTextScene, gImageScene, ensureRendered, isRate, testKind, testLabel, errorScene } from './os-display.js'
 import { menuScene, ensureMenuRendered, menuItemLabel, MENU_ITEM_COUNT } from './os-menu.js'
+import { WindowManager } from './os-windows.js'
 
 // Hard ceiling on a single in-flight audio buffer (a resource guard, NOT an I/O timeout — allowed):
 // ~6.5 min of 48 kHz/2ch/float32 (~384 KB/s). Bounds memory if audio_end never arrives.
@@ -92,14 +93,17 @@ export interface WSClient {
    *  (double-tap steps), osFFilled = filled containers in the F fill-test,
    *  osGTimer = the G rate-test interval (cleared on test-change + ws-close). */
   osMode: boolean
-  /** Which OS screen os_attach serves. Default 'menu' (the cursive 4-tile menu);
-   *  'probe' reaches the capability-probe matrix (kept wired for re-runs). */
-  osScreen: 'menu' | 'probe'
+  /** Which OS screen os_attach serves. Default 'de' (the window-manager DE,
+   *  docs/DE_DESIGN.md); 'menu' = the old cursive 4-tile menu; 'probe' = the
+   *  capability-probe matrix (both kept wired for re-runs). */
+  osScreen: 'de' | 'menu' | 'probe'
   osTest: number
   osFFilled: number
   /** Current menu selection (menu screen) — moved by antenna-scroll focus events. */
   osMenuSel: number
   osGTimer: ReturnType<typeof setInterval> | null
+  /** The DE window manager (osScreen 'de'); created on os_attach. */
+  wm: WindowManager | null
 }
 
 export interface AudioFormat {
@@ -162,11 +166,12 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     router: new ChannelRouter(),
     audioFormat: null,
     osMode: false,
-    osScreen: 'menu',
+    osScreen: 'de',
     osTest: 0,
     osFFilled: 0,
     osMenuSel: 0,
     osGTimer: null,
+    wm: null,
   }
 
   pool.on('background_alert', (alert: { sessionId: string; alertType: string; details?: string }) => {
@@ -768,15 +773,30 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'os_attach': {
-      // Glasses-OS attach. Default screen = the cursive 4-tile MENU; 'probe'
-      // reaches the capability matrix. Render the first frame.
+      // Glasses-OS attach. Default screen = the DE window manager
+      // (docs/DE_DESIGN.md); 'menu' = the old cursive 4-tile menu; 'probe' =
+      // the capability matrix. Render the first frame.
       client.lastAppActivityMs = Date.now()
       client.osMode = true
       client.osTest = 0
       client.osFFilled = 0
       client.osMenuSel = 0
       try {
-        if (client.osScreen === 'menu') {
+        if (client.osScreen === 'de') {
+          if (!client.wm) {
+            client.wm = new WindowManager({
+              send: (scene) => sendMsg(client, { type: 'render', scene }),
+              audio: (action) => sendMsg(client, { type: 'audio_request', action }),
+              log: (msg) => console.log(msg),
+              pool: client.pool,
+              config,
+              registerWatchdog: (entry) => watchdog?.register(entry.id, entry.session, entry.projectPath),
+              unregisterWatchdog: (entryId) => watchdog?.unregister(entryId),
+            })
+          }
+          client.wm.requestRender()
+          console.log('[ws] os_attach — DE window manager ON (Main)')
+        } else if (client.osScreen === 'menu') {
           await ensureMenuRendered() // rasterize + cache all menu tiles once (~1s first time)
           sendMsg(client, { type: 'render', scene: menuScene(0) })
           console.log(`[ws] os_attach — MENU ON; sel 0 = "${menuItemLabel(0)}"`)
@@ -797,6 +817,27 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       client.lastAppActivityMs = Date.now()
       if (!client.osMode) {
         console.warn(`[ws] input '${msg.event}' received but client never sent os_attach — ignoring`)
+        break
+      }
+      if (client.osScreen === 'de') {
+        const wm = client.wm
+        if (!wm) { console.warn('[ws] DE input before window manager exists — ignoring'); break }
+        if (msg.event === 'hub_select') {
+          // The firmware reports the tapped row: widgetType = our container NAME
+          // ('menu' or 'browse'), index = the row (omitted f4 ⇒ 0 handled client-side).
+          const region = msg.widgetType ?? '?'
+          const index = msg.index ?? 0
+          console.log(`[ws] DE select ${region}[${index}]`)
+          await wm.onSelect(region, index)
+        } else if (msg.event === 'double_tap' || (msg.event === 'hub_gesture' && msg.code === 3)) {
+          console.log('[ws] DE back (double-tap)')
+          await wm.onBackGesture()
+        } else {
+          // scroll/focus moves the firmware list selection on-glass; nothing to do
+          // server-side until a tap reports the chosen index.
+          const detail = msg.value !== undefined ? `(${msg.region ?? '?'}:${msg.value})` : msg.code !== undefined ? `(${msg.code})` : ''
+          console.log(`[ws] DE ${msg.event}${detail} (no-op)`)
+        }
         break
       }
       if (client.osScreen === 'menu') {
@@ -1044,12 +1085,12 @@ async function handleAudio(
     try {
       const text = await transcribeDji(pcmBuffer, format, config)
       if (!text.trim()) {
-        sendMsg(client, { type: 'stt_error', error: 'No speech detected' })
+        sttError(client, 'No speech detected')
         return
       }
-      sendMsg(client, { type: 'stt_result', text })
+      sttResult(client, text)
     } catch (err) {
-      sendMsg(client, { type: 'stt_error', error: `Transcription failed: ${err}` })
+      sttError(client, `Transcription failed: ${err}`)
     }
     return
   }
@@ -1059,19 +1100,37 @@ async function handleAudio(
       ` src=${format.source ?? '?'} not routable. Expected dji-usb (48k/2ch/float32) ` +
       `or phone-mic (16k/1ch/int16).`
     console.warn(`[ws] ${reason}`)
-    sendMsg(client, { type: 'stt_error', error: reason })
+    sttError(client, reason)
     return
   }
 
   try {
     const text = await transcribe(pcmBuffer, config)
     if (!text.trim()) {
-      sendMsg(client, { type: 'stt_error', error: 'No speech detected' })
+      sttError(client, 'No speech detected')
       return
     }
-    sendMsg(client, { type: 'stt_result', text })
+    sttResult(client, text)
   } catch (err) {
-    sendMsg(client, { type: 'stt_error', error: `Transcription failed: ${err}` })
+    sttError(client, `Transcription failed: ${err}`)
+  }
+}
+
+/** Deliver an STT result: in DE mode it routes to the active window (the
+ *  dictation prompt path — docs/DE_DESIGN.md §2); the legacy phone UI gets the
+ *  stt_result message either way (harmless in OS mode; useful as diag). */
+function sttResult(client: WSClient, text: string): void {
+  sendMsg(client, { type: 'stt_result', text })
+  if (client.osMode && client.osScreen === 'de' && client.wm) {
+    console.log(`[ws] DE stt → active window: "${text}"`)
+    void client.wm.onStt(text)
+  }
+}
+
+function sttError(client: WSClient, error: string): void {
+  sendMsg(client, { type: 'stt_error', error })
+  if (client.osMode && client.osScreen === 'de' && client.wm) {
+    void client.wm.onSttError(error)
   }
 }
 

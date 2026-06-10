@@ -82,10 +82,25 @@ data class DirectoryEntry(
 
 @Serializable
 data class SceneContent(
-    val kind: String,                 // "text" | "image"
+    val kind: String,                 // "text" | "image" | "list"
     val text: String? = null,         // kind == "text"
-    val scroll: Boolean? = null,      // kind == "text"
+    val scroll: Boolean? = null,      // kind == "text" (wire f11 = isEventCapture)
     val bmpBase64: String? = null,    // kind == "image" — base64 4bpp gray BMP
+    val items: List<String>? = null,  // kind == "list" — native list rows
+    val itemWidth: Int? = null,       // kind == "list" — 0/omit = auto
+    val selectBorder: Boolean? = null, // kind == "list" — firmware selection ring (default true)
+    val eventCapture: Boolean? = null, // kind == "list" — the page's single input region (wire f12)
+)
+
+/** Container border/padding styling (wire f5–f8). Zero-valued fields are
+ *  omitted on the wire, so unstyled regions stay byte-identical to the
+ *  proven lean schema. Mirrors shared/src/protocol.ts RegionStyle. */
+@Serializable
+data class WireRegionStyle(
+    val borderWidth: Int? = null,
+    val borderColor: Int? = null,
+    val borderRadius: Int? = null,
+    val padding: Int? = null,
 )
 
 @Serializable
@@ -96,8 +111,10 @@ data class SceneRegion(
     val y: Int,
     val w: Int,
     val h: Int,
-    val kind: String,                 // "text" | "image"
+    val kind: String,                 // "text" | "image" | "list"
     val content: SceneContent? = null,
+    // last (after content) so existing positional constructions stay valid
+    val style: WireRegionStyle? = null,
 )
 
 @Serializable
@@ -316,6 +333,11 @@ sealed interface ServerMessage {
      *  render.Scene from it (injecting the app-owned clock) and drives G2Renderer. */
     @Serializable @SerialName("render")
     data class Render(val scene: WireScene) : ServerMessage
+
+    /** Server → client: start/stop streaming the phone mic (DE 'Dictate'/'Ask').
+     *  Drives AudioStreamer; capture failures surface via diag (loud). */
+    @Serializable @SerialName("audio_request")
+    data class AudioRequest(val action: String) : ServerMessage   // 'start' | 'stop'
 
     @Serializable @SerialName("error")
     data class Error(val message: String) : ServerMessage

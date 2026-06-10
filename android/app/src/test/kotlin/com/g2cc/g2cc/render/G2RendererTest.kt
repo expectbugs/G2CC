@@ -156,6 +156,90 @@ class G2RendererTest {
         assertTrue("rest should be image chunks", msgs.drop(1).all { msgType(it) == DisplayProto.MSG_IMAGE })
     }
 
+    // ---- LIST regions (the DE menu / browse lists) ----
+
+    @Test
+    fun launch_withList_emitsListContainerInWrapper() {
+        val sink = FakeSink()
+        val r = mkRenderer(sink)
+        val s = scene {
+            text("title", 0, 0, 444, 38, "CC")
+            list("menu", 0, 38, 96, 212, listOf("Next", "Prev", "Main"), eventCapture = true, id = 3)
+        }
+        var ok = false
+        r.launch(10000, s) { ok = it }
+        assertTrue(ok)
+        val launch = sink.messages().single()
+        assertEquals(DisplayProto.MSG_LAUNCH, msgType(launch))
+        // The launch payload embeds the golden-tested list container bytes verbatim.
+        val li = DisplayProto.listContainer(0, 38, 96, 212, id = 3, name = "menu",
+            items = listOf("Next", "Prev", "Main"), eventCapture = true)
+        assertTrue("launch must embed the list container", hx(launch).contains(hx(li)))
+    }
+
+    @Test
+    fun setScene_menuItemsChange_rebuildsLayout() {
+        val sink = FakeSink()
+        val r = mkRenderer(sink)
+        val base = scene {
+            text("title", 0, 0, 444, 38, "CC")
+            list("menu", 0, 38, 96, 212, listOf("Next", "Prev"), eventCapture = true, id = 3)
+        }
+        r.launch(10000, base) {}
+        sink.calls.clear()
+        val swapped = Scene(base.regions, base.content.toMutableMap().apply {
+            put("menu", Content.ListItems(listOf("Approve", "Deny"), eventCapture = true))
+        })
+        var ok = false
+        r.setScene(swapped) { ok = it }
+        assertTrue(ok)
+        val msgs = sink.messages()
+        assertEquals(DisplayProto.MSG_LAYOUT, msgType(msgs[0]))   // items change ⇒ f1=7 rebuild
+    }
+
+    @Test
+    fun validate_twoEventCaptures_rejected_noWrites() {
+        val sink = FakeSink()
+        val r = mkRenderer(sink)
+        // A scrollable text region AND an eventCapture list = 2 capture regions — hard reject.
+        val s = scene {
+            text("ant", 0, 0, 200, 38, "scroll", scroll = true)
+            list("menu", 0, 38, 96, 212, listOf("A", "B"), eventCapture = true)
+        }
+        var ok = true
+        r.launch(10000, s) { ok = it }
+        assertFalse("two event-capture regions must be rejected", ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun validate_overTwelveContainers_rejected_noWrites() {
+        val sink = FakeSink()
+        val r = mkRenderer(sink)
+        // 8 texts + 4 (empty) images + 1 list = 13 containers with every PER-KIND cap
+        // respected — isolates the 12-container total check.
+        val s = scene {
+            for (i in 0 until 8) text("t$i", 0, i * 30, 40, 20, "x")
+            for (i in 0 until 4) image("i$i", 100 + i * 50, 0, 40, 40)
+            list("menu", 300, 0, 96, 200, listOf("A"), eventCapture = true)
+        }
+        var ok = true
+        r.launch(10000, s) { ok = it }
+        assertFalse("13 containers must be rejected (SDK cap 12)", ok)
+        assertEquals(0, sink.calls.size)
+    }
+
+    @Test
+    fun validate_nineTextRegions_rejected_noWrites() {
+        val sink = FakeSink()
+        val r = mkRenderer(sink)
+        val s = scene { for (i in 0 until 9) text("t$i", 0, i * 30, 40, 20, "x") }
+        var ok = true
+        r.launch(10000, s) { ok = it }
+        assertFalse("9 text regions must be rejected (SDK cap 8)", ok)
+        assertEquals(0, sink.calls.size)
+    }
+
     // ---- pre-push guards (hardware-confirmed kill conditions; see G2Renderer.validate) ----
 
     @Test

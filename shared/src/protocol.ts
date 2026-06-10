@@ -75,26 +75,54 @@ export interface DirectoryEntry {
 // ============================================================
 
 /** A region's content kind. Mirrors render.RegionKind on the client. */
-export type SceneRegionKind = 'text' | 'image'
+export type SceneRegionKind = 'text' | 'image' | 'list'
 
 /** Text content — the firmware renders the font. */
 export interface SceneTextContent {
   kind: 'text'
   text: string
-  /** Container scroll flag (firmware scrolls overflow). Layout-level — a change
-   *  forces a layout re-push, see Scene.kt. Defaults to false. */
+  /** Container scroll flag (firmware scrolls overflow). On the wire this IS
+   *  isEventCapture (text f11 — docs/G2_BLE_PROTOCOL.md §13.2). Layout-level —
+   *  a change forces a layout re-push, see Scene.kt. Defaults to false. */
   scroll?: boolean
 }
 /** Image content: a base64 4bpp-gray BMP the PC already rasterized (the exact
- *  Gray4Bmp format the firmware accepts). Must be ≤200×100 per the render
+ *  Gray4Bmp format the firmware accepts). Must be ≤288×144 per the render
  *  constraints — the PC tiles anything larger into multiple image regions. */
 export interface SceneImageContent {
   kind: 'image'
   bmpBase64: string
 }
+/** Native firmware list widget (the DE menu / browse lists — docs/DE_DESIGN.md).
+ *  The firmware draws the selection border and reports the tapped index as a
+ *  `hub_select` input (container name + index). Items ride the LAYOUT frame
+ *  (the wire has no list content-update message), so the client treats an
+ *  items change as a layout change (f1=7 rebuild). */
+export interface SceneListContent {
+  kind: 'list'
+  items: string[]
+  /** Item width in px; 0 / omit = auto (wire itemContainer f2). */
+  itemWidth?: number
+  /** Firmware-drawn selection border (wire itemContainer f3). Default true. */
+  selectBorder?: boolean
+  /** This list is the page's single input-capture region (wire list f12).
+   *  EXACTLY ONE capture region per scene (counting text scroll flags). */
+  eventCapture?: boolean
+}
 /** Reserved for Slice 3 — a `widget` content kind (a small spec the client
  *  rasterizes locally). NOT part of the Phase-1 contract. */
-export type SceneContent = SceneTextContent | SceneImageContent
+export type SceneContent = SceneTextContent | SceneImageContent | SceneListContent
+
+/** Container border/padding styling (wire f5–f8, official schema
+ *  docs/G2_BLE_PROTOCOL.md §6.1). All default 0; zero-valued fields are
+ *  omitted on the wire so unstyled regions stay byte-identical to the proven
+ *  lean schema. */
+export interface RegionStyle {
+  borderWidth?: number   // 0–5
+  borderColor?: number   // 0–15 gray
+  borderRadius?: number  // 0–10
+  padding?: number       // 0–32
+}
 
 /** One region of the composed screen. id + geometry are server-assigned. */
 export interface SceneRegion {
@@ -105,6 +133,8 @@ export interface SceneRegion {
   w: number
   h: number
   kind: SceneRegionKind
+  /** Border/padding styling; omit for the bare (proven) look. */
+  style?: RegionStyle
   /** Omit to declare an empty region (content pushed by a later render). */
   content?: SceneContent
 }
@@ -461,6 +491,16 @@ export interface RenderMsg {
   scene: WireScene
 }
 
+/** Server → client: start/stop streaming the phone mic (the DE 'Dictate'/'Ask'
+ *  menu actions — docs/DE_DESIGN.md §2). The client drives AudioStreamer,
+ *  which sends audio_start / binary frames / audio_end back; STT results
+ *  return via stt_result and the server routes them to the active window.
+ *  Mic failures surface as diag messages (loud), never silently. */
+export interface AudioRequestMsg {
+  type: 'audio_request'
+  action: 'start' | 'stop'
+}
+
 export interface ErrorMsg {
   type: 'error'
   message: string
@@ -489,4 +529,5 @@ export type ServerMessage =
   | RewindResultMsg
   | ConfirmOnHudMsg
   | RenderMsg
+  | AudioRequestMsg
   | ErrorMsg

@@ -78,6 +78,61 @@ class SceneCodecTest {
         assertEquals(false, (s2.content[OsLayout.CLOCK_NAME] as Content.Text).scroll)
     }
 
+    // ---------------------------------------------------------------- list regions (DE menu / browse)
+
+    @Test
+    fun listRegion_parsesToListItems_withDefaults() {
+        val wire = SceneRegion(30, "menu", 0, OsLayout.CLOCK_HEIGHT, 96, 212, "list",
+            SceneContent(kind = "list", items = listOf("Next", "Prev", "Main"), eventCapture = true))
+        val s = SceneCodec.toScene(WireScene(listOf(wire)), "1:04 PM")
+        val r = s.region("menu")!!
+        assertEquals(RegionKind.LIST, r.kind)
+        val c = s.content["menu"] as Content.ListItems
+        assertEquals(listOf("Next", "Prev", "Main"), c.items)
+        assertEquals(0, c.itemWidth)            // omitted → auto
+        assertEquals(true, c.selectBorder)      // omitted → true
+        assertEquals(true, c.eventCapture)
+    }
+
+    @Test
+    fun clockStaysPassive_whenEventCaptureListPresent() {
+        // The DE menu/browse list owns input — the clock must NOT also be an antenna
+        // (the wire allows exactly ONE capture region; docs/DE_DESIGN.md §2).
+        val menu = SceneRegion(30, "menu", 0, OsLayout.CLOCK_HEIGHT, 96, 212, "list",
+            SceneContent(kind = "list", items = listOf("A", "B"), eventCapture = true))
+        val s = SceneCodec.toScene(WireScene(listOf(menu)), "1:04 PM")
+        assertEquals(false, (s.content[OsLayout.CLOCK_NAME] as Content.Text).scroll)
+    }
+
+    @Test
+    fun clockIsAntenna_whenListHasNoEventCapture() {
+        // A passive (non-capture) list does not claim input → the clock antennas as usual.
+        val l = SceneRegion(30, "lst", 0, OsLayout.CLOCK_HEIGHT, 96, 212, "list",
+            SceneContent(kind = "list", items = listOf("A")))
+        val s = SceneCodec.toScene(WireScene(listOf(l)), "1:04 PM")
+        assertEquals(true, (s.content[OsLayout.CLOCK_NAME] as Content.Text).scroll)
+    }
+
+    @Test
+    fun listContent_missingItems_loudFails() {
+        val bad = SceneRegion(30, "menu", 0, OsLayout.CLOCK_HEIGHT, 96, 212, "list",
+            SceneContent(kind = "list"))
+        expectFail("missing items") { SceneCodec.toScene(WireScene(listOf(bad)), "1:04 PM") }
+    }
+
+    @Test
+    fun regionStyle_mapsThrough_andInvalidLoudFails() {
+        val styled = SceneRegion(30, "title", 0, 0, OsLayout.CLOCK_X, OsLayout.CLOCK_HEIGHT, "text",
+            SceneContent("text", "T"), com.g2cc.g2cc.net.WireRegionStyle(borderWidth = 1, borderColor = 6, padding = 4))
+        val s = SceneCodec.toScene(WireScene(listOf(styled)), "1:04 PM")
+        val st = s.region("title")!!.style
+        assertEquals(1, st.borderWidth); assertEquals(6, st.borderColor); assertEquals(4, st.padding)
+
+        val bad = SceneRegion(31, "t2", 0, OsLayout.CLOCK_HEIGHT, 100, 40, "text",
+            SceneContent("text", "T"), com.g2cc.g2cc.net.WireRegionStyle(borderWidth = 9))
+        expectFail("style invalid") { SceneCodec.toScene(WireScene(listOf(bad)), "1:04 PM") }
+    }
+
     @Test
     fun mapsTextContent_withScrollDefault() {
         val s = SceneCodec.toScene(

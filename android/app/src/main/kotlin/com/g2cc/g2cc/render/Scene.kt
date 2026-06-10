@@ -6,7 +6,28 @@ object Display {
     const val HEIGHT = 288
 }
 
-enum class RegionKind { TEXT, IMAGE }
+enum class RegionKind { TEXT, IMAGE, LIST }
+
+/**
+ * Container border/padding styling — wire fields f5–f8 of the official container schema
+ * (docs/G2_BLE_PROTOCOL.md §6.1). All-zero ([NONE]) emits nothing on the wire, keeping
+ * unstyled regions byte-identical to the proven lean schema.
+ */
+data class RegionStyle(
+    val borderWidth: Int = 0,   // 0–5
+    val borderColor: Int = 0,   // 0–15 gray
+    val borderRadius: Int = 0,  // 0–10
+    val padding: Int = 0,       // 0–32
+) {
+    init {
+        require(borderWidth in 0..5) { "borderWidth $borderWidth out of 0..5" }
+        require(borderColor in 0..15) { "borderColor $borderColor out of 0..15" }
+        require(borderRadius in 0..10) { "borderRadius $borderRadius out of 0..10" }
+        require(padding in 0..32) { "padding $padding out of 0..32" }
+    }
+    val isNone get() = this == NONE
+    companion object { val NONE = RegionStyle() }
+}
 
 /**
  * A named, positioned region on the display. [id] is the firmware container id (echoed back
@@ -20,6 +41,7 @@ data class Region(
     val w: Int,
     val h: Int,
     val kind: RegionKind,
+    val style: RegionStyle = RegionStyle.NONE,
 ) {
     init {
         require(id > 0) { "Region id must be > 0 (got $id for '$name')" }
@@ -48,6 +70,22 @@ sealed interface Content {
         override fun equals(other: Any?) = other is Image && bmp.contentEquals(other.bmp)
         override fun hashCode() = bmp.contentHashCode()
     }
+
+    /** Native firmware list rows (docs/G2_BLE_PROTOCOL.md §6.1 itemContainer). Items ride the
+     *  LAYOUT frame — the wire has no list content-update message — so [Scene.diff] reports any
+     *  items/flags change as a layout change (f1=7 rebuild). [eventCapture] marks this list as
+     *  the page's single input region (wire f12); the firmware then draws the selection ring
+     *  ([selectBorder]) and reports the tapped index as a hub_select event. */
+    data class ListItems(
+        val items: List<String>,
+        val itemWidth: Int = 0,          // 0 = auto (wire itemContainer f2)
+        val selectBorder: Boolean = true,
+        val eventCapture: Boolean = false,
+    ) : Content {
+        init {
+            require(items.isNotEmpty()) { "ListItems requires at least one item" }
+        }
+    }
 }
 
 /**
@@ -75,6 +113,7 @@ class Scene(
             when (c) {
                 is Content.Text -> require(r.kind == RegionKind.TEXT) { "text content on non-text region '$name'" }
                 is Content.Image -> require(r.kind == RegionKind.IMAGE) { "image content on non-image region '$name'" }
+                is Content.ListItems -> require(r.kind == RegionKind.LIST) { "list content on non-list region '$name'" }
             }
         }
     }
@@ -82,6 +121,7 @@ class Scene(
     fun region(name: String): Region? = regions.firstOrNull { it.name == name }
     fun textRegions(): List<Region> = regions.filter { it.kind == RegionKind.TEXT }
     fun imageRegions(): List<Region> = regions.filter { it.kind == RegionKind.IMAGE }
+    fun listRegions(): List<Region> = regions.filter { it.kind == RegionKind.LIST }
 
     /** Same regions (id/name/geometry/kind, in order) as [other]? If not, the layout frame
      *  must be re-pushed; if so, only changed region CONTENT needs sending. */
@@ -96,7 +136,7 @@ class Scene(
      *  blank content to clear); the renderer warns loudly if it sees one rather than silently
      *  leaving stale content on the glasses. */
     fun diff(prev: Scene?): SceneDiff {
-        val layoutChanged = !sameLayoutAs(prev) || scrollFlagChanged(prev)
+        val layoutChanged = !sameLayoutAs(prev) || scrollFlagChanged(prev) || listContentChanged(prev)
         val changed = ArrayList<String>()
         val removed = ArrayList<String>()
         for (r in regions) {
@@ -122,6 +162,17 @@ class Scene(
         return false
     }
 
+    /** List items/flags ride the LAYOUT frame (no list content-update exists on the wire), so
+     *  any list-content change forces an f1=7 rebuild. */
+    private fun listContentChanged(prev: Scene?): Boolean {
+        if (prev == null) return false
+        for (r in regions) {
+            if (r.kind != RegionKind.LIST) continue
+            if (content[r.name] != prev.content[r.name]) return true
+        }
+        return false
+    }
+
     fun withContent(name: String, c: Content): Scene =
         Scene(regions, content.toMutableMap().apply { put(name, c) })
 }
@@ -143,8 +194,9 @@ class SceneBuilder {
     fun text(
         name: String, x: Int, y: Int, w: Int, h: Int,
         text: String = "", scroll: Boolean = false, id: Int? = null,
+        style: RegionStyle = RegionStyle.NONE,
     ): SceneBuilder {
-        regions += Region(id ?: nextId++, name, x, y, w, h, RegionKind.TEXT)
+        regions += Region(id ?: nextId++, name, x, y, w, h, RegionKind.TEXT, style)
         content[name] = Content.Text(text, scroll)
         return this
     }
@@ -155,6 +207,17 @@ class SceneBuilder {
     ): SceneBuilder {
         regions += Region(id ?: nextId++, name, x, y, w, h, RegionKind.IMAGE)
         if (bmp != null) content[name] = Content.Image(bmp)
+        return this
+    }
+
+    fun list(
+        name: String, x: Int, y: Int, w: Int, h: Int,
+        items: List<String>, itemWidth: Int = 0, selectBorder: Boolean = true,
+        eventCapture: Boolean = false, id: Int? = null,
+        style: RegionStyle = RegionStyle.NONE,
+    ): SceneBuilder {
+        regions += Region(id ?: nextId++, name, x, y, w, h, RegionKind.LIST, style)
+        content[name] = Content.ListItems(items, itemWidth, selectBorder, eventCapture)
         return this
     }
 

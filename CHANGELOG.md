@@ -4,6 +4,47 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-10 — **APK v0.9 + server: the DE ships — window manager, native list, content pipeline, dictation, Mail/Files**
+
+The window-manager DE went from sim mockup to implemented in one session, against the finalized
+contract in **`docs/DE_DESIGN.md`** (decided with Adam: v1 windows = Main/CC/Aria/Mail/Files;
+dictation in v1; double-tap = pop-one-level; browse windows put focus on the CONTENT list; every
+session window gets an **Options** submenu — model/effort/new-session live there, and the CC
+directory is picked BEFORE launch, not as a setting).
+
+**Client (APK v0.9).** The firmware-native **LIST container** is implemented end-to-end — protocol
+`list` kind → `SceneCodec` → `Content.ListItems` → `DisplayProto.listContainer` (wrapper **f2**, the
+§6.1 schema, golden bytes HAND-ENCODED in the test so the encoder is independently checked) →
+`G2Renderer` (wrapper order f2 lists / f3 texts / f4 images / f5 token). List items ride the layout
+frame (no list content-update exists on the wire), so `Scene.diff` reports item changes as
+layout-changed — dynamic menus are f1=7 rebuilds by construction. Region **styles** (border/padding,
+wire f5–f8) are emitted **only when non-zero**, so every unstyled frame stays byte-identical to the
+proven lean schema (capture-locked tests unchanged). Validate gains the SDK caps (≤12 containers,
+≤8 text) + the **exactly-one event-capture** rule (>1 hard-rejects; 0 warns — splash screens are
+legal). Clock: **12-hour minute-tick @38px** ("1:04 PM") — 60× less clock traffic (the v0.8 jank
+factor) and a hat power win. Dictation: `audio_request` start/stop drives `AudioStreamer`
+(fresh streamer per start so a WS reconnect can't strand it on a dead connection), manifest gets
+RECORD_AUDIO + the **microphone FGS type** (combined mask at startForeground — Android 14+ can't
+upgrade it later; falls back to connectedDevice-only with a loud diag if the start is denied).
+216/216 tests.
+
+**Server (the Display Renderer).** `os-windows.ts` (WindowManager + the five windows; per-window
+state survives switches; CC keeps one SessionLevel per directory so re-picking resumes),
+`os-compose.ts` (WinView → WireScene at the locked geometry; stable region ids; right-aligned tabs
+via the measured fw glyph widths), `os-content.ts` + `scripts/render_content.py` (markdown subset +
+```stat cards → PIL/DejaVu typeset 480×212 pages → 4× 240×106 gray4 tiles; paginate-never-truncate;
+hairline frame so no tile is ever all-black; content-hash cache). Mail reads the local mbsync
+Maildir via `scripts/read_maildir.py` (stdlib; list+read, HTML-strip fallback). Aria = vanilla CC at
+`/home/user/aria` with **`server/prompts/aria-g2.md`** appended — the display-format system prompt
+(lead with the answer, one focal element/page, stat cards for numerics). `os_attach` now defaults to
+the DE (`osScreen: 'de'`; the cursive menu + probe stay reachable). STT results route to the active
+window (the prompt path). Compositor output is verifiable without glasses via
+`scripts/scene_to_png.py` (draws the WireScene + checks every client hardware rule).
+
+**NOT yet hardware-verified** — the native list has never been sent over our direct-BLE hijack
+(wire-spec'd from g2cap but the demo went through the SDK). Checklist: `docs/DE_DESIGN.md` §7; the
+**rebuild-retention probe** there decides whether dynamic menus stay cheap or cost a 4-tile re-push.
+
 ## v0.0.1-ebbadff — 2026-06-10 — **APK v0.8 — ack-gated image pacing + corrections from the official-app protocol decode**
 
 This build acts on **`docs/G2_BLE_PROTOCOL.md`** — the byte/millisecond decode of the official Even App driving the glasses, reverse-engineered from two `g2cap` BTSnoop captures (06-07 + 06-09) and ground-truthed against the demo's on-screen breadcrumbs. The decode exposed a handful of things our renderer got subtly wrong or left conservative. One real behavior change ships here; the rest are correctness/clarity with no wire change.

@@ -40,10 +40,30 @@ object ExpectedMirror {
             when (val c = scene.content[r.name]) {
                 is Content.Image -> drawImageRegion(out, r, c.bmp)
                 is Content.Text -> drawTextRegion(canvas, r, c.text, outlines)
+                is Content.ListItems -> drawListRegion(canvas, r, c, outlines)
                 null -> if (outlines) outline(canvas, r, Color.rgb(40, 40, 40))
             }
         }
         return out
+    }
+
+    /** Approximate guide for a native list region: one row per item. The firmware owns the
+     *  real rendering AND the selection ring (which the phone can't know), so like text this
+     *  is a layout guide, not a pixel reference. */
+    private fun drawListRegion(canvas: Canvas, r: Region, c: Content.ListItems, outlines: Boolean) {
+        if (outlines) outline(canvas, r, Color.rgb(60, 60, 60))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE; textSize = 15f; typeface = Typeface.MONOSPACE
+        }
+        canvas.save()
+        canvas.clipRect(r.x, r.y, r.x + r.w, r.y + r.h)
+        var y = r.y + 20f
+        for (item in c.items) {
+            canvas.drawText(item, r.x + 8f, y, paint)
+            y += 34f                       // ~firmware list row pitch
+            if (y > r.y + r.h) break       // firmware scrolls; the mirror just clips
+        }
+        canvas.restore()
     }
 
     private fun drawImageRegion(out: Bitmap, r: Region, bmp: ByteArray) {

@@ -27,6 +27,10 @@
          foregrounded (pocket / screen-off / SSH-terminal app) — the recovery fix. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- DE dictation (server audio_request → phone mic → STT). The mic FGS type must be in
+         the service's type mask from the start (Android 14+; can't upgrade mid-flight). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- PARTIAL_WAKE_LOCK so the keepalive/sync/watchdog delay() loops aren't Doze-throttled
          (FG type stops process-kill, NOT CPU throttling — factory finding). -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -66,6 +70,6 @@
         <service
             android:name=".service.ConnectionService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|microphone" />
     </application>
 </manifest>

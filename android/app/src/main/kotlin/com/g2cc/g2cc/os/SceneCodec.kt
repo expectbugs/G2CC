@@ -3,10 +3,12 @@ package com.g2cc.g2cc.os
 import com.g2cc.g2cc.ble.EventParser
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.SceneContent
+import com.g2cc.g2cc.net.WireRegionStyle
 import com.g2cc.g2cc.net.WireScene
 import com.g2cc.g2cc.render.Content
 import com.g2cc.g2cc.render.Region
 import com.g2cc.g2cc.render.RegionKind
+import com.g2cc.g2cc.render.RegionStyle
 import com.g2cc.g2cc.render.Scene
 import java.util.Base64
 
@@ -36,11 +38,17 @@ object SceneCodec {
         // App-owned clock first — always present, so every screen has a text region.
         // The clock also doubles as the UNIVERSAL INPUT ANTENNA: make it scrollable
         // (a focus target → ring scroll + tap) ONLY when the scene carries no other
-        // focusable (scrollable) region. So pure-image screens become navigable via
-        // the clock, while text/list screens keep their own region as the scroll
-        // target (no focus ambiguity). A zero-range single-line scrollable fires a
-        // focus boundary event on every notch (hardware-confirmed 2026-06-06).
-        val clockIsAntenna = wire.regions.none { it.kind == "text" && it.content?.scroll == true }
+        // input-capture region — neither a scrollable text region nor an
+        // eventCapture list (the DE menu / browse lists own focus when present —
+        // docs/DE_DESIGN.md §2). So pure-image screens become navigable via the
+        // clock, while text/list screens keep their own region as the input target
+        // (no focus ambiguity; the wire allows exactly ONE capture region). A
+        // zero-range single-line scrollable fires a focus boundary event on every
+        // notch (hardware-confirmed 2026-06-06).
+        val clockIsAntenna = wire.regions.none {
+            (it.kind == "text" && it.content?.scroll == true) ||
+                (it.kind == "list" && it.content?.eventCapture == true)
+        }
         val clock = OsLayout.clockRegion()
         regions += clock
         content[clock.name] = Content.Text(clockText, scroll = clockIsAntenna)
@@ -57,7 +65,7 @@ object SceneCodec {
                     "[${OsLayout.CLOCK_X},${OsLayout.CLOCK_Y},${OsLayout.CLOCK_WIDTH},${OsLayout.CLOCK_HEIGHT}]"
             }
             val kind = parseKind(wr.kind)
-            regions += Region(wr.id, wr.name, wr.x, wr.y, wr.w, wr.h, kind)
+            regions += Region(wr.id, wr.name, wr.x, wr.y, wr.w, wr.h, kind, toStyle(wr.name, wr.style))
             wr.content?.let { content[wr.name] = toContent(wr.name, kind, it) }
         }
         return Scene(regions, content)
@@ -66,7 +74,17 @@ object SceneCodec {
     private fun parseKind(s: String): RegionKind = when (s) {
         "text" -> RegionKind.TEXT
         "image" -> RegionKind.IMAGE
+        "list" -> RegionKind.LIST
         else -> throw IllegalArgumentException("unknown region kind '$s'")
+    }
+
+    private fun toStyle(name: String, s: WireRegionStyle?): RegionStyle {
+        if (s == null) return RegionStyle.NONE
+        return try {
+            RegionStyle(s.borderWidth ?: 0, s.borderColor ?: 0, s.borderRadius ?: 0, s.padding ?: 0)
+        } catch (e: IllegalArgumentException) {
+            throw IllegalArgumentException("region '$name' style invalid — ${e.message}")
+        }
     }
 
     private fun toContent(name: String, kind: RegionKind, c: SceneContent): Content = when (c.kind) {
@@ -88,6 +106,13 @@ object SceneCodec {
                 throw IllegalArgumentException("image content for region '$name': bad base64 — ${e.message}")
             }
             Content.Image(bytes) // Gray4Bmp.decode validates the BMP (dims/format) at render time
+        }
+        "list" -> {
+            require(kind == RegionKind.LIST) { "list content on non-list region '$name'" }
+            val items = c.items
+                ?: throw IllegalArgumentException("list content for region '$name' missing items")
+            require(items.isNotEmpty()) { "list content for region '$name' has zero items" }
+            Content.ListItems(items, c.itemWidth ?: 0, c.selectBorder ?: true, c.eventCapture ?: false)
         }
         else -> throw IllegalArgumentException("unknown content kind '${c.kind}' for region '$name'")
     }

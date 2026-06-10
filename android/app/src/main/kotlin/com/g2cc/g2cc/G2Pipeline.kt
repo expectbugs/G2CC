@@ -1813,6 +1813,11 @@ class G2Pipeline(
                 // unexpected here; log loudly rather than drop it silently.
                 Log.w(TAG, "unexpected render msg in legacy dispatch path (${msg.scene.regions.size} regions) — ignoring")
             }
+            is ServerMessage.AudioRequest -> {
+                // Server-driven dictation is a Glasses-OS (os_attach) feature; the legacy
+                // dispatch app drives its own mic via UI buttons. Loud, not silent.
+                Log.w(TAG, "unexpected audio_request '${msg.action}' in legacy dispatch path — ignoring")
+            }
         }
     }
 

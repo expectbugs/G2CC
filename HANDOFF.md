@@ -23,8 +23,18 @@ design**, with a working visual-design loop. In order:
    "Server" menu image *significantly slower* + clock jankier — which is exactly why the DE design
    below avoids fullscreen images (small dirty-rect tiles + firmware text); fuller speedup waits on the
    hat (`HAT_BRIDGE_SPEC.md` §13).
-3. **The DE is designed and mocked up** in the EvenHub simulator (see "The DE design" + `docs/SIM_TOOLING.md`).
-   Font metrics measured. Next step is building it for real server-side.
+3. **The DE is FINALIZED and IMPLEMENTED end-to-end (2026-06-10)** — design contract in
+   `docs/DE_DESIGN.md` (supersedes the sketch below where they differ), content API in
+   `docs/CONTENT_API.md`. Server: window manager + compositor + content pipeline
+   (`os-windows.ts` / `os-compose.ts` / `os-content.ts` + `scripts/render_content.py`), five
+   windows (Main switcher, Claude Code w/ dir-picker→session→Options, Aria w/ display
+   system prompt `server/prompts/aria-g2.md`, Mail on `~/Mail/marzello.net/INBOX`, Files),
+   dictation round-trip (`audio_request` → mic → STT → active window). Client APK v0.9:
+   native LIST container (wrapper f2, §6.1 byte-locked tests), region styles f5–f8
+   (emit-if-nonzero), 12-hour minute-tick clock @38px, mic FGS type + RECORD_AUDIO.
+   216 unit tests green; compositor verified by `scripts/scene_to_png.py` (renders a
+   composed WireScene + checks every client hardware rule). **NOT yet hardware-verified**
+   — checklist in `docs/DE_DESIGN.md` §7.
 
 The OS runs as: home PC = brain (composes a Scene, holds all window/session state), glasses = thin
 display (render + send input, zero state). Hardware-verified through v0.7 (FGS recovery) / v0.8.
@@ -53,13 +63,18 @@ bars ≥~38px); **per-tile width caps at 288px** so any content wider than 288 n
 
 ## What remains
 
-1. **Build the DE for real**: port the mocked layout into the server (`server/src/os-*.ts`) — compose
-   the chrome + the canvas→gray4 4-tile content renderer; client renders the Scene + sends input.
-   Verify each slice on Adam's glasses.
-2. **The other windows**: Mail/SMS list views (firmware-text rows), Aria, the Main launcher, FS.
-3. **Dispatch target**: ship pointed at vanilla CC; swap to the ARIA swarm's Code specialist over the
-   same WS contract (`g2_custom_app_spec.md` Part A).
-4. The **hat** (`docs/HAT_BRIDGE_SPEC.md`) — and its §13 pacing sweep — once a stable link makes it worth it.
+1. **Hardware-verify v0.9 + the DE** — the checklist in `docs/DE_DESIGN.md` §7: chrome paints,
+   the FIRST direct-BLE native LIST (paints / scrolls / select round-trip), 12h clock @38px,
+   the rebuild-retention probe (do tiles survive an f1=7? — gates dynamic-menu cost), tile
+   page timing, the full Dictate→STT→prompt→tiles loop. Iterate from diag + Adam's eyes.
+2. **Content API v2**: ```chart (Vega-Lite/Mermaid via matplotlib/headless), inline bold/mono
+   runs, the validated `display` tool with interaction round-trip (docs/CONTENT_API.md roadmap).
+3. **Dispatch target**: shipped pointed at vanilla CC; swap to the ARIA swarm's Code specialist
+   over the same WS contract when it exists (`g2_custom_app_spec.md` Part A). SMS window needs
+   a phone-side bridge (deferred with Settings).
+4. The **hat** (`docs/HAT_BRIDGE_SPEC.md`, ESP32-C5 on backorder ~weeks) — port
+   DisplayProto/SceneCodec to C (now incl. the list container) + the §13 pacing sweep. The DE
+   is hat-ready by construction (all state server-side; minute-tick clock cuts radio time).
 
 ## Lessons learned (these stay learned)
 
@@ -98,12 +113,20 @@ bars ≥~38px); **per-tile width caps at 288px** so any content wider than 288 n
 
 - **Wire spec:** `docs/G2_BLE_PROTOCOL.md` (authoritative) · `docs/PROTOCOL_NOTES.md` (lineage + render
   constraints) · `docs/SDK_CAPABILITY_MAP.md` (SDK↔wire). **Sim/visual loop:** `docs/SIM_TOOLING.md`.
-  **OS plan:** `docs/GLASSES_OS.md`. **Hat:** `docs/HAT_BRIDGE_SPEC.md`. **Changelog:** `CHANGELOG.md`.
-- **Renderer (Android):** `android/.../render/` (DisplayProto, G2Renderer.validate, Gray4Bmp, Scene) ·
-  `service/ConnectionService.kt` (the live FGS loop) · `os/SceneCodec.kt` (WS Scene → render).
-- **Server OS path:** `server/src/` — `os-menu.ts`, `os-display.ts`, `ws-handler.ts`, `gray4bmp.ts`,
-  `session-pool.ts`+`cc-session.ts`+`dispatch.ts` (the CC bridge). WS contract: `shared/src/protocol.ts`.
-- **Sim apps:** `sdk-demo/{fontcal,mockup}.html` + `src/*.ts`. **Decode/measure tools:** `scripts/`.
+  **DE contract:** `docs/DE_DESIGN.md` (FINAL) · `docs/CONTENT_API.md` (LLM display API) ·
+  `docs/GLASSES_OS.md` (architecture). **Hat:** `docs/HAT_BRIDGE_SPEC.md`. **Changelog:** `CHANGELOG.md`.
+- **Renderer (Android):** `android/.../render/` (DisplayProto incl. listContainer, G2Renderer.validate,
+  Gray4Bmp, Scene) · `service/ConnectionService.kt` (the live FGS loop + audio_request) ·
+  `os/SceneCodec.kt` (WS Scene → render).
+- **Server DE:** `server/src/` — `os-windows.ts` (window manager: Main/CC/Aria/Mail/Files),
+  `os-compose.ts` (WinView→WireScene), `os-content.ts` (markdown→blocks→tiles via
+  `scripts/render_content.py`), `prompts/aria-g2.md` · legacy `os-menu.ts`/`os-display.ts`
+  (osScreen 'menu'/'probe') · `ws-handler.ts` · `session-pool.ts`+`cc-session.ts`+`dispatch.ts`
+  (the CC bridge). WS contract: `shared/src/protocol.ts`. Mail: `scripts/read_maildir.py`
+  (~/Mail/marzello.net/INBOX, mbsync cron */5).
+- **Compositor check (no glasses):** `scripts/scene_to_png.py` (WireScene JSON → PNG + client-rule
+  validation). **Sim apps:** `sdk-demo/{fontcal,mockup}.html` (mockup: `?screen=cc|aria|main|mail`).
+  **Decode/measure tools:** `scripts/`.
 
 ## Build / deploy / capture mechanics
 

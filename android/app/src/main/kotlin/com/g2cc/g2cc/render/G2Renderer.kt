@@ -65,9 +65,15 @@ class G2Renderer(
 
     /** Pre-push guard: reject a scene that would KILL or BLANK the glasses, BEFORE any BLE
      *  write goes out. Returns the rejection reason, or null if the scene is safe. These are
-     *  hardware-confirmed kill conditions — see memory g2-render-limits / PROTOCOL_NOTES.md.
-     *  The renderer is the API boundary, so callers never have to hand-walk these limits. */
+     *  hardware-confirmed kill conditions — see memory g2-render-limits / PROTOCOL_NOTES.md /
+     *  docs/G2_BLE_PROTOCOL.md §7. The renderer is the API boundary, so callers never have to
+     *  hand-walk these limits. */
     private fun validate(scene: Scene): String? {
+        if (scene.regions.size > MAX_CONTAINERS)
+            return "${scene.regions.size} containers exceeds the SDK max $MAX_CONTAINERS"
+        val texts = scene.textRegions()
+        if (texts.size > MAX_TEXT_REGIONS)
+            return "${texts.size} text regions exceeds the max $MAX_TEXT_REGIONS"
         val imgs = scene.imageRegions()
         if (imgs.size > MAX_IMAGE_REGIONS)
             return "${imgs.size} image regions exceeds the max $MAX_IMAGE_REGIONS (extras silently drop)"
@@ -78,6 +84,14 @@ class G2Renderer(
             if (c is Content.Image && Gray4Bmp.isBlank(c.bmp))
                 return "image region '${r.name}' is all-black — the glasses choke on a blank image tile and drop the app"
         }
+        // Exactly one input-capture region per page (text f11 / list f12 — wire rule §6.1).
+        // >1 is a hard reject; 0 renders fine but leaves input dead, so warn loudly only.
+        val captures = texts.count { (scene.content[it.name] as? Content.Text)?.scroll == true } +
+            scene.listRegions().count { (scene.content[it.name] as? Content.ListItems)?.eventCapture == true }
+        if (captures > 1)
+            return "$captures event-capture regions (text scroll / list eventCapture) — a page allows exactly ONE"
+        if (captures == 0)
+            diag("validate: scene has NO event-capture region — ring/tap input will be dead on this page")
         return null
     }
 
@@ -99,6 +113,7 @@ class G2Renderer(
                     nextMsgId(), appToken,
                     scene.textRegions().map { textContainer(scene, it) },
                     scene.imageRegions().map { imageContainer(it) },
+                    scene.listRegions().map { listContainer(scene, it) },
                 ),
             ))
             o += imageContentOps(scene, scene.imageRegions().map { it.name })
@@ -139,6 +154,7 @@ class G2Renderer(
                         nextMsgId(),
                         scene.textRegions().map { textContainer(scene, it) },
                         scene.imageRegions().map { imageContainer(it) },
+                        scene.listRegions().map { listContainer(scene, it) },
                     ),
                 ))
                 o += imageContentOps(scene, scene.imageRegions().map { it.name })
@@ -147,6 +163,9 @@ class G2Renderer(
                     when (val c = scene.content[name]) {
                         is Content.Text -> o += textOp(scene.region(name)!!, c)
                         is Content.Image -> o += imageOps(scene.region(name)!!, c.bmp)
+                        // Unreachable: Scene.diff reports any list change as layoutChanged
+                        // (items ride the layout frame). Defensive diag, never silent.
+                        is Content.ListItems -> diag("setScene: list '$name' changed without layoutChanged — diff bug?")
                         null -> {}
                     }
                 }
@@ -210,11 +229,18 @@ class G2Renderer(
 
     private fun textContainer(scene: Scene, r: Region): ByteArray {
         val c = scene.content[r.name] as? Content.Text
-        return DisplayProto.textContainer(r.x, r.y, r.w, r.h, r.id, r.name, c?.scroll ?: false, c?.text ?: "")
+        return DisplayProto.textContainer(r.x, r.y, r.w, r.h, r.id, r.name, c?.scroll ?: false, c?.text ?: "", r.style)
     }
 
     private fun imageContainer(r: Region): ByteArray =
         DisplayProto.imageContainer(r.x, r.y, r.w, r.h, r.id, r.name)
+
+    private fun listContainer(scene: Scene, r: Region): ByteArray {
+        val c = scene.content[r.name] as? Content.ListItems
+            ?: throw IllegalArgumentException("list region '${r.name}' declared without ListItems content (items ride the layout frame)")
+        return DisplayProto.listContainer(r.x, r.y, r.w, r.h, r.id, r.name,
+            c.items, c.itemWidth, c.selectBorder, c.eventCapture, r.style)
+    }
 
     private fun textOp(r: Region, c: Content.Text): RenderMsg =
         RenderMsg(DisplayProto.frame(nextSeq(), DisplayProto.textPayload(nextMsgId(), r.id, r.name, c.text, c.contentOffset, c.contentLength)))
@@ -364,6 +390,8 @@ class G2Renderer(
         const val SEQ_START = 0x10          // 0x00..0x0F reserved for auth
         const val MSGID_START = 0x20
         const val MAX_IMAGE_REGIONS = 4         // glasses paint ≤4 image regions; a 5th+ silently drops
+        const val MAX_TEXT_REGIONS = 8          // SDK cap (docs/G2_BLE_PROTOCOL.md §7, ramp-12 proven)
+        const val MAX_CONTAINERS = 12           // SDK total-container cap (§7)
         const val MAX_IMAGE_W = 288             // proven-safe per-region size; a region ≥384×192 drops the BLE link
         const val MAX_IMAGE_H = 129
         const val FRAGMENT_PACE_MS = 12L    // between AA fragments WITHIN one message (chunk)

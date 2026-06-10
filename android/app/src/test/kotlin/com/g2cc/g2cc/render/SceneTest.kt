@@ -80,4 +80,42 @@ class SceneTest {
     fun contentForUnknownRegion_throws() {
         Scene(listOf(Region(1, "a", 0, 0, 10, 10, RegionKind.TEXT)), mapOf("ghost" to Content.Text("x")))
     }
+
+    // ---- LIST regions (the DE menu / browse lists — docs/DE_DESIGN.md) ----
+
+    @Test
+    fun diff_listItemsChange_forcesLayoutRepush() {
+        // List items ride the LAYOUT frame (no list content-update on the wire), so an
+        // items swap must rebuild — this is what makes dynamic menus an f1=7 rebuild.
+        val s1 = scene { list("menu", 0, 38, 96, 212, listOf("Next", "Prev"), eventCapture = true) }
+        val s2 = Scene(s1.regions, mapOf("menu" to Content.ListItems(listOf("Approve", "Deny"), eventCapture = true)))
+        assertTrue(s2.diff(s1).layoutChanged)
+    }
+
+    @Test
+    fun diff_sameListContent_isNotDirty() {
+        val s1 = scene { list("menu", 0, 38, 96, 212, listOf("Next", "Prev"), eventCapture = true) }
+        val s2 = Scene(s1.regions, mapOf("menu" to Content.ListItems(listOf("Next", "Prev"), eventCapture = true)))
+        val d = s2.diff(s1)
+        assertFalse(d.layoutChanged)
+        assertTrue(d.changedRegions.isEmpty())
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun listContentOnTextRegion_throws() {
+        Scene(listOf(Region(1, "a", 0, 0, 10, 10, RegionKind.TEXT)), mapOf("a" to Content.ListItems(listOf("x"))))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun emptyListItems_throw() {
+        Content.ListItems(emptyList())
+    }
+
+    @Test
+    fun diff_styleChange_isLayoutChange() {
+        // RegionStyle is part of Region equality, so a border change re-pushes the layout.
+        val s1 = scene { text("a", 0, 0, 100, 50, "x") }
+        val s2 = scene { text("a", 0, 0, 100, 50, "x", style = RegionStyle(borderWidth = 1, borderColor = 6)) }
+        assertTrue(s2.diff(s1).layoutChanged)
+    }
 }

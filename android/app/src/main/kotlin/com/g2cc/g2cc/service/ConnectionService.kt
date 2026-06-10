@@ -16,6 +16,8 @@ import androidx.core.app.NotificationCompat
 import com.g2cc.g2cc.BuildConfig
 import com.g2cc.g2cc.G2CCApp
 import com.g2cc.g2cc.R
+import com.g2cc.g2cc.audio.AudioStreamer
+import com.g2cc.g2cc.audio.MicCapture
 import com.g2cc.g2cc.ble.BleScanner
 import com.g2cc.g2cc.ble.ConnectionState
 import com.g2cc.g2cc.ble.EvenHub
@@ -113,6 +115,7 @@ class ConnectionService : Service(), TestHarness {
     private var syncSeq = 0x10
     private var syncMsgId = 0x20
     private var connection: ConnectionManager? = null
+    private var audioStreamer: AudioStreamer? = null      // server-driven dictation (audio_request)
     private var lastLeftDevice: BluetoothDevice? = null   // cached so recovery can reconnect directly (no rescan)
     private var lastRightDevice: BluetoothDevice? = null
     @Volatile private var tearingDown = false             // suppress auto-recovery during intentional teardown
@@ -268,6 +271,36 @@ class ConnectionService : Service(), TestHarness {
                 // unconsumed one, so a burst of scrolls renders only the latest.
                 if (sceneCh?.trySend(msg.scene)?.isSuccess != true)
                     DiagLog.log("os", "render dropped — render queue not active (not in server mode?)")
+            }
+            is ServerMessage.AudioRequest -> {
+                // DE dictation: the server (menu 'Dictate'/'Ask') drives the phone mic.
+                // AudioStreamer owns audio_start/binary/audio_end; MicCapture failures
+                // surface through its log + the streamer's loud failure path. We also diag
+                // both edges so the server log shows the round-trip.
+                val conn = connection
+                if (conn == null) {
+                    DiagLog.log("os", "audio_request ${msg.action} but no WS connection — ignored")
+                    return
+                }
+                when (msg.action) {
+                    "start" -> {
+                        if (audioStreamer?.isStreaming == true) {
+                            DiagLog.log("os", "audio_request start — already streaming (ignored)")
+                            return
+                        }
+                        // Fresh streamer per start: binds the CURRENT ConnectionManager (a WS
+                        // reconnect creates a new one; a cached streamer would talk to the corpse).
+                        val s = AudioStreamer(MicCapture(applicationContext), conn)
+                        audioStreamer = s
+                        DiagLog.log("os", "audio_request start → mic streaming")
+                        s.start()
+                    }
+                    "stop" -> {
+                        DiagLog.log("os", "audio_request stop")
+                        audioStreamer?.stop()
+                    }
+                    else -> DiagLog.log("os", "audio_request unknown action '${msg.action}' — ignored (LOUD)")
+                }
             }
             else -> {
                 // config_snapshot / dispatch_target_list / etc. — not used in OS mode.
@@ -563,19 +596,24 @@ class ConnectionService : Service(), TestHarness {
         }
     }
 
-    /** Tick a live HH:MM:SS clock into the top status bar once a second. Doubles as the
-     *  "never-blank" periodic content change and keeps a text region present in every layout. */
+    /** Tick the app-owned clock ("1:04 PM"). The loop still wakes every second (cheap, and
+     *  keeps the tick aligned to the minute boundary) but only WRITES when the formatted
+     *  text actually changes — one BLE write per minute instead of sixty (the v0.8 "clock
+     *  janky during image push" factor + a hat power win; docs/DE_DESIGN.md §1). Session
+     *  liveness does NOT depend on this: the 4 s f1=12 keepalive acks feed the watchdog. */
     private fun startClock() {
         clockJob?.cancel()
         clockJob = scope.launch {
+            var lastWritten: String? = null
             while (isActive) {
                 delay(1000)
                 val r = renderer ?: break
                 val sc = r.currentScene ?: continue
                 val t = nowClock()
+                if (t == lastWritten) continue
                 when {
-                    sc.region(OsLayout.CLOCK_NAME) != null -> { r.setText(OsLayout.CLOCK_NAME, t); _scene.value = r.currentScene }
-                    sc.region("status") != null -> { r.setText("status", "G2CC  $t"); _scene.value = r.currentScene }
+                    sc.region(OsLayout.CLOCK_NAME) != null -> { r.setText(OsLayout.CLOCK_NAME, t); _scene.value = r.currentScene; lastWritten = t }
+                    sc.region("status") != null -> { r.setText("status", "G2CC  $t"); _scene.value = r.currentScene; lastWritten = t }
                 }
             }
         }
@@ -597,6 +635,7 @@ class ConnectionService : Service(), TestHarness {
         testJob?.cancel(); testJob = null
         sessionGen++   // invalidate any in-flight cold-launch/test coroutine that completes after this
         stateJobs.forEach { it.cancel() }; stateJobs.clear()
+        audioStreamer?.stop(); audioStreamer = null   // mic OFF with the session (never left running)
         connection?.shutdown(); connection = null
         _serverMode.value = false
         _testing.value = false
@@ -676,7 +715,23 @@ class ConnectionService : Service(), TestHarness {
 
     private fun startInForeground() {
         // minSdk 29 → the 3-arg startForeground with a type is always available.
-        startForeground(NOTIF_ID, buildNotification(_status.value), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        // connectedDevice + microphone combined: Android 14+ SecurityException-s if
+        // AudioRecord opens from a FG service without microphone in the type mask, and the
+        // mask is FIXED at startForeground — it can't be upgraded when dictation starts
+        // later (the parked G2CCService's hard-won note). The mic is only ACTUALLY used on
+        // a server audio_request. NET-7: a background-initiated start with a mic type can
+        // throw on Android 12+/14 — log loudly and stop cleanly, never crash silent.
+        try {
+            val typeMask = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            }
+            startForeground(NOTIF_ID, buildNotification(_status.value), typeMask)
+        } catch (e: Exception) {
+            DiagLog.log("svc", "startForeground with mic type FAILED (${e.message}) — retrying connectedDevice-only (dictation unavailable this run)")
+            startForeground(NOTIF_ID, buildNotification(_status.value), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        }
     }
 
     private fun buildNotification(text: String): Notification {

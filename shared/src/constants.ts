@@ -36,8 +36,12 @@ export const STATUS_PADDING = 4
 // ============================================================
 export const CLOCK_CONTAINER_ID = 1
 export const CLOCK_CONTAINER_NAME = 'clock'
-export const CLOCK_HEIGHT = STATUS_BAR_HEIGHT       // 28 — proven-paintable height
-export const CLOCK_WIDTH = 132                      // ~8 glyphs @ 20px; verify on glass
+// 38 = DE_BAR_H: the clock cutout is the right end of the DE title bar, so the
+// two must match (visual seam otherwise). ≥38px also avoids the firmware
+// overflow scrollbar on short bars (docs/SIM_TOOLING.md gotcha 5). Format is
+// 12-hour minute-tick ("1:04 PM") — decided 2026-06-10 (docs/DE_DESIGN.md §1).
+export const CLOCK_HEIGHT = 38
+export const CLOCK_WIDTH = 132                      // "12:59 PM" fits w/ margin; verify on glass
 export const CLOCK_Y = 0
 export const CLOCK_X = SCREEN_WIDTH - CLOCK_WIDTH    // 444 — flush right
 
@@ -47,6 +51,29 @@ export const CLOCK_X = SCREEN_WIDTH - CLOCK_WIDTH    // 444 — flush right
 export const OS_CONTENT_Y = CLOCK_HEIGHT + 2
 export const OS_CONTENT_HEIGHT = SCREEN_HEIGHT - OS_CONTENT_Y
 export const OS_TITLE_WIDTH = CLOCK_X - 2
+
+// ============================================================
+// DE (window-manager) geometry — FINALIZED 2026-06-10, docs/DE_DESIGN.md §1.
+// Mirrors the sim mockup (sdk-demo/src/mockup.ts). The clock cutout above is
+// the right end of the DE title bar. Stable region ids in DE_REGION_IDS keep
+// window switches diffing as content-only updates wherever possible.
+// ============================================================
+export const DE_BAR_H = 38                                  // title + status bar height
+export const DE_MENU_W = 96                                 // left action-menu width
+export const DE_CONTENT_X = DE_MENU_W                       // 96
+export const DE_CONTENT_Y = DE_BAR_H                        // 38
+export const DE_CONTENT_W = SCREEN_WIDTH - DE_MENU_W        // 480
+export const DE_CONTENT_H = SCREEN_HEIGHT - 2 * DE_BAR_H    // 212
+export const DE_TILE_W = DE_CONTENT_W / 2                   // 240 (≤288 cap ✓)
+export const DE_TILE_H = DE_CONTENT_H / 2                   // 106 (≤144 cap ✓)
+export const DE_TITLE_W = SCREEN_WIDTH - CLOCK_WIDTH        // 444 (title ends at the clock cutout)
+/** Stable container ids — identical across windows (docs/DE_DESIGN.md §1). */
+export const DE_REGION_IDS = {
+  title: 2, menu: 3, status: 4, tabs: 5, browse: 6, contentText: 7,
+  tile0: 10, tile1: 11, tile2: 12, tile3: 13,
+} as const
+/** Menu items that fit without firmware list scrolling (212px / ~40px rows). */
+export const DE_MENU_VISIBLE_ITEMS = 5
 
 // Main content
 export const CONTENT_Y = 30                  // 2-px gap below status bar

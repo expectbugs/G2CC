@@ -69,27 +69,67 @@ object DisplayProto {
     private fun cat(vararg parts: ByteArray): ByteArray = cat(parts.asList())
 
     // ---------- region container builders (decoded "lean" schema, matches the native games) ----------
+    // Style fields f5–f8 (borderWidth/borderColor/borderRadius/padding — the official schema,
+    // docs/G2_BLE_PROTOCOL.md §6.1) are emitted ONLY when non-zero, so unstyled containers stay
+    // byte-identical to the proven lean schema (absent == 0 in protobuf).
+    private fun styleFields(style: RegionStyle): ByteArray {
+        if (style.isNone) return ByteArray(0)
+        val parts = ArrayList<ByteArray>(4)
+        if (style.borderWidth != 0) parts += v(5, style.borderWidth)
+        if (style.borderColor != 0) parts += v(6, style.borderColor)
+        if (style.borderRadius != 0) parts += v(7, style.borderRadius)
+        if (style.padding != 0) parts += v(8, style.padding)
+        return cat(parts)
+    }
+
     /** Text-region container — placed in a launch/layout wrapper under field 3.
-     *  f1..f4 = x,y,w,h; f9 = id; f10 = name; f11 = scroll flag; f12 = embedded text. */
+     *  f1..f4 = x,y,w,h; [f5..f8 = style]; f9 = id; f10 = name; f11 = isEventCapture (the
+     *  "scroll" flag — docs/G2_BLE_PROTOCOL.md §13.2); f12 = embedded text. */
     fun textContainer(x: Int, y: Int, w: Int, h: Int, id: Int, name: String,
-                      scroll: Boolean = false, text: String = ""): ByteArray =
-        cat(v(1, x), v(2, y), v(3, w), v(4, h), v(9, id), s(10, name),
+                      scroll: Boolean = false, text: String = "",
+                      style: RegionStyle = RegionStyle.NONE): ByteArray =
+        cat(v(1, x), v(2, y), v(3, w), v(4, h), styleFields(style), v(9, id), s(10, name),
             v(11, if (scroll) 1 else 0), s(12, text))
 
     /** Image-region container — placed in a launch/layout wrapper under field 4.
-     *  f1..f4 = x,y,w,h; f5 = id; f6 = name. Content is pushed separately via [imagePayload]. */
+     *  f1..f4 = x,y,w,h; f5 = id; f6 = name (no style/event fields in the official image
+     *  schema — docs/G2_BLE_PROTOCOL.md §6.1). Content is pushed via [imagePayload]. */
     fun imageContainer(x: Int, y: Int, w: Int, h: Int, id: Int, name: String): ByteArray =
         cat(v(1, x), v(2, y), v(3, w), v(4, h), v(5, id), s(6, name))
+
+    /** List-region container (the native menu widget) — placed in a launch/layout wrapper
+     *  under field 2. Schema per docs/G2_BLE_PROTOCOL.md §6.1 (proven by the g2cap LIST
+     *  group, capture 16:32:50 "list5 sel1 wAuto"):
+     *  f1..f4 = x,y,w,h; [f5..f8 = style]; f9 = id; f10 = name;
+     *  f11 = itemContainer { f1=itemCount, f2=itemWidth(0=auto), f3=isItemSelectBorderEn,
+     *  f4=itemName (repeated) }; f12 = isEventCapture. The itemContainer's f1/f2/f3 are
+     *  emitted ALWAYS (the official frames carry explicit zeros there — "list20 sel0 w120"
+     *  → f11={f1=20 f2=120 f3=0 …}). */
+    fun listContainer(x: Int, y: Int, w: Int, h: Int, id: Int, name: String,
+                      items: List<String>, itemWidth: Int = 0, selectBorder: Boolean = true,
+                      eventCapture: Boolean = false,
+                      style: RegionStyle = RegionStyle.NONE): ByteArray {
+        require(items.isNotEmpty()) { "list container '$name' has no items" }
+        val ic = ArrayList<ByteArray>(3 + items.size)
+        ic += v(1, items.size)
+        ic += v(2, itemWidth)
+        ic += v(3, if (selectBorder) 1 else 0)
+        for (it in items) ic += s(4, it)
+        return cat(v(1, x), v(2, y), v(3, w), v(4, h), styleFields(style), v(9, id), s(10, name),
+            l(11, cat(ic)), v(12, if (eventCapture) 1 else 0))
+    }
 
     // ---------- top-level message payloads (pre-framing; exposed so tests byte-match captures) ----------
 
     /** f1=0 launch: declare app token + initial region containers (text containers embed their text). */
-    fun launchPayload(msgId: Int, token: Int, texts: List<ByteArray>, images: List<ByteArray>): ByteArray =
-        cat(v(1, MSG_LAUNCH), v(2, msgId), l(3, wrapper(texts, images, token)))
+    fun launchPayload(msgId: Int, token: Int, texts: List<ByteArray>, images: List<ByteArray>,
+                      lists: List<ByteArray> = emptyList()): ByteArray =
+        cat(v(1, MSG_LAUNCH), v(2, msgId), l(3, wrapper(lists, texts, images, token)))
 
     /** f1=7 layout / content-update: re-declare all regions (no app token). */
-    fun layoutPayload(msgId: Int, texts: List<ByteArray>, images: List<ByteArray>): ByteArray =
-        cat(v(1, MSG_LAYOUT), v(2, msgId), l(7, wrapper(texts, images, null)))
+    fun layoutPayload(msgId: Int, texts: List<ByteArray>, images: List<ByteArray>,
+                      lists: List<ByteArray> = emptyList()): ByteArray =
+        cat(v(1, MSG_LAYOUT), v(2, msgId), l(7, wrapper(lists, texts, images, null)))
 
     /** f1=5 text-update: replace one text region's content by name. With [contentOffset]+
      *  [contentLength] set, this is a PARTIAL in-place replace (wire f3/f4 = the SDK's
@@ -114,9 +154,12 @@ object DisplayProto {
         return cat(v(1, MSG_IMAGE), v(2, msgId), l(5, inner))
     }
 
-    private fun wrapper(texts: List<ByteArray>, images: List<ByteArray>, token: Int?): ByteArray {
-        val parts = ArrayList<ByteArray>(2 + texts.size + images.size)
-        parts += v(1, texts.size + images.size)        // f1 = container count
+    // Wrapper container ordering is load-bearing (docs/G2_BLE_PROTOCOL.md §5): containers are
+    // grouped by kind by FIELD NUMBER — f2 lists, f3 texts, f4 images — then f5 = app token.
+    private fun wrapper(lists: List<ByteArray>, texts: List<ByteArray>, images: List<ByteArray>, token: Int?): ByteArray {
+        val parts = ArrayList<ByteArray>(2 + lists.size + texts.size + images.size)
+        parts += v(1, lists.size + texts.size + images.size)   // f1 = container count
+        for (li in lists) parts += l(2, li)            // f2 = list containers
         for (t in texts) parts += l(3, t)              // f3 = text containers
         for (im in images) parts += l(4, im)           // f4 = image containers
         if (token != null) parts += v(5, token)        // f5 = app token (launch only)

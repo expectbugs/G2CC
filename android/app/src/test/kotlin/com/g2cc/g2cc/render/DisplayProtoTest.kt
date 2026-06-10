@@ -117,6 +117,63 @@ class DisplayProtoTest {
         assertEquals((crc ushr 8) and 0xFF, last[last.size - 1].toInt() and 0xFF)
     }
 
+    // ---- LIST container + style fields (docs/G2_BLE_PROTOCOL.md §6.1, g2cap LIST group) ----
+
+    @Test
+    fun listContainer_matchesOfficialSchema() {
+        // HAND-ENCODED golden bytes (computed from the §6.1 schema by hand, independent of the
+        // encoder) for the g2cap capture example 16:32:50 "list5 sel1 wAuto": geometry
+        // 0,44,576,244; style bw1 bc6 br2 p4; id 2; name "body"; itemContainer {count 5,
+        // width 0 (auto), selBorder 1, "it-0".."it-4"}; isEventCapture 1. All style values are
+        // non-zero here, so emit-if-nonzero matches the official frame exactly. The f11 inner
+        // f1/f2/f3 are ALWAYS emitted (official frames carry explicit zeros there —
+        // "list20 sel0 w120" → f11={f1=20 f2=120 f3=0}).
+        val golden = "0800102c18c00420f40128013006380240044802" +     // f1..f4 geom, f5..f8 style, f9 id
+            "5204626f6479" +                                          // f10 "body"
+            "5a24080510001801" +                                      // f11 + len + {f1=5 f2=0 f3=1}
+            "220469742d30220469742d31220469742d32220469742d33220469742d34" + // f11.f4 items ×5
+            "6001"                                                    // f12 isEventCapture=1
+        val enc = DisplayProto.listContainer(
+            0, 44, 576, 244, id = 2, name = "body",
+            items = listOf("it-0", "it-1", "it-2", "it-3", "it-4"),
+            itemWidth = 0, selectBorder = true, eventCapture = true,
+            style = RegionStyle(borderWidth = 1, borderColor = 6, borderRadius = 2, padding = 4),
+        )
+        assertEquals(golden, hx(enc))
+    }
+
+    @Test
+    fun launch_withList_wrapperOrdersListsTextsImagesToken() {
+        // Wrapper ordering is load-bearing (§5): f1 count, f2 lists, f3 texts, f4 images,
+        // f5 token. Expected bytes assembled from the individually golden-tested container
+        // encoders, so this isolates the WRAPPER structure.
+        val li = DisplayProto.listContainer(0, 38, 96, 212, id = 3, name = "menu", items = listOf("Next", "Prev"), eventCapture = true)
+        val tx = DisplayProto.textContainer(0, 0, 444, 38, id = 2, name = "title", text = "T")
+        val im = DisplayProto.imageContainer(96, 38, 240, 106, id = 10, name = "t0")
+        fun lenHex(n: Int): String { require(n < 128); return "%02x".format(n) }
+        val wrapper = "0803" +                                  // f1 = 3 containers
+            "12" + lenHex(li.size) + hx(li) +                   // f2 list
+            "1a" + lenHex(tx.size) + hx(tx) +                   // f3 text
+            "22" + lenHex(im.size) + hx(im) +                   // f4 image
+            "28904e"                                            // f5 token = 10000
+        val expected = "0800" + "1021" + "1a" + lenHex(wrapper.length / 2) + wrapper
+        val payload = DisplayProto.launchPayload(0x21, token = 10000, texts = listOf(tx), images = listOf(im), lists = listOf(li))
+        assertEquals(expected, hx(payload))
+    }
+
+    @Test
+    fun textContainer_styleFields_emitOnlyWhenNonZero() {
+        // style=NONE is byte-identical to the lean schema (the capture-locked launch/layout
+        // tests prove the full unstyled frames; this pins the explicit-NONE path too).
+        val lean = DisplayProto.textContainer(0, 64, 576, 224, id = 1, name = "hud", text = "x")
+        val none = DisplayProto.textContainer(0, 64, 576, 224, id = 1, name = "hud", text = "x", style = RegionStyle.NONE)
+        assertArrayEquals(lean, none)
+        // Styled emits f5/f6/f8 in field order between f4 and f9; the zero-valued f7 is omitted.
+        val styled = DisplayProto.textContainer(0, 0, 444, 38, id = 2, name = "title", text = "T",
+            style = RegionStyle(borderWidth = 1, borderColor = 6, borderRadius = 0, padding = 4))
+        assertTrue(hx(styled).contains("2801" + "3006" + "4004" + "4802"))   // f5=1 f6=6 [no f7] f8=4 f9=2
+    }
+
     @Test
     fun keepalive_hasExpectedPayloadAndValidCrc() {
         val frame = DisplayProto.keepalive(0x10, 0x20)

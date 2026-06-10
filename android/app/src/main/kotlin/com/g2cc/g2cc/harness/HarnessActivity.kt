@@ -287,13 +287,18 @@ class HarnessActivity : AppCompatActivity() {
     private fun missingBlePermissions(): List<String> =
         blePermissions().filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
 
-    /** BLE perms (the connect gate) + POST_NOTIFICATIONS on API 33+ (best-effort, non-gating). */
+    /** BLE perms (the connect gate) + POST_NOTIFICATIONS on API 33+ and RECORD_AUDIO for the
+     *  DE dictation path (both best-effort, non-gating — denied mic just means audio_request
+     *  loud-fails server-side until granted). */
     private fun permsToRequest(): List<String> {
         val l = missingBlePermissions().toMutableList()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             l += Manifest.permission.POST_NOTIFICATIONS
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            l += Manifest.permission.RECORD_AUDIO
         }
         return l
     }
