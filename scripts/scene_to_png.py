@@ -17,8 +17,8 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 576, 288
-# Mirrors shared/src/constants.ts CLOCK_* (33px bars / x474 — Adam cal 2026-06-10).
-CLOCK = {"x": 474, "y": 0, "w": 102, "h": 33}
+# Mirrors shared/src/constants.ts CLOCK_* (33px bars / x469 — Adam cal 2026-06-10 r2).
+CLOCK = {"x": 469, "y": 0, "w": 107, "h": 33}
 SANS = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", 15)
 
 

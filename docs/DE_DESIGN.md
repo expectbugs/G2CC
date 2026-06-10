@@ -46,11 +46,17 @@ content text=7, tiles=10..13 (`t0..t3`).
     `Next/Prev/Approve/Deny/Reload/Main` — Approve/Deny deliberately NOT at index 0/1, so a
     tap racing a busy→permission rebuild lands on Next/Prev, never an unread Approve). Tap
     does NOT rebuild the menu → selection stays put → tap-tap-tap through pages on `Next`.
-  - **Browse windows (CC picker, Mail list, Files): the CONTENT list** holds focus
-    (amendment to the old "menu always holds focus" — decided 2026-06-10). Firmware draws the
-    selection ring on the actual rows + reports the tapped index. The left menu is still a
-    REAL list (Adam 2026-06-10: never hint text) — non-capturing, no selection ring, showing
-    `Back / Main` (both double-tap-backed). >~17 rows page via `— prev — / — more —` rows.
+  - **Browse windows (CC picker, Mail list, Files tree): the CONTENT list** holds focus by
+    default; the left menu is a REAL list of the window's actions (`Reload / Main`, …).
+    **Double-tap flips focus content → menu** (menu list captures, ring moves there; menu
+    actions hand focus back to the rows); double-tap again pops out (→ Main). >~14 rows page
+    via `— prev — / — more —` rows.
+  - **Files' locations menu is the ANTENNA** (a scroll=true text region with a server-drawn
+    `▸`): firmware lists move their ring silently, so only the antenna reports per-notch
+    scrolls — which is what lets the content pane PREVIEW the selected directory live while
+    scrolling (Adam 2026-06-10 r2). Tap = enter (focus → content rows). The antenna shows a
+    ≤6-line window around the selection: more lines would overflow the region and break the
+    zero-range per-notch behavior (the v0.6-proven trick).
 - **Reload everywhere** (Adam 2026-06-10): every reading menu has `Reload`; every browse list
   gets a compose-injected `Reload` row at index 0. Reload = `display_reload` to the client
   (abort any wedged render op + COLD_INIT re-takeover with the current scene — the proven
@@ -59,10 +65,12 @@ content text=7, tiles=10..13 (`t0..t3`).
   G2CC logo in the content tiles (Adam 2026-06-10).
 - **Taps resolve against the last-RENDERED view** (WM `lastView`), and the WM-level labels
   (`Retry/Reload/Back/Main`) work in every window and state — incl. error screens.
-- **Double-tap = back (pop one level)** — reading → list → window root; at root → Main; at
-  MAIN's root → **blank the screen** (clock-only: the firmware refuses to paint a page with
-  no text region, so the minute clock is the floor); double-tap again wakes back to Main.
-  `Main` also stays as a menu item everywhere.
+- **Double-tap = back (pop one level)** — reading → list → menu focus → window root → Main;
+  at MAIN's root → **blank the screen**; double-tap again wakes. The blank scene = the
+  client clock + a whitespace `wake` ANTENNA region — HARDWARE RULE (2026-06-06, re-bitten
+  2026-06-10): a scroll=true clock as the SOLE text region kills ALL input incl. double-tap;
+  the v1.2 blank screen did exactly that (wake took many taps). `Main` stays a menu item
+  everywhere.
 - **Renders are preemptable** (Adam 2026-06-10): a newer scene (a menu tap's response) does
   NOT wait behind an in-flight 4-tile push. The client preempts at the next REGION boundary —
   the current tile's chunk chain finishes (an interrupted mid-image transfer is unprobed
@@ -90,11 +98,11 @@ content text=7, tiles=10..13 (`t0..t3`).
 
 | id | tab | modes | notes |
 |---|---|---|---|
-| `main` | Main | tiles | menu = window list + Reload (tap switches); content = the G2CC logo. Double-tap target at every root. |
+| `main` | Main | tile | menu = window list + Reload (tap switches); content = ONE centered 200×100 logo tile (~1 s load; placeholder art pending Adam's logo). Double-tap target at every root. |
 | `cc` | CC | browse→tiles | root = directory picker (browse /home/user/*); then the CC session: response→tiles, dynamic action menu, permission flow via menu. |
 | `aria` | Aria | tiles | CC subprocess, cwd `/home/user/aria`, `--append-system-prompt` = `server/prompts/aria-g2.md` (the display-format prompt). Free-form content area. |
 | `mail` | Mail | browse→text | Maildir `~/Mail/marzello.net/` (mbsync cron, every 5 min). List = INBOX newest-first; read = text/plain body, text mode. `scripts/read_maildir.py` (stdlib). |
-| `files` | Files | browse→text | /home/user/* browser; text-file head preview. |
+| `files` | Files | antenna→browse→text | locations menu (Root/Home/Downloads/G2CC + mounts) w/ live content preview on scroll → tree browse ('..' ascends) → bounded head preview. |
 
 Deferred: SMS (needs phone-side bridge), Settings.
 

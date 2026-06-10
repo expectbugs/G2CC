@@ -37,16 +37,15 @@ export const STATUS_PADDING = 4
 export const CLOCK_CONTAINER_ID = 1
 export const CLOCK_CONTAINER_NAME = 'clock'
 // 33 = DE_BAR_H: the clock cutout is the right end of the DE title bar, so the
-// two must match (visual seam otherwise). 33px + padding 4 leaves ~25px for the
-// ~20px firmware glyphs — believed over the overflow-scrollbar threshold
-// (docs/SIM_TOOLING.md gotcha 5); HARDWARE-VERIFY. Format is 12-hour
-// minute-tick ("1:04 PM"). Width 102 / x 474 = Adam's 2026-06-10 eyeball cal
-// (+30px right vs the first cut); "12:59 PM" estimates ~91px incl padding —
-// if it clips on glass, widen CLOCK_WIDTH back toward 132.
+// two must match (visual seam otherwise). HARDWARE 2026-06-10: padding 4 at
+// 33px triggered the firmware overflow SCROLLBAR (vertical room 25px < the
+// threshold) — so the clock runs padding 0 and gets its ~5px inset from a
+// LEADING SPACE in the text instead, plus 5px more width (Adam's cal).
+// "12:59 PM" + space ≈ 88px — if it clips, widen further.
 export const CLOCK_HEIGHT = 33
-export const CLOCK_WIDTH = 102
+export const CLOCK_WIDTH = 107
 export const CLOCK_Y = 0
-export const CLOCK_X = SCREEN_WIDTH - CLOCK_WIDTH    // 474 — flush right
+export const CLOCK_X = SCREEN_WIDTH - CLOCK_WIDTH    // 469 — flush right
 
 // Glasses-OS content area the server is free to compose into: full width
 // BELOW the clock band. The top-left band [0,0 .. CLOCK_X, CLOCK_HEIGHT] is

@@ -4,7 +4,29 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
-## (unstamped) — 2026-06-10 — **APK v1.2 + server: the multi-packet wall — Mail's silent kill, diagnosed and fenced**
+## (unstamped) — 2026-06-10 — **APK v1.3 + server: scrollbar fix, browse focus-flip, single-tile Main, Files locations w/ live preview, blank-wake fix**
+
+Adam's on-glass round 3. **Scrollbars on clock/tabs:** the v1.1 padding-4 inset ate vertical
+room (33−8 = 25px < the firmware's overflow threshold) → scrollbars. Both now run padding 0
+with a LEADING-SPACE inset (~5px, zero vertical cost) + 5px more width (clock x469/w107 —
+APK+server lockstep again). **Browse focus-flip:** browse windows keep their action submenu
+in the left menu list; double-tap flips focus content→menu (menu captures, ring moves), menu
+actions hand focus back; the injected browse 'Reload' row is gone (menus carry it).
+**Main = ONE centered 200×100 logo tile** (~1 s load vs ~4 s; compact placeholder wordmark
+until Adam's art). **Files redesigned:** the left menu is a LOCATIONS list (Root / Home /
+Downloads / G2CC + every /mnt + /run/media/user mount) rendered as the hardware-proven
+ANTENNA (scroll=true text + server-drawn ▸, ≤6-line window to keep zero-range) because
+firmware lists don't report scrolls — per-notch focus events drive a LIVE directory preview
+in the content pane; tap enters the tree (content captures, '..' ascends), double-tap walks
+read→tree→locations→Main. **Blank-screen wake fix:** v1.2's blank scene left the clock as
+the sole text region with scroll=true — the DOCUMENTED 2026-06-06 input-killer (double-tap
+dead → "doesn't work until I try a whole bunch of times"). The blank scene now ships a
+whitespace `wake` antenna + passive clock (the proven probe combo); wake = one double-tap.
+Smoked live end-to-end (antenna scroll preview, focus flips, tile geometry, blank/wake).
+
+---
+
+## (superseded same-day) — 2026-06-10 — **APK v1.2 + server: the multi-packet wall — Mail's silent kill, diagnosed and fenced**
 
 Adam: "going to Mail breaks the whole thing — it shows on the mirror but not the glasses."
 Diag told the story exactly: the Mail rebuild went out as ONE message of **7 AA packets

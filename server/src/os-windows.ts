@@ -20,8 +20,11 @@ import { join, basename } from 'node:path'
 import type { WireScene } from '@g2cc/shared'
 import type { G2CCConfig } from './config.js'
 import { listProjectDirectories } from './directory-picker.js'
-import { parseMarkdown, renderBlocks, type Block, type RenderedContent } from './os-content.js'
-import { composeScene, paginateText, errorView, blankScene, type WinView } from './os-compose.js'
+import { parseMarkdown, renderBlocks, renderSingleTile, type Block, type RenderedContent } from './os-content.js'
+import {
+  composeScene, paginateText, errorView, blankScene,
+  SINGLE_TILE_W, SINGLE_TILE_H, type WinView,
+} from './os-compose.js'
 import type { SessionPool, PoolEntry } from './session-pool.js'
 import { hostname } from 'node:os'
 
@@ -88,13 +91,20 @@ export interface OsWindow {
   /** A tap on browse row `index` INTO THE WINDOW'S OWN items (the WM already
    *  stripped the injected Reload row at index 0). */
   onBrowseSelect(index: number): Promise<void>
-  /** Pop one level. false = already at root (WM goes to Main). */
+  /** Pop one level. false = already at root (WM goes to Main). In browse
+   *  windows the FIRST pop flips focus content→menu (Adam 2026-06-10: "double
+   *  tap should back out to the menu list rather than to Main"). */
   onBack(): Promise<boolean>
   /** The Reload action: clear any stuck transient state; view() re-derives. */
   onReload?(): Promise<void>
   /** Called when the WM switches AWAY from this window — stop anything that
    *  must not outlive focus (the dictation mic, review 2026-06-10). */
   onDeactivate?(): void
+  /** Antenna-menu scroll (menuMode 'antenna' only — per-notch from the
+   *  scroll=true menu text region). */
+  onMenuScroll?(dir: 'up' | 'down'): Promise<void>
+  /** Sys tap (antenna mode: select the marked menu line / flip focus). */
+  onTap?(): Promise<void>
   onStt?(text: string): Promise<void>
   onSttError?(error: string): Promise<void>
 }
@@ -600,6 +610,8 @@ class CcWindow implements OsWindow {
   private sessions = new Map<string, SessionLevel>()   // projectPath -> level (persists across switches)
   private current: SessionLevel | null = null
   private options: SessionOptions
+  /** browse-level focus (picker/options): content rows ⇄ menu list (double-tap). */
+  private focus: 'content' | 'menu' = 'content'
 
   constructor(private ctx: WmContext, private requestRender: () => void) {
     this.options = new SessionOptions(
@@ -622,13 +634,14 @@ class CcWindow implements OsWindow {
   }
 
   async view(): Promise<WinView> {
+    const menuMode = this.focus === 'menu' ? 'capture' as const : 'passive' as const
     if (this.level === 'picker') {
       this.dirs = listProjectDirectories().map((e) => ({ name: e.name, path: e.path }))
       const { items } = browsePageItems(this.dirs.map((d) => d.name), this.pickerOffset)
-      return { mode: 'browse', title: 'Claude Code · pick directory', items }
+      return { mode: 'browse', menuMode, title: 'Claude Code · pick directory', menu: ['Reload', 'Main'], items }
     }
     if (this.level === 'options') {
-      return { mode: 'browse', title: 'Claude Code · options', items: this.options.items() }
+      return { mode: 'browse', menuMode, title: 'Claude Code · options', menu: ['Reload', 'Main'], items: this.options.items() }
     }
     const c = this.current
     if (!c) { this.level = 'picker'; return this.view() }
@@ -689,13 +702,23 @@ class CcWindow implements OsWindow {
   }
 
   async onBack(): Promise<boolean> {
-    if (this.level === 'options') { this.level = 'session'; this.requestRender(); return true }
+    if (this.level === 'options') {
+      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+      this.focus = 'content'
+      this.level = 'session'
+      this.requestRender()
+      return true
+    }
     if (this.level === 'session') {
       this.current?.stopDictation('left session')   // mic must not outlive the level
       this.level = 'picker'
+      this.focus = 'content'
       this.requestRender()
       return true   // session stays alive in the pool
     }
+    // picker: content → menu list first (Adam 2026-06-10), then out to Main
+    if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+    this.focus = 'content'
     return false
   }
 
@@ -705,6 +728,7 @@ class CcWindow implements OsWindow {
 
   async onReload(): Promise<void> {
     await this.current?.onReload()
+    this.focus = 'content'   // a menu action hands focus back to the rows
   }
 
   // Delegate regardless of level: the SessionLevel's transcribing flag decides
@@ -756,9 +780,18 @@ class AriaWindow implements OsWindow {
     return s.pendingPermissionId ? 'permission' : s.busy ? 'working' : s.alive() ? 'ready' : 'idle'
   }
 
+  /** options-level focus: content rows ⇄ menu list (double-tap). */
+  private focus: 'content' | 'menu' = 'content'
+
   async view(): Promise<WinView> {
     if (this.level === 'options') {
-      return { mode: 'browse', title: 'Aria · options', items: this.options.items() }
+      return {
+        mode: 'browse',
+        menuMode: this.focus === 'menu' ? 'capture' : 'passive',
+        title: 'Aria · options',
+        menu: ['Reload', 'Main'],
+        items: this.options.items(),
+      }
     }
     if (!this.opened) {
       this.opened = true
@@ -784,12 +817,18 @@ class AriaWindow implements OsWindow {
   }
 
   async onBack(): Promise<boolean> {
-    if (this.level === 'options') { this.level = 'session'; this.requestRender(); return true }
+    if (this.level === 'options') {
+      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+      this.focus = 'content'
+      this.level = 'session'
+      this.requestRender()
+      return true
+    }
     return false
   }
 
   onDeactivate(): void { this.session.stopDictation('window switch') }
-  async onReload(): Promise<void> { await this.session.onReload() }
+  async onReload(): Promise<void> { await this.session.onReload(); this.focus = 'content' }
   async onStt(text: string): Promise<void> { await this.session.onStt(text) }
   async onSttError(error: string): Promise<void> { await this.session.onSttError(error) }
 }
@@ -836,6 +875,9 @@ class MailWindow implements OsWindow {
     this.lastError = null
   }
 
+  /** list-level focus: content rows (default) ⇄ the menu list (double-tap). */
+  private focus: 'content' | 'menu' = 'content'
+
   async view(): Promise<WinView> {
     if (this.level === 'read') {
       const pageSuffix = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
@@ -852,7 +894,6 @@ class MailWindow implements OsWindow {
       this.lastError = (e as Error).message
     }
     if (this.lastError) return errorView('Mail · error', this.lastError)
-    // (the compose-injected Reload row doubles as refresh — view() re-fetches)
     const items: string[] = []
     if (this.offset > 0) items.push(PREV_ROW)
     for (const r of this.rows) items.push(`${r.unread ? '● ' : ''}${r.from} — ${r.subject}`)
@@ -860,7 +901,9 @@ class MailWindow implements OsWindow {
     const last = Math.min(this.offset + this.rows.length, this.total)
     return {
       mode: 'browse',
+      menuMode: this.focus === 'menu' ? 'capture' : 'passive',
       title: `Mail · ${this.offset + 1}-${last} of ${this.total}`,
+      menu: ['Reload', 'Main'],
       items,
     }
   }
@@ -898,44 +941,105 @@ class MailWindow implements OsWindow {
   }
 
   async onReload(): Promise<void> {
-    this.lastError = null   // view() refetches the list / re-renders the page
+    this.lastError = null        // view() refetches the list / re-renders the page
+    this.focus = 'content'       // a menu action hands focus back to the rows
   }
 
   async onBack(): Promise<boolean> {
-    if (this.level === 'read') { this.level = 'list'; this.requestRender(); return true }
+    if (this.level === 'read') { this.level = 'list'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }   // content → the menu list
+    this.focus = 'content'       // leaving via Main: reset for re-entry
     return false
   }
 }
 
 // ============================================================ Files window
 
+/** Files (redesigned per Adam 2026-06-10 r2): the LEFT MENU is a live
+ *  LOCATIONS list — Root / Home / Downloads / G2CC / each mounted drive —
+ *  rendered as the hardware-proven ANTENNA (a scroll=true text region with a
+ *  server-drawn ▸): a firmware LIST moves its ring silently, only the antenna
+ *  reports per-notch scrolls, which is what makes the content pane preview the
+ *  selected directory IMMEDIATELY while scrolling. Tap → focus moves to the
+ *  content rows (tree browsing: dirs descend, '..' ascends, files open a
+ *  bounded head preview). Double-tap walks back: read → tree → locations →
+ *  Main. The antenna shows a 6-line WINDOW around the selection — more lines
+ *  would overflow the region and break the zero-range per-notch behavior. */
 class FilesWindow implements OsWindow {
   readonly id = 'files'
   readonly tab = 'Files'
   readonly label = 'Files'
-  private stack: string[] = [FILES_ROOT]
+  private level: 'locations' | 'tree' | 'read' = 'locations'
+  private locs: { label: string; path: string }[] = []
+  private locIndex = 0
+  private stack: string[] = []
   private offset = 0
   private entries: { name: string; isDir: boolean }[] = []
-  private level: 'browse' | 'read' = 'browse'
   private pages: string[] = []
   private page = 0
   private readName = ''
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
-  summary(): string { return this.stack[this.stack.length - 1] }
+  summary(): string {
+    return this.level === 'locations' ? (this.locs[this.locIndex]?.label ?? 'locations') : this.cwd()
+  }
 
-  private cwd(): string { return this.stack[this.stack.length - 1] }
+  private cwd(): string { return this.stack[this.stack.length - 1] ?? FILES_ROOT }
 
-  private list(): void {
-    const dir = this.cwd()
+  /** The common areas (Adam's list) + every mounted drive, re-scanned per entry. */
+  private refreshLocations(): void {
+    const out = [
+      { label: 'Root', path: '/' },
+      { label: 'Home', path: '/home/user' },
+      { label: 'Downloads', path: '/home/user/Downloads' },
+      { label: 'G2CC', path: '/home/user/G2CC' },
+    ]
+    for (const base of ['/mnt', '/run/media/user']) {
+      try {
+        for (const n of readdirSync(base)) {
+          try {
+            const p = join(base, n)
+            if (statSync(p).isDirectory()) out.push({ label: n, path: p })
+          } catch { /* unreadable mount entry — skip (loud below if ALL fail) */ }
+        }
+      } catch (e) {
+        this.ctx.log(`[os] files: cannot scan ${base}: ${(e as Error).message}`)
+      }
+    }
+    this.locs = out
+    if (this.locIndex >= out.length) this.locIndex = out.length - 1
+  }
+
+  private listDir(dir: string): { name: string; isDir: boolean }[] {
     const names = readdirSync(dir).filter((n) => !n.startsWith('.')).sort((a, b) => a.localeCompare(b))
-    this.entries = names.map((n) => {
+    const entries = names.map((n) => {
       let isDir = false
       try { isDir = statSync(join(dir, n)).isDirectory() } catch { /* dangling symlink — list as file; open loud-fails */ }
       return { name: n, isDir }
     })
-    this.entries.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
+    entries.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
+    return entries
+  }
+
+  /** Passive preview rows for the antenna level (first page only; full paging
+   *  comes with tree focus). */
+  private previewRows(path: string): string[] {
+    try {
+      const rows = this.listDir(path).slice(0, BROWSE_PAGE).map((e) => (e.isDir ? e.name + '/' : e.name))
+      return rows.length ? rows : ['(empty)']
+    } catch (e) {
+      return [`(unreadable: ${(e as Error).message})`]
+    }
+  }
+
+  /** The antenna line window: ≤6 lines so the text region never overflows
+   *  (overflow = real scrolling = no per-notch events; zero-range is the trick). */
+  private antennaWindow(): { lines: string[]; selected: number } {
+    const WIN = 6
+    const start = Math.min(Math.max(this.locIndex - 2, 0), Math.max(0, this.locs.length - WIN))
+    const lines = this.locs.slice(start, start + WIN).map((l) => l.label)
+    return { lines, selected: this.locIndex - start }
   }
 
   async view(): Promise<WinView> {
@@ -948,20 +1052,72 @@ class FilesWindow implements OsWindow {
         text: this.pages[this.page] ?? '',
       }
     }
+    if (this.level === 'locations') {
+      this.refreshLocations()
+      if (this.locs.length === 0) return errorView('Files · error', 'no locations found')
+      const loc = this.locs[this.locIndex]
+      const { lines, selected } = this.antennaWindow()
+      return {
+        mode: 'browse',
+        menuMode: 'antenna',
+        menuLines: lines,
+        menuSelected: selected,
+        title: `Files · ${loc.label} — tap to browse`,
+        items: this.previewRows(loc.path),
+      }
+    }
+    // tree
+    let listed: { name: string; isDir: boolean }[]
     try {
-      this.list()
+      listed = this.listDir(this.cwd())
     } catch (e) {
       return errorView('Files · error', (e as Error).message)
     }
+    this.entries = listed
     const labels = this.entries.map((e) => (e.isDir ? e.name + '/' : e.name))
-    const { items } = browsePageItems(labels, this.offset)
-    return { mode: 'browse', title: `Files · ${this.cwd()}`, items }
+    const paged = browsePageItems(labels, this.offset)
+    const up = this.stack.length > 1 ? ['..'] : []
+    return {
+      mode: 'browse',
+      menuMode: 'passive',
+      title: `Files · ${this.cwd()}`,
+      menu: ['Reload', 'Main'],
+      items: [...up, ...paged.items],
+    }
+  }
+
+  /** Antenna scroll: move the location selection — the content pane preview
+   *  updates immediately (Adam 2026-06-10 r2). */
+  async onMenuScroll(dir: 'up' | 'down'): Promise<void> {
+    if (this.level !== 'locations') return
+    const next = this.locIndex + (dir === 'down' ? 1 : -1)
+    if (next < 0 || next >= this.locs.length) return
+    this.locIndex = next
+    this.requestRender()
+  }
+
+  /** Antenna tap: enter the selected location — focus moves to the content rows. */
+  async onTap(): Promise<void> {
+    if (this.level !== 'locations') return
+    const loc = this.locs[this.locIndex]
+    if (!loc) return
+    this.stack = [loc.path]
+    this.offset = 0
+    this.level = 'tree'
+    this.requestRender()
   }
 
   async onBrowseSelect(index: number): Promise<void> {
+    if (this.level !== 'tree') { this.ctx.log(`[os] files: browse select ${index} outside tree — ignored`); return }
+    // row 0 may be the '..' ascender (only below the location root)
+    let i = index
+    if (this.stack.length > 1) {
+      if (i === 0) { this.stack.pop(); this.offset = 0; this.requestRender(); return }
+      i -= 1
+    }
     const labels = this.entries.map((e) => (e.isDir ? e.name + '/' : e.name))
     const { map } = browsePageItems(labels, this.offset)
-    const m = map[index]
+    const m = map[i]
     if (m === undefined) { this.ctx.log(`[os] files: index ${index} out of range`); return }
     if (m === -1) { this.offset = Math.max(0, this.offset - BROWSE_PAGE); this.requestRender(); return }
     if (m === -2) { this.offset += BROWSE_PAGE; this.requestRender(); return }
@@ -1019,9 +1175,10 @@ class FilesWindow implements OsWindow {
     }
   }
 
+  /** read → tree → locations (the menu) → Main. */
   async onBack(): Promise<boolean> {
-    if (this.level === 'read') { this.level = 'browse'; this.requestRender(); return true }
-    if (this.stack.length > 1) { this.stack.pop(); this.offset = 0; this.requestRender(); return true }
+    if (this.level === 'read') { this.level = 'tree'; this.requestRender(); return true }
+    if (this.level === 'tree') { this.level = 'locations'; this.requestRender(); return true }
     return false
   }
 }
@@ -1030,14 +1187,15 @@ class FilesWindow implements OsWindow {
 
 /** Main = the switcher + the wordmark (Adam 2026-06-10: "a cool logo in the
  *  content area and the list of stuff in the menu list"). Menu list = the
- *  windows (capture lives here — Main has no browse list); content = the
- *  logo rendered through the normal tile pipeline (cached by content hash). */
+ *  windows (capture lives here — Main has no browse list); content = ONE
+ *  centered 200×100 logo tile (single tile ≈ 1 s load vs ~4 s for four —
+ *  Adam 2026-06-10 r2; placeholder art until he designs the real logo). */
 class MainWindow implements OsWindow {
   readonly id = 'main'
   readonly tab = 'Main'
   readonly label = 'Main'
   private others: () => OsWindow[]
-  private logo: RenderedContent | null = null
+  private logo: string | null = null
 
   constructor(private ctx: WmContext, others: () => OsWindow[]) {
     this.others = others
@@ -1047,13 +1205,14 @@ class MainWindow implements OsWindow {
 
   async view(): Promise<WinView> {
     if (!this.logo) {
-      this.logo = await renderBlocks([{ t: 'logo', title: 'G2CC', sub: `glasses os · ${hostname()}` }])
+      this.logo = await renderSingleTile(
+        [{ t: 'logo', title: 'G2CC', sub: hostname() }], SINGLE_TILE_W, SINGLE_TILE_H)
     }
     return {
-      mode: 'tiles',
+      mode: 'tile',
       title: 'Main',
       menu: [...this.others().map((w) => w.tab), 'Reload'],   // Reload = WM-level
-      tiles: this.logo.tiles(0),
+      tile: this.logo,
     }
   }
 
@@ -1223,9 +1382,7 @@ export class WindowManager {
           this.requestRender()
           return
         }
-        // Index 0 = the compose-injected Reload row; windows see 0-based rows after it.
-        if (index === 0) { this.reload(); return }
-        await this.active.onBrowseSelect(index - 1)
+        await this.active.onBrowseSelect(index)
       } else {
         this.ctx.log(`[os] select on unknown region '${region}' idx=${index} — ignored`)
       }
@@ -1233,6 +1390,25 @@ export class WindowManager {
       if (e instanceof SwitchTo) { this.switchTo(e.windowId); return }
       this.ctx.log(`[os] select handler failed (${this.active.id}/${region}/${index}): ${(e as Error).message}`)
       this.requestRender()   // view() surfaces the error state; never a dead screen
+    }
+  }
+
+  /** Antenna-menu scroll (Files' locations live preview). */
+  async onScroll(dir: 'up' | 'down'): Promise<void> {
+    try {
+      await this.active.onMenuScroll?.(dir)
+    } catch (e) {
+      this.ctx.log(`[os] scroll handler failed (${this.active.id}): ${(e as Error).message}`)
+    }
+  }
+
+  /** Sys tap (only meaningful with an antenna menu — list taps arrive as hub_select). */
+  async onTapGesture(): Promise<void> {
+    try {
+      await this.active.onTap?.()
+    } catch (e) {
+      this.ctx.log(`[os] tap handler failed (${this.active.id}): ${(e as Error).message}`)
+      this.requestRender()
     }
   }
 

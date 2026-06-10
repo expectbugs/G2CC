@@ -225,34 +225,39 @@ def rule_atoms(f, cw, blk):
 
 def logo_atoms(f, cw, blk):
     """The Main-screen logo (Adam 2026-06-10): centered wordmark + glasses glyph,
-    drawn as one full-pane atom (it owns the page)."""
+    drawn as one full-pane atom. COMPACT metrics when the canvas is small (the
+    Main logo now renders on a single 200×100 tile so it loads in ~1 s)."""
     title = str(blk.get("title", "G2CC"))
     sub = str(blk.get("sub", "glasses os"))
-    big = ImageFont.truetype(SANS_BOLD, 52)
-    small = ImageFont.truetype(SANS, 15)
-    H_LOGO = 180
+    compact = cw < 300
+    big = ImageFont.truetype(SANS_BOLD, 28 if compact else 52)
+    small = ImageFont.truetype(SANS, 11 if compact else 15)
+    lw, lh, gap = (32, 18, 9) if compact else (54, 30, 14)
+    word_pad = 6 if compact else 14
+    word_h = 32 if compact else 62
+    top = 2 if compact else 12
+    H_LOGO = (top + lh + word_pad + word_h + 16) if compact else 180
 
     def draw(d, y):
         cx = MARGIN + cw // 2
         # glasses glyph: two rounded lens rects + bridge + temples
-        gy = y + 12
-        lw, lh, gap = 54, 30, 14
+        gy = y + top
         lx = cx - lw - gap // 2
         rx = cx + gap // 2
-        d.rounded_rectangle([lx, gy, lx + lw, gy + lh], radius=8, outline=INK_HEAD, width=2)
-        d.rounded_rectangle([rx, gy, rx + lw, gy + lh], radius=8, outline=INK_HEAD, width=2)
-        d.arc([lx + lw - 2, gy + 4, rx + 2, gy + lh], start=200, end=340, fill=INK_HEAD, width=2)
-        d.line([(lx - 14, gy + 6), (lx, gy + 8)], fill=INK_DIM, width=2)
-        d.line([(rx + lw, gy + 8), (rx + lw + 14, gy + 6)], fill=INK_DIM, width=2)
+        d.rounded_rectangle([lx, gy, lx + lw, gy + lh], radius=6 if compact else 8, outline=INK_HEAD, width=2)
+        d.rounded_rectangle([rx, gy, rx + lw, gy + lh], radius=6 if compact else 8, outline=INK_HEAD, width=2)
+        d.arc([lx + lw - 2, gy + 3, rx + 2, gy + lh], start=200, end=340, fill=INK_HEAD, width=2)
+        d.line([(lx - 9, gy + 4), (lx, gy + 6)], fill=INK_DIM, width=2)
+        d.line([(rx + lw, gy + 6), (rx + lw + 9, gy + 4)], fill=INK_DIM, width=2)
         # wordmark
         tw = text_w(big, title)
-        d.text((cx - tw // 2, gy + lh + 14), title, font=big, fill=INK_HEAD)
+        d.text((cx - tw // 2, gy + lh + word_pad), title, font=big, fill=INK_HEAD)
         # flourish rules + subtitle
-        sy = gy + lh + 14 + 62
+        sy = gy + lh + word_pad + word_h
         sw = text_w(small, sub)
         d.text((cx - sw // 2, sy), sub, font=small, fill=INK_DIM)
-        d.line([(MARGIN + 30, sy + 9), (cx - sw // 2 - 12, sy + 9)], fill=RULE, width=1)
-        d.line([(cx + sw // 2 + 12, sy + 9), (MARGIN + cw - 30, sy + 9)], fill=RULE, width=1)
+        d.line([(MARGIN + 6, sy + 7), (cx - sw // 2 - 8, sy + 7)], fill=RULE, width=1)
+        d.line([(cx + sw // 2 + 8, sy + 7), (MARGIN + cw - 6, sy + 7)], fill=RULE, width=1)
 
     return [Atom(H_LOGO, draw)]
 

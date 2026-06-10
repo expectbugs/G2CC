@@ -842,8 +842,20 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         } else if (msg.event === 'double_tap' || (msg.event === 'hub_gesture' && msg.code === 3)) {
           console.log('[ws] DE back (double-tap)')
           await wm.onBackGesture()
+        } else if (msg.event === 'focus' && msg.region === 'menu') {
+          // ANTENNA scroll (Files' locations menu — a scroll=true text region
+          // reports per-notch focus events; f3: 1=up, 2=down, CONFIRMED §6.6).
+          if (msg.value === 1 || msg.value === 2) {
+            await wm.onScroll(msg.value === 1 ? 'up' : 'down')
+          } else {
+            console.log(`[ws] DE menu focus unknown f3=${msg.value} — not moving`)
+          }
+        } else if (msg.event === 'tap') {
+          // Sys tap — meaningful only with an antenna menu (list taps arrive as
+          // hub_select); the WM routes it to the active window's onTap.
+          await wm.onTapGesture()
         } else {
-          // scroll/focus moves the firmware list selection on-glass; nothing to do
+          // Firmware-list scrolls move the on-glass ring silently; nothing to do
           // server-side until a tap reports the chosen index.
           const detail = msg.value !== undefined ? `(${msg.region ?? '?'}:${msg.value})` : msg.code !== undefined ? `(${msg.code})` : ''
           console.log(`[ws] DE ${msg.event}${detail} (no-op)`)

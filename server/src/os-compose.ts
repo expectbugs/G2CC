@@ -19,25 +19,44 @@ import {
 } from '@g2cc/shared'
 import type { WireScene, SceneRegion, RegionStyle } from '@g2cc/shared'
 
-export type WinMode = 'tiles' | 'browse' | 'text'
+export type WinMode = 'tiles' | 'tile' | 'browse' | 'text'
+
+/** Browse-mode menu behavior (docs/DE_DESIGN.md §2, revised 2026-06-10):
+ *  - 'passive': content list holds focus; menu list shows the window's actions
+ *    (no capture, no ring). Double-tap flips to 'capture'.
+ *  - 'capture': the MENU list holds focus (ring on menu); content list passive.
+ *  - 'antenna': the menu is a scroll=true TEXT region (the hardware-proven
+ *    per-notch antenna) with a server-drawn ▸ marker — the only pattern that
+ *    reports SCROLLS (a firmware list moves its ring silently), enabling
+ *    Files' live directory preview. Tap = sys event → focus to content. */
+export type MenuMode = 'passive' | 'capture' | 'antenna'
 
 /** What the active window wants on screen right now. */
 export interface WinView {
   mode: WinMode
   /** Title-bar text (window name + state + page indicator). */
   title: string
-  /** tiles/text modes: the action list (THE focus region). ≤5 visible; longer
-   *  scrolls. In browse mode this is the NON-capturing menu list (defaults to
-   *  ['Back','Main'] — both double-tap-backed). */
+  /** The menu list items (every mode except antenna). In tiles/tile/text modes
+   *  this is THE focus region; in browse mode its capture follows menuMode. */
   menu?: string[]
-  /** browse mode: the content list rows (THE focus region). compose() injects
-   *  a 'Reload' row at index 0; the WM strips it before windows see indexes. */
+  /** browse mode only — defaults to 'passive'. */
+  menuMode?: MenuMode
+  /** menuMode 'antenna': the menu lines + the server-tracked selection index. */
+  menuLines?: string[]
+  menuSelected?: number
+  /** browse mode: the content list rows (focus region iff menuMode 'passive'). */
   items?: string[]
   /** text mode: pre-paginated page content. */
   text?: string
   /** tiles mode: 4 base64 gray4 BMPs (t0..t3, 2x2 row-major). */
   tiles?: [string, string, string, string]
+  /** tile mode: ONE centered base64 gray4 BMP (TILE_W×TILE_H — Main's logo). */
+  tile?: string
 }
+
+/** Single-tile mode geometry — the classic proven 200×100, centered. */
+export const SINGLE_TILE_W = 200
+export const SINGLE_TILE_H = 100
 
 export interface TabSpec {
   label: string
@@ -61,13 +80,7 @@ export function fwTextWidth(s: string): number {
   return Math.ceil(w)
 }
 
-/** The Reload row compose() injects at INDEX 0 of every browse list (Adam
- *  2026-06-10: "every menu list should contain a reload option"). The WM
- *  intercepts index 0 and decrements before delegating to the window —
- *  windows never see the row. */
-export const BROWSE_RELOAD_ROW = 'Reload'
-
-/** Browse rows clamp tighter than the 64-byte SDK name cap: 16 rows/page must
+/** Browse rows clamp tighter than the 64-byte SDK name cap: 14 rows/page must
  *  keep the whole rebuild frame under the firmware's single-message
  *  multi-packet wall (~1000 B — hardware 2026-06-10: Mail's 7-packet rebuild
  *  was silently ignored). 16 × 40 B + chrome ≈ 4-5 AA packets. */
@@ -101,24 +114,28 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
     content: { kind: 'text', text: ' ' + view.title },
   })
 
-  // Menu slot — ALWAYS a real list (Adam 2026-06-10). Reading/tiles windows:
-  // the action list, the page's single focus region. Browse windows: focus
-  // lives on the content list (only ONE capture region is allowed per page —
-  // §6.1), so the menu renders as a non-capturing list (no selection ring) of
-  // the gesture-backed actions: Back / Main are both double-tap behaviors.
-  if (view.mode === 'browse') {
+  // Menu slot — ALWAYS a real menu (Adam 2026-06-10). Reading/tiles/text
+  // windows: the action list, the page's single focus region. Browse windows:
+  // menuMode decides who captures (exactly ONE capture region per page, §6.1).
+  const menuMode: MenuMode = view.mode === 'browse' ? (view.menuMode ?? 'passive') : 'capture'
+  if (view.mode === 'browse' && menuMode === 'antenna') {
+    const lines = view.menuLines ?? []
+    if (lines.length === 0) throw new Error(`compose: '${view.title}' antenna menu has no lines`)
+    const sel = Math.min(Math.max(view.menuSelected ?? 0, 0), lines.length - 1)
+    const text = lines.map((l, i) => (i === sel ? `▸ ${l}` : `  ${l}`)).join('\n')
     regions.push({
       id: DE_REGION_IDS.menu, name: 'menu', x: 0, y: DE_BAR_H, w: DE_MENU_W, h: DE_CONTENT_H,
-      kind: 'list', style: { ...CHROME, padding: 3 },
-      content: { kind: 'list', items: view.menu ?? ['Back', 'Main'], selectBorder: false, eventCapture: false },
+      kind: 'text', style: { ...CHROME, padding: 3 },
+      content: { kind: 'text', text, scroll: true },   // THE antenna: per-notch focus events
     })
   } else {
-    const menu = (view.menu ?? []).map((m) => clampLabel(m, 'menu'))
-    if (menu.length === 0) throw new Error(`compose: '${view.title}' is ${view.mode} mode but has no menu items (the focus region)`)
+    const menu = (view.menu ?? ['Reload', 'Main']).map((m) => clampLabel(m, 'menu'))
+    if (menu.length === 0) throw new Error(`compose: '${view.title}' has no menu items`)
+    const capture = menuMode === 'capture'
     regions.push({
       id: DE_REGION_IDS.menu, name: 'menu', x: 0, y: DE_BAR_H, w: DE_MENU_W, h: DE_CONTENT_H,
       kind: 'list', style: { ...CHROME, padding: 3 },
-      content: { kind: 'list', items: menu, eventCapture: true },
+      content: { kind: 'list', items: menu, selectBorder: capture, eventCapture: capture },
     })
   }
 
@@ -139,14 +156,27 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
         content: { kind: 'image', bmpBase64: tiles[i] },
       })
     })
+  } else if (view.mode === 'tile') {
+    const tile = view.tile
+    if (!tile) throw new Error(`compose: '${view.title}' is tile mode but has no tile`)
+    regions.push({
+      id: DE_REGION_IDS.tile0, name: 't0',
+      x: DE_CONTENT_X + ((DE_CONTENT_W - SINGLE_TILE_W) >> 1),
+      y: DE_CONTENT_Y + ((DE_CONTENT_H - SINGLE_TILE_H) >> 1),
+      w: SINGLE_TILE_W, h: SINGLE_TILE_H,
+      kind: 'image',
+      content: { kind: 'image', bmpBase64: tile },
+    })
   } else if (view.mode === 'browse') {
     const items = (view.items ?? []).map((s) => clampLabel(s, 'browse', BROWSE_ROW_MAX_BYTES))
-    // Injected Reload at index 0 (see BROWSE_RELOAD_ROW). An empty window list
-    // still composes (Reload-only) instead of throwing the screen away.
+    const contentCaptures = menuMode === 'passive'
+    // An empty listing still composes a one-row placeholder instead of throwing
+    // the screen away (and a capture list must have ≥1 row).
+    const rows = items.length ? items : ['(empty)']
     regions.push({
       id: DE_REGION_IDS.browse, name: 'browse', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: DE_CONTENT_W, h: DE_CONTENT_H,
       kind: 'list', style: { ...CHROME, padding: 4 },
-      content: { kind: 'list', items: [BROWSE_RELOAD_ROW, ...items], eventCapture: true },
+      content: { kind: 'list', items: rows, selectBorder: contentCaptures, eventCapture: contentCaptures },
     })
   } else {
     regions.push({
@@ -161,11 +191,11 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   // SCREEN_W - textWidth). DE_TAB_RIGHT_TRIM pushes the strip ~30px farther
   // right (Adam cal 2026-06-10 vs the conservative glyph estimate) — if the
   // tabs CLIP on real glass, reduce the trim.
-  const tabText = tabs.map((t) => (t.active ? `[${t.label}]` : t.label)).join('  ')
-  // padding 4 insets the tab text ~5px off the status bar's right border (Adam
-  // 2026-06-10 — un-padded it sat on the border line); +4 on the width keeps
-  // the right-edge calibration unchanged.
-  const tabW = Math.min(Math.max(40, fwTextWidth(tabText) + 12 - DE_TAB_RIGHT_TRIM + 4), SCREEN_WIDTH - 120)
+  // Leading space = the ~5px border inset; padding 4 here triggered the firmware
+  // overflow SCROLLBAR at 33px bars (hardware 2026-06-10 — vertical room fell to
+  // 25px), so the inset must cost no vertical room. +5 width per Adam's cal.
+  const tabText = ' ' + tabs.map((t) => (t.active ? `[${t.label}]` : t.label)).join('  ')
+  const tabW = Math.min(Math.max(40, fwTextWidth(tabText) + 12 - DE_TAB_RIGHT_TRIM + 5), SCREEN_WIDTH - 120)
   const tabX = SCREEN_WIDTH - tabW
   regions.push({
     id: DE_REGION_IDS.status, name: 'status', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: tabX, h: DE_BAR_H,
@@ -174,19 +204,26 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   })
   regions.push({
     id: DE_REGION_IDS.tabs, name: 'tabs', x: tabX, y: SCREEN_HEIGHT - DE_BAR_H, w: tabW, h: DE_BAR_H,
-    kind: 'text', style: { padding: 4 },
+    kind: 'text',
     content: { kind: 'text', text: tabText },
   })
 
   return { regions }
 }
 
-/** The blanked screen (double-tap at Main root — Adam 2026-06-10): no server
- *  regions at all. The client injects its minute clock (the firmware refuses
- *  to paint a page with NO text region, so the clock is the floor), which also
- *  becomes the input antenna; the global double-tap gesture restores. */
+/** The blanked screen (double-tap at Main root — Adam 2026-06-10): visually
+ *  empty except the client-injected minute clock. The 'wake' region is the
+ *  INPUT ANTENNA (scroll=true, whitespace content): HARDWARE RULE 2026-06-06 —
+ *  a scroll=true CLOCK as the sole text region kills ALL input incl.
+ *  double-tap (the v1.2 blank screen did exactly that: wake took "a whole
+ *  bunch" of taps). With a separate antenna the clock stays passive (the
+ *  proven probe combo) and the sys double-tap reaches us to wake. */
 export function blankScene(): WireScene {
-  return { regions: [] }
+  return {
+    regions: [
+      { id: 50, name: 'wake', x: 0, y: 0, w: 200, h: DE_BAR_H, kind: 'text', content: { kind: 'text', text: ' ', scroll: true } },
+    ],
+  }
 }
 
 /** Loud, visible error screen (rasterizer/window failure) — never a silent

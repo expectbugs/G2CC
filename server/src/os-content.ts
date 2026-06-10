@@ -138,9 +138,10 @@ const TILE_RECTS = [
 const cache = new Map<string, { pages: number; tilesB64: string[][] }>()
 const CACHE_MAX = 24
 
-function runRenderer(blocks: Block[]): Promise<Buffer> {
+function runRenderer(blocks: Block[], width: number = DE_CONTENT_W, height: number = DE_CONTENT_H,
+  tiles: { x: number; y: number; w: number; h: number }[] = TILE_RECTS): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const req = JSON.stringify({ width: DE_CONTENT_W, height: DE_CONTENT_H, tiles: TILE_RECTS, blocks })
+    const req = JSON.stringify({ width, height, tiles, blocks })
     const child = execFile(PY, [RENDER_SCRIPT], { encoding: 'buffer', maxBuffer: 256 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) { reject(new Error(`render_content failed: ${err.message}${stderr?.length ? ' :: ' + stderr.toString() : ''}`)); return }
       resolve(stdout as Buffer)
@@ -199,4 +200,28 @@ export async function renderBlocks(blocks: Block[]): Promise<RenderedContent> {
       return [row[0], row[1], row[2], row[3]]
     },
   }
+}
+
+/** Typeset blocks onto a SINGLE w×h tile (page 0 only — e.g. the Main logo at
+ *  the classic 200×100). Cached by (size, blocks) hash like renderBlocks. */
+const singleCache = new Map<string, string>()
+export async function renderSingleTile(blocks: Block[], w: number, h: number): Promise<string> {
+  const key = createHash('sha256').update(`${w}x${h}:` + JSON.stringify(blocks)).digest('hex')
+  const hit = singleCache.get(key)
+  if (hit) return hit
+  const raw = await runRenderer(blocks, w, h, [{ x: 0, y: 0, w, h }])
+  if (raw.length < 4) throw new Error(`render_content output too short (${raw.length}B)`)
+  const pages = raw.readUInt32LE(0)
+  const tileBytes = w * h
+  if (raw.length < 4 + tileBytes || pages < 1) {
+    throw new Error(`render_content single-tile output ${raw.length}B / ${pages} pages — expected ≥1 page of ${tileBytes}B`)
+  }
+  const b64 = encodeGray4Bmp(w, h, raw.subarray(4, 4 + tileBytes)).toString('base64')
+  singleCache.set(key, b64)
+  while (singleCache.size > CACHE_MAX) {
+    const oldest = singleCache.keys().next().value
+    if (oldest === undefined) break
+    singleCache.delete(oldest)
+  }
+  return b64
 }
