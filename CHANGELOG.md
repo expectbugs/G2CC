@@ -4,7 +4,27 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
-## (unstamped) — 2026-06-10 — **APK v1.1 + server: text insets, preemptable renders, blank-screen toggle**
+## (unstamped) — 2026-06-10 — **APK v1.2 + server: the multi-packet wall — Mail's silent kill, diagnosed and fenced**
+
+Adam: "going to Mail breaks the whole thing — it shows on the mirror but not the glasses."
+Diag told the story exactly: the Mail rebuild went out as ONE message of **7 AA packets
+(~1.6 KB)** and the firmware **never sent the f1=8 ack** — silently ignored, link alive,
+keepalives fine. Earlier the CC picker (also two lists, ~20 short rows) painted and acked
+normally — so two-lists, 20 auto-width rows, and `—`-glyph rows are all FINE on hardware;
+the variable was FRAME SIZE. This is the same wall g2code hit with the 83-entry directory
+list (official app max observed = 4 packets ≈ 900 B). The "whole thing breaks" part was the
+renderer's optimistic state: it believed Mail was delivered (hence the mirror), so every
+retry diffed to zero changes.
+
+Fences, all four layers: **(1)** browse pages drop to 14 rows × ≤40 UTF-8-byte labels
+(~880 B worst-case frame); **(2)** the client hard-rejects layout/launch frames > 1000 B
+pre-wire (loud diag instead of a silent firmware ignore); **(3)** layout frames are now
+**ack-gated** like image chunks (matching the official app's 0/100 no-overlap pacing) — an
+ignored frame parks visibly instead of lying; **(4)** `preempt()` now also releases PARKED
+ack-waits and `failJob` rolls back every undelivered region (an undelivered LAYOUT rolls
+back to the previous scene), so the next tap/diff re-sends reality — no optimistic-state
+wedge, and write-failures roll back too (pre-existing gap). 222/222 tests incl. the
+oversize-reject + release-rollback-resend paths; Mail scene measured live at 578 item bytes.
 
 Adam's on-glass follow-ups to v1.0. **Insets:** the clock and tab-strip text sat ON the
 neighboring bar's border line (both regions were borderless with padding 0) — both get

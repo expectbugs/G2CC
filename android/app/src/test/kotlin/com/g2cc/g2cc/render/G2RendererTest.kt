@@ -384,26 +384,57 @@ class G2RendererTest {
         }
         var done: Boolean? = null
         r.setScene(s2) { done = it }
-        // layout (ungated) + imgA chunk are out; imgA parks on its ack.
+        // The layout frame is ACK-GATED now (multi-packet-wall protection): it goes out
+        // and parks until its f1=8 ack.
+        assertEquals(1, sink.messages().size)
+        r.onImageAck(msgIdOf(sink.messages()[0]))   // layout ack → imgA chunk goes out, parks
         assertEquals(2, sink.messages().size)
         assertNull(done)
 
         // A newer scene supersedes → preempt. The IN-FLIGHT region (a) must still finish
         // (never interrupt a mid-image transfer); the NOT-YET-STARTED region (b) is skipped.
-        r.preempt()
-        r.onImageAck(msgIdOf(sink.messages()[1]))   // a's ack → boundary check → skip b
-        assertEquals("preempted: b's chunk must NOT have been sent", 2, sink.messages().size)
+        // NOTE preempt() releases PARKED waits — but region a's chunk was WRITTEN and is
+        // awaiting its ack, so releasing it marks a undelivered too; to exercise the
+        // boundary path we ack a FIRST, then preempt before b starts… preempt() between
+        // messages is async-unobservable here, so instead verify the release semantics:
+        r.preempt()                                  // releases a's parked ack-wait
+        assertEquals("released: b's chunk must NOT have been sent", 2, sink.messages().size)
         assertEquals("preempted op completes false", false, done)
 
-        // The superseding scene (same content) re-sends ONLY the rolled-back region b.
+        // The superseding scene re-sends BOTH rolled-back regions: a's delivery was
+        // UNKNOWN at release (parked on its ack), so it must re-send too — re-pushing a
+        // possibly-delivered tile is harmless; lying about delivery is not. Layout was
+        // acked, so no rebuild.
         sink.calls.clear()
         var done2: Boolean? = null
         r.setScene(s2) { done2 = it }
-        val resent = sink.messages()
-        assertEquals("only b re-sends (a was delivered; layout unchanged)", 1, resent.size)
-        assertEquals(DisplayProto.MSG_IMAGE, msgType(resent[0]))
-        assertTrue("the re-sent region is b (image f2 name field `12 01 62`)", hx(resent[0]).contains("120162"))
-        r.onImageAck(msgIdOf(resent[0]))
+        assertEquals("a re-sends first (ack-gated)", 1, sink.messages().size)
+        assertEquals(DisplayProto.MSG_IMAGE, msgType(sink.messages()[0]))
+        r.onImageAck(msgIdOf(sink.messages()[0]))
+        assertEquals("then b", 2, sink.messages().size)
+        assertTrue("the second re-send is region b (image f2 name `12 01 62`)", hx(sink.messages()[1]).contains("120162"))
+        r.onImageAck(msgIdOf(sink.messages()[1]))
         assertEquals(true, done2)
+    }
+
+    @Test
+    fun setScene_oversizeLayoutFrame_rejected_noWrites() {
+        val sink = FakeSink()
+        val r = mkRenderer(sink)
+        r.launch(10000, scene { text("t", 0, 0, 444, 33, "x") }) {}
+        sink.calls.clear()
+        // 16 × 60-char list items ≈ 1 KB of item bytes alone — past the ~1000 B
+        // multi-packet wall the firmware silently ignores (hardware 2026-06-10).
+        val big = scene {
+            text("t", 0, 0, 444, 33, "x")
+            list("l", 0, 33, 480, 222, (1..16).map { "row $it ".padEnd(60, 'x') }, eventCapture = true)
+        }
+        var ok = true
+        r.setScene(big) { ok = it }
+        assertFalse("an oversize layout frame must be rejected pre-wire", ok)
+        assertEquals(0, sink.calls.size)
+        // and the renderer's state still reports the PREVIOUS scene (no optimistic lie)
+        assertNotNull(r.currentScene!!.region("t"))
+        assertNull(r.currentScene!!.region("l"))
     }
 }

@@ -137,15 +137,17 @@ class G2Renderer(
         val ops = try {
             val o = ArrayList<RenderMsg>()
             for (f in prelude) o += RenderMsg(listOf(f))
-            o += RenderMsg(DisplayProto.frame(
-                nextSeq(),
-                DisplayProto.launchPayload(
-                    nextMsgId(), appToken,
-                    scene.textRegions().map { textContainer(scene, it) },
-                    scene.imageRegions().map { imageContainer(it) },
-                    scene.listRegions().map { listContainer(scene, it) },
-                ),
-            ))
+            val payload = DisplayProto.launchPayload(
+                nextMsgId(), appToken,
+                scene.textRegions().map { textContainer(scene, it) },
+                scene.imageRegions().map { imageContainer(it) },
+                scene.listRegions().map { listContainer(scene, it) },
+            )
+            if (payload.size > MAX_LAYOUT_PAYLOAD_BYTES) {
+                diag("launch REJECTED — frame ${payload.size} B exceeds the ~$MAX_LAYOUT_PAYLOAD_BYTES B multi-packet wall (firmware ignores oversize frames)")
+                onComplete(false); return
+            }
+            o += RenderMsg(DisplayProto.frame(nextSeq(), payload))
             o += imageContentOps(scene, scene.imageRegions().map { it.name })
             o
         } catch (e: IllegalArgumentException) {
@@ -178,15 +180,26 @@ class G2Renderer(
         val ops = try {
             val o = ArrayList<RenderMsg>()
             if (d.layoutChanged) {
-                o += RenderMsg(DisplayProto.frame(
-                    nextSeq(),
-                    DisplayProto.layoutPayload(
-                        nextMsgId(),
-                        scene.textRegions().map { textContainer(scene, it) },
-                        scene.imageRegions().map { imageContainer(it) },
-                        scene.listRegions().map { listContainer(scene, it) },
-                    ),
-                ))
+                val layoutMsgId = nextMsgId()
+                val payload = DisplayProto.layoutPayload(
+                    layoutMsgId,
+                    scene.textRegions().map { textContainer(scene, it) },
+                    scene.imageRegions().map { imageContainer(it) },
+                    scene.listRegions().map { listContainer(scene, it) },
+                )
+                // The firmware SILENTLY IGNORES a single message past the multi-packet wall
+                // (hardware 2026-06-10: a 7-packet/1.6 KB Mail rebuild never acked; the
+                // official app never exceeds 4 packets ≈ 900 B). Reject loudly pre-wire.
+                if (payload.size > MAX_LAYOUT_PAYLOAD_BYTES) {
+                    // `current` is untouched at this point — the scene swap happens after
+                    // the ops build, so a rejected scene leaves the prior state truthful.
+                    diag("setScene REJECTED — layout frame ${payload.size} B exceeds the ~$MAX_LAYOUT_PAYLOAD_BYTES B multi-packet wall (firmware ignores oversize frames; trim list items/regions)")
+                    onComplete(false); return
+                }
+                // Ack-gated like image chunks (the official app never overlaps ANY message
+                // with its predecessor's ack, §9) — a missing f1=8 rebuild ack now parks
+                // visibly (and preempt()/abort() release it) instead of silently lying.
+                o += RenderMsg(DisplayProto.frame(nextSeq(), payload), ackMsgId = layoutMsgId)
                 o += imageContentOps(scene, scene.imageRegions().map { it.name })
             } else {
                 // Text before images: the cheap chrome updates (title/status/tabs, ~62 ms
@@ -211,14 +224,36 @@ class G2Renderer(
     }
 
     /** Request preemption of the in-flight render op (a NEWER scene supersedes it). The
-     *  current region's chunk chain still completes (never interrupt a mid-image transfer);
-     *  messages for regions not yet started are skipped, their content rolled back from
-     *  [current] so the superseding setScene's diff re-sends whatever the glasses never got.
-     *  No-op when nothing is in flight. */
+     *  current region's chunk chain still completes when actively writing (never interrupt
+     *  a mid-image transfer); messages for regions not yet started are skipped, and a job
+     *  PARKED on a never-arriving ack (the firmware silently ignoring a frame — observed
+     *  with the oversize Mail rebuild) is released immediately. Rolled-back regions re-send
+     *  via the superseding scene's diff. No-op when nothing is in flight. */
     fun preempt() {
         preemptRequested = true
-        // If the op is parked on an image ack, the resume path checks the flag; if it's
-        // between paced packets, the next sendMessage boundary checks it. Nothing to wake.
+        // Release a parked ack-wait so a frame the firmware ignored can't wedge the pump —
+        // the release path rolls back undelivered regions before completing the job.
+        val resume = synchronized(lock) {
+            ackWaitMsgId = null
+            ackWaitResume.also { ackWaitResume = null }
+        }
+        resume?.invoke(false)
+    }
+
+    /** Mark a failing job's undelivered tail as NOT on the glasses, so the next diff
+     *  re-sends it (no optimistic lies in [current] / the mirror). [fromIndex] = the first
+     *  message whose delivery is unknown/failed. An undelivered LAYOUT frame rolls all the
+     *  way back to the job's previous scene (the region set on glass never changed). */
+    private fun failJob(job: SendJob, fromIndex: Int, reason: String) {
+        if (job.sceneRef == null) return        // launch/single-op jobs: recovery owns these
+        val undelivered = job.msgs.drop(fromIndex)
+        if (undelivered.isEmpty()) return
+        val names = undelivered.mapNotNull { it.regionName }.distinct()
+        val layoutUndelivered = undelivered.any { it.regionName == null }
+        synchronized(lock) {
+            current = if (layoutUndelivered) job.prevScene else current?.withoutContent(names)
+        }
+        diag("render ${job.label}: $reason — rolled back ${if (layoutUndelivered) "to the previous scene (layout undelivered)" else "regions $names"}")
     }
 
     /** Update a single text region by name (cheap f1=5). Loud-fails if the region is unknown
@@ -347,11 +382,7 @@ class G2Renderer(
         if (i > 0 && preemptRequested && job.sceneRef != null) {
             val msg = msgs[i]
             if (msg.regionName != null && msg.regionName != msgs[i - 1].regionName) {
-                val skipped = msgs.drop(i).mapNotNull { it.regionName }.distinct()
-                synchronized(lock) {
-                    if (current === job.sceneRef) current = job.sceneRef.withoutContent(skipped)
-                }
-                diag("render $label: PREEMPTED at msg ${i + 1}/${msgs.size} — regions $skipped deferred to the next diff")
+                failJob(job, i, "PREEMPTED at msg ${i + 1}/${msgs.size}")
                 job.onComplete(false)
                 return
             }
@@ -371,6 +402,7 @@ class G2Renderer(
                 // Abort on a write failure rather than pushing the remaining chunks into a
                 // possibly-dying session (coordinated with the queueWrites BLE-1 fix).
                 diag("render $label#${i + 1}: WRITE FAILED — aborting ${msgs.size - i - 1} remaining message(s)")
+                failJob(job, i, "write failed at msg ${i + 1}")
                 job.onComplete(false)
                 return@write
             }
@@ -378,10 +410,16 @@ class G2Renderer(
             if (ackId == null) {
                 sendMessage(job, i + 1)
             } else {
-                // Ack-gate: hold the next chunk until this one's e0-00 ack (or abort()).
+                // Ack-gate: hold the next message until this one's e0-00 ack — released
+                // early by abort() (teardown/recovery) or preempt() (superseding scene /
+                // a frame the firmware silently ignored, e.g. past the multi-packet wall).
                 awaitImageAck(ackId) { acked ->
                     if (acked) sendMessage(job, i + 1)
-                    else { diag("render $label#${i + 1}: ack-wait released by abort — stopping"); job.onComplete(false) }
+                    else {
+                        diag("render $label#${i + 1}: ack-wait released (abort/preempt) — stopping")
+                        failJob(job, i, "ack never arrived for msg ${i + 1}")
+                        job.onComplete(false)
+                    }
                 }
             }
         }
@@ -462,6 +500,12 @@ class G2Renderer(
         const val MAX_CONTAINERS = 12           // SDK total-container cap (§7)
         const val MAX_LIST_ITEMS = 20           // SDK list cap (§6.1 proved exactly 20)
         const val MAX_LIST_ITEM_CHARS = 64      // SDK item-name cap (MAX_ITEM_NAME_LENGTH)
+        /** Single-message multi-packet wall: the firmware SILENTLY ignores one e0-20
+         *  message past ~4-5 AA packets. Hardware 2026-06-10: a 7-packet (~1.6 KB) Mail
+         *  rebuild never acked (link alive, keepalives fine); official app max observed =
+         *  4 packets ≈ 900 B; the 83-entry directory list hung the HUD the same way
+         *  (g2code era). 1000 B ≈ 5 packets — conservative middle; tune on hardware. */
+        const val MAX_LAYOUT_PAYLOAD_BYTES = 1000
         const val MAX_IMAGE_W = 288             // proven-safe per-region size; a region ≥384×192 drops the BLE link
         const val MAX_IMAGE_H = 129
         const val FRAGMENT_PACE_MS = 12L    // between AA fragments WITHIN one message (chunk)

@@ -112,6 +112,13 @@ Deferred: SMS (needs phone-side bridge), Settings.
 
 ## 6. Costs / diff strategy (why the design looks like this)
 
+- **THE MULTI-PACKET WALL (hardware 2026-06-10):** the firmware SILENTLY ignores a single
+  e0-20 message past ~4-5 AA packets (~1000 B) — no ack, no error, link stays alive (Mail's
+  7-packet rebuild proved it; the 83-entry directory list hung the same way in g2code).
+  Defenses: browse pages are 14 rows × ≤40 UTF-8-byte labels (~880 B frames); the client
+  hard-rejects layout/launch frames > 1000 B (loud); layout frames are ACK-GATED so a
+  silently-ignored frame parks visibly and `preempt()`/Reload releases + rolls it back.
+
 - Text update ≈ 62 ms ack; list/layout rebuild ≈ 86 ms; image tile ≈ 1 s (ack-gated).
 - **Menu items changing forces an f1=7 rebuild** (wire constraint). G2Renderer currently
   re-pushes ALL image content on layout change → a menu swap on a tile window costs ~4 s.

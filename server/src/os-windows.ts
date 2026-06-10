@@ -44,11 +44,15 @@ function cycleNext<T>(list: readonly T[], current: T): T {
   return list[i === -1 ? 0 : (i + 1) % list.length]
 }
 
-/** Rows per browse page. Budget against the HARD 20-item SDK cap
- *  (G2_BLE_PROTOCOL.md §6.1 proved exactly 20): compose injects 'Reload' at
- *  index 0, plus up to prev+more nav rows → 1 + 1 + 17 + 1 = 20. (The first
- *  cut put 18 here and Mail's extra row hit 21 — review 2026-06-10.) */
-const BROWSE_PAGE = 17
+/** Rows per browse page. TWO budgets bound this:
+ *  - the 20-item SDK cap (§6.1): Reload + prev + 14 + more = 17 ≤ 20 ✓
+ *  - the single-message MULTI-PACKET WALL: a rebuild frame over ~4-5 AA packets
+ *    (~1000 B) is SILENTLY IGNORED by the firmware (hardware 2026-06-10: Mail's
+ *    7-packet rebuild never acked; same wall that hung the 83-entry directory
+ *    list in the g2code era). 14 rows × ≤40 B (compose clamps browse rows to 40
+ *    UTF-8 bytes) + nav rows + chrome ≈ ~880 B — comfortably under the client's
+ *    1000 B hard cap (which loud-rejects anything that still slips through). */
+const BROWSE_PAGE = 14
 const MORE_ROW = '— more —'
 const PREV_ROW = '— prev —'
 /** Files window head-preview bound (event-loop-blocking read guard). */

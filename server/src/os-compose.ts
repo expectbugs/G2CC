@@ -67,20 +67,24 @@ export function fwTextWidth(s: string): number {
  *  windows never see the row. */
 export const BROWSE_RELOAD_ROW = 'Reload'
 
-/** Clamp a native-list label to the SDK item-name cap (64), measured in UTF-8
- *  BYTES — the firmware's "64" was proven with ASCII names, so the byte
- *  interpretation is the safe one for `●`/`—`/accents (≤4 B/char). This is a
- *  NAVIGATIONAL summary clamp (the full content is always reachable in the
- *  row's read view) — not content truncation. Logged so it never happens
- *  silently. */
-function clampLabel(s: string, what: string): string {
-  if (Buffer.byteLength(s, 'utf8') <= MAX_ITEM_NAME_LENGTH) return s
+/** Browse rows clamp tighter than the 64-byte SDK name cap: 16 rows/page must
+ *  keep the whole rebuild frame under the firmware's single-message
+ *  multi-packet wall (~1000 B — hardware 2026-06-10: Mail's 7-packet rebuild
+ *  was silently ignored). 16 × 40 B + chrome ≈ 4-5 AA packets. */
+export const BROWSE_ROW_MAX_BYTES = 40
+
+/** Clamp a native-list label to [maxBytes] of UTF-8 — the firmware caps were
+ *  proven with ASCII names, so bytes is the safe measure for `●`/`—`/accents.
+ *  This is a NAVIGATIONAL summary clamp (the full content is always reachable
+ *  in the row's read view) — not content truncation. Logged, never silent. */
+function clampLabel(s: string, what: string, maxBytes: number = MAX_ITEM_NAME_LENGTH): string {
+  if (Buffer.byteLength(s, 'utf8') <= maxBytes) return s
   let out = ''
   for (const ch of s) {   // iterate code points so we never split a glyph
-    if (Buffer.byteLength(out + ch, 'utf8') > MAX_ITEM_NAME_LENGTH - 3) break   // '…' = 3 bytes
+    if (Buffer.byteLength(out + ch, 'utf8') > maxBytes - 3) break   // '…' = 3 bytes
     out += ch
   }
-  console.warn(`[os-compose] ${what} label clamped to ${MAX_ITEM_NAME_LENGTH} UTF-8 bytes: "${s.slice(0, 40)}…"`)
+  console.warn(`[os-compose] ${what} label clamped to ${maxBytes} UTF-8 bytes: "${s.slice(0, 40)}…"`)
   return out + '…'
 }
 
@@ -136,7 +140,7 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
       })
     })
   } else if (view.mode === 'browse') {
-    const items = (view.items ?? []).map((s) => clampLabel(s, 'browse'))
+    const items = (view.items ?? []).map((s) => clampLabel(s, 'browse', BROWSE_ROW_MAX_BYTES))
     // Injected Reload at index 0 (see BROWSE_RELOAD_ROW). An empty window list
     // still composes (Reload-only) instead of throwing the screen away.
     regions.push({
