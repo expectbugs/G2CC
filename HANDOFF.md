@@ -14,11 +14,15 @@ design**, with a working visual-design loop. In order:
    per-capability frames, sizes, chunking, timings, acks, the container schemas, the input vocab).
    Decoded from the `g2cap` BTSnoop captures in `/tmp/g2cap-cap/` via `scripts/btsnoop_parse.py` +
    `scripts/analyze_g2cap.py`.
-2. **APK v0.8 shipped** (commits `ebbadff` + `4bb93d7`): ack-gated image pacing + corrections from the
-   decode. See `CHANGELOG.md`. **⚠️ One thing needs a hardware check:** the launch token was switched
-   from DocuLens (`11417`) to our own `TOKEN_G2CC` (`10000`) in `render/DisplayProto.kt` — **UNVERIFIED
-   on the direct-BLE path.** If the display won't cold-launch on v0.8, revert that one line to
-   `TOKEN_DOCULENS` and rebuild. (Everything else in v0.8 is inert/correctness.)
+2. **APK v0.8 shipped + HARDWARE-VERIFIED** (commits `ebbadff` + `4bb93d7`): ack-gated image pacing +
+   corrections from the decode. See `CHANGELOG.md`. The launch token was switched from DocuLens
+   (`11417`) to our own **`TOKEN_G2CC` (`10000`)** in `render/DisplayProto.kt` — **confirmed
+   cold-launching on the glasses** (Adam tested v0.8: "everything worked"), so we're cleanly off
+   impersonating DocuLens. (`TOKEN_DOCULENS` stays defined as a one-line fallback.) The v0.8 test also
+   confirmed the ack-gating tradeoff: small Test tiles slightly faster, the big fullscreen 4-tile
+   "Server" menu image *significantly slower* + clock jankier — which is exactly why the DE design
+   below avoids fullscreen images (small dirty-rect tiles + firmware text); fuller speedup waits on the
+   hat (`HAT_BRIDGE_SPEC.md` §13).
 3. **The DE is designed and mocked up** in the EvenHub simulator (see "The DE design" + `docs/SIM_TOOLING.md`).
    Font metrics measured. Next step is building it for real server-side.
 
@@ -52,11 +56,10 @@ bars ≥~38px); **per-tile width caps at 288px** so any content wider than 288 n
 1. **Build the DE for real**: port the mocked layout into the server (`server/src/os-*.ts`) — compose
    the chrome + the canvas→gray4 4-tile content renderer; client renders the Scene + sends input.
    Verify each slice on Adam's glasses.
-2. **Verify the v0.8 `TOKEN_G2CC` launch on hardware** (revert to DocuLens if it doesn't come up).
-3. **The other windows**: Mail/SMS list views (firmware-text rows), Aria, the Main launcher, FS.
-4. **Dispatch target**: ship pointed at vanilla CC; swap to the ARIA swarm's Code specialist over the
+2. **The other windows**: Mail/SMS list views (firmware-text rows), Aria, the Main launcher, FS.
+3. **Dispatch target**: ship pointed at vanilla CC; swap to the ARIA swarm's Code specialist over the
    same WS contract (`g2_custom_app_spec.md` Part A).
-5. The **hat** (`docs/HAT_BRIDGE_SPEC.md`) — and its §13 pacing sweep — once a stable link makes it worth it.
+4. The **hat** (`docs/HAT_BRIDGE_SPEC.md`) — and its §13 pacing sweep — once a stable link makes it worth it.
 
 ## Lessons learned (these stay learned)
 
