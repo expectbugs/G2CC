@@ -1,5 +1,114 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
+---
+
+# ✅ MISSION COMPLETE (2026-06-10): direct-BLE protocol decode + documentation → `docs/G2_BLE_PROTOCOL.md`
+
+**Done.** Both `g2cap` captures (`allbutimages` 06-07, `imagestatus` 06-09) were decoded to the byte
+and millisecond into **`docs/G2_BLE_PROTOCOL.md`** — the canonical official-app wire spec. Read that
+doc; the rest of this section is the mission framing it satisfied. Decode tools now durable in-repo:
+`scripts/btsnoop_parse.py` + `scripts/analyze_g2cap.py` (link-layer/cadence/ack-latency/image-chunk).
+
+**Highlights of what got pinned** (full list in the doc §13): container schemas are now exact (text
+border=`f5/f6/f7/f8`, list item-container=`f11`, image geom=`f1–f6`); **`f11`=`isEventCapture`** (our
+"scroll antenna" IS that field); input vocab mapped to `OsEventTypeList` (tap0/scrollUp1/scrollDn2/
+dbl3/fgEnter4/fgExit5/sysExit7) via the self-documenting breadcrumbs; **`f1=9`=`shutDownPageContainer`**
+(`f11.f1`=exitMode 0=now/1=confirm); **`f1=5` `f3/f4`=contentOffset/contentLength** (partial text);
+keepalive=**5.0 s exactly**, sync=15 s, host pacing is **ack-gated** (0/100 overlap); glasses battery=
+`09-00` **`f12`** (hardware-correlated 90%). Residuals: ring-battery raw bytes (needs a charging toggle
+during capture), input source byte, `e0-02`. — see doc §14.
+
+**Original goal (satisfied).** From the `g2cap` BTSnoop captures, produce **authoritative documentation
+of EXACTLY how the official Even App drives the G2 glasses over direct BLE** — every display + input +
+battery capability, with the **exact official packet timings, sizes, sequences, chunking, and pacing**.
+This is the canonical spec our own app implements against. **Why exactness matters:** deviating from the
+official timings/sizes has repeatedly broken things — link drops (`reason=3`), the msgId byte-overflow
+kill, atomic-burst drops. The doc records the OFFICIAL behavior PRECISELY; *later*, with a rock-solid
+link in our own app, we experiment with tightening.
+
+**Deliverable.** A new `docs/G2_BLE_PROTOCOL.md` (or extend `docs/PROTOCOL_NOTES.md`), structured **by
+capability**, each with: the SDK call that triggers it → the exact wire frame(s) (GATT char, AA header,
+service id, `f1` type, container/field layout) → packet sizes + chunking → **timings** (inter-packet,
+inter-message, keepalive/sync/renewal cadences, from the capture timestamps) → the ack pattern.
+
+## The captures — where + how to get them (VERIFIED 2026-06-10)
+
+Two Android bug reports were emailed to **adam@marzello.net**; they live in the local maildir
+`~/Mail/marzello.net/INBOX/`. Refresh with **`mbsync`** (neomutt config `~/.muttrc`; read with
+`neomutt`). Identify by **Subject**:
+- **`bugreport-all-but-images-…2026-06-07`** (maildir `U=21`) — INPUT / TEXT / UPGRADE / LIST / MIXED.
+- **`bugreport-image+status-…2026-06-09`** (`U=22`) — the IMAGE format sweep + STATUS/battery.
+- (run `mbsync` for any newer "image"-results report Adam sends after 06-10.)
+- *Older `U≤19` reports (Jun 1–3) are PRIOR renderer/harness sessions — incl. the Chess reference `U=19`.*
+
+Extract the `.zip` attachment (Python `email` module), then `unzip` the btsnoop:
+```python
+import email, glob, os
+f = glob.glob(os.path.expanduser('~/Mail/marzello.net/INBOX/*/*U=22:*'))[0]
+m = email.message_from_binary_file(open(f,'rb'))
+for p in m.walk():
+    fn = p.get_filename()
+    if fn and fn.endswith('.zip'): open('/tmp/cap.zip','wb').write(p.get_payload(decode=True))
+# then: unzip -j /tmp/cap.zip 'FS/data/misc/bluetooth/logs/btsnoop_hci.log*' -d /tmp/cap
+```
+**ALREADY EXTRACTED for you:** `/tmp/g2cap-cap/{allbutimages,imagestatus}-btsnoop_hci.log{,.last}`.
+**VERIFIED FULL (not GMS-filtered):** every record `orig_len == incl_len`, 0 filtered. (If a *future*
+capture shows empty service histograms → re-check the gotcha: Dev Options HCI snoop = **Enabled** +
+BT off/on; see memory `btsnoop-capture-gotcha`.)
+
+## Decode toolchain (PROVEN on these captures)
+- **`scripts/btsnoop_parse.py <log>`** — builds the connection map (G2-L=h64, G2-R=h65, R1-ring=h66),
+  the service histogram, and **pretty-prints every `e0-XX` frame with full protobuf field decode**. It
+  fully decoded `imagestatus-btsnoop_hci.log` (launch/keepalive/input/layout/image-push all readable).
+- **GOTCHA — ring-buffer rotation:** each session spans `btsnoop_hci.log` **+** `…log.last`. The parser
+  builds the conn map from CONNECT events; a rotated segment that LACKS them prints EMPTY sections (this
+  is NOT a filtered capture — the data is there). **Use the segment that HAS the connection events**
+  (image+status → the `.log`; all-but-images → the `.log.last`, the 10 MB bulk). Parse BOTH; stitch by
+  timestamp. (`e0-20` frame counts per file are a quick way to find the bulk.)
+- Deep image decoder + Chess reference: `/tmp/g2cc-btsnoop5/decode_display.py`.
+- The `e0-XX` message catalog + container schemas are already in **`docs/PROTOCOL_NOTES.md`** §"EvenHub
+  display rendering" — the mission *extends/confirms* it across every capability, with timings.
+
+## What the captures contain — the `g2cap` capability tour (self-documenting)
+`sdk-demo/` is the demo app (web/TS Even Hub SDK app, served at `http://100.107.139.121:5173`). It's a
+menu → step-through tour; each step's params are baked into **nav labels + container names** so the
+capture is self-labeling. Groups: **INPUT** (tap/scroll/double-tap + R/L/ring source), **TEXT**
+(plain + border/color/radius/padding + container caps), **UPGRADE** (full + partial
+`contentOffset/contentLength`), **LIST** (menu widget + selection), **IMAGE** (BMP4/BMP24/RAW4 format
+sweep), **MIXED+RAMP** (text+list+image; the 12/8/4 caps), **STATUS** (`getDeviceInfo` +
+`onDeviceStatusChanged` → battery glasses/ring), **EXIT** (`shutDownPageContainer`).
+
+## Findings ALREADY CONFIRMED (verify + document precisely; don't re-derive)
+- **Image format = uncompressed 4bpp BMP ("BMP4"), pass-through.** The `f1=3` image-push carries our
+  exact `render/Gray4Bmp.kt` bytes: `424d8627…` (BM + 16-gray palette), `f4`=total **10118**, chunked
+  `f7`=**4096**. **RAW4 (headerless) FAILED on glass** → the BMP header is required. **No PNG on the
+  wire** (raw-gray8 and canvas-PNG both failed at the SDK layer). So `updateImageRawData(<4bpp BMP>)`
+  → wire `f1=3` verbatim. (Exact BMP4-vs-BMP24 winner: confirm from the bytes; BMP4 is decoded above.)
+- **No wire image compression** (memory `g2-no-wire-image-compression`): RLE4 not decoded, `compressMode`
+  (inner f5) ignored — uncompressed only.
+- **The renderer + limits + msgId-1-byte rule + keepalive/sync/renewal cadences** are in
+  `PROTOCOL_NOTES.md` / memories — but the MISSION is to document the **official** numbers straight from
+  these captures (the Even App's actual pacing), per below.
+- **Battery:** the Even App polls the glasses (device-info service); the **ring battery is on the ring's
+  own direct BLE link** (handle 66). Decode the battery bytes; correlate with the % the STATUS group
+  showed on-glass (in the capture's `e0-20` text frames).
+
+## ⏱ TIMINGS — Adam's explicit requirement
+For each capability, extract from the capture **timestamps** and document EXACTLY how the official app
+sends it: inter-packet (AA-fragment) pacing; inter-message pacing; **image chunk size (4096) + inter-
+chunk cadence**; keepalive `f1=12` period (~4–5 s); `80-00` sync_trigger period (~15 s, L/R staggered
+~2 s); the cold-launch re-takeover / renewal period (~80–120 s); MTU (247), PHY (1M), conn params
+(interval/latency/supervision); and the init prelude order (`81-20` → `04-20` → `0e-20` → `f1=0` launch).
+These official numbers are the **safe envelope** — record them to the ms/byte; tightening is a *later*,
+post-stability experiment.
+
+## Discipline (load-bearing here)
+Compare to the captures, don't theorize (every win came from byte-diffing the official traffic). Ten-
+explanations rule on any mystery. Verify `orig_len==incl_len` before trusting a capture. Only Adam's
+eyes verify paint. Don't modify `g2code`/`g2aria` (read/BTSnoop only).
+
+---
+
 **Last updated 2026-06-08.** `OsLayout.OS_VERSION` is at **0.7** (the recovery refactor — hardware-verified). Read this first, then
 **`docs/GLASSES_OS.md`** (the plan), then **`docs/PROTOCOL_NOTES.md`** (the wire protocol + the
 hardware-confirmed render constraints + the msgId rule). For the latest review status:
