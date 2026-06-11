@@ -343,7 +343,7 @@ export class CCSession extends EventEmitter {
           || (err && typeof err === 'object' && typeof err.message === 'string' ? err.message : undefined)
           || (this._recentEvents.includes('rate_limit_event') ? `${resultSubtype} (a rate_limit_event preceded — likely throttled; retry shortly)` : undefined)
           || `CC ${resultSubtype || 'error'}`
-        console.error(`[cc-session] turn ERROR (${resultSubtype}) cwd=${this.config.projectPath} raw=${JSON.stringify(data).slice(0, 600)}`)
+        console.error(`[cc-session] turn ERROR (${resultSubtype}) cwd=${this.config.projectPath} recent=[${this._recentEvents.join(',')}] raw=${JSON.stringify(data).slice(0, 4000)}`)
         const errText = detail
         this.emit('error', errText)
         this.emit('turn_complete', {

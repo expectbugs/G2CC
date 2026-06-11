@@ -168,6 +168,11 @@ class SessionLevel {
   permDoc: Block[] | null = null
   toolLine = ''
   lastError: string | null = null
+  /** A dictation that arrived while a turn was STREAMING — sending a second
+   *  stdin user message mid-turn kills CC with error_during_execution
+   *  (hardware 2026-06-11: Adam asked again while Aria was thinking). Queued
+   *  and fired on turn_complete; Interrupt/death drops it loudly. */
+  pendingPrompt: string | null = null
   private opening: Promise<void> | null = null   // concurrent-open guard (double-tap during spawn)
   /** Entry ids THIS level wired. getOrCreateByDirectory returning wired=true
    *  for an id not in here means ANOTHER consumer (the Aria window / legacy
@@ -266,6 +271,13 @@ class SessionLevel {
             { t: 'heading', text: this.who, meta: info.toolCalls.length ? `${info.toolCalls.length} tools` : 'done' },
             ...parseMarkdown(info.text || '(empty response)'),
           ])
+      // Fire the prompt that queued during this turn (mid-stream sends kill CC).
+      const queued = this.pendingPrompt
+      if (queued) {
+        this.pendingPrompt = null
+        this.ctx.log(`[os] ${this.who}: sending queued prompt: "${queued.slice(0, 80)}"`)
+        void this.prompt(queued)
+      }
     })
     session.on('permission_request', (info: { requestId: string; rawEvent: Record<string, unknown> }) => {
       if (stale()) return
@@ -277,12 +289,14 @@ class SessionLevel {
       if (stale()) return
       this.lastError = message
       this.busy = false
+      this.dropQueued('turn error')
       this.requestRender()
     })
     session.on('process_died', (code: number | null) => {
       if (stale()) return
       this.lastError = `CC process died (code=${code}) — Options → New session`
       this.busy = false
+      this.dropQueued('process died')
       this.requestRender()
     })
   }
@@ -335,7 +349,7 @@ class SessionLevel {
     const state = this.pendingPermissionId ? ' · permission'
       : this.listening ? ' · listening'
       : this.transcribing ? ' · transcribing'
-      : this.busy ? (this.toolLine ? ` · ${this.toolLine}` : ' · working')
+      : this.busy ? `${this.toolLine ? ` · ${this.toolLine}` : ' · working'}${this.pendingPrompt ? ' +queued' : ''}`
       : this.lastError ? ' · ERROR' : ''   // stale tiles + a buried error must still show
     return {
       mode: 'tiles',
@@ -410,6 +424,10 @@ class SessionLevel {
       case 'Interrupt': {
         this.entry?.session.interrupt()
         this.busy = false
+        if (this.pendingPrompt) {
+          this.ctx.log(`[os] ${this.who}: Interrupt — dropping queued prompt "${this.pendingPrompt.slice(0, 60)}"`)
+          this.pendingPrompt = null
+        }
         this.requestRender()
         return null
       }
@@ -446,7 +464,16 @@ class SessionLevel {
    *  banner (the WM separately re-takes the display and recomposes). */
   async onReload(): Promise<void> {
     this.stopDictation('reload')
+    this.dropQueued('reload')
     this.lastError = null
+  }
+
+  /** Drop a queued prompt LOUDLY (never fire it into a changed/recovered context). */
+  private dropQueued(why: string): void {
+    if (this.pendingPrompt) {
+      this.ctx.log(`[os] ${this.who}: dropping queued prompt (${why}): "${this.pendingPrompt.slice(0, 60)}"`)
+      this.pendingPrompt = null
+    }
   }
 
   /** Kill any active dictation (mic OFF) — called on Cancel-equivalents: window
@@ -481,6 +508,15 @@ class SessionLevel {
   }
 
   async prompt(text: string): Promise<void> {
+    // NEVER write a second user message while a turn is streaming — it kills CC
+    // (error_during_execution; hardware 2026-06-11). Queue ONE; newest wins.
+    if (this.busy && this.entry?.session.isAlive()) {
+      if (this.pendingPrompt) this.ctx.log(`[os] ${this.who}: replacing queued prompt "${this.pendingPrompt.slice(0, 60)}"`)
+      this.pendingPrompt = text
+      this.ctx.log(`[os] ${this.who}: turn in flight — prompt QUEUED: "${text.slice(0, 80)}"`)
+      this.requestRender()   // title shows '· queued'
+      return
+    }
     if (!this.entry || !this.entry.session.isAlive()) {
       // Auto-revive: a closed (Aria 'Close session') or died subprocess respawns on
       // the next prompt — resumes the saved conversation via sessions.json when one
