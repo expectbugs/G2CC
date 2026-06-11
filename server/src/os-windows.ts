@@ -35,7 +35,10 @@ const ARIA_CWD = '/home/user/aria'
 const ARIA_PROMPT_PATH = '/home/user/G2CC/server/prompts/aria-g2.md'
 const FILES_ROOT = '/home/user'
 
-const MODELS = ['opus', 'sonnet', 'haiku']
+// Model aliases the Options row cycles through. 'fable' verified against
+// `claude --help` 2026-06-11 ("Provide an alias for the latest model (e.g.
+// 'fable', 'opus', or 'sonnet')").
+const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 type Effort = (typeof EFFORTS)[number]
 
@@ -468,6 +471,19 @@ class SessionLevel {
 
   async prompt(text: string): Promise<void> {
     if (!this.entry || !this.entry.session.isAlive()) {
+      // Auto-revive: a closed (Aria 'Close session') or died subprocess respawns on
+      // the next prompt — resumes the saved conversation via sessions.json when one
+      // exists. Loud-fails into lastError if the spawn itself fails.
+      this.ctx.log(`[os] ${this.who}: no live session at prompt time — auto-reviving`)
+      try {
+        await this.open()
+      } catch (e) {
+        this.lastError = `session revive failed: ${(e as Error).message}`
+        this.requestRender()
+        return
+      }
+    }
+    if (!this.entry || !this.entry.session.isAlive()) {
       this.lastError = 'no live CC session — Options → New session'
       this.requestRender()
       return
@@ -772,7 +788,7 @@ class AriaWindow implements OsWindow {
       effort: 'max',
       systemPrompt: prompt,
     }, requestRender, this.label, 'Ask')   // Aria's dictation verb
-    this.options = new SessionOptions(() => this.session, {}, requestRender, ctx.log)
+    this.options = new SessionOptions(() => this.session, { closeLabel: 'Close session' }, requestRender, ctx.log)
   }
 
   summary(): string {
@@ -813,7 +829,21 @@ class AriaWindow implements OsWindow {
 
   async onBrowseSelect(index: number): Promise<void> {
     if (this.level !== 'options') { this.log(`[os] aria: browse select ${index} outside options — ignored`); return }
-    await this.options.onSelect(index)   // no close row for Aria
+    const r = await this.options.onSelect(index)
+    if (r === 'close') {
+      // Close = kill the subprocess (frees the pool slot) but stay in the window;
+      // the next Ask auto-revives (resuming the saved conversation), and Options →
+      // New session starts clean. `opened` stays true so a mere window visit
+      // doesn't silently respawn what the user just closed. Level flips BEFORE the
+      // doc render so the intermediate render doesn't flash the options view.
+      this.session.close()
+      this.level = 'session'
+      this.focus = 'content'
+      await this.session.setDoc([
+        { t: 'heading', text: this.label, meta: 'closed' },
+        { t: 'para', text: 'Session closed. Ask to revive it, or Options → New session for a fresh one.' },
+      ])
+    }
   }
 
   async onBack(): Promise<boolean> {
