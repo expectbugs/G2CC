@@ -131,7 +131,10 @@ class ConnectionManager(
         }
     }
 
+    @Synchronized
     fun connect() {
+        // @Synchronized (review 2026-06-11): Job.cancel() can't abort this non-suspending
+        // body, so reconnectJob and forceReconnect could interleave inside it.
         // Bug fix #5: don't reconnect if we already have a healthy authed
         // socket. (g2aria's TS check on `readyState === OPEN` doesn't translate
         // directly — OkHttp's WebSocket doesn't expose readyState. Use our
@@ -154,8 +157,10 @@ class ConnectionManager(
             Log.w(TAG, "connect: no endpoints configured")
             return
         }
-        wsGen.incrementAndGet()
-        val myGen = wsGen.get()
+        // Single atomic op (review 2026-06-11): increment-then-get let two concurrent
+        // connect() calls (reconnectJob vs forceReconnect) both read the same gen — two
+        // live sockets, both listeners "current", every server message delivered twice.
+        val myGen = wsGen.incrementAndGet()
         val request = Request.Builder().url(endpoint).build()
         val listener = G2CCListener(myGen)
         Log.i(TAG, "connect[$myGen] -> $endpoint")
@@ -388,9 +393,13 @@ class ConnectionManager(
             // 4th-pass review LOW: snap endpoints + idx under the lock so
             // a concurrent setEndpoints can't shrink the list mid-modulo.
             val completedFullRotation = synchronized(endpointsLock) {
-                if (!wasConnected && endpoints.size > 1) {
+                if (!wasConnected) {
+                    // Count EVERY failed attempt — gating the counter on size>1 meant a
+                    // single-endpoint config never completed a "rotation", so reconnects
+                    // stayed immediate=true forever: a zero-backoff hot loop for the whole
+                    // server outage (review 2026-06-11). Only the idx rotation needs >1.
                     endpointsTriedSinceSuccess++
-                    currentEndpointIdx = (currentEndpointIdx + 1) % endpoints.size
+                    if (endpoints.size > 1) currentEndpointIdx = (currentEndpointIdx + 1) % endpoints.size
                 }
                 !wasConnected && endpointsTriedSinceSuccess >= endpoints.size
             }
@@ -409,10 +418,9 @@ class ConnectionManager(
             attemptCount++
             onDisconnected()
             val moreToTry = synchronized(endpointsLock) {
-                if (endpoints.size > 1) {
-                    endpointsTriedSinceSuccess++
-                    currentEndpointIdx = (currentEndpointIdx + 1) % endpoints.size
-                }
+                // Unconditional count — see onClosed (single-endpoint zero-backoff storm).
+                endpointsTriedSinceSuccess++
+                if (endpoints.size > 1) currentEndpointIdx = (currentEndpointIdx + 1) % endpoints.size
                 endpointsTriedSinceSuccess < endpoints.size
             }
             scheduleReconnect(immediate = moreToTry)

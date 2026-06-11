@@ -29,6 +29,8 @@ fun interface DisplaySink {
 class G2Renderer(
     private val sink: DisplaySink,
     private val diag: (String) -> Unit = {},
+    /** Injectable for tests (park age / grace decisions); production = wall clock. */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val lock = Any()
     private var seq = SEQ_START
@@ -54,14 +56,25 @@ class G2Renderer(
          *  rolls `current` back for regions whose content never went out. */
         val sceneRef: Scene? = null,
         val prevScene: Scene? = null,
+        /** abort() fences: a job whose epoch predates the current one stops at the next
+         *  REGION boundary (review 2026-06-11 — replaces the shared `aborting` flag that
+         *  a follow-up enqueue could reset while the doomed job was still in flight). */
+        val epoch: Int = 0,
+        /** preempt() fences: a preempt that fired AFTER this job was enqueued targets it;
+         *  jobs enqueued after the preempt are immune (the old single boolean was cleared
+         *  on dequeue, losing preempts aimed at QUEUED stale scenes). */
+        val preemptSnap: Int = 0,
     )
     private val sendQueue = ArrayDeque<SendJob>()
     private var sending = false
-    // Preemption (menu taps must not wait ~4 s behind a 4-tile push): when set, the in-flight
-    // job stops at the next REGION boundary — the current region's chunk chain always finishes
-    // (an interrupted mid-image transfer is unprobed firmware territory), remaining regions'
-    // messages are skipped and their content rolled back so the next diff re-sends them.
-    @Volatile private var preemptRequested = false
+    // Preemption (menu taps must not wait ~4 s behind a 4-tile push): bumping preemptSeq
+    // makes every job with an older snapshot stop at its next REGION boundary — the current
+    // region's chunk chain always finishes (an interrupted mid-image transfer is unprobed
+    // firmware territory), remaining regions' messages are skipped and their content rolled
+    // back so the next diff re-sends them.
+    private var preemptSeq = 0
+    // abort() epoch — see SendJob.epoch.
+    private var epoch = 0
 
     // Image ack-gate. A sent image chunk parks its continuation here until its `e0-00` ack
     // (onImageAck) — or until abort() releases it (teardown/recovery; the watchdog is the external
@@ -73,8 +86,9 @@ class G2Renderer(
     // transfer and the follow-up rebuild lands on the half-fed image — HARDWARE 2026-06-10 r4:
     // that CRASHED THE GLASSES OUTRIGHT (Main→Aria tap mid-tile-load).
     private var ackWaitIsLayout = false
+    private var ackWaitSince = 0L            // when the current park was entered (grace/staleness checks)
     private var lastAckedMsgId: Int = -1     // most recent e0-00 ack msgId (handles ack-arrives-before-park)
-    private var aborting = false             // set by abort(); cleared by the next enqueueSend
+    private var aborting = false             // set by FORCE abort (teardown); cleared by the next enqueueSend
 
     /** The scene last handed to the glasses (after the in-flight write was issued). */
     val currentScene: Scene? get() = synchronized(lock) { current }
@@ -99,6 +113,9 @@ class G2Renderer(
         // covered by the injected clock; this guards the harness/direct-renderer paths.
         if (texts.isEmpty())
             return "scene has no text region — image-only layouts ack but never paint (§7)"
+        scene.regions.firstOrNull { it.name.toByteArray(Charsets.UTF_8).size > 16 }?.let {
+            return "region name '${it.name}' exceeds the 16-byte f10 cap (§6.1)"
+        }
         val imgs = scene.imageRegions()
         if (imgs.size > MAX_IMAGE_REGIONS)
             return "${imgs.size} image regions exceeds the max $MAX_IMAGE_REGIONS (extras silently drop)"
@@ -115,8 +132,11 @@ class G2Renderer(
             val c = scene.content[r.name] as? Content.ListItems ?: continue
             if (c.items.size > MAX_LIST_ITEMS)
                 return "list '${r.name}' has ${c.items.size} items — SDK max is $MAX_LIST_ITEMS"
-            c.items.firstOrNull { it.length > MAX_LIST_ITEM_CHARS }?.let {
-                return "list '${r.name}' item exceeds $MAX_LIST_ITEM_CHARS chars: \"${it.take(70)}\""
+            // UTF-8 BYTES, not UTF-16 chars — the wire encodes UTF-8 and the firmware
+            // caps were proven with ASCII; 40 three-byte glyphs are 120 wire bytes
+            // (review 2026-06-11; mirrors the server's Buffer.byteLength clamp).
+            c.items.firstOrNull { it.toByteArray(Charsets.UTF_8).size > MAX_LIST_ITEM_CHARS }?.let {
+                return "list '${r.name}' item exceeds $MAX_LIST_ITEM_CHARS UTF-8 bytes: \"${it.take(70)}\""
             }
         }
         // Exactly one input-capture region per page (text f11 / list f12 — wire rule §6.1).
@@ -155,10 +175,12 @@ class G2Renderer(
             o += RenderMsg(DisplayProto.frame(nextSeq(), payload))
             o += imageContentOps(scene, scene.imageRegions().map { it.name })
             o
-        } catch (e: IllegalArgumentException) {
-            // Bad region content (wrong-size/garbage image, list without items, …) loud-fails
-            // gracefully (matches setImage) instead of throwing out to a BLE callback.
-            diag("launch: bad region content — ${e.message}")
+        } catch (e: Exception) {
+            // Bad region content (wrong-size/garbage/corrupt image, list without items, …)
+            // loud-fails gracefully instead of crashing the process — a corrupt BMP's
+            // ArrayIndexOutOfBounds escaped the old IllegalArgumentException-only catch
+            // (review 2026-06-11).
+            diag("launch: bad region content — ${e::class.simpleName}: ${e.message}")
             onComplete(false); return
         }
         synchronized(lock) { current = scene }
@@ -220,8 +242,9 @@ class G2Renderer(
                 }
             }
             o
-        } catch (e: IllegalArgumentException) {
-            diag("setScene: bad region content — ${e.message}")
+        } catch (e: Exception) {
+            // Exception (not just IAE): see launch() — corrupt-content AIOOBE must not crash.
+            diag("setScene: bad region content — ${e::class.simpleName}: ${e.message}")
             onComplete(false); return
         }
         val prev2 = synchronized(lock) { current.also { current = scene } }
@@ -232,14 +255,21 @@ class G2Renderer(
      *  in-flight region's chunk chain ALWAYS completes — its image park resolves on the
      *  ~176 ms ack and the boundary check then skips the remaining regions. NEVER abandon a
      *  mid-image transfer: releasing an image park + rebuilding on the half-fed transfer
-     *  CRASHED THE GLASSES (hardware 2026-06-10 r4). Only a parked LAYOUT ack is released
-     *  immediately — that park only persists when the firmware silently ignored the frame
-     *  (the multi-packet wall), where nothing is mid-transfer and the rollback is clean.
-     *  Rolled-back regions re-send via the superseding scene's diff. */
+     *  CRASHED THE GLASSES (hardware 2026-06-10 r4).
+     *
+     *  A parked LAYOUT ack is released only when the park is OLDER than
+     *  LAYOUT_PARK_GRACE_MS: every ack-gated layout frame parks for its normal
+     *  ~40-160 ms ack window, and releasing those healthy parks made every fast
+     *  antenna-scroll send a second f1=7 while the first's ack was outstanding —
+     *  overlapping a predecessor's ack is unprobed firmware territory (§9; review
+     *  2026-06-11). A park past the grace IS the wall-ignore wedge (ack never
+     *  coming) — released + rolled back exactly as before. Rolled-back regions
+     *  re-send via the superseding scene's diff. */
     fun preempt() {
-        preemptRequested = true
         val resume = synchronized(lock) {
-            if (ackWaitResume != null && ackWaitIsLayout) {
+            preemptSeq++
+            if (ackWaitResume != null && ackWaitIsLayout
+                && clock() - ackWaitSince >= LAYOUT_PARK_GRACE_MS) {
                 ackWaitMsgId = null
                 ackWaitResume.also { ackWaitResume = null }
             } else null
@@ -326,8 +356,16 @@ class G2Renderer(
             c.items, c.itemWidth, c.selectBorder, c.eventCapture, r.style)
     }
 
-    private fun textOp(r: Region, c: Content.Text): RenderMsg =
-        RenderMsg(DisplayProto.frame(nextSeq(), DisplayProto.textPayload(nextMsgId(), r.id, r.name, c.text, c.contentOffset, c.contentLength)), regionName = r.name)
+    private fun textOp(r: Region, c: Content.Text): RenderMsg {
+        val payload = DisplayProto.textPayload(nextMsgId(), r.id, r.name, c.text, c.contentOffset, c.contentLength)
+        // The wall applies to EVERY e0-20 message, not just layout frames — an oversize
+        // f1=5 was silently eaten by firmware, marked delivered in `current`, and never
+        // re-sent by any diff: permanent silent divergence (review 2026-06-11).
+        require(payload.size <= MAX_LAYOUT_PAYLOAD_BYTES) {
+            "text update '${r.name}' ${payload.size} B exceeds the ~$MAX_LAYOUT_PAYLOAD_BYTES B multi-packet wall (paginate/trim server-side)"
+        }
+        return RenderMsg(DisplayProto.frame(nextSeq(), payload), regionName = r.name)
+    }
 
     /** Chunk a BMP at MAX_IMAGE_CHUNK and frame each chunk as its own f1=3 message. Each chunk is
      *  ack-gated on its own msgId so the NEXT chunk waits for this one's `e0-00` ack (the official
@@ -380,15 +418,25 @@ class G2Renderer(
         val msgs = job.msgs
         val label = job.label
         if (i >= msgs.size) { job.onComplete(true); return }
-        // Preemption boundary (preempt()): a superseding scene wants the BLE queue. Only
-        // per-region CONTENT messages are skippable (regionName != null — layout/launch
-        // frames always complete), and only at a REGION boundary: the in-flight region's
-        // chunk chain finishes (an interrupted mid-image transfer is unprobed firmware
-        // territory). Skipped regions roll back from `current` BEFORE onComplete fires, so
-        // the superseding setScene's diff (computed after this completes) re-sends them.
-        if (i > 0 && preemptRequested && job.sceneRef != null) {
+        // Fences (preempt()/abort()): a superseding scene or an abort wants the BLE queue.
+        // Checks happen only at a REGION boundary: the in-flight region's chunk chain
+        // finishes first (an interrupted mid-image transfer is unprobed firmware
+        // territory). Preemption skips only per-region CONTENT messages of scene jobs;
+        // an abort fence (stale epoch) additionally stops BEFORE an unsent layout frame.
+        // Skipped regions roll back from `current` BEFORE onComplete fires, so the
+        // superseding setScene's diff (computed after this completes) re-sends them.
+        if (i > 0) {
             val msg = msgs[i]
-            if (msg.regionName != null && msg.regionName != msgs[i - 1].regionName) {
+            val atBoundary = msg.regionName == null || msg.regionName != msgs[i - 1].regionName
+            val (stale, preempted) = synchronized(lock) {
+                (job.epoch != epoch) to (preemptSeq > job.preemptSnap && job.sceneRef != null)
+            }
+            if (atBoundary && stale) {
+                failJob(job, i, "ABORTED at msg ${i + 1}/${msgs.size}")
+                job.onComplete(false)
+                return
+            }
+            if (preempted && msg.regionName != null && msg.regionName != msgs[i - 1].regionName) {
                 failJob(job, i, "PREEMPTED at msg ${i + 1}/${msgs.size}")
                 job.onComplete(false)
                 return
@@ -441,7 +489,7 @@ class G2Renderer(
     ) {
         synchronized(lock) {
             aborting = false                       // a fresh op means we're live again (post-recovery)
-            sendQueue.addLast(SendJob(msgs, label, onComplete, sceneRef, prevScene))
+            sendQueue.addLast(SendJob(msgs, label, onComplete, sceneRef, prevScene, epoch, preemptSeq))
             if (sending) return
             sending = true
         }
@@ -452,11 +500,11 @@ class G2Renderer(
         val job = synchronized(lock) {
             if (sendQueue.isEmpty()) { sending = false; null } else sendQueue.removeFirst()
         } ?: return
-        preemptRequested = false   // preemption targets the job in flight WHEN preempt() fired
+        // (No flag reset here — preempt/abort fencing is per-job via epoch/preemptSnap.)
         val wrapped = SendJob(job.msgs, job.label, { ok ->
             job.onComplete(ok)
             pumpNext()
-        }, job.sceneRef, job.prevScene)
+        }, job.sceneRef, job.prevScene, job.epoch, job.preemptSnap)
         sendOps(wrapped)
     }
 
@@ -472,17 +520,45 @@ class G2Renderer(
         resume?.invoke(true)
     }
 
-    /** Release any parked image-chunk send (failing it) and drop queued ops — call on teardown /
-     *  before recovery so a never-arriving ack can't wedge the render pump. The watchdog supervises
-     *  the session externally; this is the local unblock. Safe when nothing is parked. */
-    fun abort(reason: String) {
+    /** Stop current work and drop queued ops — display_reload recovery and teardown.
+     *
+     *  Review 2026-06-11 (two finders each): (1) cleared queue jobs MUST fire their
+     *  onComplete(false) — the render pump awaits exactly that callback, and dropping it
+     *  wedged server mode permanently after a Reload that raced a queued scene; their
+     *  rollback runs newest-first so `current` unwinds truthfully. (2) a HEALTHY parked
+     *  image chunk (normal ~176 ms ack window) is NOT released on a live link — releasing
+     *  it abandons the chunk chain mid-image and the follow-up COLD_INIT rebuild lands on
+     *  the half-fed transfer: the exact r4 glasses-crash recipe, triggered by the very
+     *  Reload the user presses when a multi-second image push feels stuck. The epoch
+     *  fence stops the in-flight job at its next REGION boundary instead. A park older
+     *  than IMAGE_PARK_STALE_MS is the genuine wedge (ack never coming) and is released
+     *  exactly as before. [force] (teardown — the BLE session dies right after) releases
+     *  everything unconditionally. */
+    fun abort(reason: String, force: Boolean = false) {
+        var dropped: List<SendJob> = emptyList()
+        var keptParkAgeMs = -1L
         val resume = synchronized(lock) {
-            aborting = true
+            epoch++
+            if (force) aborting = true
+            dropped = sendQueue.toList()
             sendQueue.clear()
-            ackWaitMsgId = null
-            ackWaitResume.also { ackWaitResume = null }
+            val parkAge = clock() - ackWaitSince
+            if (ackWaitResume != null && (force || ackWaitIsLayout || parkAge >= IMAGE_PARK_STALE_MS)) {
+                ackWaitMsgId = null
+                ackWaitResume.also { ackWaitResume = null }
+            } else {
+                if (ackWaitResume != null) keptParkAgeMs = parkAge
+                null
+            }
         }
-        if (resume != null) diag("renderer abort ($reason): releasing parked image-chunk send")
+        // Newest-first so each rollback lands on the scene the PREVIOUS job had installed.
+        for (job in dropped.asReversed()) {
+            failJob(job, 0, "aborted ($reason)")
+            job.onComplete(false)
+        }
+        if (dropped.isNotEmpty()) diag("renderer abort ($reason): dropped ${dropped.size} queued op(s)")
+        if (resume != null) diag("renderer abort ($reason): releasing parked send")
+        if (keptParkAgeMs >= 0) diag("renderer abort ($reason): image park only ${keptParkAgeMs}ms old — letting its region finish (epoch fence stops the job at the boundary)")
         resume?.invoke(false)
     }
 
@@ -495,7 +571,7 @@ class G2Renderer(
             when {
                 aborting -> fire = false                   // teardown underway → don't park, fail fast
                 lastAckedMsgId == msgId -> fire = true      // ack already arrived → proceed now
-                else -> { ackWaitMsgId = msgId; ackWaitResume = resume; ackWaitIsLayout = isLayout }
+                else -> { ackWaitMsgId = msgId; ackWaitResume = resume; ackWaitIsLayout = isLayout; ackWaitSince = clock() }
             }
         }
         fire?.let { resume(it) }
@@ -517,6 +593,13 @@ class G2Renderer(
         const val MAX_LAYOUT_PAYLOAD_BYTES = 1000
         const val MAX_IMAGE_W = 288             // proven-safe per-region size; a region ≥384×192 drops the BLE link
         const val MAX_IMAGE_H = 129
+        /** preempt() releases a parked LAYOUT ack only past this age — younger parks are
+         *  the normal 40-160 ms ack window (overlapping them is unprobed); older = the
+         *  wall-ignore wedge. */
+        const val LAYOUT_PARK_GRACE_MS = 500L
+        /** abort() (non-force) releases a parked IMAGE chunk only past this age — younger
+         *  parks are healthy mid-push (release = the r4 crash recipe); older = wedged. */
+        const val IMAGE_PARK_STALE_MS = 3_000L
         const val FRAGMENT_PACE_MS = 12L    // between AA fragments WITHIN one message (chunk)
         const val INTER_MESSAGE_PACE_MS = 100L  // after a NON-ack-gated message (text/layout) — keepalive interleaves here
         // After an image chunk, before its ack-gate. Just a small floor — the real inter-chunk gap

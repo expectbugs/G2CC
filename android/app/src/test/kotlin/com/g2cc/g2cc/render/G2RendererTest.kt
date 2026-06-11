@@ -354,14 +354,63 @@ class G2RendererTest {
     }
 
     @Test
-    fun abort_releasesParkedImageChunk_completesFalse_noHang() {
+    fun abortForce_releasesParkedImageChunk_completesFalse_noHang() {
         val sink = FakeSink()                 // no auto-ack → the first chunk parks until abort
         val r = G2Renderer(sink)
         var done: Boolean? = null
         r.launch(10061, scene { text("s", 0, 0, 576, 28, "x"); image("pic", 0, 28, 200, 100, img(200, 100)) }) { done = it }
         assertNull("parked on the first image ack", done)
-        r.abort("test teardown")              // the watchdog/teardown unblock
+        r.abort("test teardown", force = true)   // teardown: BLE dies next — release everything
         assertEquals("a parked image send is released as a failure, never left hanging", false, done)
+    }
+
+    @Test
+    fun abortLiveLink_keepsYoungImagePark_dropsQueuedOps_fencesAtBoundary() {
+        // display_reload on a LIVE link (review 2026-06-11): a healthy mid-push image
+        // park must NOT be abandoned (the r4 crash recipe) — the queue drops loudly,
+        // the in-flight region finishes on its ack, and the epoch fence stops the job
+        // at the region boundary.
+        val sink = FakeSink()
+        var now = 0L
+        val r = G2Renderer(sink, clock = { now })
+        r.launch(10061, scene { text("s", 0, 0, 576, 28, "x") }) {}
+        sink.calls.clear()
+        val s2 = scene {
+            text("s", 0, 0, 576, 28, "x")
+            image("a", 0, 40, 64, 64, img(64, 64))
+            image("b", 100, 40, 64, 64, img(64, 64))
+        }
+        var done: Boolean? = null
+        r.setScene(s2) { done = it }
+        r.onImageAck(msgIdOf(sink.messages()[0]))    // layout ack → chunk 'a' goes out + parks
+        assertEquals(2, sink.messages().size)
+        var queuedDone: Boolean? = null
+        r.setText("s", "queued-behind") { queuedDone = it }   // queued behind the parked job
+        now = 100                                     // park is 100 ms old — healthy, not wedged
+        r.abort("display_reload")                     // non-force (live link)
+        assertEquals("queued op dropped with onComplete(false), never left hanging", false, queuedDone)
+        assertNull("young image park survives a live-link abort (mid-image crash guard)", done)
+        assertEquals(2, sink.messages().size)
+        // 'a's ack arrives → its chain is complete; the epoch fence stops the job at
+        // the next region boundary — 'b' is never sent on the doomed job.
+        r.onImageAck(msgIdOf(sink.messages()[1]))
+        assertEquals("aborted at the region boundary: b never sent", 2, sink.messages().size)
+        assertEquals("fenced job completes false", false, done)
+    }
+
+    @Test
+    fun abortLiveLink_releasesStaleImagePark() {
+        // A park past IMAGE_PARK_STALE_MS is the genuine wall/wedge case — released
+        // exactly like the old behavior so Reload still recovers a stuck push.
+        val sink = FakeSink()
+        var now = 0L
+        val r = G2Renderer(sink, clock = { now })
+        var done: Boolean? = null
+        r.launch(10061, scene { text("s", 0, 0, 576, 28, "x"); image("pic", 0, 28, 200, 100, img(200, 100)) }) { done = it }
+        assertNull(done)
+        now = G2Renderer.IMAGE_PARK_STALE_MS + 1
+        r.abort("display_reload")
+        assertEquals("stale image park released as a failure", false, done)
     }
 
     // ---- preemption (a superseding scene must not wait behind a multi-tile push) ----
@@ -412,13 +461,39 @@ class G2RendererTest {
     }
 
     @Test
+    fun preempt_keepsYoungLayoutPark_thenBoundarySkipsAfterAck() {
+        // A layout park INSIDE the grace window is the normal 40-160 ms ack round-trip
+        // — releasing it sent overlapping f1=7 rebuilds (unprobed firmware territory;
+        // review 2026-06-11). The preempt waits for the ack, then skips at the boundary.
+        val sink = FakeSink()
+        var now = 0L
+        val r = G2Renderer(sink, clock = { now })
+        r.launch(10061, scene { text("s", 0, 0, 576, 28, "x") }) {}
+        sink.calls.clear()
+        val s2 = scene { text("s", 0, 0, 576, 28, "x"); image("a", 0, 40, 64, 64, img(64, 64)) }
+        var done: Boolean? = null
+        r.setScene(s2) { done = it }
+        assertEquals(1, sink.messages().size)
+        now = 50                                     // park is 50 ms old — healthy ack window
+        r.preempt()
+        assertNull("young layout park NOT released (no overlapping rebuilds)", done)
+        // the ack lands normally → the layout is truthfully on glass; the preempt
+        // fence then skips the image content at the boundary
+        r.onImageAck(msgIdOf(sink.messages()[0]))
+        assertEquals("preempted at the boundary: image content never sent", 1, sink.messages().size)
+        assertEquals(false, done)
+        assertNull("skipped content rolled back: 'a' content reads as undelivered", r.currentScene!!.content["a"])
+    }
+
+    @Test
     fun preempt_releasesParkedLayoutAck_rollsBackToPrevScene() {
         // The wall-ignore wedge: a layout frame the firmware silently ignored parks
-        // forever — preempt() (the user's next tap) releases THAT park (nothing is
-        // mid-transfer) and rolls back to the previous scene so the next diff
+        // PAST THE GRACE — preempt() (the user's next tap) releases THAT park (nothing
+        // is mid-transfer) and rolls back to the previous scene so the next diff
         // re-sends the full layout.
         val sink = FakeSink()
-        val r = G2Renderer(sink)
+        var now = 0L
+        val r = G2Renderer(sink, clock = { now })
         r.launch(10061, scene { text("s", 0, 0, 576, 28, "x") }) {}
         sink.calls.clear()
         val s2 = scene { text("s", 0, 0, 576, 28, "x"); image("a", 0, 40, 64, 64, img(64, 64)) }
@@ -426,6 +501,7 @@ class G2RendererTest {
         r.setScene(s2) { done = it }
         assertEquals("layout written, parked on its (never-arriving) ack", 1, sink.messages().size)
         assertNull(done)
+        now = G2Renderer.LAYOUT_PARK_GRACE_MS + 1    // aged past the grace = the wedge
         r.preempt()
         assertEquals("layout park released → job fails", false, done)
         assertNull("rolled back: region 'a' is NOT on the glasses", r.currentScene!!.region("a"))

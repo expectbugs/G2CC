@@ -66,6 +66,16 @@ export class CCSession extends EventEmitter {
   private _ccSessionId: string | null = null  // CC's own session UUID (from system init event)
   private _recentStderr: string[] = []        // ring buffer of last stderr lines (for death diagnostics)
   private _recentEvents: string[] = []        // ring buffer of last stream-json event types
+  /** rate_limit_event seen DURING the current turn. CC emits a rate_limit_event at
+   *  every session init (empirically 4/4 runs, 2026-06-11), so scanning the whole
+   *  _recentEvents ring blamed "throttled" for ANY later empty-detail error. Turn-
+   *  scoped: set while a turn is processing, reset on sendPrompt. */
+  private _sawRateLimitThisTurn = false
+  /** Set by interrupt() so the turn's result/error_during_execution (CC reports an
+   *  interrupted turn as an error subtype with an empty result — verified live
+   *  2026-06-11) renders as a calm "Interrupted" instead of a scary failure. */
+  private _interruptRequested = false
+  private _interruptSeq = 0
   consecutiveFailures = 0
 
   constructor(config: CCSessionConfig) {
@@ -157,6 +167,17 @@ export class CCSession extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
+    // stdin EPIPE guard (review 2026-06-11): the parent's stdin write-end stays
+    // `writable === true` for a beat after CC dies, so a sendPrompt/respondToPermission
+    // racing the death EPIPEs asynchronously — an unhandled stream 'error' event is an
+    // uncaughtException that takes the WHOLE server down (same class as the
+    // os-content.ts renderer-stdin fix, proven on Node 24). The 'close' event that
+    // follows drives process_died → the UI error path; this just keeps the EPIPE loud
+    // instead of fatal.
+    this.proc.stdin!.on('error', (e: Error) => {
+      console.error(`[cc-session] stdin error (cwd=${this.config.projectPath}): ${e.message}`)
+    })
+
     // SRV-7 (no-mangle): decode stdout as UTF-8 so a multibyte glyph (CC's
     // markdown box-drawing ┌─└│▸ / emoji) split across two pipe reads isn't
     // mis-decoded into mojibake that then flows into scrollback. (The Parakeet
@@ -176,6 +197,11 @@ export class CCSession extends EventEmitter {
       }
       this._recentEvents.push(`${data.type}${data.subtype ? '/' + data.subtype : ''}`)
       if (this._recentEvents.length > 50) this._recentEvents.shift()
+      // Turn-scoped throttle marker (the init-time rate_limit_event must not poison
+      // later turns' error diagnostics — see _sawRateLimitThisTurn).
+      if (this._isProcessingTurn && String(data.type).startsWith('rate_limit_event')) {
+        this._sawRateLimitThisTurn = true
+      }
       // LOUD-AND-PROUD: a listener throwing (e.g. turn_complete → persistSessionMeta →
       // writeFileSync on a full/unwritable disk, which EventEmitter.emit re-throws) must NOT
       // be silently swallowed — that leaves the HUD stuck on "processing". Log it; keep streaming.
@@ -195,16 +221,9 @@ export class CCSession extends EventEmitter {
     // A spawn-level failure (ENOENT bad CLI path, EACCES, …) emits 'error' on the
     // ChildProcess — WITHOUT a listener that's an uncaught exception that takes the
     // WHOLE SERVER down (it did, 2026-06-10, on the bad /usr/bin/claude default).
-    // Surface it loudly through the same death path instead. 'close' may or may not
-    // follow an 'error'; diedEmitted guards double process_died emission.
+    // 'close' may or may not follow an 'error'; diedEmitted guards double process_died.
     let diedEmitted = false
-    this.proc.on('error', (err) => {
-      console.error(`[cc-session] spawn/process error (cwd=${this.config.projectPath}): ${err.message}`)
-      this.proc = null
-      this._isProcessingTurn = false
-      this.emit('error', `CC spawn failed: ${err.message}`)
-      if (!diedEmitted) { diedEmitted = true; this.emit('process_died', null) }
-    })
+    const proc = this.proc
 
     this.proc.on('close', (code, signal) => {
       const recentEvents = this._recentEvents.slice(-15).join(', ')
@@ -217,13 +236,44 @@ export class CCSession extends EventEmitter {
       if (!diedEmitted) { diedEmitted = true; this.emit('process_died', code) }
     })
 
+    // Resolve the actual spawn OUTCOME (review 2026-06-11): Node's spawn() errors
+    // asynchronously (ENOENT/EACCES arrive via the 'error' event AFTER spawn()
+    // returned), so without this race every `await session.spawn()` "succeeded" for a
+    // process that never existed — openInner registered the watchdog + persisted meta,
+    // isAlive() was true for a beat (feeding the stdin-EPIPE hole), and the caller's
+    // catch (written to surface the spawn error) was dead code. Node emits 'spawn' on
+    // success; no timeout — exactly one of the two events always fires.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        proc.once('spawn', resolve)
+        proc.once('error', reject)
+      })
+    } catch (err) {
+      diedEmitted = true   // failure is reported via this throw; suppress the duplicate process_died card
+      this.proc = null
+      this._isProcessingTurn = false
+      const m = err instanceof Error ? err.message : String(err)
+      console.error(`[cc-session] spawn failed (cwd=${this.config.projectPath}): ${m}`)
+      throw new Error(`CC spawn failed: ${m}`)
+    }
+
+    // Post-spawn process errors (rare) — keep the loud death path. Attached on the
+    // local `proc` ref: an instantly-exiting child may have nulled this.proc already.
+    proc.on('error', (err) => {
+      console.error(`[cc-session] process error (cwd=${this.config.projectPath}): ${err.message}`)
+      this.proc = null
+      this._isProcessingTurn = false
+      this.emit('error', `CC process error: ${err.message}`)
+      if (!diedEmitted) { diedEmitted = true; this.emit('process_died', null) }
+    })
+
     // S-H3: do NOT reset consecutiveFailures here. The watchdog owns this counter
     // and only resets it after the proc has stayed alive for HEALTHY_LIFETIME_MS.
     // Resetting on every successful spawn() (g2code's bug we inherited) makes the
     // crash-loop guard unreachable for procs that crash within seconds of spawning.
     this._requestCount = 0
     this._isProcessingTurn = false
-    console.log(`[cc-session] Spawned (pid=${this.proc.pid}, cwd=${this.config.projectPath}, effort=${effort}, model=${model})`)
+    console.log(`[cc-session] Spawned (pid=${proc.pid}, cwd=${this.config.projectPath}, effort=${effort}, model=${model})`)
   }
 
   // [V] Send prompt format from ARIA session_pool.py:246-251.
@@ -235,6 +285,8 @@ export class CCSession extends EventEmitter {
     this.toolCallsSeen = []
     this._requestCount++
     this._isProcessingTurn = true
+    this._sawRateLimitThisTurn = false
+    this._interruptRequested = false
 
     const msg = JSON.stringify({
       type: 'user',
@@ -243,12 +295,33 @@ export class CCSession extends EventEmitter {
     this.proc.stdin.write(msg)
   }
 
+  /** Abort the in-flight turn WITHOUT killing the subprocess. Verified live
+   *  2026-06-11: SIGINT makes `claude --print` emit result/error_during_execution
+   *  and then EXIT (so the old SIGINT interrupt cost a process death + watchdog
+   *  respawn every time), while the stream-json control_request
+   *  `{subtype:'interrupt'}` aborts the turn, gets a control_response/success, and
+   *  the process stays alive and accepts the next prompt. The aborted turn still
+   *  terminates as result/error_during_execution with an empty result —
+   *  _interruptRequested makes that render as 'Interrupted', not a failure. */
   interrupt(): void {
-    if (this.proc) this.proc.kill('SIGINT')
-    // The turn is aborted. Clear the processing flag now rather than relying on
-    // CC to emit a terminal 'result' on SIGINT (unverified in stream-json mode);
-    // if it does emit one, the result handler clears the (already-false) flag
-    // again — idempotent.
+    if (!this.proc?.stdin?.writable) {
+      console.log('[cc-session] interrupt: no live process — nothing to abort')
+      this._isProcessingTurn = false
+      return
+    }
+    if (!this._isProcessingTurn) {
+      console.log('[cc-session] interrupt: no turn in flight — ignored')
+      return
+    }
+    this._interruptRequested = true
+    const msg = JSON.stringify({
+      type: 'control_request',
+      request_id: `int-${++this._interruptSeq}`,
+      request: { subtype: 'interrupt' },
+    }) + '\n'
+    this.proc.stdin.write(msg)
+    // Clear the processing flag now for instant UI feedback; the turn's terminal
+    // result event re-clears it (idempotent).
     this._isProcessingTurn = false
   }
 
@@ -265,8 +338,12 @@ export class CCSession extends EventEmitter {
   }
 
   // [V] control_response APPROVE format verified from ARIA session_pool.py:361-368.
-  // [U] DENY format unverified — ARIA always approves. Phase 7 may need to verify
-  // when implementing the confirm_on_hud reject path through CC's permission gates.
+  // [U] DENY semantics still hardware-unverified (2026-06-11 test: CC --print
+  // never emitted a can_use_tool control_request at all in default mode, so the
+  // deny path could not be exercised live). The SHAPE now follows the SDK control
+  // protocol: deny is subtype:'success' with behavior:'deny' — subtype:'error'
+  // (the old shape) means "the control request itself failed", which would most
+  // plausibly abort the tool call as a protocol error rather than denying it.
   // 4th-pass-final review HIGH: throws when proc is dead instead of silently
   // dropping. Without this, the HUD reports approval-sent but CC never got
   // it; the watchdog respawn loses the request entirely. Caller must catch
@@ -278,9 +355,11 @@ export class CCSession extends EventEmitter {
     const resp = JSON.stringify({
       type: 'control_response',
       response: {
-        subtype: approved ? 'success' : 'error',
+        subtype: 'success',
         request_id: requestId,
-        response: { behavior: approved ? 'allow' : 'deny' },
+        response: approved
+          ? { behavior: 'allow' }
+          : { behavior: 'deny', message: 'denied on the glasses' },
       },
     }) + '\n'
     this.proc.stdin.write(resp)
@@ -315,10 +394,33 @@ export class CCSession extends EventEmitter {
       }
     }
 
-    // [V] "tool" handling verified from ARIA session_pool.py:346-357.
-    // G2CC change: NO 500-char truncation. Emit full content; scrollback paginates.
-    // The g2code version sliced to 500 + '...' which violated the no-truncation rule
-    // (see docs/FORBIDDEN_PATTERN_AUDIT.md §1).
+    // Tool results (verified live 2026-06-11): current CC stream-json delivers them
+    // as type:'user' events carrying tool_result content blocks — there is NO
+    // top-level type:'tool' event anymore. Emit the full content; scrollback
+    // paginates (no truncation).
+    if (msgType === 'user') {
+      const content = (data.message as { content?: unknown } | undefined)?.content
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (typeof block !== 'object' || block === null) continue
+          const b = block as { type?: unknown; content?: unknown }
+          if (b.type !== 'tool_result') continue
+          const c = b.content
+          const text = typeof c === 'string'
+            ? c
+            : Array.isArray(c)
+              ? c.map((p) => {
+                  const part = p as { type?: unknown; text?: unknown }
+                  return part?.type === 'text' && typeof part.text === 'string' ? part.text : JSON.stringify(p)
+                }).join('\n')
+              : JSON.stringify(c ?? '')
+          this.emit('tool_result', text)
+        }
+      }
+    }
+
+    // Legacy 'tool' shape (the ARIA-era CLI; session_pool.py:346-357) — kept as a
+    // harmless fallback in case an older CC ever runs, but dead on 2.1.x.
     if (msgType === 'tool') {
       const toolContent = data.message as Record<string, unknown> | undefined
       if (toolContent && typeof toolContent === 'object') {
@@ -338,10 +440,15 @@ export class CCSession extends EventEmitter {
         // 2026-06-11, while the actual cause — a rate limit — was only in the
         // stream). Log the raw event so the next mystery error is diagnosable.
         const err = data.error as { message?: unknown } | string | undefined
-        const detail = (data.result as string)
+        // A user-initiated interrupt terminates as error_during_execution with an
+        // empty result (verified live 2026-06-11) — name it instead of guessing.
+        const interrupted = this._interruptRequested
+        this._interruptRequested = false
+        const detail = (interrupted ? 'Interrupted' : undefined)
+          || (data.result as string)
           || (typeof err === 'string' ? err : undefined)
           || (err && typeof err === 'object' && typeof err.message === 'string' ? err.message : undefined)
-          || (this._recentEvents.includes('rate_limit_event') ? `${resultSubtype} (a rate_limit_event preceded — likely throttled; retry shortly)` : undefined)
+          || (this._sawRateLimitThisTurn ? `${resultSubtype} (a rate_limit_event arrived during this turn — possibly throttled; retry shortly)` : undefined)
           || `CC ${resultSubtype || 'error'}`
         console.error(`[cc-session] turn ERROR (${resultSubtype}) cwd=${this.config.projectPath} recent=[${this._recentEvents.join(',')}] raw=${JSON.stringify(data).slice(0, 4000)}`)
         const errText = detail
@@ -358,6 +465,8 @@ export class CCSession extends EventEmitter {
         this.toolCallsSeen = []
         return
       }
+
+      this._interruptRequested = false   // success result — any stale interrupt flag is moot
 
       let fullText = (data.result as string) || ''
 

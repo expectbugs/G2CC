@@ -4,6 +4,37 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-11 — **Full-system review #3: 9 Fable agents, ~45 confirmed fixes, APK v1.5**
+
+Nine-agent review (8 subsystem finders + rules sweeper, all findings personally re-verified,
+five live-CC experiments + an AOSP source pull; 2 findings REJECTED on verification). Full
+record: `docs/CODE_REVIEW_2026-06-11.md`. Headlines:
+
+**Empirical**: SIGINT-Interrupt was killing the CC subprocess every time (now a stream-json
+interrupt control_request — proven to keep the process alive); rate_limit_event fires at every
+init (turn-scoped now); CC --print emits NO can_use_tool control_requests (permission flow
+dormant at the CC layer; deny shape aligned to the SDK protocol); tool results ride
+type:'user' events ('tool' branch was dead); AudioRecord.read(byte[]) can NEVER read float —
+the DJI-USB path was deterministically broken (AOSP-verified, FloatArray fix).
+
+**Server**: stdin-EPIPE could kill the server; watchdog backoff resurrection (zombie CC);
+THE WALL FAMILY (unpaginated errorView / unclamped title+status+antenna / UTF-16 pagination →
+unpaintable screens + firmware-scrollbar wraps + broken antenna input; px-measured pagination
++ chrome clamps + a frame-byte estimator on EVERY compose, mirrored into scene_to_png); the
+STT dictation wedge cluster (rejects bypassed the WM + the mic was never stopped — incl. on WS
+drop); close()/died permission-state hygiene; permission FIFO; queued-prompt drain no longer
+erases the finished answer; Mail read errors were eaten + one bad message bricked the inbox +
+unknown charsets (LookupError) crashed reads; Files FIFO-preview froze the whole server +
+stat-storm on big dirs + dead Reload menu at tree level; blanked-screen input leak.
+
+**Client (APK v1.5)**: abort() wedged the render pump (queued jobs' onComplete dropped) and
+could abandon a HEALTHY mid-image transfer on display_reload — the r4 crash recipe (epoch
+fences + park-age grace now; preempt() stops overlapping f1=7 rebuilds the same way);
+oversize f1=5 text silently eaten by firmware (now wall-checked); MicCapture fallback
+Failures killed the streamer with the mic left running; single-endpoint reconnect was a
+zero-backoff hot loop; sticky restart never reconnected; corrupt-BMP/truncated-ack crashes
+hardened. Renderer tests rewritten for the new contract + 3 new; all suites green.
+
 ## (unstamped) — 2026-06-11 — **server: live status phases, STT confirm step, Files image viewer, thicker title border**
 
 The g2aria feel, ported (Adam's ask): the bottom status bar now tracks the active session

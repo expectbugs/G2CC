@@ -56,12 +56,39 @@ def main(out_path):
         items = c.get("items") or []
         if len(items) > 20:
             problems.append(f"list '{r['name']}' has {len(items)} items (SDK max 20)")
+        if not items:
+            problems.append(f"list '{r['name']}' has ZERO items (SceneCodec rejects)")
         for it in items:
-            if len(it) > 64:
-                problems.append(f"list '{r['name']}' item >64 chars: {it[:40]}…")
+            # Kotlin measures UTF-16 code units, not Python code points (astral
+            # chars count double there) — mirror it exactly (review 2026-06-11).
+            if len(it.encode("utf-16-le")) // 2 > 64:
+                problems.append(f"list '{r['name']}' item >64 UTF-16 units: {it[:40]}…")
     ids = [r["id"] for r in regions]
     if len(set(ids)) != len(ids) or 1 in ids:
         problems.append(f"region id problem (dup or reserved clock id 1): {ids}")
+    names = [r["name"] for r in regions]
+    if len(set(names)) != len(names) or "clock" in names:
+        problems.append(f"region name problem (dup or reserved 'clock'): {names}")
+
+    # THE MULTI-PACKET WALL (review 2026-06-11) — the one rule that actually
+    # wedges hardware, previously unchecked here: the firmware silently ignores
+    # any single layout frame past ~1000 B and the client hard-rejects it.
+    # Conservative DisplayProto mirror (1-byte keys, len-varints, UTF-8, the
+    # injected clock, wrapper framing) — matches the server-side estimator.
+    frame = 40 + 10
+    for r in regions:
+        frame += 16 + len(r["name"].encode("utf-8"))
+        if r.get("style"):
+            frame += 8
+        c = r.get("content") or {}
+        if r["kind"] == "text":
+            frame += 4 + len(str(c.get("text", "")).encode("utf-8"))
+        elif r["kind"] == "list":
+            frame += 8 + sum(2 + len(it.encode("utf-8")) for it in (c.get("items") or []))
+        else:
+            frame += 4
+    if frame > 1000:
+        problems.append(f"layout frame ≈{frame} B exceeds the ~1000 B multi-packet wall (firmware silently ignores it)")
     for r in regions:
         if (r["x"] < CLOCK["x"] + CLOCK["w"] and r["x"] + r["w"] > CLOCK["x"]
                 and r["y"] < CLOCK["y"] + CLOCK["h"] and r["y"] + r["h"] > CLOCK["y"]):

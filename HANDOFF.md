@@ -26,7 +26,8 @@ The glasses Bluetooth wire format is fully worked out (`docs/G2_BLE_PROTOCOL.md`
 byte + millisecond from logs of Adam's own phone↔glasses traffic), and the **window-manager
 "desktop environment" (DE) is implemented, hardware-iterated, and being polished on real glasses.**
 
-- **Android client: APK v1.4** on the glasses (`os/OsLayout.OS_VERSION`). Hardware-iterated through
+- **Android client: APK v1.5** built (`os/OsLayout.OS_VERSION`; v1.4 on the glasses until
+  Adam installs). Hardware-iterated through
   many rounds. The client is now a thin Scene renderer: it receives a `WireScene` over WebSocket,
   draws it with the proven `G2Renderer`, and sends ring/gesture input back. Native firmware list
   widget, region styles, a 12-hour minute-tick clock, dictation mic, render preemption.
@@ -59,7 +60,9 @@ byte + millisecond from logs of Adam's own phone↔glasses traffic), and the **w
   mangled transcript never reaches the model unread.
 
 The whole loop is verifiable without glasses: `scripts/scene_to_png.py` renders a composed
-`WireScene` to PNG and checks every client hardware rule.
+`WireScene` to PNG and checks every client hardware rule INCLUDING the ~1000 B
+multi-packet wall (added in the 2026-06-11 review; the server compositor enforces the
+same budget via `estimateLayoutFrameBytes`).
 
 ## What's next (Adam is refining the DE; pick up wherever he points)
 

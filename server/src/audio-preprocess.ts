@@ -37,7 +37,13 @@ async function getRnnoise(): Promise<{ instance: RnnoiseInstance; state: Denoise
 }
 
 function pcmBufferToFloat32(pcmBuffer: Buffer): Float32Array {
-  const sampleCount = Math.floor(pcmBuffer.length / 2)
+  // LOUD on misalignment: a torn binary frame byte-shifts every later sample into
+  // garbage; silently flooring here made pcm-wav's SRV-8 guard unreachable on the
+  // legacy path (review 2026-06-11).
+  if (pcmBuffer.length % 2 !== 0) {
+    throw new Error(`preprocessAudio: odd PCM byte length ${pcmBuffer.length} — torn int16 stream`)
+  }
+  const sampleCount = pcmBuffer.length / 2
   const out = new Float32Array(sampleCount)
   for (let i = 0; i < sampleCount; i++) {
     out[i] = pcmBuffer.readInt16LE(i * 2)

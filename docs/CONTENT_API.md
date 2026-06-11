@@ -8,7 +8,15 @@ pipeline — CC responses, Aria replies, future apps — is parsed and typeset t
 ## Pipeline
 
 ```
-LLM markdown ──parseMarkdown()──► Block[] ──render_content.py──► 480×212 gray4 pages
+LLM markdown ──parseMarkdown()──► Block[] ──blocksToText()──► paginateText() ──► firmware-text pages
+
+> **2026-06-11 — session content is FIRMWARE TEXT now.** The tile pipeline below was
+> NIXED for CC/Aria responses (hardware: menu rebuilds re-pushed all four tiles, taps
+> took 15-20 s). Tiles remain ONLY for Main's logo (renderSingleTile) and the Files
+> image viewer (render_image.py) — both 480×222-era sizes (tiles ≤240×111). The
+> legacy description below is kept for the roadmap's rich-tile revisit:
+
+LLM markdown ──parseMarkdown()──► Block[] ──render_content.py──► 480×212 gray4 pages [LEGACY]
  (os-content.ts)                            (PIL + DejaVu)         │ sliced 2×2
                                                                    ▼
                                                     4× 240×106 BMP tiles per page

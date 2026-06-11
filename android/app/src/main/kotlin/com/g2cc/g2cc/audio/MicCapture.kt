@@ -210,7 +210,11 @@ class MicCapture(private val context: Context) {
         val encoding = AudioFormat.ENCODING_PCM_FLOAT     // 32-bit float per spec §B2
         val bufCheck = AudioRecord.getMinBufferSize(sampleRate, channelMask, encoding)
         if (bufCheck <= 0) {
-            onEvent(Event.Failure("CHANNEL_IN_STEREO + PCM_FLOAT not supported at $sampleRate Hz on USB"))
+            // Fallback, NOT Failure (review 2026-06-11): the chain continues to SCO/phone
+            // mic, but AudioStreamer treats any Failure as fatal — it killed the streamer
+            // so the LATER successful source's frames were all dropped and stop() became
+            // a no-op: the mic ran forever. "Only a total miss is a Failure."
+            Log.w(TAG, "USB: CHANNEL_IN_STEREO + PCM_FLOAT not supported at $sampleRate Hz; falling through")
             return null
         }
         val bufSize = bufCheck * 4   // 4× margin
@@ -227,7 +231,7 @@ class MicCapture(private val context: Context) {
                 .setBufferSizeInBytes(bufSize)
                 .build()
         } catch (e: Exception) {
-            onEvent(Event.Failure("AudioRecord build failed for USB", e))
+            Log.w(TAG, "USB: AudioRecord build failed; falling through", e)   // fallback, not Failure (see above)
             return null
         }
 
@@ -237,7 +241,7 @@ class MicCapture(private val context: Context) {
             }
         }
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
-            onEvent(Event.Failure("AudioRecord state != INITIALIZED for USB"))
+            Log.w(TAG, "USB: AudioRecord state != INITIALIZED; falling through")   // fallback, not Failure
             try { rec.release() } catch (e: Exception) { Log.w(TAG, "release", e) }
             return null
         }
@@ -393,16 +397,43 @@ class MicCapture(private val context: Context) {
         val frameSize = (targetBytes / align) * align
         Log.i(TAG, "frameSize=$frameSize bytes (~${TARGET_FRAME_MS}ms @ ${sampleRate}Hz × $channels ch × $bytesPerSample bytes)")
 
+        // ENCODING_PCM_FLOAT REQUIRES the float[] overload: the byte[] read returns
+        // ERROR_INVALID_OPERATION unconditionally for float records (AOSP
+        // AudioRecord.java:1617, verified 2026-06-11) — the old byte[] path made every
+        // DJI-USB capture fail deterministically on its first read.
+        if (encoding == AudioFormat.ENCODING_PCM_FLOAT) {
+            val floatBuf = FloatArray(frameSize / 4)
+            val byteBuf = java.nio.ByteBuffer.allocate(frameSize).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            while (isCapturing) {
+                val read = try {
+                    rec.read(floatBuf, 0, floatBuf.size, AudioRecord.READ_BLOCKING)
+                } catch (e: IOException) {
+                    if (isCapturing) onEvent(Event.Failure("read threw", e))
+                    return
+                }
+                if (read < 0) {
+                    // A negative code after stop() is the release-wakes-the-read race, not
+                    // a real failure (review 2026-06-11) — only report while capturing.
+                    if (isCapturing) onEvent(Event.Failure("AudioRecord.read(float) returned error code $read"))
+                    return
+                }
+                if (read == 0) continue
+                byteBuf.clear()
+                for (k in 0 until read) byteBuf.putFloat(floatBuf[k])
+                onEvent(Event.Frame(byteBuf.array().copyOf(read * 4), System.currentTimeMillis()))
+            }
+            return
+        }
         val frameBytes = ByteArray(frameSize)
         while (isCapturing) {
             val read = try {
                 rec.read(frameBytes, 0, frameBytes.size, AudioRecord.READ_BLOCKING)
             } catch (e: IOException) {
-                onEvent(Event.Failure("read threw", e))
+                if (isCapturing) onEvent(Event.Failure("read threw", e))
                 return
             }
             if (read < 0) {
-                onEvent(Event.Failure("AudioRecord.read returned error code $read"))
+                if (isCapturing) onEvent(Event.Failure("AudioRecord.read returned error code $read"))   // post-stop race: see float path
                 return
             }
             if (read == 0) continue

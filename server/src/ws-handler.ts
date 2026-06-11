@@ -230,7 +230,9 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
           client.audioChunks = []
           client.audioBytes = 0
           client.audioFormat = null
-          sendMsg(client, { type: 'stt_error', error: `audio stream exceeded ${MAX_AUDIO_BYTES} bytes without audio_end; discarded` })
+          // Through the helper so the WM's dictation state machine unwinds too
+          // (raw sendMsg left the DE stuck 'transcribing…' — review 2026-06-11).
+          sttError(client, `audio stream exceeded ${MAX_AUDIO_BYTES} bytes without audio_end; discarded`)
         } else {
           client.audioChunks.push(chunk)
         }
@@ -413,7 +415,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       const sr = msg.sampleRate ?? 16_000
       const ch = msg.channels ?? 1
       if (sr <= 0 || ch <= 0) {
-        sendMsg(client, { type: 'stt_error', error: `Invalid audio_start: sampleRate=${sr} channels=${ch} (must be > 0)` })
+        sttError(client, `Invalid audio_start: sampleRate=${sr} channels=${ch} (must be > 0)`)
         break
       }
       // Loud-fail when audio_start arrives while we're already collecting.
@@ -436,7 +438,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // <100-byte handleAudio early-return on a stray audio_end doesn't
       // clear the flag mid-transcription.
       if (client.sttInFlightCount > 0) {
-        sendMsg(client, { type: 'stt_error', error: `audio_start rejected: previous transcription still in flight; wait for stt_result before starting again` })
+        sttError(client, 'audio_start rejected: previous transcription still in flight; wait for stt_result before starting again')
         break
       }
       client.audioChunks = []
@@ -459,7 +461,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // returns instantly, corrupting the in-flight tracker.
       if (!client.collectingAudio) {
         console.warn(`[ws] audio_end without prior audio_start — ignoring`)
-        sendMsg(client, { type: 'stt_error', error: 'audio_end without prior audio_start' })
+        sttError(client, 'audio_end without prior audio_start')
         break
       }
       client.collectingAudio = false
@@ -476,6 +478,10 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       client.sttInFlightCount++
       void handleAudio(client, pcmBuffer, format, config).finally(() => {
         client.sttInFlightCount = Math.max(0, client.sttInFlightCount - 1)
+      }).catch((err: unknown) => {
+        // Fire-and-forget chain: without this, a rejection escaping handleAudio's
+        // inner try/catches is an unhandled rejection (fatal on Node >=15).
+        console.error('[ws] handleAudio rejected:', err)
       })
       break
     }
@@ -731,6 +737,10 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         break
       }
       const turnText = msg.turns >= 999 ? 'the start of the conversation' : `${msg.turns} turn${msg.turns === 1 ? '' : 's'} ago`
+      if (active.session.isProcessingTurn) {
+        sendMsg(client, { type: 'rewind_result', success: false, turnsRewound: 0, summary: 'A turn is in flight — interrupt or wait before rewinding' })
+        break
+      }
       try {
         active.session.sendPrompt(`/rewind ${msg.turns >= 999 ? '' : msg.turns}`.trim())
         sendMsg(client, { type: 'rewind_result', success: true, turnsRewound: msg.turns, summary: `Rewound to ${turnText}` })
@@ -1077,7 +1087,9 @@ async function handleAudio(
   config: G2CCConfig,
 ): Promise<void> {
   if (pcmBuffer.length < 100) {
-    sendMsg(client, { type: 'stt_error', error: 'Audio too short' })
+    // sttError (not raw sendMsg) so an accidental Dictate→Done unwinds the WM's
+    // 'transcribing…' state instead of hanging it forever (review 2026-06-11).
+    sttError(client, 'Audio too short')
     return
   }
 
@@ -1162,6 +1174,12 @@ function handlePrompt(client: WSClient, text: string): void {
     return
   }
   const active = client.pool.getActive()
+  // A second stdin user message mid-turn kills CC with error_during_execution
+  // (hardware 2026-06-11). The DE queues; this legacy path refuses loudly.
+  if (active?.session.isProcessingTurn) {
+    sendMsg(client, { type: 'cc_error', error: 'A turn is already in flight — wait for it to finish (or interrupt) before prompting again' })
+    return
+  }
   try {
     client.dispatcher.sendPrompt(text)
     client.autoScroll = true
@@ -1215,6 +1233,10 @@ export function confirmOnHudWithDelivery(
  *  app's connection.ts watchdog will then reconnect automatically per the
  *  five-defence pattern (see g2aria/app/src/connection.ts:280-300). */
 function startHeartbeat(client: WSClient): void {
+  // A repeated auth on the same socket re-enters here — clear the previous pair
+  // or it leaks (only the latest pair is cleared on ws close).
+  if (client.hbInterval) clearInterval(client.hbInterval)
+  if (client.livenessInterval) clearInterval(client.livenessInterval)
   client.lastAppActivityMs = Date.now()
   client.hbInterval = setInterval(() => {
     if (client.ws.readyState === 1) {

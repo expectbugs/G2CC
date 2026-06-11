@@ -226,7 +226,16 @@ object EventParser {
     /** Decode an EvenHub ack on service 0xe0-00: `08 <ackType> 10 <msgId varint> …`
      *  (f1=ackType, f2=echoed msgId). Tolerant of trailing descriptor fields (the image ack
      *  carries f6). Falls back to Unknown if the prefix doesn't match. */
-    private fun decodeHubAck(payload: ByteArray): Event {
+    private fun decodeHubAck(payload: ByteArray): Event = try {
+        decodeHubAckInner(payload)
+    } catch (e: IllegalArgumentException) {
+        // Same never-throw contract as the sibling decoders (review 2026-06-11): a
+        // CRC-valid-but-truncated varint here propagated out of parse() into the BLE
+        // notify callback and killed the process.
+        Event.Malformed("hub-ack: ${e.message}", payload.toHex())
+    }
+
+    private fun decodeHubAckInner(payload: ByteArray): Event {
         val svc = 0xE0.toByte() to 0x00.toByte()
         if (payload.size < 2 || payload[0] != 0x08.toByte()) return Event.Unknown(svc, payload.toHex())
         val (ackType, n1) = Varint.decode(payload, 1)

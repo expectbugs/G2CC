@@ -140,36 +140,63 @@ def find_message(md_path, key):
 def cmd_list(md_path, limit, offset):
     rows = []
     for key, path, unread, mtime in scan_messages(md_path):
-        h = parse_headers(path)
+        # Per-message isolation (review 2026-06-11): one unreadable message
+        # (mbsync deleted it between scandir and open — a real race with the
+        # 5-min cron — or a pathological header) must not brick the WHOLE
+        # inbox list. Loud on stderr; the row renders as unreadable.
         try:
-            d = h.get("Date")
-            ts = parsedate_to_datetime(d).timestamp() if d else mtime
-        except Exception:
-            ts = mtime   # unparseable Date header → file mtime, not epoch 0
-        rows.append({
-            "key": key,
-            "from": short_addr(h.get("From")),
-            "subject": unfold(h.get("Subject"), "(no subject)"),
-            "date": ts,
-            "unread": unread,
-        })
+            h = parse_headers(path)
+            try:
+                d = h.get("Date")
+                ts = parsedate_to_datetime(d).timestamp() if d else mtime
+            except Exception:
+                ts = mtime   # unparseable Date header → file mtime, not epoch 0
+            row = {
+                "key": key,
+                "from": short_addr(h.get("From")),
+                "subject": unfold(h.get("Subject"), "(no subject)"),
+                "date": ts,
+                "unread": unread,
+            }
+        except Exception as e:
+            sys.stderr.write(f"read_maildir: message {key!r} unreadable: {e}\n")
+            row = {"key": key, "from": "(unreadable)", "subject": f"(unreadable: {e})", "date": mtime, "unread": unread}
+        rows.append(row)
     rows.sort(key=lambda r: r["date"], reverse=True)
     unread_total = sum(1 for r in rows if r["unread"])
     print(json.dumps({"total": len(rows), "unreadTotal": unread_total, "rows": rows[offset:offset + limit]}))
 
 
 def body_text(msg):
+    # The preferred-part branches are guarded (review 2026-06-11, repro'd):
+    # get_content() decodes with errors='replace' but bytes.decode raises
+    # LookupError for an UNKNOWN charset regardless (e.g. iso-8859-8-i, a real
+    # mail charset Python lacks) — which used to abort the whole read before
+    # the per-part fallback loop below ever ran.
     part = msg.get_body(preferencelist=("plain",))
     if part is not None:
-        return part.get_content().strip()
+        try:
+            return part.get_content().strip()
+        except Exception as e:
+            sys.stderr.write(f"read_maildir: plain part undecodable ({e}); falling back\n")
     part = msg.get_body(preferencelist=("html",))
     if part is not None:
-        return html_to_text(part.get_content())
+        try:
+            return html_to_text(part.get_content())
+        except Exception as e:
+            sys.stderr.write(f"read_maildir: html part undecodable ({e}); falling back\n")
     for p in msg.walk():
         if p.get_content_maintype() == "text":
             try:
                 return p.get_content().strip()
             except Exception:
+                # last resort: raw payload, lenient decode — readable beats lost
+                try:
+                    raw = p.get_payload(decode=True)
+                    if raw:
+                        return raw.decode("latin-1", errors="replace").strip()
+                except Exception:
+                    pass
                 continue
     return "(no readable body)"
 

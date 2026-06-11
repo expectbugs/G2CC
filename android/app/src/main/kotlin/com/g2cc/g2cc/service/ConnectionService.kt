@@ -167,10 +167,21 @@ class ConnectionService : Service(), TestHarness {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A mic-FGS type denied at a background service start is re-grantable once the
+        // app is foregrounded — and onStartCommand only fires from the Activity's
+        // startForegroundService (user present). Without this retry the advertised
+        // remediation ("reopen the app") did nothing (review 2026-06-11).
+        if (!micFgsGranted) {
+            DiagLog.log("svc", "retrying mic-FGS startForeground (was denied at service start)")
+            startInForeground()
+        }
         // Connect is driven via an action so it doesn't depend on the bind round-trip
         // (the Activity startForegroundService()s us, then binds only to observe).
-        if (intent?.action == ACTION_CONNECT) connect()   // connect() is idempotent (guards launched/connecting)
-        // START_STICKY: with the battery-opt exemption, Android relaunches us after a kill.
+        // intent == null IS the START_STICKY relaunch after a system kill — the whole
+        // point of sticky + the battery-opt exemption is to come back CONNECTED, but the
+        // old guard only connected on ACTION_CONNECT, so the relaunched service idled in
+        // foreground doing nothing until Adam opened the app (review 2026-06-11).
+        if (intent == null || intent.action == ACTION_CONNECT) connect()   // connect() is idempotent (guards launched/connecting)
         return START_STICKY
     }
 
@@ -244,14 +255,22 @@ class ConnectionService : Service(), TestHarness {
         renderConsumerJob = scope.launch {
             var next: WireScene? = null
             while (isActive) {
+                // Drain anything newer that landed while we were preempting — `next` may
+                // already be stale and rendering it first burns a full region of BLE time
+                // on a scene known to be superseded (review 2026-06-11).
+                next = ch.tryReceive().getOrNull() ?: next
                 val wire = next ?: ch.receiveCatching().getOrNull() ?: break
                 next = null
                 val r = renderer ?: continue
                 val sceneObj = try {
                     SceneCodec.toScene(wire, latestClockText)
-                } catch (e: IllegalArgumentException) {
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
                     // LOUD AND PROUD — a bad scene from the server is surfaced, not dropped.
-                    DiagLog.log("os", "BAD render scene: ${e.message}")
+                    // Exception (not just IAE): a corrupt payload's ArrayIndexOutOfBounds
+                    // must not kill the whole bridge process (review 2026-06-11).
+                    DiagLog.log("os", "BAD render scene: ${e::class.simpleName}: ${e.message}")
                     setStatus("Bad scene from server: ${e.message}")
                     continue
                 }
@@ -287,7 +306,16 @@ class ConnectionService : Service(), TestHarness {
                 connection?.send(ClientMessage.OsAttach)
                 scope.launch { setStatus("Server mode: PC connected. Use the ring.") }
             },
-            onDisconnected = { DiagLog.log("os", "WS disconnected") },
+            onDisconnected = {
+                DiagLog.log("os", "WS disconnected")
+                // The mic must die with the WS (review 2026-06-11): the server that knew
+                // about this dictation is gone — after re-auth the NEW connection/WM has
+                // no dictation in flight, so no audio_request stop will ever come, and
+                // the streamer would pump dead frames (and block future dictations) for
+                // hours. stop() is an idempotent no-op when not streaming.
+                audioStreamer?.stop()
+                audioStreamer = null
+            },
         )
         connection = cm
         cm.connect()
@@ -330,7 +358,11 @@ class ConnectionService : Service(), TestHarness {
                 when (msg.action) {
                     "start" -> {
                         if (audioStreamer?.isStreaming == true) {
-                            DiagLog.log("os", "audio_request start — already streaming (ignored)")
+                            // Surface to the SERVER, not just the diag log — its dictation
+                            // state machine is waiting for an audio_start that will never
+                            // come (review 2026-06-11).
+                            DiagLog.log("os", "audio_request start — already streaming (refused)")
+                            conn.send(ClientMessage.Diag("[audio-error] audio_request start refused: a previous capture is still streaming — Reload to clear it"))
                             return
                         }
                         if (!micFgsGranted) {
@@ -513,7 +545,7 @@ class ConnectionService : Service(), TestHarness {
         if (l.state.value !is ConnectionState.Ready || r.state.value !is ConnectionState.Ready) return
         _launched.value = true
         DiagLog.log("conn", "both lenses Ready — R link mtu=${r.lastMtu} phy=${r.lastPhy} conn=${r.lastConnParams}")
-        val rend = G2Renderer(BleDisplaySink(r)) { msg -> DiagLog.log("render", msg) }
+        val rend = G2Renderer(BleDisplaySink(r), diag = { msg -> DiagLog.log("render", msg) })
         renderer = rend
         val gen = sessionGen
         coldLaunchJob = scope.launch {
@@ -687,7 +719,7 @@ class ConnectionService : Service(), TestHarness {
 
     private fun teardown() {
         tearingDown = true   // our own shutdownBle() disconnects must NOT trigger auto-recovery
-        renderer?.abort("teardown")   // release any parked image-chunk ack-wait so the pump can't wedge
+        renderer?.abort("teardown", force = true)   // BLE dies next — release every park + queued op
         keepaliveJob?.cancel(); keepaliveJob = null
         clockJob?.cancel(); clockJob = null
         renderConsumerJob?.cancel(); renderConsumerJob = null

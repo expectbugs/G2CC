@@ -77,7 +77,10 @@ export interface DirectoryEntry {
 /** A region's content kind. Mirrors render.RegionKind on the client. */
 export type SceneRegionKind = 'text' | 'image' | 'list'
 
-/** Text content — the firmware renders the font. */
+/** Text content — the firmware renders the font.
+ *  RESERVED NAMES: 'clock' (rejected — the client injects its own) and 'ant'
+ *  (the probe/menu screens' antenna — SceneCodec rewrites its text to the OS
+ *  version string; don't name a DE region 'ant'). */
 export interface SceneTextContent {
   kind: 'text'
   text: string

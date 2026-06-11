@@ -176,11 +176,27 @@ class Scene(
     fun withContent(name: String, c: Content): Scene =
         Scene(regions, content.toMutableMap().apply { put(name, c) })
 
-    /** Same regions with [names]' content REMOVED — the preemption rollback: a region whose
-     *  push was skipped must read as never-delivered so the next diff re-sends it. */
+    /** Same regions with [names]' content rolled back: a region whose push was skipped must
+     *  read as never-delivered so the next diff re-sends it. A scroll=true TEXT region keeps
+     *  a flag-preserving sentinel instead of full removal — the scroll flag is LAYOUT-level
+     *  and still true on glass; removing it made the next diff read scroll false→true and
+     *  force a spurious full f1=7 rebuild (and setText silently downgraded the stored flag)
+     *  (review 2026-06-11). The sentinel text never equals real content, so re-send still
+     *  happens. */
     fun withoutContent(names: Collection<String>): Scene =
         if (names.isEmpty()) this
-        else Scene(regions, content.toMutableMap().apply { names.forEach { remove(it) } })
+        else Scene(regions, content.toMutableMap().apply {
+            for (n in names) {
+                val prev = get(n)
+                if (prev is Content.Text && prev.scroll) put(n, Content.Text(ROLLED_BACK_SENTINEL, scroll = true))
+                else remove(n)
+            }
+        })
+
+    companion object {
+        /** Never-matching placeholder for rolled-back scroll-text content. */
+        const val ROLLED_BACK_SENTINEL = "\u0000<rolled-back>\u0000"
+    }
 }
 
 /** Result of [Scene.diff]: layout change, which region contents changed, and which regions had

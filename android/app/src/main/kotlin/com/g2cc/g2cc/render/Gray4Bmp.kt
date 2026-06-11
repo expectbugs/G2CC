@@ -87,9 +87,13 @@ object Gray4Bmp {
         val height = getI32(bmp, 22)
         val bpp = getI16(bmp, 28)
         require(bpp == BITS_PER_PIXEL) { "Gray4Bmp.decode: expected 4bpp, got $bpp" }
-        require(width > 0 && height > 0) { "Gray4Bmp.decode: bad dims ${width}x$height" }
+        // Sane dims + a dataOff inside the file (review 2026-06-11): a NEGATIVE dataOff or
+        // an int-overflowing rb*height sailed past the old check and the pixel loop threw
+        // ArrayIndexOutOfBounds — which escaped the IAE-only catches and killed the app.
+        require(width in 1..4096 && height in 1..4096) { "Gray4Bmp.decode: bad dims ${width}x$height" }
+        require(dataOff in HEADER_SIZE..bmp.size) { "Gray4Bmp.decode: bad pixel-data offset $dataOff (file ${bmp.size} B)" }
         val rb = rowBytes(width)
-        require(dataOff + rb * height <= bmp.size) { "Gray4Bmp.decode: truncated pixel data" }
+        require(dataOff + rb.toLong() * height <= bmp.size) { "Gray4Bmp.decode: truncated pixel data" }
         val indices = ByteArray(width * height)
         for (y in 0 until height) {
             val srcRow = height - 1 - y

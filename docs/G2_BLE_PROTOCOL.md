@@ -382,6 +382,8 @@ These were earned the hard way and are re-confirmed by the official traffic:
 1. **Every page needs a text region.** Image-only layouts ack but never paint (and break L-mirror).
    The official app always pairs images with at least the nav text. (§6.1; `g2-render-limits`.)
 2. **Image tile ≤ 288×144** (the SDK cap; "imgmax" hit exactly 288×144). Tile anything larger.
+   NOTE: the G2CC renderer enforces a conservative **288×129** (G2Renderer MAX_IMAGE_H — the
+   144 was probed via the SDK, not our direct-BLE path); re-probe 130-144 before relying on it.
 3. **≤ 4 image regions, ≤ 8 text regions, ≤ 12 containers total** (SDK caps; ramp-12 used all 12).
 4. **Exactly one `isEventCapture=1`** container per page (= the old "antenna"; wire field text-`f11` /
    list-`f12`).

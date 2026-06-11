@@ -16,7 +16,11 @@ export class ScrollbackBuffer {
     const newLines = text.split('\n')
     this.lines.push(...newLines)
     if (this.lines.length > SCROLLBACK_MAX_LINES) {
+      // Loud trim (review 2026-06-11): silent oldest-line drops violated the
+      // no-truncation rule — leave a visible marker where history was cut.
+      const dropped = this.lines.length - SCROLLBACK_MAX_LINES
       this.lines = this.lines.slice(-SCROLLBACK_MAX_LINES)
+      this.lines[0] = `[… ${dropped} earlier line${dropped === 1 ? '' : 's'} dropped — scrollback cap ${SCROLLBACK_MAX_LINES} …]`
     }
   }
 

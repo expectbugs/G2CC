@@ -93,7 +93,9 @@ class AudioStreamer(
                         // handler — a concurrent stop() could otherwise interleave between
                         // the isStreaming read and the AudioEnd send, producing duplicate
                         // AudioEnd messages (server-side protocol violation).
+                        val report: Boolean
                         synchronized(this@AudioStreamer) {
+                            report = isStreaming
                             if (isStreaming) {
                                 // Only send audio_end if audio_start actually went out. The three
                                 // synchronous failure paths (no RECORD_AUDIO, no source,
@@ -106,8 +108,13 @@ class AudioStreamer(
                                 mic.stop()
                             }
                         }
-                        // Outside the lock (callback may do I/O): surface to the server.
-                        onFailure(event.reason)
+                        // Outside the lock (callback may do I/O): surface to the server —
+                        // but ONLY for failures of a LIVE capture. A post-stop read-race
+                        // failure sent a spurious [audio-error] that killed the WM's
+                        // 'transcribing' state and discarded the just-recorded dictation's
+                        // real transcript (review 2026-06-11).
+                        if (report) onFailure(event.reason)
+                        else Log.w(TAG, "capture failure after stop — not reported: ${event.reason}")
                     }
                     is MicCapture.Event.Stopped -> {
                         Log.i(TAG, "capture stopped")
@@ -119,10 +126,13 @@ class AudioStreamer(
 
     fun stop() {
         synchronized(this) {
-            if (!isStreaming) return
+            val was = isStreaming
             isStreaming = false
+            // ALWAYS stop the mic (idempotent): a Failure that already cleared isStreaming
+            // could leave the capture loop running while the early-return skipped
+            // mic.stop() — the read loop then ran forever (review 2026-06-11).
             mic.stop()
-            if (startSent) connection.send(ClientMessage.AudioEnd)   // don't send a bogus end if start never went out
+            if (was && startSent) connection.send(ClientMessage.AudioEnd)   // don't send a bogus end if start never went out
             startSent = false
         }
     }

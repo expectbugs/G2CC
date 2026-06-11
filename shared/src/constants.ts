@@ -22,7 +22,7 @@ export const STATUS_CONTAINER_NAME = 'status' // SDK max 16 chars
 export const STATUS_PADDING = 4
 
 // ============================================================
-// Clock cutout (Glasses OS) — app-owned ticking HH:MM:SS in the
+// Clock cutout (Glasses OS) — app-owned 12-hour minute-tick clock in the
 // top-RIGHT corner. The display server MUST lay out content around
 // this reserved rect (never emit a region that overlaps it). The
 // Android client injects it into every Scene and ticks it locally
@@ -68,7 +68,7 @@ export const DE_CONTENT_W = SCREEN_WIDTH - DE_MENU_W        // 480
 export const DE_CONTENT_H = SCREEN_HEIGHT - 2 * DE_BAR_H    // 222
 export const DE_TILE_W = DE_CONTENT_W / 2                   // 240 (≤288 cap ✓)
 export const DE_TILE_H = DE_CONTENT_H / 2                   // 111 (≤129 cap ✓)
-export const DE_TITLE_W = SCREEN_WIDTH - CLOCK_WIDTH        // 474 (title ends at the clock cutout)
+export const DE_TITLE_W = SCREEN_WIDTH - CLOCK_WIDTH        // 469 (title ends at the clock cutout)
 /** Right-trim on the tab strip's estimated width — pushes the right-aligned
  *  tabs ~30px farther right (Adam's 2026-06-10 eyeball cal vs the conservative
  *  glyph estimate). If the tabs CLIP/wrap on real glass, reduce this. */

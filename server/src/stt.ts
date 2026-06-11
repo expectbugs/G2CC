@@ -14,6 +14,7 @@
 // specific — though Phase 8 may extend it for Parakeet's failure modes).
 
 import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
+import process from 'node:process'
 import { join } from 'node:path'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -52,6 +53,15 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/\s+/g, ' ').trim()
 }
 
+// Per-process-unique STT tmp names: `Date.now()` alone collided when two WS
+// clients (phone + a dev/sim client) transcribed in the same millisecond — the
+// second write overwrote the first WAV and BOTH transcriptions returned the
+// second client's words, silently (review 2026-06-11).
+let sttTmpSeq = 0
+function sttTmpPath(prefix: string): string {
+  return join('/tmp', `${prefix}-${Date.now()}-${process.pid}-${++sttTmpSeq}.wav`)
+}
+
 export function isLikelyHallucination(text: string): boolean {
   return HALLUCINATION_DENYLIST.has(normalize(text))
 }
@@ -82,10 +92,12 @@ export function extractSentinelResult(stdout: string): string {
 export async function transcribe(pcmBuffer: Buffer, config: G2CCConfig): Promise<string> {
   const processed = await preprocessAudio(pcmBuffer)
   const wavBuffer = pcmToWav(processed, 16000, 16, 1)
-  const tmpPath = join('/tmp', `g2cc-stt-${Date.now()}.wav`)
-  writeFileSync(tmpPath, wavBuffer)
+  const tmpPath = sttTmpPath('g2cc-stt')
 
   try {
+    // Inside the try so an ENOSPC partial write still hits the cleanup below
+    // (it used to orphan the partial file — review 2026-06-11).
+    writeFileSync(tmpPath, wavBuffer)
     if (config.stt.engine === 'parakeet') {
       return await transcribeParakeet(tmpPath, config)
     }
@@ -165,9 +177,9 @@ export async function transcribeDji(
   // soundfile decoder can read it without ambiguity. bitsPerSample=32,
   // audioFormat=3.
   const wavBuffer = pcmToWav(pcmBuffer, format.sampleRate, 32, format.channels, 3)
-  const tmpPath = join('/tmp', `g2cc-dji-${Date.now()}.wav`)
-  writeFileSync(tmpPath, wavBuffer)
+  const tmpPath = sttTmpPath('g2cc-dji')
   try {
+    writeFileSync(tmpPath, wavBuffer)
     const { pythonPath } = config.stt
     const { stdout } = await execFileAsync(
       pythonPath,
@@ -230,7 +242,11 @@ class ParakeetDaemon {
     this.proc = proc
     this.buf = ''
     proc.stdout.setEncoding('utf-8')
-    proc.stdout.on('data', (c: string) => this.onStdout(c))
+    // Identity-gated like die(): after an SRV-17 overflow respawn, late pipe data
+    // from the SIGKILLed predecessor must not pollute the fresh daemon's buffer
+    // (it could resolve the next job with stale text or re-trip the overflow and
+    // kill the healthy daemon — review 2026-06-11).
+    proc.stdout.on('data', (c: string) => { if (this.proc === proc) this.onStdout(c) })
     proc.stderr.on('data', () => { /* NeMo / tqdm chatter — ignored unless it dies */ })
     proc.stdin.on('error', (e: Error) => console.warn(`[stt] parakeet daemon stdin error: ${e}`))
     const die = (err: Error): void => {

@@ -139,6 +139,18 @@ export class Watchdog extends EventEmitter {
 
       try {
         await new Promise<void>(resolve => setTimeout(resolve, backoff))
+        // RESURRECTION GUARD (review 2026-06-11, 3 independent finders): the id may
+        // have been unregistered DURING the backoff sleep — Close session, Options
+        // respawn, the auto-revive eviction (prompt on a dead session → pool evicts →
+        // session_evicted → unregister), or ws-close cleanup. Respawning the captured
+        // session anyway created a zombie CC subprocess owned by NO pool entry (so
+        // disconnect cleanup never kills it), holding --resume on the same
+        // conversation as its replacement, and the re-`set` below re-registered the
+        // deleted id so the orphan was babysat forever.
+        if (this.sessions.get(id)?.session !== session) {
+          console.log(`[watchdog] Session ${id} was unregistered/replaced during the ${backoff}ms backoff — skipping respawn`)
+          continue
+        }
         // If CC had assigned a session ID, adopt it for --resume so the
         // conversation context is preserved across the respawn.
         // (4th-pass L6: spawnedWithResume now derives from session.config so
@@ -149,6 +161,13 @@ export class Watchdog extends EventEmitter {
           console.log(`[watchdog] Will --resume ${priorCcId} on respawn`)
         }
         await session.spawn()
+        // Re-check before re-registering: an unregister can also land during the
+        // spawn await itself. Kill what we just spawned rather than orphan it.
+        if (this.sessions.get(id)?.session !== session) {
+          console.warn(`[watchdog] Session ${id} unregistered during respawn — killing the fresh process to avoid an orphan`)
+          session.kill()
+          continue
+        }
         // Record spawn time so we can detect early death (above) and apply the
         // HEALTHY_LIFETIME_MS counter-clear (pass 1).
         this.sessions.set(id, { session, projectPath, healthySince: Date.now() })

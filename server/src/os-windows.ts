@@ -24,7 +24,7 @@ import { listProjectDirectories } from './directory-picker.js'
 import { parseMarkdown, renderSingleTile, renderImageFile, type Block, type RenderedImage } from './os-content.js'
 import {
   composeScene, paginateText, errorView, blankScene,
-  SINGLE_TILE_W, SINGLE_TILE_H, type WinView,
+  SINGLE_TILE_W, SINGLE_TILE_H, DEFAULT_BROWSE_MENU, type WinView,
 } from './os-compose.js'
 import type { SessionPool, PoolEntry } from './session-pool.js'
 import { hostname } from 'node:os'
@@ -95,8 +95,10 @@ export interface OsWindow {
    *  last-RENDERED view (so taps can't misroute across state changes) and
    *  handles the global labels (Retry/Reload/Back/Main) before delegating. */
   onMenuSelect(label: string): Promise<void>
-  /** A tap on browse row `index` INTO THE WINDOW'S OWN items (the WM already
-   *  stripped the injected Reload row at index 0). */
+  /** A tap on browse row `index` INTO THE WINDOW'S OWN items, exactly as the
+   *  window rendered them (no offset — the once-planned compose-injected Reload
+   *  row was superseded by the v1.3 browse focus-flip: Reload lives in the left
+   *  menu list, reached by double-tap). */
   onBrowseSelect(index: number): Promise<void>
   /** Pop one level. false = already at root (WM goes to Main). In browse
    *  windows the FIRST pop flips focus content→menu (Adam 2026-06-10: "double
@@ -191,8 +193,13 @@ class SessionLevel {
    *  arrive with this false (Cancel / a newer Dictate / a window pop cleared
    *  it) — the single source of truth that kills the canceled-result race. */
   transcribing = false
-  pendingPermissionId: string | null = null
-  permDoc: Block[] | null = null
+  /** FIFO of pending CC permission requests (review 2026-06-11: parallel tool_use
+   *  blocks can emit overlapping control_requests; a single slot silently orphaned
+   *  all but the latest — CC then blocked on the unanswered one forever). The head
+   *  is the one on screen; Approve/Deny answers it and shows the next. */
+  private pendingPermissions: { id: string; doc: Block[] }[] = []
+  /** The on-screen (head) pending permission id; null when none. */
+  get pendingPermissionId(): string | null { return this.pendingPermissions[0]?.id ?? null }
   toolLine = ''
   lastError: string | null = null
   /** A dictation that arrived while a turn was STREAMING — sending a second
@@ -318,17 +325,26 @@ class SessionLevel {
             ...parseMarkdown(info.text || '(empty response)'),
           ])
       // Fire the prompt that queued during this turn (mid-stream sends kill CC).
+      // retainDoc: the answer that just landed stays on the page above the new
+      // prompt — without it the drain erased the response before it ever rendered.
       const queued = this.pendingPrompt
       if (queued) {
         this.pendingPrompt = null
         this.ctx.log(`[os] ${this.who}: sending queued prompt: "${queued.slice(0, 80)}"`)
-        void this.prompt(queued)
+        void this.prompt(queued, true)
       }
     })
     session.on('permission_request', (info: { requestId: string; rawEvent: Record<string, unknown> }) => {
       if (stale()) return
-      this.pendingPermissionId = info.requestId
-      this.permDoc = permissionSummary(info.rawEvent)
+      // The mic / an unconfirmed transcript must not stay live underneath the
+      // permission menu (review 2026-06-11: the perm menu replaced Done/Cancel,
+      // leaving the mic hot with no stop path). Discarding an unread transcript
+      // is loud (stopDictation logs); the user re-records after deciding.
+      this.stopDictation('permission request')
+      this.pendingPermissions.push({ id: info.requestId, doc: permissionSummary(info.rawEvent) })
+      if (this.pendingPermissions.length > 1) {
+        this.ctx.log(`[os] ${this.who}: permission request #${this.pendingPermissions.length} queued (${info.requestId})`)
+      }
       this.renderPermDoc()
     })
     session.on('error', (message: string) => {
@@ -336,12 +352,14 @@ class SessionLevel {
       this.lastError = message
       this.busy = false
       this.dropQueued('turn error')
+      this.dropPermissions('turn error')   // the turn that asked is dead; CC won't honor late answers
       this.requestRender()
     })
     session.on('process_died', (code: number | null) => {
       if (stale()) return
       this.busy = false
       this.dropQueued('process died')
+      this.dropPermissions('process died')
       this.showError(`CC process died (code=${code}).`,
         `The watchdog auto-respawns it — ${this.verb} again, or Options → New session.`)
     })
@@ -351,10 +369,19 @@ class SessionLevel {
   // doc-race sequence tokens are gone with the tiles (2026-06-11).
 
   private renderPermDoc(): void {
-    if (!this.permDoc) return
-    this.pages = paginateText(blocksToText(this.permDoc))
+    const head = this.pendingPermissions[0]
+    if (!head) return
+    this.pages = paginateText(blocksToText(head.doc))
     this.page = 0
     this.requestRender()
+  }
+
+  /** Drop ALL queued permission requests LOUDLY (their turn/process is gone). */
+  private dropPermissions(why: string): void {
+    if (this.pendingPermissions.length) {
+      this.ctx.log(`[os] ${this.who}: dropping ${this.pendingPermissions.length} pending permission request(s) (${why})`)
+      this.pendingPermissions = []
+    }
   }
 
   async setDoc(blocks: Block[]): Promise<void> {
@@ -425,6 +452,10 @@ class SessionLevel {
   menu(): string[] {
     if (this.pendingPermissionId) return ['Next', 'Prev', 'Approve', 'Deny', 'Reload', 'Main']
     if (this.listening) return ['Done', 'Cancel', 'Reload', 'Main']
+    // While STT runs, do NOT offer the verb (review 2026-06-11: the idle menu here
+    // invited a re-Dictate that the server rejects mid-transcription — wedging the
+    // mic with no stop path). Cancel discards the in-flight result loudly.
+    if (this.transcribing) return ['Cancel', 'Reload', 'Main']
     // NOT 'Retry' — that's a WM-level label (errorView) and the WM would eat
     // the tap before it reached us (hardware 2026-06-11: Re-record ignored).
     if (this.pendingStt) return ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main']
@@ -497,24 +528,39 @@ class SessionLevel {
       }
       case 'Approve':
       case 'Deny': {
-        const id = this.pendingPermissionId
-        let failure: string | null = null
-        if (id && this.entry) {
-          try {
-            this.entry.session.respondToPermission(id, label === 'Approve')
-          } catch (e) {
-            failure = `permission response failed: ${(e as Error).message}`
-          }
+        const head = this.pendingPermissions[0]
+        if (!head || !this.entry) {
+          // Stale tap (already answered / session closed) — never touch `busy`
+          // here: setting it with no turn in flight wedged 'thinking…' forever
+          // (review 2026-06-11).
+          this.ctx.log(`[os] ${this.who}: ${label} with ${!head ? 'no pending permission' : 'no live session'} — ignored (LOUD)`)
+          this.dropPermissions('stale tap')
+          this.restorePages()
+          this.requestRender()
+          return null
         }
-        this.pendingPermissionId = null
-        this.permDoc = null
-        // Only mark busy if the response actually reached CC — a dead-stdin
-        // failure must show the error, not hide behind "· working" forever.
-        this.busy = failure === null
-        // restore the doc view (the permission doc replaced it); set the error
-        // AFTER (setDoc clears lastError on success)
-        await this.setDoc(this.doc)
-        if (failure) { this.lastError = failure; this.requestRender() }
+        let failure: string | null = null
+        try {
+          this.entry.session.respondToPermission(head.id, label === 'Approve')
+        } catch (e) {
+          failure = `permission response failed: ${(e as Error).message}`
+        }
+        this.pendingPermissions.shift()
+        if (failure) {
+          // Dead stdin — the turn is gone and the remaining queue can't be answered.
+          this.busy = false
+          this.dropPermissions('stdin dead')
+          await this.setDoc(this.doc)
+          this.lastError = failure
+          this.requestRender()
+        } else if (this.pendingPermissions.length > 0) {
+          this.ctx.log(`[os] ${this.who}: ${this.pendingPermissions.length} more permission request(s) — showing next`)
+          this.renderPermDoc()
+        } else {
+          // restore the doc view (the permission doc replaced it). The turn keeps
+          // running after a response — `busy` is left exactly as it was.
+          await this.setDoc(this.doc)
+        }
         return null
       }
       case 'Options': return 'options'
@@ -548,7 +594,10 @@ class SessionLevel {
   stopDictation(why: string): void {
     if (this.listening || this.transcribing || this.pendingStt) {
       this.ctx.log(`[os] ${this.who}: dictation stopped (${why})`)
-      if (this.listening) this.ctx.audio('stop')
+      // Stop the mic whenever it COULD be live (listening, or a rejected-start
+      // wedge where our flags say transcribing but the phone is still capturing —
+      // review 2026-06-11). The phone-side stop is an idempotent no-op.
+      if (this.listening || this.transcribing) this.ctx.audio('stop')
       this.listening = false
       this.transcribing = false
       if (this.pendingStt) { this.pendingStt = null; this.restorePages() }
@@ -578,21 +627,46 @@ class SessionLevel {
   }
 
   async onSttError(error: string): Promise<void> {
+    const hadDictation = this.listening || this.transcribing || this.pendingStt
+    // ALWAYS tell the phone to stop the mic (idempotent no-op when idle). Every
+    // server-side reject path used to leave the phone streaming with no stop path
+    // — the flags here went false, so window switches no longer stopped it either
+    // (review 2026-06-11, three independent finders).
+    this.ctx.audio('stop')
     this.listening = false
     this.transcribing = false
+    if (this.pendingStt) {
+      // The transcript page is being replaced by the error — a Confirm tap after
+      // this would send words the user can never re-read.
+      this.ctx.log(`[os] ${this.who}: discarding unconfirmed transcript (stt error): "${this.pendingStt.slice(0, 60)}"`)
+      this.pendingStt = null
+    }
+    if (!hadDictation) {
+      // A late/duplicate error for a dictation that no longer exists (already
+      // canceled / handled) must not repaint an error page over whatever the
+      // user is reading now — log + re-render is enough.
+      this.ctx.log(`[os] ${this.who}: stt error with no dictation in flight — logged only: ${error}`)
+      this.requestRender()
+      return
+    }
     this.showError(`Dictation failed: ${error}`, `${this.verb} to try again.`)
   }
 
-  async prompt(text: string): Promise<void> {
+  /** [retainDoc]: keep the current doc (the just-finished answer) above the new
+   *  prompt — used by the queued-prompt drain, whose setDoc otherwise erased the
+   *  completed turn's response before it ever rendered (review 2026-06-11). */
+  async prompt(text: string, retainDoc = false): Promise<void> {
     // NEVER write a second user message while a turn is streaming — it kills CC
     // (error_during_execution; hardware 2026-06-11). Queue ONE; newest wins.
-    if (this.busy && this.entry?.session.isAlive()) {
+    const queueIfBusy = (): boolean => {
+      if (!(this.busy && this.entry?.session.isAlive())) return false
       if (this.pendingPrompt) this.ctx.log(`[os] ${this.who}: replacing queued prompt "${this.pendingPrompt.slice(0, 60)}"`)
       this.pendingPrompt = text
       this.ctx.log(`[os] ${this.who}: turn in flight — prompt QUEUED: "${text.slice(0, 80)}"`)
       this.requestRender()   // title shows '· queued'
-      return
+      return true
     }
+    if (queueIfBusy()) return
     if (!this.entry || !this.entry.session.isAlive()) {
       // Auto-revive: a closed (Aria 'Close session') or died subprocess respawns on
       // the next prompt — resumes the saved conversation via sessions.json when one
@@ -604,6 +678,10 @@ class SessionLevel {
         this.showError(`Session revive failed: ${(e as Error).message}`, 'Options → New session for a fresh start.')
         return
       }
+      // Re-check after the await: a concurrent prompt can have raced through the
+      // shared open() and already started a turn — queue rather than double-send
+      // (the second mid-turn stdin message kills CC; review 2026-06-11).
+      if (queueIfBusy()) return
     }
     if (!this.entry || !this.entry.session.isAlive()) {
       this.showError('No live CC session.', 'Options → New session.')
@@ -616,6 +694,7 @@ class SessionLevel {
       this.lastError = null
       // Show the prompt while CC works — visible confirmation the dictation landed.
       await this.setDoc([
+        ...(retainDoc ? [...this.doc, { t: 'rule' } as Block] : []),
         { t: 'heading', text: 'You', meta: 'prompt' },
         ...parseMarkdown(text),
         { t: 'rule' },
@@ -630,6 +709,10 @@ class SessionLevel {
   /** Respawn with current opts (Options model/effort change; resumes context). */
   async respawn(fresh = false): Promise<void> {
     this.stopDictation('respawn')
+    // The old session's process_died is stale()-suppressed after the swap, so its
+    // dropQueued never runs — drop here or a stale queued prompt fires after some
+    // LATER unrelated turn in the new session (review 2026-06-11).
+    this.dropQueued('respawn')
     const old = this.entry
     const ccSessionId = !fresh ? old?.session.ccSessionId ?? null : null
     if (old) {
@@ -656,8 +739,7 @@ class SessionLevel {
     this.ctx.registerWatchdog(entry)
     this.ctx.pool.persistSessionMeta()
     this.busy = false
-    this.pendingPermissionId = null
-    this.permDoc = null
+    this.dropPermissions('respawn')
     if (fresh) {
       await this.setDoc([
         { t: 'heading', text: this.who, meta: basename(this.projectPath) },
@@ -671,6 +753,15 @@ class SessionLevel {
 
   close(): void {
     this.stopDictation('close')
+    // Turn-scoped state must die with the session (review 2026-06-11: closing
+    // mid-turn left busy=true → 'thinking…' + the busy menu over the "Session
+    // closed" doc; a surviving permission entry showed Approve/Deny whose tap then
+    // wedged busy with no turn at all).
+    this.busy = false
+    this.turnPhase = null
+    this.toolLine = ''
+    this.dropQueued('close')
+    this.dropPermissions('close')
     const old = this.entry
     if (old) {
       this.ctx.unregisterWatchdog(old.id)
@@ -817,7 +908,12 @@ class CcWindow implements OsWindow {
       try {
         await level.open()   // spawn/resume (resumes saved CC session for this dir)
       } catch (e) {
-        level.lastError = `spawn failed: ${(e as Error).message}`   // visible in the session view
+        // showError (not bare lastError): the bare flag only put 'ERROR' in the
+        // title while the page kept saying "Ready." and nothing hit the server
+        // log — the actual reason (pool full, dir owned by another window, spawn
+        // failure) was unreadable anywhere (review 2026-06-11).
+        this.ctx.log(`[os] cc: open ${dir.path} failed: ${(e as Error).message}`)
+        level.showError(`spawn failed: ${(e as Error).message}`, 'Reload to retry, or pick another directory.')
       }
       this.requestRender()
       return
@@ -1082,7 +1178,15 @@ class MailWindow implements OsWindow {
       this.level = 'read'
       this.requestRender()
     } catch (e) {
-      this.lastError = (e as Error).message
+      // Render the failure as a READ-level page. Parking it in lastError was a
+      // silent failure: the re-render's refresh() succeeded and nulled lastError
+      // before the list view ever checked it, so the tap just "did nothing"
+      // (review 2026-06-11). The read level has no refresh to eat the error.
+      this.ctx.log(`[os] mail: read ${sel.key} failed: ${(e as Error).message}`)
+      this.pages = paginateText(`ERROR reading message:\n\n${(e as Error).message}`)
+      this.page = 0
+      this.readSubject = '(error)'
+      this.level = 'read'
       this.requestRender()
     }
   }
@@ -1135,6 +1239,9 @@ class FilesWindow implements OsWindow {
   private page = 0
   private readName = ''
   private img: RenderedImage | null = null   // the image-viewer payload
+  /** tree-level focus: content rows (default) ⇄ the menu list (double-tap) — without
+   *  this the tree's rendered Reload/Main menu was dead UI (review 2026-06-11). */
+  private focus: 'content' | 'menu' = 'content'
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -1175,11 +1282,17 @@ class FilesWindow implements OsWindow {
   }
 
   private listDir(dir: string): { name: string; isDir: boolean }[] {
-    const names = readdirSync(dir).filter((n) => !n.startsWith('.')).sort((a, b) => a.localeCompare(b))
-    const entries = names.map((n) => {
-      let isDir = false
-      try { isDir = statSync(join(dir, n)).isDirectory() } catch { /* dangling symlink — list as file; open loud-fails */ }
-      return { name: n, isDir }
+    // withFileTypes: the dirent already knows isDirectory() — the old per-entry
+    // statSync pass fully blocked the event loop for tens of seconds on a huge or
+    // cold-HDD directory (and previewRows runs this PER ANTENNA NOTCH; review
+    // 2026-06-11). Only symlinks still need one stat each to classify their target.
+    const dirents = readdirSync(dir, { withFileTypes: true }).filter((d) => !d.name.startsWith('.'))
+    const entries = dirents.map((d) => {
+      let isDir = d.isDirectory()
+      if (!isDir && d.isSymbolicLink()) {
+        try { isDir = statSync(join(dir, d.name)).isDirectory() } catch { /* dangling symlink — list as file; open loud-fails */ }
+      }
+      return { name: d.name, isDir }
     })
     entries.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
     return entries
@@ -1253,11 +1366,15 @@ class FilesWindow implements OsWindow {
     const up = this.stack.length > 1 ? ['..'] : []
     return {
       mode: 'browse',
-      menuMode: 'passive',
+      menuMode: this.focus === 'menu' ? 'capture' : 'passive',
       title: `Files · ${this.cwd()}`,
       menu: ['Reload', 'Main'],
       items: [...up, ...paged.items],
     }
+  }
+
+  async onReload(): Promise<void> {
+    this.focus = 'content'   // a menu action hands focus back to the rows
   }
 
   /** Antenna scroll: move the location selection — the content pane preview
@@ -1277,6 +1394,7 @@ class FilesWindow implements OsWindow {
     if (!loc) return
     this.stack = [loc.path]
     this.offset = 0
+    this.focus = 'content'
     this.level = 'tree'
     this.requestRender()
   }
@@ -1322,7 +1440,19 @@ class FilesWindow implements OsWindow {
       // multi-GB file blocks the whole event loop for seconds (review
       // 2026-06-10). Read ONLY the head from disk. This is a navigational
       // preview, clearly labeled; full content is reachable via a CC session.
-      const size = statSync(path).size
+      const st = statSync(path)
+      if (!st.isFile()) {
+        // openSync on a writer-less FIFO blocks in the kernel FOREVER — single
+        // thread, whole server frozen, nothing recovers it (review 2026-06-11).
+        // Sockets/devices are equally not preview material.
+        this.pages = [`(special file — not previewable)\n\n${e.name}`]
+        this.page = 0
+        this.readName = e.name
+        this.level = 'read'
+        this.requestRender()
+        return
+      }
+      const size = st.size
       const fd = openSync(path, 'r')
       let buf: Buffer
       try {
@@ -1363,11 +1493,19 @@ class FilesWindow implements OsWindow {
     }
   }
 
-  /** image/read → tree → locations (the menu) → Main. */
+  /** image/read → tree → (tree menu focus) → locations (the antenna) → Main. */
   async onBack(): Promise<boolean> {
-    if (this.level === 'image') { this.level = 'tree'; this.img = null; this.requestRender(); return true }
-    if (this.level === 'read') { this.level = 'tree'; this.requestRender(); return true }
-    if (this.level === 'tree') { this.level = 'locations'; this.requestRender(); return true }
+    if (this.level === 'image') { this.level = 'tree'; this.img = null; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'read') { this.level = 'tree'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'tree') {
+      // First pop flips focus to the menu list (Reload/Main reachable — review
+      // 2026-06-11: they rendered but could never be tapped at this level).
+      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+      this.focus = 'content'
+      this.level = 'locations'
+      this.requestRender()
+      return true
+    }
     return false
   }
 }
@@ -1496,8 +1634,10 @@ export class WindowManager {
             view = errorView(`${this.active.label} · error`, (e as Error).message)
             scene = composeScene(view, tabs, this.statusLeft())
           }
-          // Normalize the menu the user actually SEES (browse default Back/Main).
-          this.lastView = { ...view, menu: view.mode === 'browse' ? (view.menu ?? ['Back', 'Main']) : view.menu }
+          // Normalize the menu the user actually SEES — MUST match compose's own
+          // browse default exactly (they diverged: compose rendered Reload/Main
+          // while taps resolved Back/Main — index-0 misroute; review 2026-06-11).
+          this.lastView = { ...view, menu: view.mode === 'browse' ? (view.menu ?? [...DEFAULT_BROWSE_MENU]) : view.menu }
           this.ctx.send(scene)
         } while (this.renderQueued)
       } catch (e) {
@@ -1553,6 +1693,13 @@ export class WindowManager {
    *  the last-RENDERED view. Global labels (Retry/Reload/Back/Main) are
    *  handled here so they work in EVERY window and state — incl. errorView. */
   async onSelect(region: string, index: number): Promise<void> {
+    if (this.blanked) {
+      // Blanked = only a double-tap (wake) is meaningful. The blank scene has no
+      // list regions so this shouldn't fire — but a stale/firmware-odd event must
+      // not mutate window state invisibly (review 2026-06-11).
+      this.ctx.log(`[os] select ${region}[${index}] ignored — screen is blanked`)
+      return
+    }
     try {
       if (region === 'menu') {
         const label = this.lastView?.menu?.[index]
@@ -1587,6 +1734,7 @@ export class WindowManager {
 
   /** Antenna-menu scroll (Files' locations live preview). */
   async onScroll(dir: 'up' | 'down'): Promise<void> {
+    if (this.blanked) { this.ctx.log('[os] scroll ignored — screen is blanked'); return }
     try {
       await this.active.onMenuScroll?.(dir)
     } catch (e) {
@@ -1596,6 +1744,13 @@ export class WindowManager {
 
   /** Sys tap (only meaningful with an antenna menu — list taps arrive as hub_select). */
   async onTapGesture(): Promise<void> {
+    if (this.blanked) {
+      // The blank scene's wake antenna DOES produce sys taps; without this guard a
+      // single tap while dark silently drove the active window (Files entered its
+      // tree level invisibly — review 2026-06-11). Double-tap is the only wake.
+      this.ctx.log('[os] tap ignored — screen is blanked (double-tap wakes)')
+      return
+    }
     try {
       await this.active.onTap?.()
     } catch (e) {

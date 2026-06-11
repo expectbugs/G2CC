@@ -1,9 +1,9 @@
 // DE compositor — a window's current view + the global chrome -> WireScene.
 //
 // Geometry + region ids are the FINALIZED DE contract (docs/DE_DESIGN.md §1,
-// constants in shared DE_*): 38px title bar (title left of the client-owned
-// clock cutout), 96px menu, 480x212 content pane (4 tiles / browse list /
-// text), 38px status bar with right-aligned window tabs. Region ids stay
+// constants in shared DE_*): 33px title bar (title left of the client-owned
+// clock cutout at x=469), 96px menu, 480x222 content pane (4 tiles / browse
+// list / text), 33px status bar with right-aligned window tabs. Region ids stay
 // IDENTICAL across windows so switches diff as content-only updates wherever
 // the wire allows (menu item changes force an f1=7 rebuild — §6).
 //
@@ -81,6 +81,10 @@ export function fwTextWidth(s: string): number {
     else if (ch >= '0' && ch <= '9') w += 11.0
     else if (ch === 'W' || ch === 'M') w += 15.8
     else if (ch >= 'A' && ch <= 'Z') w += 11.6
+    // CJK + fullwidth glyphs render ~full-em wide — treating them as lowercase
+    // let a Chinese page wrap past the 6-row window (review 2026-06-11).
+    // Conservative estimate pending a hardware cal.
+    else if (ch >= '⺀') w += 17.0
     else w += 9.6
   }
   return Math.ceil(w)
@@ -89,8 +93,64 @@ export function fwTextWidth(s: string): number {
 /** Browse rows clamp tighter than the 64-byte SDK name cap: 14 rows/page must
  *  keep the whole rebuild frame under the firmware's single-message
  *  multi-packet wall (~1000 B — hardware 2026-06-10: Mail's 7-packet rebuild
- *  was silently ignored). 16 × 40 B + chrome ≈ 4-5 AA packets. */
+ *  was silently ignored). Re-derived from the wire encoding 2026-06-11: a worst
+ *  Mail page (16 rows × 42 B-encoded + chrome + clock) is ~960 B — only ~4%
+ *  headroom, which is why EVERY composed frame now also goes through
+ *  estimateLayoutFrameBytes() below. */
 export const BROWSE_ROW_MAX_BYTES = 40
+
+/** The browse-mode menu default — single source of truth shared with the WM's
+ *  lastView normalization (they diverged once: compose rendered Reload/Main
+ *  while taps resolved Back/Main — an index-0 action swap; review 2026-06-11). */
+export const DEFAULT_BROWSE_MENU = ['Reload', 'Main'] as const
+
+/** Clamp a string to a PIXEL budget using the measured firmware glyph widths
+ *  (fwTextWidth). Used for the title / status / antenna lines, which ride
+ *  fixed-width 33 px bars where overflow WRAPS and triggers the firmware
+ *  overflow scrollbar (hardware 2026-06-10). Navigational clamp, logged. */
+function clampPx(s: string, maxPx: number, what: string): string {
+  if (fwTextWidth(s) <= maxPx) return s
+  let out = s
+  while (out.length > 1 && fwTextWidth(out + '…') > maxPx) out = out.slice(0, -1)
+  console.warn(`[os-compose] ${what} clamped to ${maxPx}px: "${s.slice(0, 60)}…"`)
+  return out + '…'
+}
+
+/** Middle-ellipsize to a pixel budget — for paths, where the TAIL (the deep dir
+ *  name) carries the meaning and the head (the mount root) anchors it. */
+function clampPxMiddle(s: string, maxPx: number, what: string): string {
+  if (fwTextWidth(s) <= maxPx) return s
+  let head = Math.ceil(s.length * 0.4)
+  let tail = s.length - head
+  while (head + tail > 4 && fwTextWidth(s.slice(0, head) + '…' + s.slice(s.length - tail)) > maxPx) {
+    if (head >= tail) head-- ; else tail--
+  }
+  console.warn(`[os-compose] ${what} middle-clamped to ${maxPx}px: "${s.slice(0, 60)}…"`)
+  return s.slice(0, head) + '…' + s.slice(s.length - tail)
+}
+
+/** Conservative wire-size estimate of the LAYOUT frame this region set encodes
+ *  to (mirrors android DisplayProto: 1-byte protobuf keys, length-varints,
+ *  UTF-8 payloads, the client-injected clock region, wrapper framing). The
+ *  firmware SILENTLY ignores any single message past ~1000 B and the client
+ *  hard-rejects them — a scene that trips this throws HERE, loudly, where the
+ *  WM's errorView fallback keeps the screen alive (review 2026-06-11). */
+export function estimateLayoutFrameBytes(regions: SceneRegion[]): number {
+  let bytes = 40 /* client-injected clock region */ + 10 /* wrapper f1/count + token + framing */
+  for (const r of regions) {
+    bytes += 16 /* geometry + id + kind framing */ + Buffer.byteLength(r.name, 'utf8')
+    if (r.style) bytes += 8
+    const c = r.content
+    if (!c) continue
+    if (c.kind === 'text') bytes += 4 + Buffer.byteLength(c.text, 'utf8')
+    else if (c.kind === 'list') bytes += 8 + c.items.reduce((n, it) => n + 2 + Buffer.byteLength(it, 'utf8'), 0)
+    else bytes += 4   // image content rides separate chunked messages, not the layout frame
+  }
+  return bytes
+}
+/** Throw threshold for the estimator — under the client's 1000 B hard cap by a
+ *  margin that absorbs the estimate's deliberate overshoot. */
+export const LAYOUT_FRAME_BUDGET_BYTES = 960
 
 /** Clamp a native-list label to [maxBytes] of UTF-8 — the firmware caps were
  *  proven with ASCII names, so bytes is the safe measure for `●`/`—`/accents.
@@ -111,13 +171,17 @@ function clampLabel(s: string, what: string, maxBytes: number = MAX_ITEM_NAME_LE
 export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string): WireScene {
   const regions: SceneRegion[] = []
 
-  // Title bar — ends at the client-owned clock cutout (474px). The leading
-  // space nudges the text ~5px right (Adam cal 2026-06-10) without raising
-  // paddingLength, which would also eat VERTICAL room in the 33px bar.
+  // Title bar — ends at the client-owned clock cutout (469px, CLOCK_X). The
+  // leading space nudges the text ~5px right (Adam cal 2026-06-10) without
+  // raising paddingLength, which would also eat VERTICAL room in the 33px bar.
+  // Middle-ellipsized to the bar's px budget: an unclamped deep Files cwd both
+  // wrapped the 33px bar AND pushed rebuild frames past the 1000 B wall
+  // (review 2026-06-11).
+  const title = clampPxMiddle(view.title, DE_TITLE_W - 14, 'title')
   regions.push({
     id: DE_REGION_IDS.title, name: 'title', x: 0, y: 0, w: DE_TITLE_W, h: DE_BAR_H,
     kind: 'text', style: TITLE_CHROME,
-    content: { kind: 'text', text: ' ' + view.title },
+    content: { kind: 'text', text: ' ' + title },
   })
 
   // Menu slot — ALWAYS a real menu (Adam 2026-06-10). Reading/tiles/text
@@ -125,8 +189,13 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   // menuMode decides who captures (exactly ONE capture region per page, §6.1).
   const menuMode: MenuMode = view.mode === 'browse' ? (view.menuMode ?? 'passive') : 'capture'
   if (view.mode === 'browse' && menuMode === 'antenna') {
-    const lines = view.menuLines ?? []
-    if (lines.length === 0) throw new Error(`compose: '${view.title}' antenna menu has no lines`)
+    const rawLines = view.menuLines ?? []
+    if (rawLines.length === 0) throw new Error(`compose: '${view.title}' antenna menu has no lines`)
+    // Antenna lines must fit the 96px column MINUS the '▸ ' marker — a wrapped
+    // line overflows the 6-line window and real firmware scrolling kills the
+    // zero-range per-notch trick the antenna depends on (review 2026-06-11:
+    // an 8-glyph mount label like 'lilhomie' was enough).
+    const lines = rawLines.map((l) => clampPx(l, DE_MENU_W - 2 * 3 - 15, 'antenna line'))
     const sel = Math.min(Math.max(view.menuSelected ?? 0, 0), lines.length - 1)
     const text = lines.map((l, i) => (i === sel ? `▸ ${l}` : `  ${l}`)).join('\n')
     regions.push({
@@ -135,7 +204,7 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
       content: { kind: 'text', text, scroll: true },   // THE antenna: per-notch focus events
     })
   } else {
-    const menu = (view.menu ?? ['Reload', 'Main']).map((m) => clampLabel(m, 'menu'))
+    const menu = (view.menu ?? [...DEFAULT_BROWSE_MENU]).map((m) => clampLabel(m, 'menu'))
     if (menu.length === 0) throw new Error(`compose: '${view.title}' has no menu items`)
     const capture = menuMode === 'capture'
     regions.push({
@@ -215,13 +284,25 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   regions.push({
     id: DE_REGION_IDS.status, name: 'status', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: tabX, h: DE_BAR_H,
     kind: 'text', style: CHROME,
-    content: { kind: 'text', text: statusLeft },
+    // px-clamped: a long MCP tool name in the phase slot (`● tool mcp__…`)
+    // wrapped the 33px bar — the exact firmware-scrollbar trigger from Adam's
+    // 2026-06-10 cal (review 2026-06-11).
+    content: { kind: 'text', text: clampPx(statusLeft, tabX - 12, 'status') },
   })
   regions.push({
     id: DE_REGION_IDS.tabs, name: 'tabs', x: tabX, y: SCREEN_HEIGHT - DE_BAR_H, w: tabW, h: DE_BAR_H,
     kind: 'text',
     content: { kind: 'text', text: tabText },
   })
+
+  // THE WALL GUARD (review 2026-06-11): nothing above may compose a layout frame
+  // the firmware would silently eat / the client would reject — that left the
+  // glasses on a stale screen while the WM's lastView moved on (tap misroutes).
+  // Throwing here lands in the WM's errorView fallback, which is itself bounded.
+  const est = estimateLayoutFrameBytes(regions)
+  if (est > LAYOUT_FRAME_BUDGET_BYTES) {
+    throw new Error(`compose: '${title}' layout frame ≈${est} B exceeds the ${LAYOUT_FRAME_BUDGET_BYTES} B budget (firmware multi-packet wall) — trim rows/text`)
+  }
 
   return { regions }
 }
@@ -244,43 +325,74 @@ export function blankScene(): WireScene {
 /** Loud, visible error screen (rasterizer/window failure) — never a silent
  *  blank. Its menu uses ONLY WindowManager-level labels (Retry/Reload/Main),
  *  so the taps work in ANY window state — review 2026-06-10 found per-window
- *  label resolution misrouted errorView taps into live actions (mic on). */
+ *  label resolution misrouted errorView taps into live actions (mic on).
+ *
+ *  The message is BOUNDED to one page (review 2026-06-11): an unpaginated
+ *  multi-line traceback both clipped invisibly at ~6 rows AND pushed the
+ *  rebuild frame past the 1000 B wall — making the ERROR screen itself
+ *  unpaintable exactly when it was needed. errorView has no Next/Prev, so the
+ *  head + a pointer to the server log (where every caller logs the full text)
+ *  is the honest bounded surface. */
 export function errorView(title: string, message: string): WinView {
+  const pages = paginateText(`ERROR\n\n${message}`)
+  let text = pages[0]
+  if (pages.length > 1) {
+    const lines = text.split('\n')
+    lines[lines.length - 1] = '… (full error in the server log)'
+    text = lines.join('\n')
+  }
   return {
     mode: 'text',
     title,
     menu: ['Retry', 'Reload', 'Main'],
-    text: `ERROR\n\n${message}`,
+    text,
   }
 }
 
-/** Estimated chars per text-mode page (content pane, firmware font): measured
- *  ≈9.0 px/char avg, 34 px rows (docs/SIM_TOOLING.md). ~6 rows x ~50 chars,
- *  kept conservative so wrapped lines don't overflow the page. */
+/** Text-mode page bounds. Lines wrap by MEASURED PIXELS (fwTextWidth — the old
+ *  48-char count let digit/uppercase-dense lines exceed the 468 px pane and
+ *  firmware-wrap past the 6-row window: invisible clipping; review 2026-06-11).
+ *  Pages are ALSO byte-capped: a page rides the f1=7 rebuild frame whenever the
+ *  menu changes with it, and 288 CJK chars (3 B each) blew the 1000 B wall —
+ *  the whole read level then never painted. */
 export const TEXT_PAGE_ROWS = 6
-export const TEXT_PAGE_COLS = 48
+export const TEXT_PAGE_PX = 456          // 480 content - 2×6 padding - safety margin
+export const TEXT_PAGE_MAX_BYTES = 560   // page UTF-8 ceiling (rebuild frame headroom)
 
-/** Pre-paginate plain text for text mode: greedy word-wrap at TEXT_PAGE_COLS,
- *  TEXT_PAGE_ROWS rows per page. Returns at least one page. NO truncation —
- *  every char lands on some page. */
+/** Pre-paginate plain text for text mode: greedy px-measured word-wrap,
+ *  TEXT_PAGE_ROWS rows per page with a UTF-8 byte ceiling. Returns at least one
+ *  page. NO truncation — every char lands on some page. */
 export function paginateText(text: string): string[] {
+  const fits = (s: string): boolean => fwTextWidth(s) <= TEXT_PAGE_PX
   const lines: string[] = []
   for (const raw of text.replace(/\r\n/g, '\n').split('\n')) {
-    if (raw.length <= TEXT_PAGE_COLS) { lines.push(raw); continue }
+    if (fits(raw)) { lines.push(raw); continue }
     const words = raw.split(' ')
     let line = ''
     for (let w of words) {
       const cand = line ? line + ' ' + w : w
-      if (cand.length <= TEXT_PAGE_COLS) { line = cand; continue }
+      if (fits(cand)) { line = cand; continue }
       if (line) lines.push(line)
-      while (w.length > TEXT_PAGE_COLS) { lines.push(w.slice(0, TEXT_PAGE_COLS)); w = w.slice(TEXT_PAGE_COLS) }
+      // hard-split a single overlong token (URL/base64) at the px boundary
+      while (!fits(w)) {
+        let cut = w.length - 1
+        while (cut > 1 && !fits(w.slice(0, cut))) cut--
+        lines.push(w.slice(0, cut)); w = w.slice(cut)
+      }
       line = w
     }
     lines.push(line)
   }
   const pages: string[] = []
-  for (let i = 0; i < lines.length; i += TEXT_PAGE_ROWS) {
-    pages.push(lines.slice(i, i + TEXT_PAGE_ROWS).join('\n'))
+  let page: string[] = []
+  let pageBytes = 0
+  const flush = (): void => { if (page.length) { pages.push(page.join('\n')); page = []; pageBytes = 0 } }
+  for (const l of lines) {
+    const b = Buffer.byteLength(l, 'utf8') + 1
+    if (page.length >= TEXT_PAGE_ROWS || (page.length > 0 && pageBytes + b > TEXT_PAGE_MAX_BYTES)) flush()
+    page.push(l)
+    pageBytes += b
   }
+  flush()
   return pages.length ? pages : ['']
 }

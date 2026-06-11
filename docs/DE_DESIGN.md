@@ -9,9 +9,9 @@ implementation builds against. Wire truth: `docs/G2_BLE_PROTOCOL.md`. OS archite
 
 ```
 ┌──────────────────────────────────────────────────┬─────────┐
-│ title (0,0,474,33)  " Claude Code · aria · 3/3"  │ clock   │ 33px bars (HW-verify the
-├──────────┬───────────────────────────────────────┤(474,0,  │ overflow-scrollbar margin)
-│ menu     │ content pane (96,33,480,222)          │ 102,33) │ title text leads with a
+│ title (0,0,469,33)  " Claude Code · aria · 3/3"  │ clock   │ 33px bars (HW-verify the
+├──────────┬───────────────────────────────────────┤(469,0,  │ overflow-scrollbar margin)
+│ menu     │ content pane (96,33,480,222)          │ 107,33) │ title text leads with a
 │ (0,33,   │  tiles: 2×2 of 240×111  (≤288×129 ✓)  │"1:04 PM"│ space (+5px, Adam cal)
 │  96,222) │  browse: native list 480×222          ├─────────┘ clock = CLIENT-OWNED cutout,
 │ 5 items  │  text:   text region 480×222          │           12-hour, MINUTE-tick
@@ -24,8 +24,9 @@ implementation builds against. Wire truth: `docs/G2_BLE_PROTOCOL.md`. OS archite
 
 If "12:59 PM" clips at 102px or the tabs clip/wrap, widen `CLOCK_WIDTH` / reduce
 `DE_TAB_RIGHT_TRIM` — both are single tunables from the 2026-06-10 eyeball cal.
-The clock and the tab strip carry **padding 4** so their text sits ~5px off the
-neighboring bar's border line (un-padded text rendered ON the border — Adam cal).
+The clock and the tab strip get their ~5px inset from a LEADING SPACE + extra width,
+NOT padding — hardware 2026-06-10: padding 4 inside a 33px bar dropped the vertical
+room below the firmware's threshold and triggered the overflow scrollbar.
 
 No region overlaps anything (SceneCodec loud-fails on clock-cutout overlap — and on a
 server/client GEOMETRY-SKEW: a new-geometry server vs an old APK rejects every scene with
@@ -57,8 +58,9 @@ content text=7, tiles=10..13 (`t0..t3`).
     scrolling (Adam 2026-06-10 r2). Tap = enter (focus → content rows). The antenna shows a
     ≤6-line window around the selection: more lines would overflow the region and break the
     zero-range per-notch behavior (the v0.6-proven trick).
-- **Reload everywhere** (Adam 2026-06-10): every reading menu has `Reload`; every browse list
-  gets a compose-injected `Reload` row at index 0. Reload = `display_reload` to the client
+- **Reload everywhere** (Adam 2026-06-10, mechanism revised in v1.3): every reading menu has
+  `Reload`; browse windows reach it via the DOUBLE-TAP focus flip to the left menu list (the
+  once-planned compose-injected row-0 was superseded). Reload = `display_reload` to the client
   (abort any wedged render op + COLD_INIT re-takeover with the current scene — the proven
   renewal path) + the active window clears stuck transients (mic, errors) + recompose.
 - **Main** = menu list of windows (`Aria/CC/Mail/Files/Reload`, capture on the menu) + the
@@ -154,7 +156,7 @@ Deferred: SMS (needs phone-side bridge), Settings.
 2. Native LIST on our hijacked slot: paints, scroll moves selection, tap → `hub_select`
    round-trip (first direct-BLE list ever — wire-spec'd from g2cap but unverified). Also the
    NON-capturing menu list in browse windows (selectBorder=0, f12=0 — also never probed).
-3. Clock 12h at x474/w102: "12:59 PM" fits; tabs don't clip with the 30px right-trim
+3. Clock 12h at x469/w107: "12:59 PM" fits; tabs don't clip with the 30px right-trim
    (tunables: `CLOCK_WIDTH`, `DE_TAB_RIGHT_TRIM`). Minute tick visible.
 4. Rebuild-retention probe: menu item swap on a tile screen — do the tiles stay painted?
 5. 240×111 tile page push: timing + jank vs the v0.8 fullscreen finding.

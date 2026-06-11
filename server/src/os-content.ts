@@ -220,6 +220,9 @@ export function renderImageFile(path: string, maxW: number, maxH: number): Promi
     execFile(PY, [IMAGE_SCRIPT, path, String(maxW), String(maxH)],
       { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err) { reject(new Error(`render_image failed: ${err.message}${stderr?.length ? ' :: ' + stderr.toString() : ''}`)); return }
+        try {   // a throw INSIDE an execFile callback escapes the Promise as an
+                // uncaughtException and kills the whole server (encodeGray4Bmp's
+                // nibble assert on a contract-violating renderer byte — review 2026-06-11)
         const raw = stdout as Buffer
         if (raw.length < 4) { reject(new Error(`render_image output too short (${raw.length}B)`)); return }
         const w = raw.readUInt16LE(0)
@@ -243,6 +246,9 @@ export function renderImageFile(path: string, maxW: number, maxH: number): Promi
           tiles.push(encodeGray4Bmp(tw, th, tile).toString('base64'))
         }
         resolve({ w, h, tiles: tiles as [string, string, string, string] })
+        } catch (e) {
+          reject(e instanceof Error ? e : new Error(String(e)))
+        }
       })
   })
 }
@@ -258,8 +264,11 @@ export async function renderSingleTile(blocks: Block[], w: number, h: number): P
   if (raw.length < 4) throw new Error(`render_content output too short (${raw.length}B)`)
   const pages = raw.readUInt32LE(0)
   const tileBytes = w * h
-  if (raw.length < 4 + tileBytes || pages < 1) {
-    throw new Error(`render_content single-tile output ${raw.length}B / ${pages} pages — expected ≥1 page of ${tileBytes}B`)
+  // STRICT: pages must be exactly 1 and the byte count exact — the old `<` check
+  // silently discarded pages ≥2 (content overflowing the tile), a no-truncation
+  // violation (review 2026-06-11).
+  if (pages !== 1 || raw.length !== 4 + pages * tileBytes) {
+    throw new Error(`render_content single-tile output ${raw.length}B / ${pages} pages — content must fit ONE ${w}x${h} tile`)
   }
   const b64 = encodeGray4Bmp(w, h, raw.subarray(4, 4 + tileBytes)).toString('base64')
   singleCache.set(key, b64)
