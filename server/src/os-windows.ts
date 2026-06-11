@@ -20,7 +20,7 @@ import { join, basename } from 'node:path'
 import type { WireScene } from '@g2cc/shared'
 import type { G2CCConfig } from './config.js'
 import { listProjectDirectories } from './directory-picker.js'
-import { parseMarkdown, renderBlocks, renderSingleTile, type Block, type RenderedContent } from './os-content.js'
+import { parseMarkdown, renderSingleTile, type Block } from './os-content.js'
 import {
   composeScene, paginateText, errorView, blankScene,
   SINGLE_TILE_W, SINGLE_TILE_H, type WinView,
@@ -150,13 +150,36 @@ interface SessionOpts {
   systemPrompt?: string
 }
 
-/** One live CC subprocess rendered to tiles — the content/state machine behind
- *  the CC window's session level and the whole Aria window. */
+/** Flatten content blocks to FIRMWARE TEXT (decided 2026-06-11: the tile path
+ *  was unusable on hardware — menu rebuilds re-pushed all four tiles, taps took
+ *  15-20 s with no feedback; firmware text updates in ~100 ms). The '─' glyph
+ *  is hardware-proven (the Chess capture used it). */
+function blocksToText(blocks: Block[]): string {
+  const out: string[] = []
+  for (const b of blocks) {
+    switch (b.t) {
+      case 'heading': out.push(b.meta ? `${b.text} — ${b.meta}` : b.text, '─'.repeat(20)); break
+      case 'para': out.push(b.text); break
+      case 'bullets': for (const it of b.items) out.push(`• ${it}`); break
+      case 'code': for (const l of b.lines) out.push(`  ${l}`); break
+      case 'stats': for (const c of b.cards) out.push(`${c.value}  ${c.label}`.trim()); break
+      case 'rule': out.push('─'.repeat(20)); break
+      case 'logo': break   // tile-only block
+    }
+    out.push('')
+  }
+  return out.join('\n').trim() || '(empty)'
+}
+
+/** One live CC subprocess rendered to FIRMWARE TEXT pages — the content/state
+ *  machine behind the CC window's session level and the whole Aria window.
+ *  (Tiles for session content were nixed 2026-06-11: every menu state change
+ *  rebuilt + re-pushed all four tiles → 15-20 s taps on hardware.) */
 class SessionLevel {
   entry: PoolEntry | null = null
   opts: SessionOpts
   doc: Block[] = []
-  rendered: RenderedContent | null = null
+  pages: string[] = ['(empty)']
   page = 0
   busy = false
   listening = false
@@ -194,6 +217,7 @@ class SessionLevel {
       { t: 'heading', text: who, meta: basename(projectPath) },
       { t: 'para', text: `Ready. Menu → ${verb} to prompt; responses render here.` },
     ]
+    this.pages = paginateText(blocksToText(this.doc))   // text mode renders synchronously
   }
 
   /** Spawn (or resume) the subprocess and wire events. Loud-throws on failure.
@@ -283,7 +307,7 @@ class SessionLevel {
       if (stale()) return
       this.pendingPermissionId = info.requestId
       this.permDoc = permissionSummary(info.rawEvent)
-      void this.renderPermDoc()
+      this.renderPermDoc()
     })
     session.on('error', (message: string) => {
       if (stale()) return
@@ -301,73 +325,36 @@ class SessionLevel {
     })
   }
 
-  // Monotonic render token: concurrent setDoc/renderPermDoc calls (prompt echo
-  // racing a fast turn_complete racing a permission_request) resolve in
-  // last-STARTED order, not last-FINISHED — a slow older render can no longer
-  // overwrite a newer one (review 2026-06-10).
-  private renderSeq = 0
+  // Text-mode rendering is SYNCHRONOUS (no rasterizer subprocess), so the old
+  // doc-race sequence tokens are gone with the tiles (2026-06-11).
 
-  private async renderPermDoc(): Promise<void> {
+  private renderPermDoc(): void {
     if (!this.permDoc) return
-    const seq = ++this.renderSeq
-    try {
-      const r = await renderBlocks(this.permDoc)
-      if (seq !== this.renderSeq) return   // a newer doc superseded this render
-      this.rendered = r
-      this.page = 0
-    } catch (e) {
-      if (seq === this.renderSeq) this.lastError = `permission render failed: ${(e as Error).message}`
-    }
+    this.pages = paginateText(blocksToText(this.permDoc))
+    this.page = 0
     this.requestRender()
   }
 
   async setDoc(blocks: Block[]): Promise<void> {
     this.doc = blocks
-    const seq = ++this.renderSeq
-    try {
-      const r = await renderBlocks(this.doc)
-      if (seq !== this.renderSeq) return   // a newer doc superseded this render
-      this.rendered = r
-      this.page = 0
-      this.lastError = null
-    } catch (e) {
-      if (seq === this.renderSeq) this.lastError = `render failed: ${(e as Error).message}`
-    }
+    this.pages = paginateText(blocksToText(blocks))
+    this.page = 0
+    this.lastError = null
     this.requestRender()
   }
 
   async view(tab: string): Promise<WinView> {
-    // Re-attempt whenever nothing is rendered — even after a failure, so
-    // 'Retry' actually retries (the old lastError gate made it a no-op here).
-    if (!this.rendered) await this.setDocQuiet()
-    if (this.lastError && !this.rendered) {
-      return errorView(`${this.who} · error`, this.lastError)
-    }
-    const r = this.rendered
-    if (!r) return errorView(`${this.who} · error`, 'no content rendered')
-    const pageSuffix = r.pages > 1 ? ` · ${this.page + 1}/${r.pages}` : ''
+    const pageSuffix = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
     const state = this.pendingPermissionId ? ' · permission'
       : this.listening ? ' · listening'
       : this.transcribing ? ' · transcribing'
       : this.busy ? `${this.toolLine ? ` · ${this.toolLine}` : ' · working'}${this.pendingPrompt ? ' +queued' : ''}`
-      : this.lastError ? ' · ERROR' : ''   // stale tiles + a buried error must still show
+      : this.lastError ? ' · ERROR' : ''
     return {
-      mode: 'tiles',
+      mode: 'text',
       title: `${tab} · ${basename(this.projectPath)}${pageSuffix}${state}`,
       menu: this.menu(),
-      tiles: r.tiles(this.page),
-    }
-  }
-
-  private async setDocQuiet(): Promise<void> {
-    const seq = ++this.renderSeq
-    try {
-      const r = await renderBlocks(this.doc)
-      if (seq !== this.renderSeq) return
-      this.rendered = r
-      this.lastError = null
-    } catch (e) {
-      if (seq === this.renderSeq) this.lastError = `render failed: ${(e as Error).message}`
+      text: this.pages[this.page] ?? '',
     }
   }
 
@@ -392,8 +379,7 @@ class SessionLevel {
   async onMenu(label: string): Promise<'options' | null> {
     switch (label) {
       case 'Next': {
-        const r = this.rendered
-        if (r && this.page < r.pages - 1) { this.page++; this.requestRender() }
+        if (this.page < this.pages.length - 1) { this.page++; this.requestRender() }
         return null
       }
       case 'Prev': {

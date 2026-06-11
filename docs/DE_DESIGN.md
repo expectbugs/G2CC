@@ -85,10 +85,14 @@ content text=7, tiles=10..13 (`t0..t3`).
 
 ## 3. Content modes (per window state — "browsing → firmware text/list; reading → image tiles")
 
-- **tiles**: PC rasterizes a 480×222 canvas page (real typography → gray4) → 4× 240×111 BMP
-  tiles. ~1 s/tile — for content you *read* (CC/Aria responses). Pages via Next/Prev; the
-  title bar carries `· page/pages`. Every tile carries ink (hairline frame — all-black tile
-  kills the slot).
+- **tiles — NIXED for session content (Adam 2026-06-11).** On hardware, every menu state
+  change rebuilt the layout and conservatively re-pushed all four tiles → taps took 15-20 s
+  with zero feedback. CC/Aria responses are now **firmware text** (blocks flattened by
+  `blocksToText`: headings + `─` dividers, `•` bullets, indented code, value/label lines),
+  paginated server-side — every interaction is a ~62-86 ms text/list write. The 4-tile
+  machinery (and the preemption/wall fences) remains for Main's single logo tile and any
+  future static imagery; revisit rich tiles only after the hat's pacing sweep + the
+  rebuild-retention probe make them cheap.
 - **browse**: native firmware list in the content pane. Instant.
 - **text**: firmware text region in the content pane (mail bodies, file previews — plain
   content where instant paging beats typography). Server pre-paginates (~9.0 px/char avg,
@@ -99,8 +103,8 @@ content text=7, tiles=10..13 (`t0..t3`).
 | id | tab | modes | notes |
 |---|---|---|---|
 | `main` | Main | tile | menu = window list + Reload (tap switches); content = ONE centered 200×100 logo tile (~1 s load; placeholder art pending Adam's logo). Double-tap target at every root. |
-| `cc` | CC | browse→tiles | root = directory picker (browse /home/user/*); then the CC session: response→tiles, dynamic action menu, permission flow via menu. |
-| `aria` | Aria | tiles | CC subprocess, cwd `/home/user/aria`, `--append-system-prompt` = `server/prompts/aria-g2.md` (the display-format prompt). Free-form content area. |
+| `cc` | CC | browse→text | root = directory picker (browse /home/user/*); then the CC session: response→firmware-text pages, dynamic action menu, permission flow via menu. |
+| `aria` | Aria | text | CC subprocess, cwd `/home/user/aria`, `--append-system-prompt` = `server/prompts/aria-g2.md` (teaches the ~44×6 text surface). |
 | `mail` | Mail | browse→text | Maildir `~/Mail/marzello.net/` (mbsync cron, every 5 min). List = INBOX newest-first; read = text/plain body, text mode. `scripts/read_maildir.py` (stdlib). |
 | `files` | Files | antenna→browse→text | locations menu (Root/Home/Downloads/G2CC + mounts) w/ live content preview on scroll → tree browse ('..' ascends) → bounded head preview. |
 

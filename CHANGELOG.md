@@ -4,6 +4,26 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-11 — **server: CC/Aria session content → firmware text (tiles nixed for sessions)**
+
+Adam's hardware verdict: "the aria part sucks and is janky… tapping takes 15-20s… no
+feedback." Mechanism: the dynamic action menu means every state change is an f1=7 rebuild,
+and the renderer conservatively re-pushes ALL FOUR content tiles on every rebuild (the
+rebuild-retention probe was never run) — each tap bought a multi-second ack-gated tile storm.
+SessionLevel now renders responses as FIRMWARE TEXT: `blocksToText` flattens the parsed
+markdown (headings + `─` dividers — a hardware-proven glyph — `•` bullets, indented code,
+value/label stat lines) → `paginateText` pages → a single text region. Rendering is
+synchronous (no rasterizer subprocess), so the old doc-race sequence tokens went away with
+the tiles; every interaction is now a ~62-86 ms text/list write. The Aria system prompt was
+rewritten for the real surface (~44 chars × 6 lines/page, plain text, fit-one-page guidance).
+The tile pipeline + its preemption/wall fences stay for Main's single logo tile and future
+static imagery. Earlier same-day fixes (separate commits): 'fable' in the model cycle
+(verified vs claude --help), Aria 'Close session' + prompt auto-revive, real error surfacing
+("cc error_during_execution" was a fallback string; the actual cause logging was truncated),
+and the mid-turn second-prompt kill → queue-while-busy ('+queued' title indicator).
+
+---
+
 ## (unstamped) — 2026-06-10 — **APK v1.3 + server: scrollbar fix, browse focus-flip, single-tile Main, Files locations w/ live preview, blank-wake fix**
 
 Adam's on-glass round 3. **Scrollbars on clock/tabs:** the v1.1 padding-4 inset ate vertical
