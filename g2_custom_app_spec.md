@@ -217,9 +217,14 @@ Filter parameters (server-side starting points): 1024 taps at 48kHz, step size �
 - Close the stream cleanly on tap-to-stop.
 - Surface stream-open / stream-close failures explicitly on the HUD per the no-silent-failures rule.
 
-### Phone-mic fallback (single-mic recording away from workplace)
+### Phone-mic fallback — **REMOVED BY POLICY (2026-06-11)**
 
-When DJI is not available, the app may capture from the phone mic. Server-side processing in that case: high-pass at 100Hz → DeepFilterNet → Parakeet. App still does no DSP on-device.
+> Superseded: Adam ruled the phone mic out as an input source, permanently ("I never
+> ever want to fall back to the phone's mic"). The capture chain is DJI-ONLY
+> (USB receiver → Bluetooth TX, then a LOUD failure — `MicCapture.kt`), and the server
+> refuses any `audio_start` announcing `src=phone-mic` (`ws-handler.ts`). With the
+> receiver out of service, the **DJI TX paired to the phone over Bluetooth (HFP/SCO,
+> 16 kHz mono)** is the expected daily source. Do not re-add a phone-mic path.
 
 ---
 

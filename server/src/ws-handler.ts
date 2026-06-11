@@ -418,6 +418,15 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         sttError(client, `Invalid audio_start: sampleRate=${sr} channels=${ch} (must be > 0)`)
         break
       }
+      // DJI ONLY (Adam 2026-06-11): a client that fell back to the phone mic must be
+      // refused, not transcribed — the announced source is informational for ROUTING,
+      // but it is authoritative for POLICY. Routed through sttError so the WM unwinds
+      // and the mic is stopped. (Belt-and-braces with the client-side chain change —
+      // this also guards an older APK that still has the fallback.)
+      if (msg.source === 'phone-mic') {
+        sttError(client, 'phone-mic is disabled by policy (DJI only) — connect the DJI TX over Bluetooth and try again')
+        break
+      }
       // Loud-fail when audio_start arrives while we're already collecting.
       // The previous reset was silent — N bytes of audio just vanished.
       // Violates LOUD AND PROUD. Could happen on race conditions, double-

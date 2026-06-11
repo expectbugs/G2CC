@@ -4,6 +4,16 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-11 r2 — **DJI-only mic policy + first-letter tabs (APK v1.6)**
+
+Adam: "I never ever want to fall back to the phone's mic." MicCapture's source chain is now
+USB-receiver → BT-SCO TX and STOPS — no DJI source = a loud [audio-error] error card, never a
+silent phone-mic capture (startPhoneMic parked in-tree). Server-side belt-and-braces: an
+audio_start announcing src=phone-mic is refused via sttError (guards any not-yet-updated APK;
+`source` stays informational for routing, authoritative for policy). Tab strip → first
+letters (" M  [A]  C  M  F") — status slot grows 327→463px ahead of the window-count
+expansion (SMS, calls, calendar…); full names stay in the title + Main menu.
+
 ## (unstamped) — 2026-06-11 — **Full-system review #3: 9 Fable agents, ~45 confirmed fixes, APK v1.5**
 
 Nine-agent review (8 subsystem finders + rules sweeper, all findings personally re-verified,

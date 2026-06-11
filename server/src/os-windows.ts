@@ -1622,7 +1622,11 @@ export class WindowManager {
             this.ctx.log(`[os] view() failed for ${this.active.id}: ${(e as Error).message}`)
             view = errorView(`${this.active.label} · error`, (e as Error).message)
           }
-          const tabs = this.windows.map((w) => ({ label: w.tab, active: w === this.active }))
+          // First-letter tabs (Adam 2026-06-11): the window list is outgrowing the
+          // status bar — initials keep it readable as functions multiply (full names
+          // stay in the title bar + Main's menu). Headed toward retirement in favor
+          // of a Main dashboard once the window count demands it.
+          const tabs = this.windows.map((w) => ({ label: w.tab.slice(0, 1), active: w === this.active }))
           let scene: WireScene
           try {
             scene = composeScene(view, tabs, this.statusLeft())

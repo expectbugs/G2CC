@@ -242,7 +242,15 @@ gained an optional `compressMode`, `G2Renderer.setImageRaw` pushes arbitrary byt
 image → bottom rows blitted as garbage); the target digit never appeared, BUT the uncompressed
 control DID paint and the session survived. RLE4-raw (headerless) → nothing. ⇒ **leading hypothesis:
 the firmware blits `mapRawData` as raw pixels and does NOT decompress on this direct-BLE path**
-(compressMode may be host-side-only / vestigial in fw 2.2.2). **v1.1 = isolation probe**: RLE4-header
+(compressMode may be host-side-only / vestigial in fw 2.2.2).
+
+> **CLOSED (Adam, hardware-confirmed by 2026-06-11): compression is NOT supported on the
+> direct-BLE path — the glasses reject everything except the raw 4bpp format we already
+> send. Do not re-probe. The only remaining image-path experiment is HAT-GATED: with the
+> hat's more reliable link, test image stability + pushing chunks faster than the official
+> ack-gated pacing (HAT_BRIDGE_SPEC §13).**
+
+**v1.1 = isolation probe**: RLE4-header
 -only (no f5) vs f5-only (on a known-good uncompressed image) vs both vs a deliberately truncated
 uncompressed buffer — to confirm the raw-blit mechanism and rule out "the f5 field corrupts the parse."
 

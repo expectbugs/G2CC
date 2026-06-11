@@ -91,15 +91,16 @@ class MicCapture(private val context: Context) {
                 return
             }
 
-            // Descending quality: DJI USB receiver (48k float stereo) → DJI TX
-            // over Bluetooth SCO (16k mono) → phone's own mic (16k mono). The
-            // first two return null + log when their device is simply absent, so
-            // the chain falls through cleanly; only a total miss is a Failure.
+            // DJI ONLY (Adam 2026-06-11): USB receiver (48k float stereo) → DJI TX
+            // over Bluetooth SCO (16k mono). The PHONE-MIC FALLBACK IS DISABLED BY
+            // POLICY — a dictation must never silently ride the phone's mic; if no
+            // DJI source is present this is a LOUD failure the glasses show
+            // ([audio-error] → error card), not a degraded capture. (The receiver
+            // is out of service, so BT-SCO is the expected daily path.)
             val attempt = startUsb(onEvent)
                 ?: startBluetoothSco(onEvent)
-                ?: startPhoneMic(onEvent)
             if (attempt == null) {
-                onEvent(Event.Failure("no usable audio source (USB, Bluetooth, or phone mic)"))
+                onEvent(Event.Failure("DJI Mic unavailable (no USB receiver; no Bluetooth TX connected) — phone-mic fallback is disabled by policy"))
                 return
             }
             val (rec, source, sampleRate, channels, encoding) = attempt
@@ -341,6 +342,9 @@ class MicCapture(private val context: Context) {
         return AttemptResult(rec, Source.DjiBluetooth, sampleRate, 1, encoding)
     }
 
+    // PARKED (Adam 2026-06-11): phone-mic capture is disabled by policy — kept only
+    // as reference / emergency re-enable. Not called from the source chain.
+    @Suppress("unused")
     @SuppressLint("MissingPermission")
     private fun startPhoneMic(onEvent: (Event) -> Unit): AttemptResult? {
         // Spec §B7 phone-mic fallback path: 16 kHz mono, 16-bit PCM.
