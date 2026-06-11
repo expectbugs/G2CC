@@ -340,10 +340,10 @@ class SessionLevel {
     })
     session.on('process_died', (code: number | null) => {
       if (stale()) return
-      this.lastError = `CC process died (code=${code}) — Options → New session`
       this.busy = false
       this.dropQueued('process died')
-      this.requestRender()
+      this.showError(`CC process died (code=${code}).`,
+        `The watchdog auto-respawns it — ${this.verb} again, or Options → New session.`)
     })
   }
 
@@ -397,6 +397,22 @@ class SessionLevel {
     this.page = 0
   }
 
+  /** Surface an error WITH its message + a recovery hint as the page content —
+   *  a bare 'ERROR' in the status slot buried the reason (Adam 2026-06-11:
+   *  "Aria just says ERROR" — it was 'No speech detected'). The conversation
+   *  doc is untouched; the next successful action repaints it. */
+  showError(message: string, hint: string): void {
+    this.lastError = message
+    this.pages = paginateText(blocksToText([
+      { t: 'heading', text: 'Error', meta: this.who },
+      { t: 'para', text: message },
+      { t: 'rule' },
+      { t: 'para', text: hint },
+    ]))
+    this.page = 0
+    this.requestRender()
+  }
+
   // Reload + Main are WM-level labels (handled before delegation); they appear
   // here only so they RENDER in every state (Adam 2026-06-10: every menu has
   // Reload). >5 items scrolls on firmware — fine.
@@ -409,7 +425,9 @@ class SessionLevel {
   menu(): string[] {
     if (this.pendingPermissionId) return ['Next', 'Prev', 'Approve', 'Deny', 'Reload', 'Main']
     if (this.listening) return ['Done', 'Cancel', 'Reload', 'Main']
-    if (this.pendingStt) return ['Confirm', 'Retry', 'Cancel', 'Reload', 'Main']
+    // NOT 'Retry' — that's a WM-level label (errorView) and the WM would eat
+    // the tap before it reached us (hardware 2026-06-11: Re-record ignored).
+    if (this.pendingStt) return ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main']
     if (this.busy) return ['Interrupt', 'Next', 'Prev', 'Reload', 'Main']
     return [this.verb, 'Next', 'Prev', 'Options', 'Reload', 'Main']
   }
@@ -457,7 +475,7 @@ class SessionLevel {
         else this.ctx.log(`[os] ${this.who}: Confirm with no pending transcript — ignored (LOUD)`)
         return null
       }
-      case 'Retry': {
+      case 'Re-record': {
         // Discard the mangled transcript and record again immediately.
         this.pendingStt = null
         this.restorePages()
@@ -553,7 +571,7 @@ class SessionLevel {
       { t: 'heading', text: 'You said', meta: 'confirm?' },
       { t: 'para', text },
       { t: 'rule' },
-      { t: 'para', text: 'Confirm to send · Retry to re-record · Cancel' },
+      { t: 'para', text: 'Confirm to send · Re-record · Cancel' },
     ]))
     this.page = 0
     this.requestRender()
@@ -562,8 +580,7 @@ class SessionLevel {
   async onSttError(error: string): Promise<void> {
     this.listening = false
     this.transcribing = false
-    this.lastError = `dictation failed: ${error}`
-    this.requestRender()
+    this.showError(`Dictation failed: ${error}`, `${this.verb} to try again.`)
   }
 
   async prompt(text: string): Promise<void> {
@@ -584,14 +601,12 @@ class SessionLevel {
       try {
         await this.open()
       } catch (e) {
-        this.lastError = `session revive failed: ${(e as Error).message}`
-        this.requestRender()
+        this.showError(`Session revive failed: ${(e as Error).message}`, 'Options → New session for a fresh start.')
         return
       }
     }
     if (!this.entry || !this.entry.session.isAlive()) {
-      this.lastError = 'no live CC session — Options → New session'
-      this.requestRender()
+      this.showError('No live CC session.', 'Options → New session.')
       return
     }
     try {
@@ -607,9 +622,8 @@ class SessionLevel {
         { t: 'para', text: `${this.who} is working…` },
       ])
     } catch (e) {
-      this.lastError = `prompt failed: ${(e as Error).message}`
       this.busy = false
-      this.requestRender()
+      this.showError(`Prompt failed: ${(e as Error).message}`, `${this.verb} to try again.`)
     }
   }
 

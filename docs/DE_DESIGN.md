@@ -80,8 +80,9 @@ content text=7, tiles=10..13 (`t0..t3`).
 - **Dictation = the prompt input** (v1): menu `Dictate`/`Ask` → server sends `audio_request
   start` → phone streams mic (existing AudioStreamer/STT path). The transcript then enters a
   **CONFIRM step** (the g2aria CONFIRM_STT flow, ported 2026-06-11): the page shows "You
-  said: …" and the menu offers `Confirm / Retry / Cancel` — nothing reaches CC unread
-  (Parakeet mangles words). Menu swaps to `Done/Cancel` while listening. **Leaving the
+  said: …" and the menu offers `Confirm / Re-record / Cancel` — nothing reaches CC unread
+  (Parakeet mangles words). NOT labeled 'Retry': that's a WM-level label (error screens)
+  and the WM would eat the tap (window menu labels must avoid Retry/Reload/Back/Main). Menu swaps to `Done/Cancel` while listening. **Leaving the
   window (switch/pop/reload) stops the mic and discards unconfirmed transcripts** —
   phone-side capture failures come back as `[audio-error]` diags so the server never waits.
 - **Live status bar** (g2aria-style, 2026-06-11): the bottom-left status slot shows the
