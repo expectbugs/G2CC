@@ -132,7 +132,23 @@ sealed interface ClientMessage {
     data class Auth(val token: String) : ClientMessage
 
     @Serializable @SerialName("client_hb")
-    data class ClientHb(val now: Long) : ClientMessage
+    data class ClientHb(
+        val now: Long,
+        /** Phone battery % (Phase 9, APK v1.7+). Default null = omitted on the
+         *  wire (encodeDefaults=false) so old servers see the v1.6 shape. */
+        val battery: Int? = null,
+    ) : ClientMessage
+
+    /** A phone notification forwarded by NotifyListener (Phase 9, READ-ONLY —
+     *  no inline reply in v1). The server maps `package` → priority. */
+    @Serializable @SerialName("notify")
+    data class Notify(
+        @SerialName("package") val pkg: String,
+        val title: String,
+        val text: String,
+        val postedAt: Long,
+        val key: String,
+    ) : ClientMessage
 
     /** Audio format announcement. Defaults match the legacy 16 kHz mono int16
      *  path so older callers don't need to set anything. */

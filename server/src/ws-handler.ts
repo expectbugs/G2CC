@@ -39,6 +39,7 @@ import { markdownToPlaintext, formatToolUse } from './output-parser.js'
 import { listProjectDirectories, validateProjectPath } from './directory-picker.js'
 import { CCDispatcher, DISPATCH_TARGETS, type Dispatcher, getDispatchTarget } from './dispatch.js'
 import { ChannelRouter } from './channel-router.js'
+import { notify, type NotifyPriority } from './os-notify.js'
 import { probeScene, gTextScene, gImageScene, ensureRendered, isRate, testKind, testLabel, errorScene } from './os-display.js'
 import { menuScene, ensureMenuRendered, menuItemLabel, MENU_ITEM_COUNT } from './os-menu.js'
 import { WindowManager } from './os-windows.js'
@@ -104,6 +105,8 @@ export interface WSClient {
   osGTimer: ReturnType<typeof setInterval> | null
   /** The DE window manager (osScreen 'de'); created on os_attach. */
   wm: WindowManager | null
+  /** Latest phone battery % from client_hb (Phase 9; null until reported). */
+  phoneBattery: number | null
 }
 
 export interface AudioFormat {
@@ -172,6 +175,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     osMenuSel: 0,
     osGTimer: null,
     wm: null,
+    phoneBattery: null,
   }
 
   pool.on('background_alert', (alert: { sessionId: string; alertType: string; details?: string }) => {
@@ -288,6 +292,9 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     client.confirmCallbacks.clear()
     // Phase 7: in-flight Channel Router acks all fall to 'unverified'.
     client.router.onClientDisconnect()
+    // Phase 4: detach the WM from the global notification hub + kill its popup
+    // timer — a dead WM must not accumulate listeners across reconnects.
+    client.wm?.dispose()
     // Kill all CC subprocesses owned by this client. The pool is per-client
     // (created in handleConnection), so once the WebSocket closes there's no
     // route for these CC processes to send their output anywhere. Leaving them
@@ -331,6 +338,47 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
 
     case 'client_hb': {
       client.lastAppActivityMs = Date.now()
+      // Phase 9: phone battery rides the heartbeat (old APKs omit it). The
+      // ≤15% alert fires ONCE per downward crossing — re-arms above 15%.
+      if (typeof msg.battery === 'number' && msg.battery >= 0 && msg.battery <= 100) {
+        const prev = client.phoneBattery
+        client.phoneBattery = msg.battery
+        if (msg.battery <= 15 && (prev === null || prev > 15)) {
+          console.warn(`[ws] phone battery LOW: ${msg.battery}%`)
+          void notify({
+            source: 'phone',
+            priority: 'info',
+            title: `Phone battery ${msg.battery}%`,
+            body: `The bridge phone crossed below 15% (now ${msg.battery}%). The glasses die with it — charge soon.`,
+          })
+        }
+      }
+      break
+    }
+
+    case 'notify': {
+      client.lastAppActivityMs = Date.now()
+      // Phase 9: phone notification → the Phase-4 layer. Package → priority
+      // via config (invalid mapped values log + fall back to 'info').
+      if (msg.package === 'com.g2cc.g2cc') {
+        console.warn('[ws] notify from our own package — client filter should have caught this; ignored')
+        break
+      }
+      const mapped = config.notifications.packageMap[msg.package]
+      const VALID = new Set(['call', 'timer', 'sms', 'email', 'info'])
+      let priority: NotifyPriority = 'info'
+      if (mapped !== undefined) {
+        if (VALID.has(mapped)) priority = mapped as NotifyPriority
+        else console.error(`[ws] notifications.packageMap['${msg.package}'] = '${mapped}' is not a valid priority — using 'info'`)
+      }
+      console.log(`[ws] phone notify ${msg.package} → ${priority}: "${msg.title}"`)
+      void notify({
+        source: msg.package.split('.').pop() ?? msg.package,
+        priority,
+        title: msg.title || '(no title)',
+        body: msg.text || '(no text)',
+        targetWindow: priority === 'email' ? 'mail' : 'notices',
+      })
       break
     }
 
@@ -821,6 +869,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
               config,
               registerWatchdog: (entry) => watchdog?.register(entry.id, entry.session, entry.projectPath),
               unregisterWatchdog: (entryId) => watchdog?.unregister(entryId),
+              phoneBattery: () => client.phoneBattery,
             })
           }
           client.wm.requestRender()
@@ -861,17 +910,10 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         } else if (msg.event === 'double_tap' || (msg.event === 'hub_gesture' && msg.code === 3)) {
           console.log('[ws] DE back (double-tap)')
           await wm.onBackGesture()
-        } else if (msg.event === 'focus' && msg.region === 'menu') {
-          // ANTENNA scroll (Files' locations menu — a scroll=true text region
-          // reports per-notch focus events; f3: 1=up, 2=down, CONFIRMED §6.6).
-          if (msg.value === 1 || msg.value === 2) {
-            await wm.onScroll(msg.value === 1 ? 'up' : 'down')
-          } else {
-            console.log(`[ws] DE menu focus unknown f3=${msg.value} — not moving`)
-          }
         } else if (msg.event === 'tap') {
-          // Sys tap — meaningful only with an antenna menu (list taps arrive as
-          // hub_select); the WM routes it to the active window's onTap.
+          // Sys tap — no DE consumer since the Files antenna revert (2026-06-11);
+          // the WM keeps the blanked guard + loud no-op log (the blank scene's
+          // wake antenna still produces these).
           await wm.onTapGesture()
         } else {
           // Firmware-list scrolls move the on-glass ring silently; nothing to do

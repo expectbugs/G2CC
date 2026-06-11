@@ -1,5 +1,12 @@
 # G2CC Upgrades — THE implementation guide (2026-06-11)
 
+> **STATUS: IMPLEMENTED 2026-06-11 — Phases 1–11 complete, smoke suite 11/11 green.**
+> Per-phase record + Adam's gate answers: `UPGRADE_PROGRESS.md`; the WHY: `CHANGELOG.md`
+> r3–r13. Still open: Adam's batched on-glass verification + APK v1.7 install, the
+> Lichess deferral (Ph11 note below), and the gated Phase 12 / Section D items. This file
+> stays as the spec of record — Section C phase specs remain the reference for the
+> deferred slices.
+
 This file is the COMPLETE work specification for the next major build-out, written for a
 fresh Claude Code instance to implement end-to-end with minimal risk of mistakes,
 regressions, or rule violations. **Read `HANDOFF.md` first** — it carries the project
@@ -422,6 +429,9 @@ Bundle ALL client work into one build+install cycle:
     stream (a permanent connection with a reconnect-on-close loop — supervision, not
     timeouts); your-turn → Phase-4 notification; state in a `lichess_games` table. Moves
     via the legal-move browse list (14/page) or dictation of SAN through the Ask path.
+    **DEFERRED (Adam, gate A3.2, 2026-06-11): engine-only shipped in the Phase-11 batch;
+    set Lichess up AFTER the whole batch is tested — he mints the `board:play` token at
+    lichess.org/account/oauth/token, then this spec block is the work order.**
 - **TRAPS:** every engine/API interaction async/subprocess (B4); a dead Lichess stream
   reconnects LOUDLY, never silently stops (B3); chess board is an IMAGE page.
 - **Verify:** rpg-cli round-trip smoke (no ANSI leakage, save persists); scripted

@@ -69,6 +69,10 @@ class ConnectionManager(
     /** Defence #5 — invoked when offline past STUCK_RELOAD_MS. The owner rebuilds
      *  the connection stack from a clean state (G2Pipeline.restartConnectionStack). */
     private val onStuckTooLong: () -> Unit = {},
+    /** Phase 9: phone battery % provider, sampled at each client_hb. A null
+     *  provider (or sample) omits the field — the v1.6 wire shape. NAMED
+     *  argument at call sites (trailing-lambda rebinding bit us — B7). */
+    private val batteryPct: (() -> Int?)? = null,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -349,7 +353,7 @@ class ConnectionManager(
                 }
                 is ServerMessage.Hb -> {
                     // Reply immediately so the server knows our event loop is alive.
-                    send(ClientMessage.ClientHb(System.currentTimeMillis()))
+                    send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke()))
                 }
                 else -> {
                     onMessage(msg)
@@ -467,7 +471,7 @@ class ConnectionManager(
             while (wsGen.get() == myGen) {
                 delay(HEARTBEAT_INTERVAL_MS)
                 if (wsGen.get() != myGen) break
-                send(ClientMessage.ClientHb(System.currentTimeMillis()))
+                send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke()))
             }
         }
     }

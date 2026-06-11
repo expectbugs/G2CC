@@ -1,0 +1,27 @@
+{
+  "//": "Example of ~/.g2cc/config.json (first run writes real defaults + a random authToken; missing keys fall back to defaults — you only need the overrides). NEVER commit a real config.json.",
+  "port": 7300,
+  "host": "0.0.0.0",
+  "authToken": "<generated-on-first-run>",
+  "stt": {
+    "engine": "parakeet",
+    "language": "en",
+    "pythonPath": "/home/user/G2CC/audio/venv/bin/python",
+    "whisperModel": "large-v3",
+    "whisperDevice": "cuda",
+    "whisperCompute": "float16",
+    "parakeetModel": "nvidia/parakeet-tdt-0.6b-v2"
+  },
+  "claude": {
+    "defaultMode": "bypassPermissions",
+    "effort": "max",
+    "model": "opus",
+    "quickPrompts": [
+      "current status?",
+      "still alive?",
+      "Yes please do that",
+      "go ahead",
+      "explain further"
+    ]
+  }
+}

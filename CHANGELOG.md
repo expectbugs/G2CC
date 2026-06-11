@@ -4,7 +4,200 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
-## (unstamped) — 2026-06-11 r2 — **DJI-only mic policy + first-letter tabs (APK v1.6)**
+## (unstamped) — 2026-06-11 r13 — **Upgrades Phase 11: Games — rpg-cli + chess vs Stockfish (server-only)**
+
+**rpg-cli** (B9-verified in a sandbox FIRST: save lives at `$HOME/.rpg/data` ONLY —
+`cd`/`ls`/`battle` write NOTHING to the browsed directories, so the dungeon root is safely
+/home/user per Adam's gate 7; output is plain UTF-8, no ANSI — a defensive strip stays;
+death exits are GAME EVENTS, resolved as content not failures; `-q` succinct mode reads
+best on glass). Window: action rows (stat/battle/ls/todo/buy) + real subdirectories to
+descend (battles trigger on the way), output paginated, '..' blocked at the root.
+**Chess vs Stockfish**: STATELESS one-shot `chess_move.py` rounds (the window holds only a
+FEN — no long-lived engine to babysit; B4) with Skill Level 1/5/10/20 menu + depth-10
+compute bound (a resource cap; popen_uci runs timeout=None — no handshake clock);
+`render_board.py` draws DejaVu chess glyphs (presence verified — outline vs filled is the
+mono color distinction) into the render_image contract → the shared splitter → the proven
+IMAGE-page path with the Phase-8 placeholder-swap (page-2-class tile load, as sanctioned).
+Moves picked from a paged legal-SAN browse list; illegal SAN loud-fails (smoke-proven);
+Reload unsticks a wedged in-flight flag. **Lichess DEFERRED** (Adam, gate 2): wire the
+Board API per upgrades.md Phase 11 after full-system testing, when he mints a `board:play`
+token. smoke: sandboxed-HOME rpg round-trip (real save untouched), scripted e4→engine
+exchange, illegal-move rejection, board parity. **11/11 suite green — the full Phases 1-11
+batch is implemented.**
+
+Calendar on the glasses via aria's EXISTING OAuth (Adam's gate-1 call — zero new creds):
+`scripts/read_gcal.py` runs under ARIA'S venv, sys-paths into `~/aria`, and calls
+`google_client.calendar_list_events` GET-only (the token carries write scope; read-only is
+by discipline — and `calendar_store` is never imported, so no aria-DB coupling). The client
+auto-refreshes on 401 and its token file is multi-process safe (recon-verified). Sync:
+15-min pacing → upsert-by-uid into `events` + GHOST CLEANUP (deleted-in-Google events
+inside the window are removed — an agenda that shows dead meetings is misinformation);
+reminded_at survives updates. Reminders: 60 s sweep, TIMED events only (an all-day birthday
+does NOT ping at 23:50 — deliberate; it sits on the agenda), 10-min lead, 'timer' priority
+(wakes a blanked screen), once-only via an atomic UPDATE…RETURNING. CalendarWindow: 14-day
+day-grouped agenda (header rows are loud no-op taps) → event read view (time span, location,
+description). Live-verified against the real calendar: the pipe works (3 events at 120 days
+— the next 14 are genuinely clear, so the smoke ALSO drives synthetics through the same
+upsert path: update, ghost-removal, sweep-once). phase5's menu assertion is now derived
+from the live window list (stops breaking on every new window). 10/10 suite.
+
+SERVER HALF DEPLOYED FIRST (B6; v1.6 stays compatible — everything additive-optional):
+`notify` ClientMessage (phone notifications → package→priority map in config
+`notifications.packageMap` [dialer→call = the caller-ID popup, messaging→sms, gmail→email,
+default info, invalid values loud-fallback] → the Phase-4 layer; email targets the Mail
+window) + `client_hb.battery?` (dashboard `☎N%` on the head line + a ≤15% alert that fires
+ONCE per downward crossing, re-arms above 15). CLIENT (v1.7): **Connect = straight into the
+DE** — Test/Server buttons gone (code parked: runTest/DisplayTestSequence stay binder-
+reachable), cold-launch success auto-enterServerMode() (idempotent — the recovery paths were
+re-traced: `wasServerMode` is deleted outright since server mode is now always the
+post-launch state; every failure branch still resets as the review left them).
+**NotifyListener** (NotificationListenerService, READ-ONLY): skips own/ongoing/FGS/group-
+summary, extracts EXTRA_TITLE/BIG_TEXT/TEXT/TEXT_LINES, debounces key+postTime+content-hash,
+API-31 declarative `disabled_filter_types=ongoing`; rebind practice RESEARCHED fresh
+(requestRebind on disconnect; granted-but-dead zombie → component-toggle kick after a 10 s
+grace, run from HarnessActivity.onStart; Android 15 may REDACT OTP content for untrusted
+listeners — proper fix is a CDM GLASSES association, noted for later). One-time
+"Notification access" grant row + API-30 detail-settings deep link in the harness. Battery
+rides client_hb via a named batteryPct provider (B7 trailing-lambda trap respected).
+INTENTS.md re-audited — FINDING: the receiver had silently fallen out of the manifest with
+the parked G2CCService (whole surface was dead); re-registered + rewired to
+ConnectionService: PING live, the rest deprecated-with-log. OS_VERSION 1.7; full gradle
+suite green; APK at /tmp/g2cc-harness.apk (NOT installed — Adam does that from /setup).
+smoke/phase9-wire.mjs: a HERMETIC throwaway server (own HOME/port) proves WS auth →
+notify mapping → DB row + the battery crossing fires exactly once. 9/9 suite.
+
+The model can draw now — within Adam's elegance constraint. `scripts/render_chart.py`
+(matplotlib Agg, black bg / white 3.5px lines / 16pt titles, gray-distinct series styles,
+linear gray4 quantize — no dither, lines stay crisp) emits EXACTLY render_image.py's output
+contract; the 2×2 split + ALL-BLACK GUARD factored into a shared `splitGray4Tiles()` both
+paths use. parseMarkdown lifts ` ```chart ` fences into `{t:'chart', spec}` (malformed JSON
+degrades to the loud code block, the ```stat pattern). SessionLevel pages are now a UNION
+(string | image page): **THE PAGE-2 RULE is enforced in the assembler** — all text pages
+first, chart pages strictly after, regardless of fence position; page 1 renders instantly;
+chart pages start as "⏳ chart rendering…" placeholders and swap in via requestRender;
+failures REPLACE the page with a bounded loud text page. renderChart is PROMISE-cached by
+(size, spec) hash — page flips never re-rasterize, concurrent same-spec requests share one
+subprocess, failures evict (retry works). Every this.pages writer audited (restorePages
+re-assembles from doc — cache makes it free; showError/confirm/permission stay strings;
+history captures the raw markdown incl. the spec — text, never pixels). The ~4 s tile push
+happens only when flipping TO an image page — the nixed-tiles lesson stands, this is the
+sanctioned page-2-class load. aria-g2.md teaches the spec (+ "say 'chart on p.2'").
+smoke: parse/degrade, rule assembly, real render + dedupe + eviction, tiles parity. 8/8.
+
+EPUB reading on the glasses — replaces the EPUB→PDF→Teleprompt workflow. `scripts/
+read_epub.py` (ebooklib 0.20, API probed live before writing — B9: spine-ordered document
+items = chapters, toc-href → title with positional fallback, read_maildir-style html→text);
+`reader.ts` (execFile wrappers — parsing NEVER in-process, B4 — + the `reader_positions`
+table). ReaderWindow: library (~/books, Adam's gate-3 dir; seeded with three public-domain
+classics for testing) → chapters → read. **RESUME POSITION IS THE FEATURE**: every page/
+chapter change persists fire-and-forget; tapping a book with a saved position drops
+STRAIGHT back into the page. Next past a chapter's last page rolls into the next chapter
+(and Prev into the previous chapter's last page) — continuous reading without backing out.
+Corrupt EPUBs render the Mail-pattern error page (proven in smoke with a garbage file).
+smoke: real-EPUB list/read, position round-trip+upsert, corrupt-loud-fail, both levels
+≤ budget. 7/7 suite green.
+
+**Timers**: durable `timers` table is the truth; in-memory setTimeouts re-arm from the DB at
+every boot (a fire missed while down fires immediately, titled "(late)"; >24.8-day waits
+chunk past setTimeout's 32-bit ceiling). Fire → Phase-4 'timer' notification (wakes a
+blanked screen). New Timers window (pending list [tap → detail → Cancel timer] + New
+5/10/20/30/60 min rows); dashboard gained the next-timer line (MINUTE granularity only —
+per-second is hat-gated). **Quick prompts**: `claude.quickPrompts` in config (defaults =
+Adam's five, gate A3.4; config.example.json added) → session menus gained `Prompts` → tap
+feeds the REAL prompt() path (mid-turn queue rules apply untouched). **Ask from Main**:
+Main menu gained `Ask` → SwitchTo('aria', 'Ask') — the WM invokes the target's OWN menu
+action post-switch, so Aria's existing dictation path runs verbatim (no parallel pipeline).
+**Intents** (`intents.ts`): at the Aria confirm-ACCEPT point ONLY (never raw STT — the
+confirm step stays sacred): `timer/remind me <N> min|hour [label]` (digits or common number
+words; unresolvable → falls through to Aria) creates the timer instantly + ack card;
+`note: …` / `note …` (but NOT conversational "note that …") appends timestamped to
+~/notes/glasses-inbox.md (dir auto-created LOUDLY — exercised for real by the smoke) + a
+QUIET ack notification (new notify({quiet}) = durable pre-seen record, no live surfacing —
+the ack card he's already looking at IS the surfacing). A matched intent whose action fails
+renders the failure and does NOT leak the command to the model. Dashboard naturally
+paginates now (7 lines > 6 rows — Next/Prev appear per the Phase-5 design). smoke:
+14 regex cases, arm→fire→notification+flag, late-fire, re-arm idempotence, create/cancel,
+note round-trip (surgically cleaned). 6/6 suite green.
+
+Main's logo tile → a live TEXT dashboard: `host · N cc · ⚠unseen`, then one `Label:
+summary()` line per window (40-char assembly clamp, logged), 30 s re-render pacing ONLY
+while Main is active. Text mode = ~62 ms renders (the tile was ~1 s); paginates with
+menu-injected Next/Prev if the window count ever outgrows a page (no truncation). The
+first-letter tab strip is RETIRED: the WM passes empty tabs, composeScene skips the region
+(id 5 stays reserved, never reused), and the status slot spans the full 576 px (the
+estimator measurably DROPS: smoke shows 455→412 B on the same view). renderSingleTile
+marked parked (no producers); compose's tile mode + the tabs machinery stay wire-capable.
+DE_DESIGN §1 sketch + §2/§4 updated. smoke/phase5-dashboard.mjs covers both compose-level
+and a real-WM render.
+
+`os-notify.ts` (persist-then-surface: every event lands in the `notifications` table — the
+durable record — then fans out on a singleton hub to each live WM; persist failure is loud
+but never blocks live surfacing) + WM surfacing policy + a new **Notices window** (browse
+history newest-first → read marks seen). Priorities call>timer>sms>email>info (Adam).
+Surfacing: info/sms/email = ⚠ title-bar override (persists until read in Notices — chrome
+only, safe during dictation) + unseen badge in the status slot; timer/call = full-page
+overlay (errorView-shaped, WM-owned `Open/Dismiss/Main` — reserved labels are FINE here, the
+view belongs to the WM) that QUEUES behind listening/transcribing/pendingStt/
+pendingPermission (new optional `OsWindow.interruptible?()`) and flushes via a set-state +
+loop-reiteration check inside the already-serialized render loop (no reentrancy, B5).
+**Blanked screen (Adam's gate-5 rule, an explicit override of the doc's no-auto-dismiss):
+EVERY priority wakes as a popup for 10 s, then auto-returns to blank** — marked seen at
+display (it lands in Notices, no lingering badge); newest-wins mid-popup; tap Open/Main =
+act + wake, Dismiss = re-blank now, double-tap = dismiss + wake; the 10 s timer clears on
+every exit path. Awake overlays still persist until acted on (the 10 s rule is blanked-only).
+WM gained dispose() (hub detach on ws close). THE SMOKE CAUGHT A REAL STORE BUG: concurrent
+first queries each spawned a migration run (memo recorded coverage at completion, not
+launch) → parallel CREATE TABLE catalog race; fixed in store.ts. smoke/phase4-notify.mjs
+exercises all 8 behaviors against a real WindowManager with a scene-capturing context.
+
+Every CC/Aria exchange is now durable (UNLIMITED retention — Adam: "do not curtail
+capability"). `history.ts`: conversations (UNIQUE cc_session_id, so respawn-with-resume and
+even a re-picked directory keep appending to the same conversation) + turns
+(prompt/response/error/interrupted, tool_calls jsonb, model/effort). Capture is choke-pointed
+in SessionLevel: prompt() records after a successful send; turn_complete records the terminal
+kind — through a SERIALIZED fire-and-forget chain (.then链 + .catch) so DB order matches turn
+order and a down Postgres costs one log line, never a render stall (B4). The conversation row
+is created on first capture (cc_session_id may lag the init event) and back-linked once known.
+UI: session Options gains `History` → conversations (newest-first, `MM/DD HH:MM ·
+first-prompt…`) → turns (»/«/✗/◦ tags) → full text via paginateText + Next/Prev (Mail read
+pattern incl. rendered error pages). HistoryLevel is level-state ONLY (B5) — it can't touch
+live session state; all labels pre-trimmed + clampLabel'd; smoke proves the worst clamped
+frame is 908 B ≤ 960. Backfill: `scripts/import_cc_history.mjs` walked ~/.claude/projects
+(146 files): **139 conversations / 2,927 turns imported** (1,484 prompts, 1,443 responses);
+shapes verified against a real JSONL first (B9 — cwd field beats the ambiguous dirname);
+idempotent via (conversation_id, source_uuid) ON CONFLICT (re-run inserts 0); the ~26k
+skipped lines are metadata/tool-result/wrapper types, all counted in the summary. The 7
+no-turn files are tool-result-only/metadata-only sessions.
+
+New `server/src/store.ts`: lazy singleton pg.Pool over the unix socket (`/run/postgresql`,
+db `g2cc`, peer auth — no password, no TCP, pg's no-timeout defaults untouched) + an
+idempotent migration runner (`migrations` table; features register CREATE-IF-NOT-EXISTS DDL
+at module import). THE FAILURE POLICY IS THE FEATURE: a dead Postgres rejects every query
+loudly, UI paths render it via the normal error views, capture paths fire-and-forget with
+.catch — and ensureMigrated() self-heals (memo cleared on failure, so the first query after
+Postgres returns re-runs migrations). Live-drilled: rc-service stop → /health still 200,
+`connect ENOENT .s.PGSQL.5432` logged loudly, query rejects; start → same process self-heals
+without restart. DRILL LESSON: stopping postgresql-17 also stops the dependent n8n service
+(OpenRC) and needs RUDE_QUIT past aria's live connections — n8n restarted, aria daemon
+verified unharmed (it reconnects). sessions.json deliberately NOT migrated (it backs CC
+--resume; D8). Startup pre-warms the store fire-and-forget. smoke/phase2-store.mjs added
+(migration + round-trip + idempotency, self-cleaning).
+
+Adam's verdict on the per-notch live preview: "feels janky." The locations level is now a
+normal browse list like every other browse level (tap → tree; Mail-style double-tap focus
+flip → Reload/Main → Main), which deletes the whole antenna machinery from the DE path:
+`antennaWindow()`/`previewRows()`/`locIndex`/`onMenuScroll`/`onTap` (FilesWindow),
+`MenuMode 'antenna'` + `menuLines`/`menuSelected` + the antenna compose branch (os-compose),
+the WM `onScroll` route + the ws-handler `focus`→scroll wiring. WHY beyond the jank: every
+later upgrades phase (notifications/dashboard/reader/games) would have had to stay consistent
+with a third menu mode and its per-notch I/O hazards (previewRows ran listDir per notch).
+DELIBERATELY KEPT: `blankScene()`'s scroll=true wake region (hardware rule — sole-region
+scroll text kills all input; bitten twice), scroll-text support in protocol.ts/SceneCodec/
+scene_to_png (the wake region + legacy probe/menu screens still use it), and WM
+`onTapGesture` (blanked guard; the wake antenna still emits sys taps — now a loud no-op when
+awake). Locations gained browsePageItems paging (B1) it never had. NEW: `server/smoke/`
+regression harness (`run-all.mjs` + `phase1-files.mjs` — capture-region/budget/wake-region
+asserts + scene_to_png parity). No wire-contract change; v1.6 APK unaffected.
 
 Adam: "I never ever want to fall back to the phone's mic." MicCapture's source chain is now
 USB-receiver → BT-SCO TX and STOPS — no DJI source = a loud [audio-error] error card, never a

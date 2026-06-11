@@ -4,6 +4,14 @@ What's NOT in Phases 0-9, and why. Each entry has a **trigger** (what unlocks
 it), a **scope** (what gets done when triggered), and a **cost** (size of
 work).
 
+> **STATUS UPDATE 2026-06-11 (the upgrades batch):** this catalog is SUPERSEDED for new
+> work by `upgrades.md` (+ its live record `UPGRADE_PROGRESS.md`). The 2026-06-11 batch
+> resolved/absorbed: **C3** (badges now come from the Phase-4 notification layer — ⚠
+> unseen count in the status slot), **C4** (absorbed by Phase-3 session history — full
+> turns browsable on-glass), **C5** (quick prompts SHIPPED in Phase 6 — `Prompts` menu in
+> both session windows). The hardware gates (H4-H7-era audio work) and swarm gates (S1-S4)
+> below remain live as written.
+
 ---
 
 ## Hardware-test gates (Adam runs these on physical hardware)

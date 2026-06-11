@@ -21,29 +21,26 @@ import type { WireScene, SceneRegion, RegionStyle } from '@g2cc/shared'
 
 export type WinMode = 'tiles' | 'tile' | 'browse' | 'text'
 
-/** Browse-mode menu behavior (docs/DE_DESIGN.md §2, revised 2026-06-10):
+/** Browse-mode menu behavior (docs/DE_DESIGN.md §2, revised 2026-06-10;
+ *  the 'antenna' per-notch preview mode was REVERTED 2026-06-11 — Adam: "feels
+ *  janky". The hardware-proven scroll=true antenna PATTERN itself lives on in
+ *  blankScene()'s wake region and the legacy probe/menu screens — only the
+ *  Files-locations live-preview menu died):
  *  - 'passive': content list holds focus; menu list shows the window's actions
  *    (no capture, no ring). Double-tap flips to 'capture'.
- *  - 'capture': the MENU list holds focus (ring on menu); content list passive.
- *  - 'antenna': the menu is a scroll=true TEXT region (the hardware-proven
- *    per-notch antenna) with a server-drawn ▸ marker — the only pattern that
- *    reports SCROLLS (a firmware list moves its ring silently), enabling
- *    Files' live directory preview. Tap = sys event → focus to content. */
-export type MenuMode = 'passive' | 'capture' | 'antenna'
+ *  - 'capture': the MENU list holds focus (ring on menu); content list passive. */
+export type MenuMode = 'passive' | 'capture'
 
 /** What the active window wants on screen right now. */
 export interface WinView {
   mode: WinMode
   /** Title-bar text (window name + state + page indicator). */
   title: string
-  /** The menu list items (every mode except antenna). In tiles/tile/text modes
-   *  this is THE focus region; in browse mode its capture follows menuMode. */
+  /** The menu list items. In tiles/tile/text modes this is THE focus region;
+   *  in browse mode its capture follows menuMode. */
   menu?: string[]
   /** browse mode only — defaults to 'passive'. */
   menuMode?: MenuMode
-  /** menuMode 'antenna': the menu lines + the server-tracked selection index. */
-  menuLines?: string[]
-  menuSelected?: number
   /** browse mode: the content list rows (focus region iff menuMode 'passive'). */
   items?: string[]
   /** text mode: pre-paginated page content. */
@@ -105,9 +102,9 @@ export const BROWSE_ROW_MAX_BYTES = 40
 export const DEFAULT_BROWSE_MENU = ['Reload', 'Main'] as const
 
 /** Clamp a string to a PIXEL budget using the measured firmware glyph widths
- *  (fwTextWidth). Used for the title / status / antenna lines, which ride
- *  fixed-width 33 px bars where overflow WRAPS and triggers the firmware
- *  overflow scrollbar (hardware 2026-06-10). Navigational clamp, logged. */
+ *  (fwTextWidth). Used for the title / status lines, which ride fixed-width
+ *  33 px bars where overflow WRAPS and triggers the firmware overflow
+ *  scrollbar (hardware 2026-06-10). Navigational clamp, logged. */
 function clampPx(s: string, maxPx: number, what: string): string {
   if (fwTextWidth(s) <= maxPx) return s
   let out = s
@@ -188,31 +185,14 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   // windows: the action list, the page's single focus region. Browse windows:
   // menuMode decides who captures (exactly ONE capture region per page, §6.1).
   const menuMode: MenuMode = view.mode === 'browse' ? (view.menuMode ?? 'passive') : 'capture'
-  if (view.mode === 'browse' && menuMode === 'antenna') {
-    const rawLines = view.menuLines ?? []
-    if (rawLines.length === 0) throw new Error(`compose: '${view.title}' antenna menu has no lines`)
-    // Antenna lines must fit the 96px column MINUS the '▸ ' marker — a wrapped
-    // line overflows the 6-line window and real firmware scrolling kills the
-    // zero-range per-notch trick the antenna depends on (review 2026-06-11:
-    // an 8-glyph mount label like 'lilhomie' was enough).
-    const lines = rawLines.map((l) => clampPx(l, DE_MENU_W - 2 * 3 - 15, 'antenna line'))
-    const sel = Math.min(Math.max(view.menuSelected ?? 0, 0), lines.length - 1)
-    const text = lines.map((l, i) => (i === sel ? `▸ ${l}` : `  ${l}`)).join('\n')
-    regions.push({
-      id: DE_REGION_IDS.menu, name: 'menu', x: 0, y: DE_BAR_H, w: DE_MENU_W, h: DE_CONTENT_H,
-      kind: 'text', style: { ...CHROME, padding: 3 },
-      content: { kind: 'text', text, scroll: true },   // THE antenna: per-notch focus events
-    })
-  } else {
-    const menu = (view.menu ?? [...DEFAULT_BROWSE_MENU]).map((m) => clampLabel(m, 'menu'))
-    if (menu.length === 0) throw new Error(`compose: '${view.title}' has no menu items`)
-    const capture = menuMode === 'capture'
-    regions.push({
-      id: DE_REGION_IDS.menu, name: 'menu', x: 0, y: DE_BAR_H, w: DE_MENU_W, h: DE_CONTENT_H,
-      kind: 'list', style: { ...CHROME, padding: 3 },
-      content: { kind: 'list', items: menu, selectBorder: capture, eventCapture: capture },
-    })
-  }
+  const menu = (view.menu ?? [...DEFAULT_BROWSE_MENU]).map((m) => clampLabel(m, 'menu'))
+  if (menu.length === 0) throw new Error(`compose: '${view.title}' has no menu items`)
+  const capture = menuMode === 'capture'
+  regions.push({
+    id: DE_REGION_IDS.menu, name: 'menu', x: 0, y: DE_BAR_H, w: DE_MENU_W, h: DE_CONTENT_H,
+    kind: 'list', style: { ...CHROME, padding: 3 },
+    content: { kind: 'list', items: menu, selectBorder: capture, eventCapture: capture },
+  })
 
   // Content pane.
   if (view.mode === 'tiles') {
@@ -270,16 +250,18 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
     })
   }
 
-  // Status bar: connection/status left, right-aligned window tabs (own region —
-  // firmware text is left-aligned only, so the tabs region starts at
-  // SCREEN_W - textWidth). DE_TAB_RIGHT_TRIM pushes the strip ~30px farther
-  // right (Adam cal 2026-06-10 vs the conservative glyph estimate) — if the
-  // tabs CLIP on real glass, reduce the trim.
+  // Status bar. The right-aligned tab strip RETIRED 2026-06-11 (Phase 5 —
+  // the Main dashboard carries window states); an EMPTY tabs array skips the
+  // region entirely and the status slot spans the full width. The machinery
+  // below stays for any future strip (region id 5 remains reserved).
   // Leading space = the ~5px border inset; padding 4 here triggered the firmware
   // overflow SCROLLBAR at 33px bars (hardware 2026-06-10 — vertical room fell to
   // 25px), so the inset must cost no vertical room. +5 width per Adam's cal.
+  const hasTabs = tabs.length > 0
   const tabText = ' ' + tabs.map((t) => (t.active ? `[${t.label}]` : t.label)).join('  ')
-  const tabW = Math.min(Math.max(40, fwTextWidth(tabText) + 12 - DE_TAB_RIGHT_TRIM + 5), SCREEN_WIDTH - 120)
+  const tabW = hasTabs
+    ? Math.min(Math.max(40, fwTextWidth(tabText) + 12 - DE_TAB_RIGHT_TRIM + 5), SCREEN_WIDTH - 120)
+    : 0
   const tabX = SCREEN_WIDTH - tabW
   regions.push({
     id: DE_REGION_IDS.status, name: 'status', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: tabX, h: DE_BAR_H,
@@ -289,11 +271,13 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
     // 2026-06-10 cal (review 2026-06-11).
     content: { kind: 'text', text: clampPx(statusLeft, tabX - 12, 'status') },
   })
-  regions.push({
-    id: DE_REGION_IDS.tabs, name: 'tabs', x: tabX, y: SCREEN_HEIGHT - DE_BAR_H, w: tabW, h: DE_BAR_H,
-    kind: 'text',
-    content: { kind: 'text', text: tabText },
-  })
+  if (hasTabs) {
+    regions.push({
+      id: DE_REGION_IDS.tabs, name: 'tabs', x: tabX, y: SCREEN_HEIGHT - DE_BAR_H, w: tabW, h: DE_BAR_H,
+      kind: 'text',
+      content: { kind: 'text', text: tabText },
+    })
+  }
 
   // THE WALL GUARD (review 2026-06-11): nothing above may compose a layout frame
   // the firmware would silently eat / the client would reject — that left the

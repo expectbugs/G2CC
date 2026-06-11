@@ -108,10 +108,12 @@ class ConnectionService : Service(), TestHarness {
     private var watchdogJob: Job? = null      // glasses-response gap watchdog (silent-drop detector)
     private var renewalJob: Job? = null       // periodic re-takeover (the ~120s app-slot lifetime)
     private var coldLaunchJob: Job? = null    // the cold-launch coroutine — tracked so teardown cancels it
-    private var testJob: Job? = null          // the Test Display sequence coroutine — tracked for teardown
+    private var testJob: Job? = null          // the Test Display sequence coroutine — tracked for teardown (parked: no UI producer since v1.7)
     private var sessionGen = 0                // bumped on teardown; a stale coroutine re-checks it before mutating
     private var recovering = false            // auto-recovery in progress (guard against re-trigger)
-    private var wasServerMode = false         // re-enter server mode after a recovery
+    // v1.7: `wasServerMode` is GONE — server mode is now unconditionally the
+    // post-cold-launch state (Adam 2026-06-11: Connect = straight into the DE),
+    // so recovery doesn't need to remember whether to re-enter it.
     @Volatile private var lastRecoverMs = 0L  // rate-limit auto-recoveries (no thrashing)
     @Volatile private var lastNotifyMs = 0L   // last notify (incl e0-00 ack) from R lens
     private var syncSeq = 0x10
@@ -158,10 +160,35 @@ class ConnectionService : Service(), TestHarness {
     override fun onCreate() {
         super.onCreate()
         running = true
+        instance = this
         DiagLog.start(scope)
         startInForeground()
         acquireWakeLock()
         DiagLog.log("svc", "ConnectionService onCreate — server ${BuildConfig.SERVER_HOST}:${BuildConfig.SERVER_PORT}, token=${if (BuildConfig.AUTH_TOKEN.isEmpty()) "MISSING" else "set"}")
+    }
+
+    /** Phone battery % via BatteryManager (Phase 9). Null on any failure —
+     *  the hb field is optional and a missing read must never break the hb. */
+    private fun readBatteryPct(): Int? = try {
+        val bm = getSystemService(android.os.BatteryManager::class.java)
+        val pct = bm?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        if (pct != null && pct in 0..100) pct else null
+    } catch (e: Exception) {
+        DiagLog.log("svc", "battery read failed: $e")
+        null
+    }
+
+    /** Phase 9: forward a phone notification (from [com.g2cc.g2cc.service.NotifyListener])
+     *  to the server. Loud no-op when the WS isn't up — missed phone
+     *  notifications stay on the phone; the server only mirrors live ones. */
+    fun sendNotify(pkg: String, title: String, text: String, postedAt: Long, key: String) {
+        val conn = connection
+        if (conn == null) {
+            DiagLog.log("notify", "dropped $pkg \"$title\" — no WS connection")
+            return
+        }
+        val sent = conn.send(ClientMessage.Notify(pkg = pkg, title = title, text = text, postedAt = postedAt, key = key))
+        DiagLog.log("notify", "$pkg \"$title\" → ${if (sent) "sent" else "DROPPED (ws not ready)"}")
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -187,6 +214,7 @@ class ConnectionService : Service(), TestHarness {
 
     override fun onDestroy() {
         running = false
+        instance = null
         teardown()
         releaseWakeLock()
         DiagLog.stop()
@@ -216,6 +244,9 @@ class ConnectionService : Service(), TestHarness {
         stopForegroundAndSelf()
     }
 
+    // PARKED, NO UI PRODUCER since v1.7 (the harness Test button died with the
+    // straight-into-DE change — Adam 2026-06-11). Kept wired for bench
+    // debugging via the binder; DisplayTestSequence stays in-tree.
     fun runTest() {
         if (!_launched.value || _testing.value) return
         _testing.value = true
@@ -300,6 +331,7 @@ class ConnectionService : Service(), TestHarness {
             initialEndpoints = listOf(url),
             authToken = BuildConfig.AUTH_TOKEN,
             httpClient = OkHttpClient(),
+            batteryPct = { readBatteryPct() },   // Phase 9: battery rides client_hb
             onMessage = { msg -> scope.launch { onServerMessage(msg) } },
             onConnected = {
                 DiagLog.log("os", "WS authed → sending os_attach")
@@ -554,7 +586,7 @@ class ConnectionService : Service(), TestHarness {
                 text("clock", OsLayout.CLOCK_X, OsLayout.CLOCK_Y, OsLayout.CLOCK_WIDTH, OsLayout.CLOCK_HEIGHT,
                     nowClock(), scroll = false, id = OsLayout.CLOCK_ID)
                 text("main", 0, OsLayout.CONTENT_Y, Display.WIDTH, OsLayout.CONTENT_HEIGHT,
-                    "G2 OS v${OsLayout.OS_VERSION}\n\nConnected.\n\nTap  Test  for the renderer test,\nor  Server  to let the PC drive\nthe display.", scroll = false, id = 2)
+                    "G2 OS v${OsLayout.OS_VERSION}\n\nConnected — entering the DE…", scroll = false, id = 2)
             }
             val ok = awaitLaunch(rend, splash)
             // Bail if teardown ran while we were launching — don't re-arm jobs against a
@@ -562,7 +594,7 @@ class ConnectionService : Service(), TestHarness {
             if (gen != sessionGen) { DiagLog.log("conn", "cold-launch result ignored — session torn down"); return@launch }
             if (ok) {
                 DiagLog.log("conn", "cold-launch OK")
-                setStatus("Connected. Tap Test Display.")
+                setStatus("Connected — server mode.")
                 startKeepalive()
                 startClock()
                 startSyncTrigger()
@@ -572,14 +604,20 @@ class ConnectionService : Service(), TestHarness {
                 if (recovering) {
                     recovering = false
                     DiagLog.log("recover", "reconnect + cold-launch OK after silent drop")
-                    if (wasServerMode) { wasServerMode = false; enterServerMode() }
                 }
+                // v1.7 (Adam 2026-06-11): Connect = straight into the DE. The
+                // splash above is momentary; the server scene replaces it as
+                // soon as the WS auths. enterServerMode() is idempotent
+                // (guards _serverMode), so the recovery path — where server
+                // mode may still be live across a needsRelaunch revive — is
+                // unaffected, and a full-teardown recovery re-enters here.
+                enterServerMode()
             } else {
                 // Reset so the dead-end can't permanently block recovery.
                 DiagLog.log("conn", "cold-launch FAILED — resetting (launched=false) so a reconnect can retry")
                 _launched.value = false
                 _connecting.value = false
-                if (recovering) { recovering = false; wasServerMode = false }
+                if (recovering) recovering = false
                 setStatus("Cold-launch failed — see Diag log. Will retry on next reconnect.")
             }
         }
@@ -656,14 +694,14 @@ class ConnectionService : Service(), TestHarness {
     }
 
     /** Auto-recovery. The silent app-drop leaves the BLE link "up"; only a FRESH BLE session
-     *  revives it. Force a full teardown + reconnect + cold-launch, then re-attach server mode. */
+     *  revives it. Force a full teardown + reconnect + cold-launch; server mode re-enters
+     *  unconditionally with the cold-launch (v1.7 — no remembered flag needed). */
     private fun recoverSession() {
         if (recovering) return
         recovering = true
         needsRelaunch = false
-        wasServerMode = _serverMode.value
         lastRecoverMs = System.currentTimeMillis()
-        DiagLog.log("recover", "SILENT DROP — auto-recovering: teardown + reconnect + cold-launch${if (wasServerMode) " + re-attach server" else ""}")
+        DiagLog.log("recover", "SILENT DROP — auto-recovering: teardown + reconnect + cold-launch + server mode")
         setStatus("Auto-recovering (silent drop)…")
         teardown()        // full BLE teardown (clears launched/serverMode, cancels jobs; keeps cached devices)
         reconnect()       // DIRECT reconnect to cached lenses (no rescan) -> Ready -> maybeColdLaunch (clears `recovering`)
@@ -906,6 +944,22 @@ class ConnectionService : Service(), TestHarness {
         var running: Boolean = false
             private set
         val isRunning: Boolean get() = running
+
+        // Phase 9: process-local handle for NotifyListener (both services share
+        // the default process). Set in onCreate, cleared in onDestroy — the
+        // listener loud-drops when the connection service isn't up.
+        @Volatile
+        private var instance: ConnectionService? = null
+
+        /** NotifyListener → server forwarding entry point. */
+        fun forwardNotification(pkg: String, title: String, text: String, postedAt: Long, key: String) {
+            val svc = instance
+            if (svc == null) {
+                DiagLog.log("notify", "dropped $pkg \"$title\" — ConnectionService not running")
+                return
+            }
+            svc.sendNotify(pkg, title, text, postedAt, key)
+        }
 
         /** Start the FG service and tell it to connect. Survives Activity unbind / background. */
         fun startAndConnect(context: Context) {

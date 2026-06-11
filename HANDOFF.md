@@ -1,8 +1,9 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
 Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI contract:
-`docs/DE_DESIGN.md`. **The work queue is `upgrades.md`** — a complete phase-by-phase
-implementation guide; this file gets you up to speed, that file tells you what to build.
+`docs/DE_DESIGN.md`. The 2026-06-11 build-out is COMPLETE: `upgrades.md` was the work
+queue (now annotated), `UPGRADE_PROGRESS.md` is the per-phase record incl. Adam's decision
+answers, and `CHANGELOG.md` r3–r13 carries the WHY of every phase.
 
 ---
 
@@ -11,9 +12,9 @@ implementation guide; this file gets you up to speed, that file tells you what t
 G2CC is Adam's **personal first-party project**: a custom user interface for **his own Even
 Realities G2 smart glasses** (a consumer product he bought). It replaces the vendor's companion
 app with his own Android app + home-PC server, so he can drive his glasses directly and show the
-content *he* wants on them — a Claude Code / assistant interface, his email, his files, an image
-viewer. Everything runs on hardware Adam owns over his own home network: his phone, his glasses,
-his PC, his auth token. Working out the glasses' Bluetooth wire format is ordinary
+content *he* wants on them — a Claude Code / assistant interface, his email, his files, books,
+his calendar, games. Everything runs on hardware Adam owns over his own home network: his phone,
+his glasses, his PC, his auth token. Working out the glasses' Bluetooth wire format is ordinary
 device-interoperability so his app can talk to his hardware. There are **no third-party systems,
 networks, accounts, or credentials** anywhere in this project — it is a UI for a wearable display.
 
@@ -23,32 +24,44 @@ zero state). The phone is the BLE/WiFi bridge — and per **the prime directive*
 it stays in Adam's pocket, untouched, always. A small hat device (ESP32, on backorder) replaces
 the phone eventually; the DE is hat-ready by construction.
 
-## Where we are (2026-06-11, post-review)
+## Where we are (2026-06-11, post-upgrades-batch)
 
-The BLE wire format is fully decoded (`docs/G2_BLE_PROTOCOL.md`, authoritative) and the
-**window-manager "desktop environment" (DE) is implemented, hardware-iterated, and in daily
-use.** On 2026-06-11 a nine-agent code review re-verified the whole codebase: ~45 confirmed
-findings fixed, plus five live-CC experiments and an AOSP source pull that settled long-standing
-unknowns (`docs/CODE_REVIEW_2026-06-11.md` — read the lessons below; skim the doc when touching
-the relevant subsystems).
+The BLE wire format is fully decoded (`docs/G2_BLE_PROTOCOL.md`, authoritative); the
+window-manager DE is in daily use; and the **entire upgrades batch (Phases 1–11) is
+implemented and smoke-verified** (11/11 in `server/smoke/run-all.mjs`): Postgres
+foundation, durable session history (+2,927-turn backfill), the notification layer,
+the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
+```chart image pages, APK v1.7, Google Calendar, and rpg-cli + chess.
 
-- **Server**: the DE itself — window manager, compositor, content pipeline, CC-subprocess
-  bridge. All active work happens here unless stated otherwise. Running on `:7300`
-  (restart procedure below).
-- **Android client: APK v1.6 built** (`os/OsLayout.OS_VERSION` — check the connect splash to
-  see what's actually installed on the glasses; Adam installs from
-  `http://100.107.139.121:7300/setup`). The client is a thin Scene renderer + input/mic
-  bridge: `WireScene` in over WS, ring/tap/dictation back.
-- **The five windows** (`server/src/os-windows.ts`): **Main** (switcher; logo tile —
-  upgrades.md Phase 5 turns it into a live dashboard) · **CC** (directory picker →
-  Claude Code subprocess; responses as firmware-text pages; dictation prompts; Options
-  cycles model/effort) · **Aria** (CC subprocess at `/home/user/aria` with the
-  `server/prompts/aria-g2.md` display prompt) · **Mail** (local Maildir
-  `~/Mail/marzello.net/INBOX`, mbsync cron) · **Files** (locations → tree browse →
-  bounded text preview / image viewer; the locations level currently uses the per-notch
-  "antenna" — being reverted to a plain list, upgrades.md Phase 1).
-- **Status bar tabs are first-letter initials** (` M [A] C M F`) as a stopgap; they retire
-  entirely when the dashboard lands.
+- **Server**: the DE — window manager, compositor, content pipeline, CC-subprocess
+  bridge, Postgres store (`g2cc` DB, unix-socket peer auth), notification hub, timers,
+  calendar sync, games glue. Running on `:7300` (restart procedure below).
+- **Android client: APK v1.7 BUILT + STAGED at `/tmp/g2cc-harness.apk`** — check
+  `os/OsLayout.OS_VERSION` on the connect splash for what's actually installed; Adam
+  installs from `http://100.107.139.121:7300/setup`. **The on-glass verification batch
+  for the whole upgrade is still PENDING** (checklist in UPGRADE_PROGRESS.md / the
+  2026-06-11 session log). v1.7: Connect → auto server mode (Test/Server buttons gone),
+  NotificationListener mirroring (read-only; one-time Settings grant via the new harness
+  row), phone battery on the heartbeat. The server half is additive-optional — v1.6
+  keeps working until he installs.
+- **The TEN windows** (`server/src/os-windows.ts`): **Main** (live dashboard: host/pool/
+  battery/unseen/next-timer + one summary line per window; menu = switcher + `Ask`) ·
+  **Aria** (CC subprocess @ ~/aria, `server/prompts/aria-g2.md` display prompt; the Ask
+  flow runs confirmed-dictation INTENTS: `timer/remind me N min…` → instant timer,
+  `note: …` → ~/notes/glasses-inbox.md, else normal prompt) · **CC** (directory picker →
+  session; Options cycles model/effort + History + New session; `Prompts` = quick
+  prompts) · **Mail** (Maildir) · **Files** (locations → tree → preview/image viewer) ·
+  **Reader** (EPUBs in ~/books; resume-position) · **Timers** · **Calendar** (READ-ONLY
+  agenda) · **Games** (rpg-cli dungeon @ /home/user + chess vs Stockfish) · **Notices**
+  (notification history; reading marks seen). Session windows share SessionLevel
+  (firmware-text pages + chart image pages) + HistoryLevel + the options/prompts levels.
+- **Notifications** (the Phase-4 layer, WM-owned): persist-then-surface via a hub;
+  info/sms/email = ⚠ title flash + status badge until read in Notices; timer/call =
+  overlay (`Open/Dismiss/Main`) that QUEUES behind dictation/confirm/permission states;
+  **blanked screen: EVERY priority pops for 10 s then auto-re-blanks** (Adam's rule —
+  the one sanctioned auto-dismiss; marked seen at display; newest-wins).
+- **Tab strip retired** (Phase 5): the status slot spans the full bottom bar; region id 5
+  stays reserved, never reused.
 
 ## Hard-learned lessons (each cost real debugging — do not relearn them)
 
@@ -65,25 +78,27 @@ the relevant subsystems).
   reconnect.
 - **Render limits** (client `G2Renderer.validate`): ≤4 image regions, tile ≤288×129 (we use
   ≤240×111), ≤8 text, ≤12 containers, EXACTLY one event-capture region, ≥1 text region, no
-  all-black tile.
+  all-black tile (`splitGray4Tiles` guards this for every image producer).
 - **Never abandon an image transfer mid-chunk-chain** — it crashed the glasses (r4). The
   renderer's park/epoch/grace machinery enforces this; treat `G2Renderer.kt` send semantics
   as hardware-proven and frozen.
 - **The blank screen MUST keep a scroll-text "wake" region** — a scroll-clock as the sole
   text region kills ALL input including the wake double-tap (bitten twice). `blankScene()`
-  is load-bearing; don't touch it.
+  is load-bearing; don't touch it. (The Phase-4 blanked POPUP composes a full view in its
+  place for 10 s, then returns to blankScene — that path is smoke-covered.)
 - **Tiles for session content were NIXED on hardware** (menu rebuilds re-pushed all four
-  tiles → 15-20 s taps). CC/Aria content is firmware TEXT (~62-86 ms updates). Tiles remain
-  for the image viewer (and charts, once upgrades Phase 8 lands) — always on page ≥2 (the
-  PAGE-2 RULE: page 1 of any answer is text, instantly rendered; imagery only on later
-  pages).
+  tiles → 15-20 s taps). CC/Aria content is firmware TEXT (~62-86 ms updates). Tiles serve
+  ONLY page-≥2-class imagery — the Files image viewer, ```chart pages, the chess board —
+  per **THE PAGE-2 RULE**: page 1 of any answer is text, instantly rendered; imagery only
+  on later pages (the ~4 s tile push happens only when the user flips TO an image page).
 
 **Empirical CC-subprocess truths (live-tested 2026-06-11 against claude 2.1.170):**
 - SIGINT makes `claude --print` emit result/error_during_execution and **exit** — the
   correct turn-abort is the stdin control_request `{subtype:'interrupt'}` (process survives;
   implemented).
 - A second stdin user message mid-turn **kills CC** (error_during_execution) — the DE queues
-  one pending prompt and drains on turn_complete. Never bypass `SessionLevel.prompt()`.
+  one pending prompt and drains on turn_complete. Never bypass `SessionLevel.prompt()` (the
+  quick-prompts menu and the Ask intents both go through it).
 - `rate_limit_event` fires at EVERY session init (it's a status report, not throttling).
 - CC `--print` emits **no can_use_tool control_requests** — the on-glass permission flow is
   dormant; Aria/CC deliberately run `--dangerously-skip-permissions` (Adam's choice).
@@ -94,7 +109,7 @@ the relevant subsystems).
 **Policy truths (Adam's rules, non-negotiable):**
 - **THE PRIME DIRECTIVE: the phone never leaves the pocket.** Adam isn't permitted phone use
   at work; any flow requiring a hand on the phone is a defect. One-time setup at home is the
-  only exception.
+  only exception (the v1.7 notification-access grant is exactly that class).
 - **DJI Mic ONLY.** The phone-mic fallback is removed at BOTH ends (client chain stops at
   USB→BT-SCO and loud-fails; server refuses `src=phone-mic`). The receiver is out of
   service, so the DJI TX paired to the phone over Bluetooth is the daily path. Never re-add
@@ -102,64 +117,91 @@ the relevant subsystems).
 - **Image compression on the BLE path is CLOSED** — hardware-tested; the firmware rejects
   everything except the raw 4bpp format. Don't re-probe. (Post-hat: pacing experiments only.)
 - **Three Absolute Rules:** no I/O timeouts (pacing delays, resource caps, supervision
-  cadences, and the 5 s auth window are the sanctioned categories); no silent failures
-  (loud `[subsystem]` logs everywhere); no truncation (paginate — the byte-cap label clamps
-  are the only sanctioned trims, and they log).
+  cadences, the 5 s auth window, user-requested ALARMS [timers], and Adam's 10 s
+  blanked-popup display cadence are the sanctioned categories); no silent failures (loud
+  `[subsystem]` logs everywhere); no truncation (paginate — the byte-cap label clamps and
+  documented navigational previews are the only sanctioned trims, and they log).
 - **Don't modify `/home/user/g2code/` or `/home/user/g2aria/`** (working ancestors, read-only
   fallbacks). **Never log or commit the auth token** (`~/.g2cc/config.json`; baked into the
   APK via gitignored `android/harness-secrets.properties`).
+- **History retention is UNLIMITED** ("do not curtail capability") — no caps, no pruning.
 
-**Codebase truths (from the 2026-06-11 review — the recurring bug shapes):**
-- The event loop IS the display: one blocking sync call (a FIFO `openSync`, a stat storm on
-  a cold HDD dir) freezes every window and drops the WS. Slow/unknown I/O goes async or into
-  an `execFile` subprocess (pattern: `os-content.ts` runRenderer / `read_maildir.py`).
-- Subprocess hygiene: attach a stdin 'error' listener (EPIPE = uncaught exception =
-  server death), race 'spawn' vs 'error' for real spawn outcomes, guard late events from
-  killed processes (`stale()` pattern).
+**Codebase truths (the recurring bug shapes — the 2026-06-11 review + batch):**
+- The event loop IS the display: one blocking sync call freezes every window and drops the
+  WS. Slow/unknown I/O goes async or into an `execFile` subprocess (pattern: read_maildir /
+  read_epub / read_gcal / render_chart / render_board / chess_move / rpg-cli — every new
+  helper copies it: stdin 'error' listener when stdin is written, maxBuffer, exact output
+  asserts, loud stderr in the reject).
+- Subprocess hygiene: attach a stdin 'error' listener (EPIPE = uncaught exception = server
+  death), race 'spawn' vs 'error' for real spawn outcomes, guard late events from killed
+  processes (`stale()` pattern; the chart/board placeholder swaps use identity checks).
 - Session/WM state leaks: every transient flag must clear on EVERY exit path (close,
-  respawn, death, error, window switch). Taps resolve against the last-RENDERED view
-  (`lastView`); menu labels `Retry`/`Reload`/`Back`/`Main` are WM-reserved — window menus
-  must never use them.
+  respawn, death, error, window switch — and the Phase-4 popup timer clears on tap/replace/
+  wake/dispose). Taps resolve against the last-RENDERED view (`lastView`); menu labels
+  `Retry`/`Reload`/`Back`/`Main` are WM-reserved — window menus must never use them (the
+  WM's own notification overlay may, it IS the WM).
+- Store discipline: ALL Postgres access through `store.ts query()` (self-healing migration
+  gate); a down DB rejects loudly — UI paths render it, capture paths fire-and-forget with
+  `.catch`. NEVER await store calls in render/turn hot paths (SessionLevel.capture chains).
 - Wire-contract changes are additive-optional on both sides (`protocol.ts` ↔
   `WsProtocol.kt`), server half deployed first; the installed APK lags until Adam installs.
+  kotlinx optional fields need default values.
 - Kotlin: trailing lambdas bind to the LAST param — adding constructor params silently
   rebinds call-site lambdas (bit us); use named args. Bump `OS_VERSION` on every APK.
 
 ## How it's wired (key files)
 
-- **Contracts/docs:** `docs/DE_DESIGN.md` (UI contract) · `docs/G2_BLE_PROTOCOL.md` (wire,
-  authoritative) · `docs/CONTENT_API.md` (content pipeline; tiles section is legacy) ·
-  `docs/GLASSES_OS.md` (architecture/vision) · `docs/HAT_BRIDGE_SPEC.md` ·
-  `docs/SIM_TOOLING.md` · `docs/HOLDS.md` (old deferral catalog — superseded for new work
-  by `upgrades.md`) · `CHANGELOG.md` (the WHY of every change).
-- **Server (`server/src/`):** `os-windows.ts` (WM + windows + SessionLevel — the heart) ·
-  `os-compose.ts` (WinView→WireScene; budgets/clamps/estimator live here) · `os-content.ts`
-  (+`scripts/render_content.py`, `render_image.py`) · `ws-handler.ts` (WS + input routing +
-  audio framing) · `cc-session.ts`/`session-pool.ts`/`watchdog.ts` (CC bridge) · `stt.ts`
-  (Parakeet daemon) · `shared/src/protocol.ts` + `constants.ts` (both ends' contract).
-- **Client (`android/.../`):** `service/ConnectionService.kt` (connection loop, render pump,
-  dictation, display_reload) · `os/SceneCodec.kt` + `OsLayout.kt` (wire→Scene + geometry) ·
-  `render/G2Renderer.kt` (BLE display protocol — frozen semantics) · `net/ConnectionManager.kt`
-  + `WsProtocol.kt` · `audio/MicCapture.kt` (DJI-only chain) + `AudioStreamer.kt` ·
-  `harness/HarnessActivity.kt` (launcher). Parked, not in manifest: ProbeActivity,
+- **Contracts/docs:** `docs/DE_DESIGN.md` (UI contract incl. the window table) ·
+  `docs/G2_BLE_PROTOCOL.md` (wire, authoritative) · `docs/CONTENT_API.md` (content
+  pipeline incl. ```chart) · `docs/GLASSES_OS.md` (architecture/vision) ·
+  `docs/HAT_BRIDGE_SPEC.md` · `docs/SIM_TOOLING.md` · `docs/HOLDS.md` (old deferral
+  catalog — superseded by upgrades.md; C3/C4/C5 resolved 2026-06-11) ·
+  `docs/CODE_REVIEW_2026-06-11.md` · `CHANGELOG.md` (the WHY of every change) ·
+  `UPGRADE_PROGRESS.md` (the batch record + Adam's gate answers).
+- **Server (`server/src/`):** `os-windows.ts` (WM + the ten windows + SessionLevel/
+  HistoryLevel — the heart, ~2.9k lines) · `os-compose.ts` (WinView→WireScene; budgets/
+  clamps/estimator) · `os-content.ts` (markdown→blocks, chart/image rendering,
+  `splitGray4Tiles`) · `store.ts` (pg pool + migrations) · `history.ts` · `os-notify.ts`
+  (hub + persistence) · `timers.ts` · `intents.ts` · `reader.ts` · `calendar.ts` ·
+  `games.ts` · `ws-handler.ts` (WS routing incl. notify/battery) · `cc-session.ts`/
+  `session-pool.ts`/`watchdog.ts` (CC bridge) · `stt.ts` (Parakeet) · `config.ts`
+  (quickPrompts, notifications.packageMap; example in `config.example.json`) ·
+  `shared/src/protocol.ts` + `constants.ts` (both ends' contract).
+- **Scripts (`scripts/`):** `read_maildir.py` · `read_epub.py` · `read_gcal.py` (runs
+  under ARIA's venv — reuses aria's OAuth read-only) · `render_image.py` ·
+  `render_chart.py` · `render_board.py` · `chess_move.py` · `import_cc_history.mjs`
+  (one-shot backfill, idempotent) · `scene_to_png.py` (offline client-rule check incl.
+  the wall). Python helpers run under `audio/venv` EXCEPT read_gcal.py (aria venv).
+- **Client (`android/.../`):** `service/ConnectionService.kt` (connection loop, render
+  pump, dictation, display_reload, notify forwarding, battery) · `service/NotifyListener.kt`
+  (notification mirror + zombie-rebind kick) · `os/SceneCodec.kt` + `OsLayout.kt` ·
+  `render/G2Renderer.kt` (BLE display protocol — frozen semantics) ·
+  `net/ConnectionManager.kt` + `WsProtocol.kt` · `audio/MicCapture.kt` (DJI-only) +
+  `AudioStreamer.kt` · `harness/HarnessActivity.kt` (Connect/Disconnect + notification-
+  access row; Test/Server buttons retired) · `intents/IntentReceiver.kt` + `INTENTS.md`
+  (PING live; rest deprecated-with-log). Parked, not in manifest: ProbeActivity,
   G2Pipeline, G2CCService, hud/*.
-- **Verification:** `scripts/scene_to_png.py` (offline client-rule check incl. the wall) ·
-  smoke scripts accumulate under `server/smoke/` (see upgrades.md B8) · android unit tests
-  (`gradlew testDebugUnitTest`, ~225, must stay green).
+- **Verification:** `server/smoke/run-all.mjs` — 11 scripts, THE regression suite; run it
+  after every server change (some need Postgres up; phase9-wire spawns a hermetic server
+  on :7399; phase10 hits the real Google Calendar read-only). `scripts/scene_to_png.py`
+  for new compose surfaces. Android: `gradlew testDebugUnitTest` must stay green.
 
 ## Build / deploy / restart
 
-- **Server (most changes — no APK):** `npm run build -w server` (from `/home/user/G2CC`),
-  then restart: `ss -ltnp | grep :7300` → kill the pid → `nohup setsid node
+- **Server (most changes — no APK):** `npm run build -w server` (and `-w shared` first if
+  the contract changed), then `node server/smoke/run-all.mjs`, then restart:
+  `ss -ltnp | grep :7300` → kill the pid → `nohup setsid node
   /home/user/G2CC/server/dist/index.js > /tmp/g2cc-server.log 2>&1 < /dev/null & disown`,
-  then tail the log for a clean start. The phone auto-reconnects.
+  then tail the log for a clean start (store/timers/calendar lines). The phone
+  auto-reconnects.
 - **Android (only when the client changes):** `JAVA_HOME=/opt/openjdk-bin-17
   ANDROID_HOME=/opt/android-sdk ./android/gradlew -p android testDebugUnitTest
   assembleDebug` → bump `OsLayout.OS_VERSION` → `cp android/app/build/outputs/apk/debug/
   app-debug.apk /tmp/g2cc-harness.apk` → Adam installs from
   `http://100.107.139.121:7300/setup`. Client diag → `/tmp/g2cc-harness-diag.log`.
-- **Postgres** (from upgrades Phase 2 onward): DB `g2cc`, role `user`, unix-socket peer
-  auth; OpenRC service `postgresql-17`.
+- **Postgres:** DB `g2cc`, role `user`, unix-socket peer auth; OpenRC service
+  `postgresql-17`. CAUTION: stopping it also stops the dependent `n8n` service and
+  rude-quits aria's connections — don't drill casually.
 
 ## How Adam works
 
@@ -173,6 +215,16 @@ session, context is truncating — tell him.
 
 ## What's next
 
-**`upgrades.md` is the entire work queue** — phases, order, per-phase traps, verification
-ritual, decision gates, and the explicit OUT list (calls await Adam's root-vs-SIP decision;
-hat-gated and swarm-gated items wait for their hardware/software). Start at its Section A.
+1. **Adam's on-glass verification batch** for the whole upgrade (his gate-8 choice:
+   batched at the end) — the 11-step checklist lives in UPGRADE_PROGRESS.md §RUN COMPLETE
+   and the 2026-06-11 session log. Install APK v1.7 + the one-time notification-access
+   grant first.
+2. **Lichess** (deferred by Adam at gate A3.2): after the batch tests clean, he mints a
+   `board:play` token → wire the Board API per upgrades.md Phase 11's spec block.
+3. **Phase 12 stretch** (upgrades.md): streaming STT + the layer-3 `display` MCP tool —
+   requires Adam's explicit go-ahead; the display tool needs a design doc first.
+4. **upgrades.md Section D** stays OUT (calls await the root-vs-SIP decision; hat-gated
+   and swarm-gated items wait for their hardware/software).
+5. Android 15 note: OTP-bearing notifications may arrive REDACTED for untrusted listeners;
+   the clean fix when it matters is a CDM `DEVICE_PROFILE_GLASSES` association (researched,
+   documented in CHANGELOG r11).

@@ -71,5 +71,38 @@
             android:name=".service.ConnectionService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|microphone" />
+
+        <!-- Phase 9: phone-notification mirror (READ-ONLY). The SYSTEM binds this
+             (BIND_NOTIFICATION_LISTENER_SERVICE keeps everyone else out); needs the
+             one-time "Notification access" grant — HarnessActivity has the row +
+             deep link. API 31+ declarative filter: ongoing/FGS notifications are
+             never even delivered. -->
+        <service
+            android:name=".service.NotifyListener"
+            android:exported="false"
+            android:label="G2CC glasses mirror"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.notification.disabled_filter_types"
+                android:value="ongoing" />
+        </service>
+
+        <!-- Tasker / adb broadcast surface (android/INTENTS.md). Re-registered in
+             v1.7 (it had silently fallen out of the manifest with the parked
+             G2CCService); deliberately open — see INTENTS.md §Security. -->
+        <receiver
+            android:name=".intents.IntentReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.g2cc.intent.action.PING" />
+                <action android:name="com.g2cc.intent.action.START_RECORDING" />
+                <action android:name="com.g2cc.intent.action.STOP_RECORDING" />
+                <action android:name="com.g2cc.intent.action.SHOW_DIRECTORY_PICKER" />
+                <action android:name="com.g2cc.intent.action.SWITCH_DISPATCH_TARGET" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

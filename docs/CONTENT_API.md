@@ -12,9 +12,12 @@ LLM markdown ──parseMarkdown()──► Block[] ──blocksToText()──�
 
 > **2026-06-11 — session content is FIRMWARE TEXT now.** The tile pipeline below was
 > NIXED for CC/Aria responses (hardware: menu rebuilds re-pushed all four tiles, taps
-> took 15-20 s). Tiles remain ONLY for Main's logo (renderSingleTile) and the Files
-> image viewer (render_image.py) — both 480×222-era sizes (tiles ≤240×111). The
-> legacy description below is kept for the roadmap's rich-tile revisit:
+> took 15-20 s). Tiles remain ONLY for page-≥2-class imagery: the Files image viewer
+> (render_image.py), ` ```chart ` pages (render_chart.py, upgrades Phase 8), and the
+> chess board (render_board.py, Phase 11) — all through the shared `splitGray4Tiles()`
+> (tiles ≤240×111). Main's logo tile retired with the Phase-5 dashboard
+> (renderSingleTile is parked, no producers). The legacy description below is kept for
+> the roadmap's rich-tile revisit:
 
 LLM markdown ──parseMarkdown()──► Block[] ──render_content.py──► 480×212 gray4 pages [LEGACY]
  (os-content.ts)                            (PIL + DejaVu)         │ sliced 2×2
@@ -37,6 +40,7 @@ LLM markdown ──parseMarkdown()──► Block[] ──render_content.py─�
 | `- item` / `* item` | bullet list |
 | ```` ```lang ```` fenced block | bordered monospace panel (13px) |
 | ```` ```stat ```` fenced block | **big-number stat cards** (see below) |
+| ```` ```chart ```` fenced block | **matplotlib image page, strictly page ≥2** (see below) |
 | `---` | horizontal rule |
 | `\|a\|b\|` table rows | aligned monospace lines (proper grid later) |
 | inline `**b**` / `*i*` / `` `c` `` / `[t](url)` | flattened to plain text (v1) |
@@ -52,6 +56,23 @@ LLM markdown ──parseMarkdown()──► Block[] ──render_content.py─�
 → up to 3 cards, 21px bold value + 12px label, bordered tiles. Malformed JSON renders as a
 visible error code-panel (loud, never dropped).
 
+### Charts (upgrades Phase 8 — LIVE)
+
+````
+```chart
+{"type": "line", "title": "CPU %", "x": [0,1,2,3], "series": [{"label": "cpu", "y": [10,40,35,80]}]}
+```
+````
+
+Types `line`/`bar`/`scatter`; keys `title`/`xlabel`/`ylabel`/`x`/`series` (shorthand:
+top-level `y`). Rendered by `scripts/render_chart.py` (matplotlib Agg, white-on-black,
+thick lines) into the render_image gray4 contract → 2×2 tiles. **THE PAGE-2 RULE (Adam's
+elegance constraint, enforced server-side always):** text pages assemble FIRST; chart
+pages land strictly AFTER page 1 regardless of fence position. Page 1 never waits on
+imagery — chart pages render async behind a "⏳ chart rendering…" placeholder and swap in;
+failures become a loud bounded text page. Cached by (size, spec) hash with in-flight
+dedupe. Malformed JSON degrades to the visible error code-panel (the ```stat pattern).
+
 ## Block schema (for non-markdown producers)
 
 Server code can skip markdown and hand `renderBlocks()` blocks directly:
@@ -64,6 +85,7 @@ type Block =
   | { t: 'code'; lines: string[] }
   | { t: 'stats'; cards: { value: string; label: string }[] }  // ≤3 used
   | { t: 'rule' }
+  | { t: 'chart'; spec: string }   // JSON spec text → async image page (PAGE-2 RULE)
 ```
 
 ## Guidance baked into the system prompts
@@ -73,9 +95,9 @@ lead with the answer, one focal element per page, stat cards for numerics, ≤48
 lines, no filler. CC sessions get standard engineering prompting; their markdown renders
 through the same pipeline.
 
-## Roadmap (deliberately NOT v1)
+## Roadmap (deliberately NOT yet)
 
-- ` ```chart ` (+ Vega-Lite / Mermaid) → server-rasterized via matplotlib/headless — the
-  schema slot is reserved; rasterizer hooks live in render_content.py.
+- Mermaid / ` ```image ` blocks (headless-browser dependency — upgrades.md D5, charts v2).
 - Inline bold/mono runs (multi-font text layout).
-- The validated `display` tool with interaction round-trip (GLASSES_OS.md layer 3).
+- The validated `display` tool with interaction round-trip (GLASSES_OS.md layer 3;
+  upgrades.md Phase 12 stretch — design doc required first).

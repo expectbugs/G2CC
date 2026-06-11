@@ -24,6 +24,7 @@ import androidx.lifecycle.lifecycleScope
 import com.g2cc.g2cc.BuildConfig
 import com.g2cc.g2cc.render.Scene
 import com.g2cc.g2cc.service.ConnectionService
+import com.g2cc.g2cc.service.NotifyListener
 import com.g2cc.g2cc.setup.BatteryOptimization
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
@@ -49,9 +50,8 @@ class HarnessActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private lateinit var connectBtn: Button
-    private lateinit var testBtn: Button
-    private lateinit var serverBtn: Button
     private lateinit var disconnectBtn: Button
+    private lateinit var notifAccessBtn: Button
     private lateinit var diagCheck: CheckBox
     private lateinit var boundsCheck: CheckBox
     private lateinit var mirror: ImageView
@@ -61,7 +61,9 @@ class HarnessActivity : AppCompatActivity() {
     private val uiJobs = mutableListOf<Job>()
     private var lastScene: Scene? = null   // re-render the mirror when the bounds toggle flips
 
-    private data class Btns(val launched: Boolean, val connecting: Boolean, val serverMode: Boolean, val testing: Boolean)
+    // v1.7: Test + Server buttons are GONE (Connect goes straight into the DE;
+    // DisplayTestSequence stays in-tree, reachable via the binder for bench use).
+    private data class Btns(val launched: Boolean, val connecting: Boolean)
 
     private val serviceConn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -99,10 +101,17 @@ class HarnessActivity : AppCompatActivity() {
         }
         boundsCheck.setOnCheckedChangeListener { _, _ -> updateMirror(lastScene) }
         connectBtn.setOnClickListener { DiagLog.log("btn", "Connect tapped"); onConnectTap() }
-        testBtn.setOnClickListener { DiagLog.log("btn", "Test tapped"); svc?.runTest() }
-        serverBtn.setOnClickListener { DiagLog.log("btn", "Server tapped"); svc?.enterServerMode() }
         disconnectBtn.setOnClickListener { DiagLog.log("btn", "Disconnect tapped (MANUAL)"); onDisconnectTap() }
-        applyButtons(Btns(false, false, false, false))
+        notifAccessBtn.setOnClickListener {
+            DiagLog.log("btn", "Notification access tapped")
+            try {
+                startActivity(NotifyListener.settingsIntent(this))
+            } catch (e: Exception) {
+                DiagLog.log("setup", "notification-access settings open failed: $e")
+                setStatus("Could not open notification-access settings: ${e.message}")
+            }
+        }
+        applyButtons(Btns(false, false))
         updateMirror(null)
     }
 
@@ -112,6 +121,17 @@ class HarnessActivity : AppCompatActivity() {
         // service kept the session alive in the background). flag 0 → observe only; do
         // NOT create the service just by opening the app.
         if (ConnectionService.isRunning && !bound) bindToService(autoCreate = false)
+        // Phase 9: refresh the notification-access row + recover a zombie
+        // listener (granted-but-unbound after a crash loop — researched pattern:
+        // requestRebind, then the component-toggle kick after a 10 s grace).
+        refreshNotifAccessRow()
+        NotifyListener.kickIfZombie(this)
+    }
+
+    private fun refreshNotifAccessRow() {
+        val granted = NotifyListener.isAccessGranted(this)
+        notifAccessBtn.text = if (granted) "Notification access: GRANTED ✓ (mirroring to glasses)"
+        else "Notification access: NOT granted — tap to grant (one-time)"
     }
 
     override fun onStop() {
@@ -142,12 +162,15 @@ class HarnessActivity : AppCompatActivity() {
 
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         connectBtn = Button(this).apply { text = "Connect" }
-        testBtn = Button(this).apply { text = "Test" }
-        serverBtn = Button(this).apply { text = "Server" }
         disconnectBtn = Button(this).apply { text = "Disconnect" }
         val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        row.addView(connectBtn, lp); row.addView(testBtn, lp); row.addView(serverBtn, lp); row.addView(disconnectBtn, lp)
+        row.addView(connectBtn, lp); row.addView(disconnectBtn, lp)
         root.addView(row)
+
+        // Phase 9: the one-time "Notification access" grant row (prime-directive
+        // compliant: one tap at home, then the phone goes back in the pocket).
+        notifAccessBtn = Button(this).apply { text = "Notification access: checking…" }
+        root.addView(notifAccessBtn)
 
         diagCheck = CheckBox(this).apply {
             text = "Diag — stream verbose diagnostics to server log"
@@ -185,8 +208,6 @@ class HarnessActivity : AppCompatActivity() {
 
     private fun applyButtons(b: Btns) {
         connectBtn.isEnabled = !b.launched && !b.connecting
-        testBtn.isEnabled = b.launched && !b.serverMode && !b.testing
-        serverBtn.isEnabled = b.launched && !b.serverMode
         disconnectBtn.isEnabled = b.launched || b.connecting
     }
 
@@ -201,7 +222,7 @@ class HarnessActivity : AppCompatActivity() {
         uiJobs += lifecycleScope.launch { s.status.collect { setStatus(it) } }
         uiJobs += lifecycleScope.launch { s.sceneFlow.collect { lastScene = it; updateMirror(it) } }
         uiJobs += lifecycleScope.launch {
-            combine(s.launched, s.connecting, s.serverMode, s.testing) { l, c, sm, t -> Btns(l, c, sm, t) }
+            combine(s.launched, s.connecting) { l, c -> Btns(l, c) }
                 .collect { applyButtons(it) }
         }
     }
@@ -272,7 +293,7 @@ class HarnessActivity : AppCompatActivity() {
         setStatus("Disconnected.")
         lastScene = null
         updateMirror(null)
-        applyButtons(Btns(false, false, false, false))
+        applyButtons(Btns(false, false))
     }
 
     // ----------------------------------------------------------------- permissions

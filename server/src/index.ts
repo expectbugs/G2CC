@@ -21,6 +21,9 @@ import { Watchdog } from './watchdog.js'
 import { renderSetupPage, getLocalInterfaces } from './setup-page.js'
 import { getEndpointJson } from './endpoints.js'
 import { warmParakeet } from './stt.js'
+import { warmStore } from './store.js'
+import { armTimersFromDb } from './timers.js'
+import { startCalendarSync } from './calendar.js'
 
 const VERSION = '0.0.1'
 
@@ -137,6 +140,14 @@ try {
   // Pre-warm the Parakeet STT daemon so the first voice command isn't a ~12 s
   // cold model load (fire-and-forget; lazy-loads on first request if it fails).
   void warmParakeet(config)
+  // Pre-warm the Postgres store (migrations) — fire-and-forget: a down DB logs
+  // loudly and every store feature lazily retries; the server must not care.
+  warmStore()
+  // Re-arm durable timers (crash-safe; misses fire immediately as "(late)").
+  void armTimersFromDb().catch((e: unknown) =>
+    console.error(`[timers] startup re-arm failed (will affect only pre-existing timers): ${e instanceof Error ? e.message : String(e)}`))
+  // Google Calendar sync (15-min pacing) + the 60 s reminder tick (Phase 10).
+  startCalendarSync()
 } catch (err) {
   console.error('[g2cc-server] Failed to start:', err)
   process.exit(1)

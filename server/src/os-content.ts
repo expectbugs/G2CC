@@ -24,6 +24,9 @@ export type Block =
   | { t: 'stats'; cards: { value: string; label: string }[] }
   | { t: 'rule' }
   | { t: 'logo'; title: string; sub: string }
+  /** ```chart fenced block (Phase 8) — the JSON spec text, rendered async to
+   *  an image PAGE that lands strictly AFTER page 1 (THE PAGE-2 RULE). */
+  | { t: 'chart'; spec: string }
 
 export interface RenderedContent {
   pages: number
@@ -71,6 +74,19 @@ export function parseMarkdown(md: string): Block[] {
       i++
       while (i < lines.length && !/^```\s*$/.test(lines[i])) { body.push(lines[i]); i++ }
       // (an unterminated fence consumes to EOF — still rendered, never dropped)
+      if (lang === 'chart') {
+        // Phase 8: validate the JSON here so a malformed spec degrades to the
+        // loud visible code block (the ```stat pattern) instead of failing
+        // later inside the rasterizer.
+        const specText = body.join('\n')
+        try {
+          JSON.parse(specText)
+          blocks.push({ t: 'chart', spec: specText })
+        } catch (e) {
+          blocks.push({ t: 'code', lines: [`(bad \`\`\`chart JSON: ${(e as Error).message})`, ...body] })
+        }
+        continue
+      }
       if (lang === 'stat' || lang === 'stats') {
         try {
           const parsed = JSON.parse(body.join('\n')) as unknown
@@ -215,6 +231,36 @@ export interface RenderedImage {
   tiles: [string, string, string, string]
 }
 
+/** Shared gray4-payload → 2×2 tile splitter (Phase 8 factored it out of
+ *  renderImageFile so render_chart.py reuses the identical contract):
+ *  u16-LE w, u16-LE h, then w*h gray4 bytes. Validates dims (even, exact
+ *  byte count) and applies the ALL-BLACK GUARD — an all-black tile hard-kills
+ *  the glasses slot (hardware), so one near-invisible pixel is set. */
+export function splitGray4Tiles(raw: Buffer, what: string): RenderedImage {
+  if (raw.length < 4) throw new Error(`${what} output too short (${raw.length}B)`)
+  const w = raw.readUInt16LE(0)
+  const h = raw.readUInt16LE(2)
+  if (raw.length !== 4 + w * h || w % 2 || h % 2) {
+    throw new Error(`${what} output ${raw.length}B for ${w}x${h} — malformed`)
+  }
+  const tw = w / 2, th = h / 2
+  const tiles: string[] = []
+  for (const [tx, ty] of [[0, 0], [tw, 0], [0, th], [tw, th]] as const) {
+    const tile = Buffer.alloc(tw * th)
+    let blank = true
+    for (let y = 0; y < th; y++) {
+      for (let x = 0; x < tw; x++) {
+        const v = raw[4 + (ty + y) * w + (tx + x)]
+        tile[y * tw + x] = v
+        if (v !== 0) blank = false
+      }
+    }
+    if (blank) tile[0] = 1   // one near-invisible pixel: all-black tiles kill the slot
+    tiles.push(encodeGray4Bmp(tw, th, tile).toString('base64'))
+  }
+  return { w, h, tiles: tiles as [string, string, string, string] }
+}
+
 export function renderImageFile(path: string, maxW: number, maxH: number): Promise<RenderedImage> {
   return new Promise((resolve, reject) => {
     execFile(PY, [IMAGE_SCRIPT, path, String(maxW), String(maxH)],
@@ -223,29 +269,7 @@ export function renderImageFile(path: string, maxW: number, maxH: number): Promi
         try {   // a throw INSIDE an execFile callback escapes the Promise as an
                 // uncaughtException and kills the whole server (encodeGray4Bmp's
                 // nibble assert on a contract-violating renderer byte — review 2026-06-11)
-        const raw = stdout as Buffer
-        if (raw.length < 4) { reject(new Error(`render_image output too short (${raw.length}B)`)); return }
-        const w = raw.readUInt16LE(0)
-        const h = raw.readUInt16LE(2)
-        if (raw.length !== 4 + w * h || w % 2 || h % 2) {
-          reject(new Error(`render_image output ${raw.length}B for ${w}x${h} — malformed`)); return
-        }
-        const tw = w / 2, th = h / 2
-        const tiles: string[] = []
-        for (const [tx, ty] of [[0, 0], [tw, 0], [0, th], [tw, th]] as const) {
-          const tile = Buffer.alloc(tw * th)
-          let blank = true
-          for (let y = 0; y < th; y++) {
-            for (let x = 0; x < tw; x++) {
-              const v = raw[4 + (ty + y) * w + (tx + x)]
-              tile[y * tw + x] = v
-              if (v !== 0) blank = false
-            }
-          }
-          if (blank) tile[0] = 1   // one near-invisible pixel: all-black tiles kill the slot
-          tiles.push(encodeGray4Bmp(tw, th, tile).toString('base64'))
-        }
-        resolve({ w, h, tiles: tiles as [string, string, string, string] })
+          resolve(splitGray4Tiles(stdout as Buffer, 'render_image'))
         } catch (e) {
           reject(e instanceof Error ? e : new Error(String(e)))
         }
@@ -253,8 +277,63 @@ export function renderImageFile(path: string, maxW: number, maxH: number): Promi
   })
 }
 
-/** Typeset blocks onto a SINGLE w×h tile (page 0 only — e.g. the Main logo at
- *  the classic 200×100). Cached by (size, blocks) hash like renderBlocks. */
+// ---- chart rendering (render_chart.py — Phase 8) --------------------------
+
+const CHART_SCRIPT = '/home/user/G2CC/scripts/render_chart.py'
+
+/** Promise-cached by (size, spec) hash — page flips never re-rasterize AND
+ *  concurrent requests for the same spec share one subprocess (in-flight
+ *  dedupe). Failures evict so a retry can succeed. */
+const chartCache = new Map<string, Promise<RenderedImage>>()
+
+export function renderChart(spec: string, w: number, h: number): Promise<RenderedImage> {
+  const key = createHash('sha256').update(`${w}x${h}:${spec}`).digest('hex')
+  const hit = chartCache.get(key)
+  if (hit) {
+    chartCache.delete(key)   // refresh LRU position
+    chartCache.set(key, hit)
+    return hit
+  }
+  const p = new Promise<RenderedImage>((resolve, reject) => {
+    const child = execFile(PY, [CHART_SCRIPT], { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) { reject(new Error(`render_chart failed: ${err.message}${stderr?.length ? ' :: ' + stderr.toString() : ''}`)); return }
+        try {
+          resolve(splitGray4Tiles(stdout as Buffer, 'render_chart'))
+        } catch (e) {
+          reject(e instanceof Error ? e : new Error(String(e)))
+        }
+      })
+    // stdin EPIPE guard — same class as runRenderer's (a dead child EPIPEs the
+    // write; without a listener that's an uncaughtException, server down).
+    child.stdin?.on('error', (e: Error) => console.error(`[os-content] render_chart stdin: ${e.message}`))
+    child.stdin?.end(JSON.stringify({ spec, width: w, height: h }))
+  })
+  const guarded = p.catch((e: unknown) => {
+    chartCache.delete(key)   // failed renders don't poison the cache
+    throw e
+  })
+  chartCache.set(key, guarded)
+  while (chartCache.size > CACHE_MAX) {
+    const oldest = chartCache.keys().next().value
+    if (oldest === undefined) break
+    chartCache.delete(oldest)
+  }
+  return guarded
+}
+
+/** THE PAGE-2 RULE assembler (pure — Phase 8): text pages FIRST from every
+ *  non-chart block, chart specs strictly AFTER, regardless of where the model
+ *  emitted the fences. Page 1 never waits on or contains imagery. */
+export function splitDocForPages(blocks: Block[]): { textBlocks: Block[]; chartSpecs: string[] } {
+  const textBlocks = blocks.filter((b) => b.t !== 'chart')
+  const chartSpecs = blocks.filter((b): b is Extract<Block, { t: 'chart' }> => b.t === 'chart').map((b) => b.spec)
+  return { textBlocks, chartSpecs }
+}
+
+/** Typeset blocks onto a SINGLE w×h tile (page 0 only). PARKED, NO PRODUCERS
+ *  since Phase 5 retired Main's logo tile (2026-06-11) — kept for future
+ *  static imagery. Cached by (size, blocks) hash like renderBlocks. */
 const singleCache = new Map<string, string>()
 export async function renderSingleTile(blocks: Block[], w: number, h: number): Promise<string> {
   const key = createHash('sha256').update(`${w}x${h}:` + JSON.stringify(blocks)).digest('hex')

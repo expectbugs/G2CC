@@ -174,6 +174,25 @@ export interface AuthMsg {
 export interface ClientHbMsg {
   type: 'client_hb'
   now: number
+  /** Phone battery percent 0-100 (Phase 9; optional — old APKs omit it).
+   *  Feeds the dashboard line + the ≤15% notification. */
+  battery?: number
+}
+
+/** A phone notification forwarded by the client's NotificationListenerService
+ *  (Phase 9, READ-ONLY v1 — no inline reply). The server maps `package` →
+ *  priority (config notifications.packageMap; default 'info') and routes it
+ *  into the Phase-4 notification layer. Additive-optional (B6): old servers
+ *  ignore unknown message types loudly; old APKs simply never send it. */
+export interface NotifyMsg {
+  type: 'notify'
+  package: string
+  title: string
+  text: string
+  /** StatusBarNotification.postTime (epoch ms). */
+  postedAt: number
+  /** StatusBarNotification.key — client-side debounce key. */
+  key: string
 }
 
 /** Audio format the phone is about to stream. The server routes on
@@ -324,6 +343,7 @@ export interface InputMsg {
 export type ClientMessage =
   | AuthMsg
   | ClientHbMsg
+  | NotifyMsg
   | AudioStartMsg
   | AudioEndMsg
   | PromptMsg

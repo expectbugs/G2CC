@@ -42,6 +42,15 @@ export interface G2CCConfig {
     model: string
     /** Optional system prompt appended to the default. */
     systemPrompt?: string
+    /** Canned prompts for the session windows' `Prompts` menu (Phase 6 —
+     *  Adam's gate A3.4 picks). One tap feeds the normal prompt() path. */
+    quickPrompts: string[]
+  }
+  notifications: {
+    /** Android package → notification priority (Phase 9). Unlisted packages
+     *  default to 'info'. Values must be call|timer|sms|email|info — invalid
+     *  entries log loudly and fall back to 'info'. */
+    packageMap: Record<string, string>
   }
 }
 
@@ -82,6 +91,25 @@ function defaultConfig(): G2CCConfig {
       effort: 'max',
       model: 'opus',
       // systemPrompt left unset; user can configure an engineering-oriented prompt.
+      // Adam's picks, gate A3.4 (2026-06-11):
+      quickPrompts: [
+        'current status?',
+        'still alive?',
+        'Yes please do that',
+        'go ahead',
+        'explain further',
+      ],
+    },
+    notifications: {
+      // Pixel 10a defaults (Phase 9): dialer → the caller-ID overlay popup,
+      // messaging → sms, gmail → email; everything else 'info'.
+      packageMap: {
+        'com.google.android.dialer': 'call',
+        'com.android.dialer': 'call',
+        'com.google.android.apps.messaging': 'sms',
+        'com.android.messaging': 'sms',
+        'com.google.android.gm': 'email',
+      },
     },
   }
 }
@@ -115,6 +143,7 @@ export function loadConfig(): G2CCConfig {
     ...saved,
     stt: { ...defaults.stt, ...(saved.stt ?? {}) },
     claude: { ...defaults.claude, ...(saved.claude ?? {}) },
+    notifications: { ...defaults.notifications, ...(saved.notifications ?? {}) },
   }
 }
 

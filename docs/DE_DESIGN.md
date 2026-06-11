@@ -16,14 +16,15 @@ implementation builds against. Wire truth: `docs/G2_BLE_PROTOCOL.md`. OS archite
 │  96,222) │  browse: native list 480×222          ├─────────┘ clock = CLIENT-OWNED cutout,
 │ 5 items  │  text:   text region 480×222          │           12-hour, MINUTE-tick
 │ visible  │                                       │           (hat power win)
-├──────────┴───────────────────────┬───────────────┤
-│ status (0,255,tabsX,33)          │ tabs (right-  │ tabs right-aligned: fwTextWidth
-│ "● beardos · 1 cc"               │ aligned, 33)  │ estimate − DE_TAB_RIGHT_TRIM(30);
-└──────────────────────────────────┴───────────────┘ active tab [bracketed]
-```
+├──────────┴───────────────────────────────────────┤
+│ status (0,255,576,33)  "● beardos · 1 cc · ⚠2"   │ tab strip RETIRED 2026-06-11
+└──────────────────────────────────────────────────┘ (Phase 5 — Main dashboard
+```                                                    carries window states; status
+                                                       spans the full bottom bar;
+                                                       region id 5 stays reserved)
 
-If "12:59 PM" clips at 102px or the tabs clip/wrap, widen `CLOCK_WIDTH` / reduce
-`DE_TAB_RIGHT_TRIM` — both are single tunables from the 2026-06-10 eyeball cal.
+If "12:59 PM" clips at 102px, widen `CLOCK_WIDTH` — a single tunable from the
+2026-06-10 eyeball cal.
 The clock and the tab strip get their ~5px inset from a LEADING SPACE + extra width,
 NOT padding — hardware 2026-06-10: padding 4 inside a 33px bar dropped the vertical
 room below the firmware's threshold and triggered the overflow scrollbar.
@@ -52,19 +53,20 @@ content text=7, tiles=10..13 (`t0..t3`).
     **Double-tap flips focus content → menu** (menu list captures, ring moves there; menu
     actions hand focus back to the rows); double-tap again pops out (→ Main). >~14 rows page
     via `— prev — / — more —` rows.
-  - **Files' locations menu is the ANTENNA** (a scroll=true text region with a server-drawn
-    `▸`): firmware lists move their ring silently, so only the antenna reports per-notch
-    scrolls — which is what lets the content pane PREVIEW the selected directory live while
-    scrolling (Adam 2026-06-10 r2). Tap = enter (focus → content rows). The antenna shows a
-    ≤6-line window around the selection: more lines would overflow the region and break the
-    zero-range per-notch behavior (the v0.6-proven trick).
+  - **Files' locations level is a plain browse list** (REVERTED from the per-notch antenna
+    live-preview 2026-06-11 — Adam: "feels janky"): a normal content list of locations, tap
+    to enter the tree. The scroll=true antenna PATTERN itself remains hardware-proven and
+    load-bearing in `blankScene()`'s wake region (and the legacy probe/menu screens) — only
+    the locations preview use died.
 - **Reload everywhere** (Adam 2026-06-10, mechanism revised in v1.3): every reading menu has
   `Reload`; browse windows reach it via the DOUBLE-TAP focus flip to the left menu list (the
   once-planned compose-injected row-0 was superseded). Reload = `display_reload` to the client
   (abort any wedged render op + COLD_INIT re-takeover with the current scene — the proven
   renewal path) + the active window clears stuck transients (mic, errors) + recompose.
-- **Main** = menu list of windows (`Aria/CC/Mail/Files/Reload`, capture on the menu) + the
-  G2CC logo in the content tiles (Adam 2026-06-10).
+- **Main** = menu list of windows (capture on the menu) + the live DASHBOARD in the content
+  pane (Phase 5, 2026-06-11 — replaced the logo tile): host + pool + unseen count, then one
+  `Label: summary()` line per window, 30 s re-render pacing while Main is active. Content
+  paginates (menu gains Next/Prev) if the window count outgrows a page.
 - **Taps resolve against the last-RENDERED view** (WM `lastView`), and the WM-level labels
   (`Retry/Reload/Back/Main`) work in every window and state — incl. error screens.
 - **Double-tap = back (pop one level)** — reading → list → menu focus → window root → Main;
@@ -111,13 +113,24 @@ content text=7, tiles=10..13 (`t0..t3`).
 
 | id | tab | modes | notes |
 |---|---|---|---|
-| `main` | Main | tile | menu = window list + Reload (tap switches); content = ONE centered 200×100 logo tile (~1 s load; placeholder art pending Adam's logo). Double-tap target at every root. |
+| `main` | Main | text | menu = window list + Reload (tap switches); content = the live dashboard (host/pool/unseen + one summary line per window, 30 s pacing). Double-tap target at every root. |
 | `cc` | CC | browse→text | root = directory picker (browse /home/user/*); then the CC session: response→firmware-text pages, dynamic action menu, permission flow via menu. |
 | `aria` | Aria | text | CC subprocess, cwd `/home/user/aria`, `--append-system-prompt` = `server/prompts/aria-g2.md` (teaches the ~44×6 text surface). |
 | `mail` | Mail | browse→text | Maildir `~/Mail/marzello.net/` (mbsync cron, every 5 min). List = INBOX newest-first; read = text/plain body, text mode. `scripts/read_maildir.py` (stdlib). |
-| `files` | Files | antenna→browse→text/image | locations menu (Root/Home/DL/G2CC + /proc/mounts drives) w/ live content preview on scroll → tree browse ('..' ascends) → bounded head preview, or the **image viewer** (2026-06-11): png/jpg/gif/bmp/webp → aspect-preserving largest-fit ≤480×222, Floyd–Steinberg-dithered to gray4, 4 centered tiles. |
+| `files` | Files | browse→browse→text/image | locations list (Root/Home/DL/G2CC + /proc/mounts drives; plain browse rows since 2026-06-11) → tree browse ('..' ascends) → bounded head preview, or the **image viewer** (2026-06-11): png/jpg/gif/bmp/webp → aspect-preserving largest-fit ≤480×222, Floyd–Steinberg-dithered to gray4, 4 centered tiles. |
+| `reader` | Reader | browse→browse→text | EPUB library (`~/books`) → chapters → paginated text (upgrades Ph7). **Resume position is the feature**: every page/chapter change persists (`reader_positions`); re-opening a book drops straight back into the page; Next/Prev roll across chapter boundaries. Parsing via `read_epub.py` subprocess. |
+| `timers` | Timers | browse→text | pending timers (tap → detail → `Cancel timer`) + `New 5/10/20/30/60 min` rows (Ph6). DB-backed (`timers`), re-armed at boot (missed fires fire late, marked); fires arrive as 'timer'-priority notifications. Voice creation via the Aria Ask intent pre-parse. |
+| `calendar` | Calendar | browse→text | 14-day day-grouped agenda → event read view (Ph10, READ-ONLY). Synced from Google every 15 min via aria's OAuth (`read_gcal.py`); 10-min-lead reminders for timed events ride the notification layer. |
+| `games` | Games | browse→text/tiles | rpg-cli (filesystem dungeon rooted at /home/user; action rows + dir descent; output paginated) and chess vs Stockfish (Ph11): board = IMAGE page (render_board.py → tiles, placeholder-swapped), moves picked from a paged legal-SAN list, Skill 1/5/10/20. Lichess deferred (gate A3.2). |
+| `notices` | Notices | browse→text | the persisted notification history, newest-first → read view (Ph4). Reading marks SEEN (clears the ⚠ title flash + badge). |
 
-Deferred: SMS (needs phone-side bridge), Settings.
+Notification surfacing (Ph4, WM-owned): info/sms/email = ⚠ title-bar override (until read
+in Notices) + unseen badge in the status slot; timer/call = full-page overlay
+(`Open/Dismiss/Main`) that queues behind dictation/permission states; while BLANKED, every
+priority pops for 10 s then auto-re-blanks (Adam 2026-06-11; marked seen at display).
+Main's menu also carries `Ask` → switches to Aria and starts its dictation verb (Ph6).
+
+Deferred: SMS inline-reply (Ph9 is read-only mirroring), Settings.
 
 ## 5. Wire/protocol additions (shared/src/protocol.ts ↔ WsProtocol.kt)
 
