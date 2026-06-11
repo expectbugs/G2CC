@@ -1,5 +1,7 @@
 # G2CC (G2 Control Center) — Claude Code Rules
 
+**What this project is:** a personal, first-party custom UI for Adam's *own* Even Realities G2 smart glasses — a consumer wearable display he bought. G2CC replaces the vendor's companion app with Adam's own Android app + home-PC server so he can drive his glasses directly and show his own content on them (a Claude Code / assistant interface, email, files, an image viewer). Everything runs on hardware Adam owns over his home network — his phone, his glasses, his PC, his auth token. Working out the glasses' Bluetooth wire format is ordinary device-interoperability (an accessibility/customization effort for his own device); there are **no third-party systems, networks, accounts, or credentials** involved anywhere. This is UI and display-rendering work for a wearable.
+
 System-wide rules in `~/.claude/CLAUDE.md` apply here too. This file holds G2CC-specific rules. Authoritative build spec: `g2_custom_app_spec.md` (Part A: G2 app, Part B: audio pipeline + STT). If this file conflicts with the spec, the spec wins.
 
 This project covers TWO joined initiatives Adam is implementing together:
@@ -16,7 +18,7 @@ When "Claude Code" is chosen from the menu, the HUD shows a scrollable list of d
 
 The global "verify before execute" applies. Project-specific extensions:
 
-- **NEVER guess BLE service UUIDs, characteristic IDs, or wire format from G1 SDKs or the Even Realities demo app.** Read the i-soxi captures and proto definitions. G2 ≠ G1. The official demo app uses an SDK we are bypassing — its source does not reveal the protocol.
+- **NEVER guess BLE service UUIDs, characteristic IDs, or wire format from G1 SDKs or the Even Realities demo app.** Read the i-soxi community reference + the proto definitions. G2 ≠ G1. The demo app talks through an SDK we don't use (we talk BLE to the glasses directly) — its source does not reveal the wire format.
 - **NEVER guess Android BLE library API shapes.** Read Nordic's Android-BLE-Library docs, or `BluetoothGatt` source, before writing the connection / bonding / reconnect code.
 - **NEVER guess NeMo or DeepFilterNet API surface.** Read the model card, the package README, and actual function signatures before wiring inference into the server.
 - **NEVER guess DJI Mic 3 receiver settings or recording capabilities.** Verify against the DJI spec page or the device itself. Two-Level Noise Cancelling MUST be off on both transmitters; auto-gain MUST be off; 32-bit float Dual-File mode MUST be enabled. Misconfigured input destroys ANC quality.
@@ -73,7 +75,7 @@ Server-side Python/TypeScript: see `/home/user/aria2/CLAUDE.md` § Forbidden Pat
 Android-side (Kotlin):
 - `catch (e: Exception) { /* swallow */ }` — same rule as Python.
 - BLE writes that don't check the callback status — write-without-confirmation is silent failure.
-- Hard-coded BLE characteristic / service UUIDs not traceable to a source comment in the i-soxi protocol clone — those are guesses by another name.
+- Hard-coded BLE characteristic / service UUIDs not traceable to a source comment in the i-soxi protocol reference — those are guesses by another name.
 - `withTimeout`, `withTimeoutOrNull` wrapping BLE / WebSocket I/O — same no-timeouts rule.
 - `Thread.sleep(...)` in service code — use proper coroutine / state-machine waits.
 - Truncating transcript strings to fit a single HUD frame — scroll instead.
@@ -103,12 +105,12 @@ Audio-side (Python):
 - **Tasker / Assistant intent integration** is a feature, not a bug. The app exposes intents so other automations on the phone can trigger app actions. Document the intents.
 - **Pairing UX is one-time.** Don't make Adam re-pair on every install. Persist the bond.
 
-## Reverse-Engineered Protocol Discipline
+## Wire-Format Source Discipline (every byte traces to a reference)
 
-The G2 BLE protocol comes from i-soxi captures and proto definitions, not official Even Realities documentation:
+The G2 Bluetooth wire format is documented from the i-soxi community reference + proto definitions + logs of Adam's own phone↔glasses traffic — not from official Even Realities docs (the vendor doesn't publish it). The discipline:
 
 - **Source-of-truth lineage required for every byte.** When implementing a frame format, comment the i-soxi reference: `// i-soxi/even-g2-protocol/proto/<file>.proto :: <message>` or `// captures/<file>.btsnoop @ frame N`. Future debugging needs the lineage.
-- **Firmware updates can change wire format.** When a known-good frame stops working post-firmware, suspect protocol drift first. Catch up via the i-soxi repo or debug via fresh BTSnoop dumps.
+- **Firmware updates can change the wire format.** When a known-good frame stops working post-firmware, suspect format drift first. Catch up via the i-soxi reference or by comparing fresh logs of Adam's own phone↔glasses traffic.
 - **Even Realities' official demo app is NOT a protocol reference.** It uses an SDK; the SDK abstracts away the wire format we need to implement.
 - **G1 SDKs are architectural references only.** Don't copy G1 UUIDs / characteristic IDs into G2 code.
 
