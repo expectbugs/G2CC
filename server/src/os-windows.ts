@@ -251,10 +251,21 @@ class SessionLevel {
       // sessions.json and a WS drop loses the conversation (review 2026-06-10;
       // mirrors the legacy path's persist-on-turn_complete).
       this.ctx.pool.persistSessionMeta()
-      void this.setDoc([
-        { t: 'heading', text: this.who, meta: info.toolCalls.length ? `${info.toolCalls.length} tools` : 'done' },
-        ...parseMarkdown(info.text || '(empty response)'),
-      ])
+      // An ERROR turn (cc-session emits 'error' with the same text immediately
+      // before this) renders as an explicit error card with the recovery hint,
+      // not as a response (Adam got a bare "CC error_during_execution" doc).
+      const isErrorTurn = this.lastError !== null && info.text === this.lastError
+      void this.setDoc(isErrorTurn
+        ? [
+            { t: 'heading', text: 'Turn failed', meta: this.who },
+            { t: 'para', text: info.text },
+            { t: 'rule' },
+            { t: 'para', text: `The session auto-recovers — ${this.verb} again to retry.` },
+          ]
+        : [
+            { t: 'heading', text: this.who, meta: info.toolCalls.length ? `${info.toolCalls.length} tools` : 'done' },
+            ...parseMarkdown(info.text || '(empty response)'),
+          ])
     })
     session.on('permission_request', (info: { requestId: string; rawEvent: Record<string, unknown> }) => {
       if (stale()) return

@@ -333,7 +333,18 @@ export class CCSession extends EventEmitter {
       this._isProcessingTurn = false
       const resultSubtype = data.subtype as string | undefined
       if (data.is_error || resultSubtype === 'error_during_execution' || resultSubtype === 'error_max_turns') {
-        const errText = (data.result as string) || `CC ${resultSubtype || 'error'}`
+        // Pull every detail field the event may carry — `data.result` is often EMPTY
+        // on error subtypes (Adam saw a bare "CC error_during_execution" on glass,
+        // 2026-06-11, while the actual cause — a rate limit — was only in the
+        // stream). Log the raw event so the next mystery error is diagnosable.
+        const err = data.error as { message?: unknown } | string | undefined
+        const detail = (data.result as string)
+          || (typeof err === 'string' ? err : undefined)
+          || (err && typeof err === 'object' && typeof err.message === 'string' ? err.message : undefined)
+          || (this._recentEvents.includes('rate_limit_event') ? `${resultSubtype} (a rate_limit_event preceded — likely throttled; retry shortly)` : undefined)
+          || `CC ${resultSubtype || 'error'}`
+        console.error(`[cc-session] turn ERROR (${resultSubtype}) cwd=${this.config.projectPath} raw=${JSON.stringify(data).slice(0, 600)}`)
+        const errText = detail
         this.emit('error', errText)
         this.emit('turn_complete', {
           text: errText,
