@@ -78,10 +78,16 @@ content text=7, tiles=10..13 (`t0..t3`).
   them. Worst-case tap latency ≈ one tile (~1 s) instead of a full page (~4 s). Cheap chrome
   text ops are also emitted BEFORE image ops within a render.
 - **Dictation = the prompt input** (v1): menu `Dictate`/`Ask` → server sends `audio_request
-  start` → phone streams mic (existing AudioStreamer/STT path) → result routes to the session
-  that's transcribing (stale/canceled results discard loudly). Menu swaps to `Done/Cancel`
-  while listening. **Leaving the window (switch/pop/reload) stops the mic** — phone-side
-  capture failures come back as `[audio-error]` diags so the server never waits forever.
+  start` → phone streams mic (existing AudioStreamer/STT path). The transcript then enters a
+  **CONFIRM step** (the g2aria CONFIRM_STT flow, ported 2026-06-11): the page shows "You
+  said: …" and the menu offers `Confirm / Retry / Cancel` — nothing reaches CC unread
+  (Parakeet mangles words). Menu swaps to `Done/Cancel` while listening. **Leaving the
+  window (switch/pop/reload) stops the mic and discards unconfirmed transcripts** —
+  phone-side capture failures come back as `[audio-error]` diags so the server never waits.
+- **Live status bar** (g2aria-style, 2026-06-11): the bottom-left status slot shows the
+  active session's phase as it moves — `listening… → transcribing… → confirm? → thinking…
+  → tool X → writing…` (one ~62 ms text write per phase change; `+queued` when a prompt
+  waits). Idle shows `● host · N cc`.
 
 ## 3. Content modes (per window state — "browsing → firmware text/list; reading → image tiles")
 
@@ -106,7 +112,7 @@ content text=7, tiles=10..13 (`t0..t3`).
 | `cc` | CC | browse→text | root = directory picker (browse /home/user/*); then the CC session: response→firmware-text pages, dynamic action menu, permission flow via menu. |
 | `aria` | Aria | text | CC subprocess, cwd `/home/user/aria`, `--append-system-prompt` = `server/prompts/aria-g2.md` (teaches the ~44×6 text surface). |
 | `mail` | Mail | browse→text | Maildir `~/Mail/marzello.net/` (mbsync cron, every 5 min). List = INBOX newest-first; read = text/plain body, text mode. `scripts/read_maildir.py` (stdlib). |
-| `files` | Files | antenna→browse→text | locations menu (Root/Home/Downloads/G2CC + mounts) w/ live content preview on scroll → tree browse ('..' ascends) → bounded head preview. |
+| `files` | Files | antenna→browse→text/image | locations menu (Root/Home/DL/G2CC + /proc/mounts drives) w/ live content preview on scroll → tree browse ('..' ascends) → bounded head preview, or the **image viewer** (2026-06-11): png/jpg/gif/bmp/webp → aspect-preserving largest-fit ≤480×222, Floyd–Steinberg-dithered to gray4, 4 centered tiles. |
 
 Deferred: SMS (needs phone-side bridge), Settings.
 

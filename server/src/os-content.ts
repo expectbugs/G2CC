@@ -14,6 +14,7 @@ import { encodeGray4Bmp } from './gray4bmp.js'
 
 const PY = '/home/user/G2CC/audio/venv/bin/python'
 const RENDER_SCRIPT = '/home/user/G2CC/scripts/render_content.py'
+const IMAGE_SCRIPT = '/home/user/G2CC/scripts/render_image.py'
 
 export type Block =
   | { t: 'heading'; text: string; meta?: string }
@@ -200,6 +201,50 @@ export async function renderBlocks(blocks: Block[]): Promise<RenderedContent> {
       return [row[0], row[1], row[2], row[3]]
     },
   }
+}
+
+/** An image file fitted + dithered for the glasses (the Files image viewer,
+ *  Adam 2026-06-11): largest aspect-preserving size inside maxW×maxH, split
+ *  into 2×2 tiles (each ≤ half the bound — inside the ≤288×129 hardware cap
+ *  for any bound ≤480×222). Every tile is guaranteed non-blank (an all-black
+ *  tile hard-kills the glasses; dark photo corners are real). */
+export interface RenderedImage {
+  w: number
+  h: number
+  /** 4 base64 gray4 BMPs, 2×2 row-major; each (w/2)×(h/2). */
+  tiles: [string, string, string, string]
+}
+
+export function renderImageFile(path: string, maxW: number, maxH: number): Promise<RenderedImage> {
+  return new Promise((resolve, reject) => {
+    execFile(PY, [IMAGE_SCRIPT, path, String(maxW), String(maxH)],
+      { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) { reject(new Error(`render_image failed: ${err.message}${stderr?.length ? ' :: ' + stderr.toString() : ''}`)); return }
+        const raw = stdout as Buffer
+        if (raw.length < 4) { reject(new Error(`render_image output too short (${raw.length}B)`)); return }
+        const w = raw.readUInt16LE(0)
+        const h = raw.readUInt16LE(2)
+        if (raw.length !== 4 + w * h || w % 2 || h % 2) {
+          reject(new Error(`render_image output ${raw.length}B for ${w}x${h} — malformed`)); return
+        }
+        const tw = w / 2, th = h / 2
+        const tiles: string[] = []
+        for (const [tx, ty] of [[0, 0], [tw, 0], [0, th], [tw, th]] as const) {
+          const tile = Buffer.alloc(tw * th)
+          let blank = true
+          for (let y = 0; y < th; y++) {
+            for (let x = 0; x < tw; x++) {
+              const v = raw[4 + (ty + y) * w + (tx + x)]
+              tile[y * tw + x] = v
+              if (v !== 0) blank = false
+            }
+          }
+          if (blank) tile[0] = 1   // one near-invisible pixel: all-black tiles kill the slot
+          tiles.push(encodeGray4Bmp(tw, th, tile).toString('base64'))
+        }
+        resolve({ w, h, tiles: tiles as [string, string, string, string] })
+      })
+  })
 }
 
 /** Typeset blocks onto a SINGLE w×h tile (page 0 only — e.g. the Main logo at

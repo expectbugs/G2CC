@@ -14,7 +14,7 @@
 import {
   SCREEN_WIDTH, SCREEN_HEIGHT,
   DE_BAR_H, DE_MENU_W, DE_CONTENT_X, DE_CONTENT_Y, DE_CONTENT_W, DE_CONTENT_H,
-  DE_TILE_W, DE_TILE_H, DE_TITLE_W, DE_REGION_IDS, DE_TAB_RIGHT_TRIM,
+  DE_TITLE_W, DE_REGION_IDS, DE_TAB_RIGHT_TRIM,
   MAX_ITEM_NAME_LENGTH,
 } from '@g2cc/shared'
 import type { WireScene, SceneRegion, RegionStyle } from '@g2cc/shared'
@@ -50,6 +50,10 @@ export interface WinView {
   text?: string
   /** tiles mode: 4 base64 gray4 BMPs (t0..t3, 2x2 row-major). */
   tiles?: [string, string, string, string]
+  /** tiles mode, optional: the FULL composed size (w×h ≤ content pane). When
+   *  set, the 2×2 grid is (w/2)×(h/2) tiles CENTERED in the pane (the Files
+   *  image viewer's aspect-preserving fit); omitted = the full-pane grid. */
+  tilesRect?: { w: number; h: number }
   /** tile mode: ONE centered base64 gray4 BMP (TILE_W×TILE_H — Main's logo). */
   tile?: string
 }
@@ -64,6 +68,8 @@ export interface TabSpec {
 }
 
 const CHROME: RegionStyle = { borderWidth: 1, borderColor: 6 }
+/** Title bar pops slightly (Adam 2026-06-11): one step thicker than the rest. */
+const TITLE_CHROME: RegionStyle = { borderWidth: 2, borderColor: 6 }
 
 // Measured G2 firmware glyph widths (docs/SIM_TOOLING.md): upper ≈11.4-11.9,
 // lower ≈9.6, digit ≈11.0, W/M ≈15.8 — close enough to right-align the tabs.
@@ -110,7 +116,7 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   // paddingLength, which would also eat VERTICAL room in the 33px bar.
   regions.push({
     id: DE_REGION_IDS.title, name: 'title', x: 0, y: 0, w: DE_TITLE_W, h: DE_BAR_H,
-    kind: 'text', style: CHROME,
+    kind: 'text', style: TITLE_CHROME,
     content: { kind: 'text', text: ' ' + view.title },
   })
 
@@ -143,15 +149,24 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   if (view.mode === 'tiles') {
     const tiles = view.tiles
     if (!tiles) throw new Error(`compose: '${view.title}' is tiles mode but has no tiles`)
+    // Aspect-fit grids (tilesRect) center; default = the full content pane.
+    const fullW = view.tilesRect?.w ?? DE_CONTENT_W
+    const fullH = view.tilesRect?.h ?? DE_CONTENT_H
+    if (fullW > DE_CONTENT_W || fullH > DE_CONTENT_H || fullW % 2 || fullH % 2) {
+      throw new Error(`compose: '${view.title}' tilesRect ${fullW}x${fullH} invalid (≤${DE_CONTENT_W}x${DE_CONTENT_H}, even)`)
+    }
+    const tw = fullW / 2, th = fullH / 2
+    const ox = DE_CONTENT_X + ((DE_CONTENT_W - fullW) >> 1)
+    const oy = DE_CONTENT_Y + ((DE_CONTENT_H - fullH) >> 1)
     const grid = [
-      { x: DE_CONTENT_X, y: DE_CONTENT_Y },
-      { x: DE_CONTENT_X + DE_TILE_W, y: DE_CONTENT_Y },
-      { x: DE_CONTENT_X, y: DE_CONTENT_Y + DE_TILE_H },
-      { x: DE_CONTENT_X + DE_TILE_W, y: DE_CONTENT_Y + DE_TILE_H },
+      { x: ox, y: oy },
+      { x: ox + tw, y: oy },
+      { x: ox, y: oy + th },
+      { x: ox + tw, y: oy + th },
     ]
     grid.forEach((g, i) => {
       regions.push({
-        id: DE_REGION_IDS.tile0 + i, name: `t${i}`, x: g.x, y: g.y, w: DE_TILE_W, h: DE_TILE_H,
+        id: DE_REGION_IDS.tile0 + i, name: `t${i}`, x: g.x, y: g.y, w: tw, h: th,
         kind: 'image',
         content: { kind: 'image', bmpBase64: tiles[i] },
       })

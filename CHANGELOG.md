@@ -4,7 +4,24 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
-## (unstamped) — 2026-06-11 — **server: CC/Aria session content → firmware text (tiles nixed for sessions)**
+## (unstamped) — 2026-06-11 — **server: live status phases, STT confirm step, Files image viewer, thicker title border**
+
+The g2aria feel, ported (Adam's ask): the bottom status bar now tracks the active session
+live — `listening… → transcribing… → confirm? → thinking… → tool X → writing…` (text_delta
+flips thinking→writing once per turn; each phase change is one ~62 ms text write) — and
+dictation gained the **CONFIRM_STT step**: the transcript renders as "You said: …" with
+`Confirm / Retry (re-record) / Cancel` so nothing Parakeet mangled reaches CC unread;
+unconfirmed transcripts are discarded on window switch/pop/reload. Shared SessionLevel ⇒
+CC and Aria both get it. **Files image viewer**: selecting png/jpg/gif/bmp/webp renders via
+`scripts/render_image.py` — EXIF-honored, alpha-over-black, largest aspect-preserving fit
+≤480×222, Floyd–Steinberg dithered to the 16 gray levels (palette-index trick = gray4
+bytes) — split into 4 centered tiles (each ≤240×111, per-tile non-blank guard against the
+all-black kill), `Back/Reload/Main` menu; loads are preemptible like any tile push. Compose
+gained `tilesRect` (centered aspect-fit grids) and the title bar a 2px border (Adam's cal).
+
+---
+
+## (superseded same-day) — 2026-06-11 — **server: CC/Aria session content → firmware text (tiles nixed for sessions)**
 
 Adam's hardware verdict: "the aria part sucks and is janky… tapping takes 15-20s… no
 feedback." Mechanism: the dynamic action menu means every state change is an f1=7 rebuild,

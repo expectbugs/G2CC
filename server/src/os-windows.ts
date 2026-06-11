@@ -17,10 +17,11 @@
 import { execFile } from 'node:child_process'
 import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join, basename } from 'node:path'
+import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
 import type { WireScene } from '@g2cc/shared'
 import type { G2CCConfig } from './config.js'
 import { listProjectDirectories } from './directory-picker.js'
-import { parseMarkdown, renderSingleTile, type Block } from './os-content.js'
+import { parseMarkdown, renderSingleTile, renderImageFile, type Block, type RenderedImage } from './os-content.js'
 import {
   composeScene, paginateText, errorView, blankScene,
   SINGLE_TILE_W, SINGLE_TILE_H, type WinView,
@@ -86,6 +87,9 @@ export interface OsWindow {
   readonly label: string
   /** One-line live status for the Main switcher row. */
   summary(): string
+  /** Live activity phase for the bottom status bar (g2aria-style: listening →
+   *  transcribing → confirm → thinking → tool → writing). null = idle. */
+  statusLine?(): string | null
   view(): Promise<WinView>
   /** A tap on the window's OWN menu rows. The WM resolves the label from the
    *  last-RENDERED view (so taps can't misroute across state changes) and
@@ -196,6 +200,14 @@ class SessionLevel {
    *  (hardware 2026-06-11: Adam asked again while Aria was thinking). Queued
    *  and fired on turn_complete; Interrupt/death drops it loudly. */
   pendingPrompt: string | null = null
+  /** Transcript awaiting Adam's Confirm/Retry/Cancel (the g2aria CONFIRM_STT
+   *  step, ported 2026-06-11): Parakeet mangles words; nothing reaches CC
+   *  until he reads and confirms it. */
+  pendingStt: string | null = null
+  /** Live turn phase for the status bar (g2aria-style feedback): 'thinking'
+   *  from prompt-send until the first stream activity, 'writing' once
+   *  text_deltas flow; tools show through [toolLine]. */
+  private turnPhase: 'thinking' | 'writing' | null = null
   private opening: Promise<void> | null = null   // concurrent-open guard (double-tap during spawn)
   /** Entry ids THIS level wired. getOrCreateByDirectory returning wired=true
    *  for an id not in here means ANOTHER consumer (the Aria window / legacy
@@ -269,12 +281,22 @@ class SessionLevel {
     session.on('tool_use', (info: { name: string; summary: string }) => {
       if (stale()) return
       this.toolLine = `${info.name} ${info.summary}`.trim()
-      this.requestRender()   // title-only text update — cheap on the wire
+      this.requestRender()   // status/title text update — cheap on the wire
+    })
+    session.on('text_delta', () => {
+      if (stale()) return
+      // One status flip per turn (NOT per delta — deltas arrive many times/sec).
+      if (this.busy && this.turnPhase !== 'writing') {
+        this.turnPhase = 'writing'
+        this.toolLine = ''
+        this.requestRender()
+      }
     })
     session.on('turn_complete', (info: { text: string; toolCalls: string[] }) => {
       if (stale()) return
       this.busy = false
       this.toolLine = ''
+      this.turnPhase = null
       // Persist NOW — ccSessionId arrives via the async init event AFTER the
       // post-spawn persist, so without this no DE session ever lands in
       // sessions.json and a WS drop loses the conversation (review 2026-06-10;
@@ -343,19 +365,36 @@ class SessionLevel {
     this.requestRender()
   }
 
+  /** The live status-bar label (g2aria-style: listening → transcribing →
+   *  confirm → thinking → tool X → writing). null when idle. */
+  phase(): string | null {
+    if (this.pendingPermissionId) return 'permission?'
+    if (this.listening) return 'listening…'
+    if (this.transcribing) return 'transcribing…'
+    if (this.pendingStt) return 'confirm?'
+    if (this.busy) {
+      const base = this.toolLine ? `tool ${this.toolLine.split(' ')[0]}` : (this.turnPhase ?? 'thinking') + '…'
+      return this.pendingPrompt ? `${base} +queued` : base
+    }
+    if (this.lastError) return 'ERROR'
+    return null
+  }
+
   async view(tab: string): Promise<WinView> {
     const pageSuffix = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
-    const state = this.pendingPermissionId ? ' · permission'
-      : this.listening ? ' · listening'
-      : this.transcribing ? ' · transcribing'
-      : this.busy ? `${this.toolLine ? ` · ${this.toolLine}` : ' · working'}${this.pendingPrompt ? ' +queued' : ''}`
-      : this.lastError ? ' · ERROR' : ''
+    const p = this.phase()
     return {
       mode: 'text',
-      title: `${tab} · ${basename(this.projectPath)}${pageSuffix}${state}`,
+      title: `${tab} · ${basename(this.projectPath)}${pageSuffix}${p ? ` · ${p}` : ''}`,
       menu: this.menu(),
       text: this.pages[this.page] ?? '',
     }
+  }
+
+  /** Re-show the conversation doc (after a transient confirm/permission view). */
+  private restorePages(): void {
+    this.pages = paginateText(blocksToText(this.doc))
+    this.page = 0
   }
 
   // Reload + Main are WM-level labels (handled before delegation); they appear
@@ -370,6 +409,7 @@ class SessionLevel {
   menu(): string[] {
     if (this.pendingPermissionId) return ['Next', 'Prev', 'Approve', 'Deny', 'Reload', 'Main']
     if (this.listening) return ['Done', 'Cancel', 'Reload', 'Main']
+    if (this.pendingStt) return ['Confirm', 'Retry', 'Cancel', 'Reload', 'Main']
     if (this.busy) return ['Interrupt', 'Next', 'Prev', 'Reload', 'Main']
     return [this.verb, 'Next', 'Prev', 'Options', 'Reload', 'Main']
   }
@@ -401,9 +441,29 @@ class SessionLevel {
         return null
       }
       case 'Cancel': {
+        // From listening OR from the confirm step: discard everything pending.
+        if (this.listening) this.ctx.audio('stop')
         this.listening = false
-        this.transcribing = false   // onStt only prompts while transcribing → canceled result discards
-        this.ctx.audio('stop')
+        this.transcribing = false   // a late STT result discards (not transcribing)
+        if (this.pendingStt) { this.pendingStt = null; this.restorePages() }
+        this.requestRender()
+        return null
+      }
+      case 'Confirm': {
+        const t = this.pendingStt
+        this.pendingStt = null
+        this.restorePages()
+        if (t) await this.prompt(t)
+        else this.ctx.log(`[os] ${this.who}: Confirm with no pending transcript — ignored (LOUD)`)
+        return null
+      }
+      case 'Retry': {
+        // Discard the mangled transcript and record again immediately.
+        this.pendingStt = null
+        this.restorePages()
+        this.listening = true
+        this.transcribing = false
+        this.ctx.audio('start')
         this.requestRender()
         return null
       }
@@ -465,13 +525,15 @@ class SessionLevel {
   /** Kill any active dictation (mic OFF) — called on Cancel-equivalents: window
    *  switch, level pop, reload. Leaving the window must never leave the phone
    *  mic streaming (review 2026-06-10). A result already in flight discards
-   *  (transcribing=false → onStt drops it loudly). */
+   *  (transcribing=false → onStt drops it loudly); an unconfirmed transcript
+   *  is discarded too (never send unread words into a changed context). */
   stopDictation(why: string): void {
-    if (this.listening || this.transcribing) {
+    if (this.listening || this.transcribing || this.pendingStt) {
       this.ctx.log(`[os] ${this.who}: dictation stopped (${why})`)
       if (this.listening) this.ctx.audio('stop')
       this.listening = false
       this.transcribing = false
+      if (this.pendingStt) { this.pendingStt = null; this.restorePages() }
     }
   }
 
@@ -483,7 +545,18 @@ class SessionLevel {
       return
     }
     this.transcribing = false
-    await this.prompt(text)
+    // CONFIRM step (g2aria's CONFIRM_STT, Adam 2026-06-11): show the transcript
+    // and wait for Confirm / Retry (re-record) / Cancel — Parakeet mangles
+    // words, and nothing should reach CC unread.
+    this.pendingStt = text
+    this.pages = paginateText(blocksToText([
+      { t: 'heading', text: 'You said', meta: 'confirm?' },
+      { t: 'para', text },
+      { t: 'rule' },
+      { t: 'para', text: 'Confirm to send · Retry to re-record · Cancel' },
+    ]))
+    this.page = 0
+    this.requestRender()
   }
 
   async onSttError(error: string): Promise<void> {
@@ -524,6 +597,7 @@ class SessionLevel {
     try {
       this.entry.session.sendPrompt(text)
       this.busy = true
+      this.turnPhase = 'thinking'
       this.lastError = null
       // Show the prompt while CC works — visible confirmation the dictation landed.
       await this.setDoc([
@@ -775,6 +849,10 @@ class CcWindow implements OsWindow {
     this.current?.stopDictation('window switch')
   }
 
+  statusLine(): string | null {
+    return this.level === 'session' ? this.current?.phase() ?? null : null
+  }
+
   async onReload(): Promise<void> {
     await this.current?.onReload()
     this.focus = 'content'   // a menu action hands focus back to the rows
@@ -891,6 +969,7 @@ class AriaWindow implements OsWindow {
   }
 
   onDeactivate(): void { this.session.stopDictation('window switch') }
+  statusLine(): string | null { return this.level === 'session' ? this.session.phase() : null }
   async onReload(): Promise<void> { await this.session.onReload(); this.focus = 'content' }
   async onStt(text: string): Promise<void> { await this.session.onStt(text) }
   async onSttError(error: string): Promise<void> { await this.session.onSttError(error) }
@@ -1032,7 +1111,7 @@ class FilesWindow implements OsWindow {
   readonly id = 'files'
   readonly tab = 'Files'
   readonly label = 'Files'
-  private level: 'locations' | 'tree' | 'read' = 'locations'
+  private level: 'locations' | 'tree' | 'read' | 'image' = 'locations'
   private locs: { label: string; path: string }[] = []
   private locIndex = 0
   private stack: string[] = []
@@ -1041,6 +1120,7 @@ class FilesWindow implements OsWindow {
   private pages: string[] = []
   private page = 0
   private readName = ''
+  private img: RenderedImage | null = null   // the image-viewer payload
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -1112,6 +1192,17 @@ class FilesWindow implements OsWindow {
   }
 
   async view(): Promise<WinView> {
+    if (this.level === 'image') {
+      const im = this.img
+      if (!im) { this.level = 'tree'; return this.view() }
+      return {
+        mode: 'tiles',
+        tilesRect: { w: im.w, h: im.h },
+        title: `Files · ${this.readName} (${im.w}×${im.h})`,
+        menu: ['Back', 'Reload', 'Main'],
+        tiles: im.tiles,
+      }
+    }
     if (this.level === 'read') {
       const pageSuffix = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
       return {
@@ -1198,6 +1289,20 @@ class FilesWindow implements OsWindow {
       this.requestRender()
       return
     }
+    // Image viewer (Adam 2026-06-11): fit + dither + 4 tiles, aspect preserved.
+    if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(e.name)) {
+      this.readName = e.name
+      try {
+        this.img = await renderImageFile(path, DE_CONTENT_W, DE_CONTENT_H)
+        this.level = 'image'
+      } catch (err) {
+        this.pages = [`ERROR rendering image ${e.name}:\n${(err as Error).message}`]
+        this.page = 0
+        this.level = 'read'
+      }
+      this.requestRender()
+      return
+    }
     try {
       // Bounded HEAD PREVIEW (DE_DESIGN §4) — an unbounded readFileSync on a
       // multi-GB file blocks the whole event loop for seconds (review
@@ -1244,8 +1349,9 @@ class FilesWindow implements OsWindow {
     }
   }
 
-  /** read → tree → locations (the menu) → Main. */
+  /** image/read → tree → locations (the menu) → Main. */
   async onBack(): Promise<boolean> {
+    if (this.level === 'image') { this.level = 'tree'; this.img = null; this.requestRender(); return true }
     if (this.level === 'read') { this.level = 'tree'; this.requestRender(); return true }
     if (this.level === 'tree') { this.level = 'locations'; this.requestRender(); return true }
     return false
@@ -1392,7 +1498,10 @@ export class WindowManager {
   }
 
   private statusLeft(): string {
-    return `● ${hostname()} · ${this.ctx.pool.count} cc`
+    // The active window's live phase takes the slot while something is
+    // happening (the g2aria status-bar feel); idle shows the host + pool.
+    const phase = this.active.statusLine?.()
+    return phase ? `● ${phase}` : `● ${hostname()} · ${this.ctx.pool.count} cc`
   }
 
   switchTo(id: string): void {
