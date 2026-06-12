@@ -164,7 +164,39 @@ class ConnectionService : Service(), TestHarness {
         DiagLog.start(scope)
         startInForeground()
         acquireWakeLock()
+        // BT-adapter watcher (review 2026-06-11b): a BT toggle / stack restart
+        // mid-session used to dead-end PERMANENTLY — Nordic fail-fasts the
+        // reconnect while the adapter is off, the Error branch stranded
+        // `_connecting`, and nothing listened for the adapter coming back
+        // (the old BluetoothStateReceiver was wired only to the parked
+        // G2CCService). "Phone Bluetooth toggled" is a required recovery
+        // scenario (project CLAUDE.md).
+        val filter = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(btStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(btStateReceiver, filter)
+        }
         DiagLog.log("svc", "ConnectionService onCreate — server ${BuildConfig.SERVER_HOST}:${BuildConfig.SERVER_PORT}, token=${if (BuildConfig.AUTH_TOKEN.isEmpty()) "MISSING" else "set"}")
+    }
+
+    /** Adapter ON while we're idle (not launched, not connecting, not mid-
+     *  recovery) → reconnect: direct to the cached lenses, else a fresh scan.
+     *  A dead-while-launched link is the watchdog's job (silent-drop recovery
+     *  fires within ~9 s of the acks stopping). */
+    private val btStateReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) {
+            if (i?.action != android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED) return
+            val st = i.getIntExtra(android.bluetooth.BluetoothAdapter.EXTRA_STATE, -1)
+            DiagLog.log("conn", "bluetooth adapter state → $st")
+            if (st == android.bluetooth.BluetoothAdapter.STATE_ON &&
+                !_launched.value && !_connecting.value && !recovering
+            ) {
+                DiagLog.log("recover", "bluetooth back ON while idle — reconnecting")
+                reconnect()
+            }
+        }
     }
 
     /** Phone battery % via BatteryManager (Phase 9). Null on any failure —
@@ -194,12 +226,15 @@ class ConnectionService : Service(), TestHarness {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // A mic-FGS type denied at a background service start is re-grantable once the
-        // app is foregrounded — and onStartCommand only fires from the Activity's
-        // startForegroundService (user present). Without this retry the advertised
-        // remediation ("reopen the app") did nothing (review 2026-06-11).
+        // A mic-FGS type denied at a background service start is re-grantable once
+        // the app is foregrounded. NOTE (review 2026-06-11b): onStartCommand ALSO
+        // fires for the START_STICKY null-intent relaunch and the boot receiver —
+        // both background, where this retry just fails again into the same
+        // connectedDevice-only fallback (harmless; the log explains itself). The
+        // retry that actually succeeds is the one from the Activity's
+        // startForegroundService (user present; review 2026-06-11).
         if (!micFgsGranted) {
-            DiagLog.log("svc", "retrying mic-FGS startForeground (was denied at service start)")
+            DiagLog.log("svc", "retrying mic-FGS startForeground (was denied earlier; succeeds only when started from the foreground)")
             startInForeground()
         }
         // Connect is driven via an action so it doesn't depend on the bind round-trip
@@ -215,6 +250,9 @@ class ConnectionService : Service(), TestHarness {
     override fun onDestroy() {
         running = false
         instance = null
+        try { unregisterReceiver(btStateReceiver) } catch (e: Exception) {
+            DiagLog.log("svc", "btStateReceiver unregister failed: $e")
+        }
         teardown()
         releaseWakeLock()
         DiagLog.stop()
@@ -340,13 +378,20 @@ class ConnectionService : Service(), TestHarness {
             },
             onDisconnected = {
                 DiagLog.log("os", "WS disconnected")
-                // The mic must die with the WS (review 2026-06-11): the server that knew
-                // about this dictation is gone — after re-auth the NEW connection/WM has
-                // no dictation in flight, so no audio_request stop will ever come, and
-                // the streamer would pump dead frames (and block future dictations) for
-                // hours. stop() is an idempotent no-op when not streaming.
-                audioStreamer?.stop()
-                audioStreamer = null
+                // Marshal to the main scope like onMessage (review 2026-06-11b):
+                // this callback runs on the OkHttp socket thread, and mutating
+                // `audioStreamer` there raced the main-thread assignment in
+                // audio_request — a delayed disconnect could null/stop a NEW
+                // streamer created after reconnect.
+                scope.launch {
+                    // The mic must die with the WS (review 2026-06-11): the server that knew
+                    // about this dictation is gone — after re-auth the NEW connection/WM has
+                    // no dictation in flight, so no audio_request stop will ever come, and
+                    // the streamer would pump dead frames (and block future dictations) for
+                    // hours. stop() is an idempotent no-op when not streaming.
+                    audioStreamer?.stop()
+                    audioStreamer = null
+                }
             },
         )
         connection = cm
@@ -425,6 +470,12 @@ class ConnectionService : Service(), TestHarness {
                     else -> DiagLog.log("os", "audio_request unknown action '${msg.action}' — ignored (LOUD)")
                 }
             }
+            is ServerMessage.Error -> {
+                // The MESSAGE TEXT must surface (review 2026-06-11b): the old
+                // catch-all logged only the class name, discarding the server's
+                // explanation — against loud-and-proud.
+                DiagLog.log("os", "server error: ${msg.message}")
+            }
             else -> {
                 // config_snapshot / dispatch_target_list / etc. — not used in OS mode.
                 DiagLog.log("os", "ignored server msg ${msg::class.simpleName}")
@@ -456,6 +507,20 @@ class ConnectionService : Service(), TestHarness {
     /** Create + observe + connect both lens clients, caching the devices so a later recovery
      *  can reconnect DIRECTLY (skips the scan + its can-stall-in-RF-noise hole). */
     private fun startClients(leftDev: BluetoothDevice, rightDev: BluetoothDevice) {
+        // Never STACK a second client pair over live ones (review 2026-06-11b):
+        // after a cold-launch failure the links deliberately stay up for the
+        // next-Ready retry, but a manual Connect (or the BT-on reconnect) then
+        // landed here and overwrote left/right without close() — leaked gatt
+        // slots + ever-growing stateJobs collecting into dead flows.
+        if (left != null || right != null) {
+            DiagLog.log("conn", "startClients: releasing the previous BLE client pair first (no stacking)")
+            stateJobs.forEach { it.cancel() }
+            stateJobs.clear()
+            left?.shutdownBle()
+            right?.shutdownBle()
+            left = null
+            right = null
+        }
         lastLeftDevice = leftDev
         lastRightDevice = rightDev
         val lc = G2BleClient(applicationContext, Side.Left)
@@ -496,6 +561,15 @@ class ConnectionService : Service(), TestHarness {
                         if (recovering && !_launched.value) {
                             recovering = false
                             DiagLog.log("recover", "$side error during recovery — cleared `recovering`")
+                        }
+                        // A pre-launch connect failure (adapter off → Nordic
+                        // fail-fast, auth failure, out of range) must also
+                        // release `_connecting` — stuck true it disabled the
+                        // harness Connect button AND blocked every auto-retry
+                        // path forever (review 2026-06-11b).
+                        if (!_launched.value && _connecting.value) {
+                            _connecting.value = false
+                            DiagLog.log("conn", "$side error pre-launch — cleared `connecting` so retries can run")
                         }
                     }
                     is ConnectionState.Disconnected -> onLensDisconnected(side, st.reason)

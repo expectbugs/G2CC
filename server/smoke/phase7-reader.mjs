@@ -2,6 +2,7 @@
 // subprocess, resume-position round-trip (THE feature), corrupt-EPUB loud
 // failure, and compose-budget checks for both levels. Uses a COPY of a real
 // book so the smoke never pollutes Adam's actual resume positions.
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { copyFile, writeFile, unlink } from 'node:fs/promises'
 import { listChapters, readChapter, savePosition, getPosition } from '../dist/reader.js'

@@ -38,6 +38,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Battery-opt exemption: without it Doze kills even the FG service. Sideloaded app. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Boot auto-start (the all-day bridge must survive a reboot — review 2026-06-11b). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
@@ -75,8 +77,10 @@
         <!-- Phase 9: phone-notification mirror (READ-ONLY). The SYSTEM binds this
              (BIND_NOTIFICATION_LISTENER_SERVICE keeps everyone else out); needs the
              one-time "Notification access" grant — HarnessActivity has the row +
-             deep link. API 31+ declarative filter: ongoing/FGS notifications are
-             never even delivered. -->
+             deep link. NO declarative 'ongoing' filter (review 2026-06-11b): an
+             incoming call's CallStyle notification IS ongoing — the filter meant
+             the dialer→'call' popup could never fire for a live call. Ongoing
+             non-call notifications are dropped in forward() instead. -->
         <service
             android:name=".service.NotifyListener"
             android:exported="false"
@@ -85,10 +89,22 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
-            <meta-data
-                android:name="android.service.notification.disabled_filter_types"
-                android:value="ongoing" />
         </service>
+
+        <!-- Boot/update auto-start (review 2026-06-11b: the receiver had fallen out
+             of the manifest with the parked G2CCService — after ANY reboot the
+             bridge stayed down until Adam opened the app, and "system reboot" is a
+             required reconnect scenario). connectedDevice-type FGS is allowed from
+             BOOT_COMPLETED; the mic type is re-granted on next app-open (the
+             existing micFgsGranted retry). -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Tasker / adb broadcast surface (android/INTENTS.md). Re-registered in
              v1.7 (it had silently fallen out of the manifest with the parked

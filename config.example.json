@@ -23,5 +23,15 @@
       "go ahead",
       "explain further"
     ]
+  },
+  "notifications": {
+    "//": "Android package → priority (call|timer|sms|email|info). Unlisted packages = 'info'. NOTE: the map REPLACES the defaults wholesale when present (no per-package merge) — copy the defaults you want to keep.",
+    "packageMap": {
+      "com.google.android.dialer": "call",
+      "com.android.dialer": "call",
+      "com.google.android.apps.messaging": "sms",
+      "com.android.messaging": "sms",
+      "com.google.android.gm": "email"
+    }
   }
 }

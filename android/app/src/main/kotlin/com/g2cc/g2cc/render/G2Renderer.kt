@@ -305,16 +305,45 @@ class G2Renderer(
         name: String, text: String,
         contentOffset: Int? = null, contentLength: Int? = null, onComplete: (Boolean) -> Unit = {},
     ) {
-        val scene = synchronized(lock) { current }
-        val region = scene?.region(name)
-        if (scene == null || region == null || region.kind != RegionKind.TEXT) {
-            diag("setText('$name'): no such text region (launched=${scene != null})")
+        val snap = synchronized(lock) { current }
+        val region = snap?.region(name)
+        if (snap == null || region == null || region.kind != RegionKind.TEXT) {
+            diag("setText('$name'): no such text region (launched=${snap != null})")
             onComplete(false); return
         }
-        val existingScroll = (scene.content[name] as? Content.Text)?.scroll ?: false
-        val c = Content.Text(text, existingScroll, contentOffset, contentLength)
-        synchronized(lock) { current = scene.withContent(name, c) }
-        enqueueSend(listOf(textOp(region, c)), "text:$name", onComplete)
+        // Build + wall-check BEFORE the content swap (review 2026-06-11b): the
+        // old order updated `current` first, then textOp's wall `require` threw
+        // uncaught into the caller's coroutine — the reject path itself
+        // produced the permanent-silent-divergence the check exists to prevent
+        // (current claimed delivery of a frame the firmware never saw).
+        val probe = Content.Text(text, (snap.content[name] as? Content.Text)?.scroll ?: false, contentOffset, contentLength)
+        val op = try {
+            textOp(region, probe)
+        } catch (e: Exception) {
+            diag("setText('$name'): ${e::class.simpleName}: ${e.message}")
+            onComplete(false); return
+        }
+        // Commit atomically against the CURRENT scene (not the snapshot): the
+        // old read→build→write spanned two lock acquisitions, so a BLE-thread
+        // failJob rollback in between was silently overwritten — the lost
+        // rollback meant the failed regions never re-sent via diff until the
+        // ~80 s renewal healed them (review 2026-06-11b).
+        val committed = synchronized(lock) {
+            val cur = current
+            val r2 = cur?.region(name)
+            if (cur == null || r2 == null || r2.kind != RegionKind.TEXT) {
+                false
+            } else {
+                val scroll = (cur.content[name] as? Content.Text)?.scroll ?: false
+                current = cur.withContent(name, Content.Text(text, scroll, contentOffset, contentLength))
+                true
+            }
+        }
+        if (!committed) {
+            diag("setText('$name'): scene changed during build — dropped")
+            onComplete(false); return
+        }
+        enqueueSend(listOf(op), "text:$name", onComplete)
     }
 
     /** Update a single image region by name from a pre-encoded 4bpp BMP (chunked f1=3). The
@@ -343,7 +372,14 @@ class G2Renderer(
 
     private fun textContainer(scene: Scene, r: Region): ByteArray {
         val c = scene.content[r.name] as? Content.Text
-        return DisplayProto.textContainer(r.x, r.y, r.w, r.h, r.id, r.name, c?.scroll ?: false, c?.text ?: "", r.style)
+        // The rollback sentinel is an internal "undelivered" marker — NEVER wire
+        // material (it contains NUL bytes, unprobed on firmware). Renewal/
+        // relaunch/display_reload all launch() the CURRENT scene, which can
+        // legitimately hold the sentinel for a rolled-back scroll-text region;
+        // push blank instead — the owner's next real update repaints it
+        // (review 2026-06-11b; latent until a scroll-text f1=5 path ships).
+        val text = c?.text?.takeUnless { it == Scene.ROLLED_BACK_SENTINEL } ?: ""
+        return DisplayProto.textContainer(r.x, r.y, r.w, r.h, r.id, r.name, c?.scroll ?: false, text, r.style)
     }
 
     private fun imageContainer(r: Region): ByteArray =
@@ -570,6 +606,12 @@ class G2Renderer(
         synchronized(lock) {
             when {
                 aborting -> fire = false                   // teardown underway → don't park, fail fast
+                // NOTE (review 2026-06-11b): msgId is mod-256 and lastAckedMsgId is
+                // never invalidated, so this immediate-release is theoretically
+                // aliasable by an ack from ≥256 messages earlier. Unreachable with
+                // real traffic (keepalive acks refresh lastAcked every ~4 s; chunk
+                // msgIds are minted at build and sent within seconds) — documented
+                // rather than changed: this machinery is hardware-frozen.
                 lastAckedMsgId == msgId -> fire = true      // ack already arrived → proceed now
                 else -> { ackWaitMsgId = msgId; ackWaitResume = resume; ackWaitIsLayout = isLayout; ackWaitSince = clock() }
             }
@@ -598,8 +640,14 @@ class G2Renderer(
          *  wall-ignore wedge. */
         const val LAYOUT_PARK_GRACE_MS = 500L
         /** abort() (non-force) releases a parked IMAGE chunk only past this age — younger
-         *  parks are healthy mid-push (release = the r4 crash recipe); older = wedged. */
-        const val IMAGE_PARK_STALE_MS = 3_000L
+         *  parks are healthy mid-push (release = the r4 crash recipe); older = wedged.
+         *  8 s (was 3 s — review 2026-06-11b): the ConnectionService watchdog comment
+         *  records an EMPIRICAL "~6 s heavy-render ack pause" (its own threshold is
+         *  tuned above it), so a 3 s stale release could classify a healthy park as
+         *  wedged during a heavy push + Reload — and COLD_INIT on a live chunk chain
+         *  IS the r4 crash recipe. Kept above the observed pause; a genuine wedge now
+         *  waits ~8 s for its Reload release (slower unstick, zero crash risk). */
+        const val IMAGE_PARK_STALE_MS = 8_000L
         const val FRAGMENT_PACE_MS = 12L    // between AA fragments WITHIN one message (chunk)
         const val INTER_MESSAGE_PACE_MS = 100L  // after a NON-ack-gated message (text/layout) — keepalive interleaves here
         // After an image chunk, before its ack-gate. Just a small floor — the real inter-chunk gap

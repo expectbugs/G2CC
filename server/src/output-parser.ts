@@ -78,9 +78,11 @@ export function markdownToPlaintext(md: string): string {
       // Italic: _text_ -> text, but only when underscores are not flanked by
       // word chars, so `my_var_name` and `__init__` survive intact.
       seg = seg.replace(/(?<![A-Za-z0-9_])_([^_]+)_(?![A-Za-z0-9_])/g, '$1')
-      // Links then images (order preserved from the original).
-      seg = seg.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      // Images BEFORE links (review 2026-06-11b): the link rule matches the
+      // `[alt](url)` substring of `![alt](url)` first, leaving `!alt` and
+      // making the image rule dead for any non-empty alt.
       seg = seg.replace(/!\[([^\]]*)\]\([^)]+\)/g, '[$1]')
+      seg = seg.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
       return seg
     }
     // split() keeps the `...` code spans (capture group) at ODD indices; only

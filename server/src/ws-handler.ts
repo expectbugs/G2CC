@@ -48,6 +48,11 @@ import { WindowManager } from './os-windows.js'
 // ~6.5 min of 48 kHz/2ch/float32 (~384 KB/s). Bounds memory if audio_end never arrives.
 const MAX_AUDIO_BYTES = 150 * 1024 * 1024
 
+/** Last battery % across ALL connections — the ≤15% crossing alert must
+ *  survive a WS reconnect (per-connection state re-fired it every re-auth on
+ *  a low battery; review 2026-06-11b). Single-user server. */
+let lastKnownPhoneBattery: number | null = null
+
 let watchdog: Watchdog | null = null
 
 export function setWatchdog(w: Watchdog): void { watchdog = w }
@@ -340,8 +345,13 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       client.lastAppActivityMs = Date.now()
       // Phase 9: phone battery rides the heartbeat (old APKs omit it). The
       // ≤15% alert fires ONCE per downward crossing — re-arms above 15%.
+      // `prev` comes from the MODULE-level last-known value, not the
+      // per-connection one: per-connection state reset to null on every WS
+      // reconnect, so a blippy day with a dying phone re-alerted on every
+      // re-auth (review 2026-06-11b). Single-user server — global is correct.
       if (typeof msg.battery === 'number' && msg.battery >= 0 && msg.battery <= 100) {
-        const prev = client.phoneBattery
+        const prev = lastKnownPhoneBattery
+        lastKnownPhoneBattery = msg.battery
         client.phoneBattery = msg.battery
         if (msg.battery <= 15 && (prev === null || prev > 15)) {
           console.warn(`[ws] phone battery LOW: ${msg.battery}%`)
@@ -360,24 +370,30 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       client.lastAppActivityMs = Date.now()
       // Phase 9: phone notification → the Phase-4 layer. Package → priority
       // via config (invalid mapped values log + fall back to 'info').
-      if (msg.package === 'com.g2cc.g2cc') {
+      // pkg defaults defensively — a malformed message without `package` used
+      // to TypeError on the .split below (review 2026-06-11b).
+      const pkg = typeof msg.package === 'string' && msg.package ? msg.package : '(unknown)'
+      if (pkg === 'com.g2cc.g2cc') {
         console.warn('[ws] notify from our own package — client filter should have caught this; ignored')
         break
       }
-      const mapped = config.notifications.packageMap[msg.package]
+      const mapped = config.notifications.packageMap[pkg]
       const VALID = new Set(['call', 'timer', 'sms', 'email', 'info'])
       let priority: NotifyPriority = 'info'
       if (mapped !== undefined) {
         if (VALID.has(mapped)) priority = mapped as NotifyPriority
-        else console.error(`[ws] notifications.packageMap['${msg.package}'] = '${mapped}' is not a valid priority — using 'info'`)
+        else console.error(`[ws] notifications.packageMap['${pkg}'] = '${mapped}' is not a valid priority — using 'info'`)
       }
-      console.log(`[ws] phone notify ${msg.package} → ${priority}: "${msg.title}"`)
+      console.log(`[ws] phone notify ${pkg} → ${priority}: "${msg.title}"`)
       void notify({
-        source: msg.package.split('.').pop() ?? msg.package,
+        source: pkg.split('.').pop() ?? pkg,
         priority,
         title: msg.title || '(no title)',
         body: msg.text || '(no text)',
-        targetWindow: priority === 'email' ? 'mail' : 'notices',
+        // ALWAYS 'notices' (review 2026-06-11b): the body lives there. The old
+        // email→'mail' jump opened the MailWindow's marzello.net Maildir —
+        // which does NOT contain the phone-gmail message that triggered it.
+        targetWindow: 'notices',
       })
       break
     }

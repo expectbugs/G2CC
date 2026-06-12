@@ -19,7 +19,13 @@
 import pg from 'pg'
 
 const PG_SOCKET_DIR = '/run/postgresql'
-const PG_DATABASE = 'g2cc'
+// G2CC_PG_DATABASE override exists for the SMOKE SUITE ONLY (review
+// 2026-06-11b: the smokes — and phase9's throwaway server, which boots the
+// FULL index.js including armTimersFromDb + startCalendarSync — used to run
+// against the PRODUCTION g2cc DB: a real timer due during a smoke run fired
+// in the test process and the live glasses never saw it). Production never
+// sets it; the default stays g2cc.
+const PG_DATABASE = process.env.G2CC_PG_DATABASE ?? 'g2cc'
 
 let pool: pg.Pool | null = null
 

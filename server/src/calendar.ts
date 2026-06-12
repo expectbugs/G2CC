@@ -74,9 +74,18 @@ export async function upsertEvents(rows: FetchedEvent[], windowDays: number = SY
       [e.uid, e.title, e.start, e.end, e.allDay, e.location ?? '', JSON.stringify(e.raw ?? {})])
   }
   const uids = rows.map((e) => e.uid).filter(Boolean)
+  // Ghost window (review 2026-06-11b): Google's events.list(timeMin=now)
+  // returns everything whose END is still in the future — incl. ongoing timed
+  // events and today's all-day events — so their absence from `rows` is also
+  // proof of deletion. The old `starts_at >= now()` floor let an event deleted
+  // AFTER it started linger on the agenda for hours. Rows with no ends_at keep
+  // the conservative starts_at floor (we can't prove the fetch would have
+  // included them); already-ENDED events are never ghost-deleted (the agenda's
+  // 12 h lookback legitimately shows them).
   const removed = await query(
     `DELETE FROM events
-     WHERE starts_at >= now() AND starts_at < now() + ($1 || ' days')::interval
+     WHERE (starts_at >= now() OR (ends_at IS NOT NULL AND ends_at > now()))
+       AND starts_at < now() + ($1 || ' days')::interval
        AND NOT (uid = ANY($2::text[]))`,
     [String(windowDays), uids])
   return { upserted: rows.length, removed: removed.rowCount ?? 0 }
@@ -100,9 +109,17 @@ export interface EventRow {
 }
 
 export async function listUpcoming(days: number = SYNC_DAYS): Promise<EventRow[]> {
+  // Per-class lower bound (review 2026-06-11b): all-day events live at LOCAL
+  // MIDNIGHT, so the flat 12-hour lookback dropped "Dad's Birthday" from the
+  // agenda at exactly noon ON the day — and all-day events deliberately get no
+  // reminder, so after noon they surfaced nowhere at all. All-day rows stay
+  // visible through their whole day; timed rows keep the 12 h lookback
+  // (recently started/ongoing meetings).
   const r = await query<{ uid: string; title: string; starts_at: Date; ends_at: Date | null; all_day: boolean; location: string; raw: Record<string, unknown> | null }>(
     `SELECT uid, title, starts_at, ends_at, all_day, location, raw FROM events
-     WHERE starts_at >= now() - interval '12 hours' AND starts_at < now() + ($1 || ' days')::interval
+     WHERE ((all_day AND starts_at >= date_trunc('day', now()))
+         OR (NOT all_day AND starts_at >= now() - interval '12 hours'))
+       AND starts_at < now() + ($1 || ' days')::interval
      ORDER BY starts_at, uid`,
     [String(days)])
   return r.rows.map((x) => ({
@@ -122,6 +139,31 @@ export async function getEvent(uid: string): Promise<EventRow | null> {
 /** Reminder sweep: timed events entering the lead window get ONE 'timer'-
  *  priority notification; reminded_at (set atomically) is the dedup. */
 export async function sweepReminders(): Promise<number> {
+  // MISSED reminders first (review 2026-06-11b): an event whose start passed
+  // while the server was down (or that synced in late) used to stay
+  // reminded_at=NULL forever with NO log — silent. Now fires a LATE
+  // notification, exactly the timers pattern (Adam 2026-06-12: "yes" to the
+  // analog) — however late, no invented cutoff window; the body says how
+  // late. Also catches events created/synced after their start (a meeting
+  // added 5 min before start lands on the 15-min sync cadence post-start).
+  const missed = await query<{ uid: string; title: string; starts_at: Date; location: string }>(
+    `UPDATE events SET reminded_at = now()
+     WHERE reminded_at IS NULL AND NOT all_day AND starts_at <= now()
+     RETURNING uid, title, starts_at, location`)
+  for (const m of missed.rows) {
+    const t = m.starts_at
+    const hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+    const agoMin = Math.max(1, Math.round((Date.now() - t.getTime()) / 60_000))
+    const ago = agoMin < 60 ? `${agoMin}m` : `${Math.floor(agoMin / 60)}h ${String(agoMin % 60).padStart(2, '0')}m`
+    console.warn(`[calendar] LATE reminder for "${m.title}" (started ${ago} ago — server down or synced late)`)
+    void notify({
+      source: 'calendar',
+      priority: 'timer',
+      title: `📅 ${m.title} (late)`,
+      body: `${m.title}\nstarted at ${hm} (${ago} ago)${m.location ? `\n${m.location}` : ''}\nThe reminder was missed while the server was down.`,
+      targetWindow: 'calendar',
+    })
+  }
   const due = await query<{ uid: string; title: string; starts_at: Date; location: string }>(
     `UPDATE events SET reminded_at = now()
      WHERE reminded_at IS NULL AND NOT all_day
@@ -139,7 +181,7 @@ export async function sweepReminders(): Promise<number> {
       targetWindow: 'calendar',
     })
   }
-  return due.rowCount ?? 0
+  return (due.rowCount ?? 0) + (missed.rowCount ?? 0)
 }
 
 /** Startup: immediate sync, then the 15-min pacing interval + the 60 s

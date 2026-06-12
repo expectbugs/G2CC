@@ -131,9 +131,9 @@ export async function renderSetupPage(port: number, token: string): Promise<stri
   </div>
 
   <div class="box">
-    <strong>Display Renderer Harness APK</strong><br>
+    <strong>G2CC Bridge APK</strong><br>
     <a href="/apk?token=${encodeURIComponent(token)}">⬇ Download g2cc-harness.apk</a>
-    <p class="subtitle">Sideload to test the new display renderer: Connect / Test Display / Disconnect, with a Diag toggle and a pixel-perfect on-phone preview of what the glasses should show.</p>
+    <p class="subtitle">Sideload the glasses bridge: Connect goes straight into the DE (server mode); Disconnect, the Diag toggle, the one-time notification-access row, and a pixel-perfect on-phone preview of what the glasses should show.</p>
   </div>
 
   <h3>Endpoints (refetched at runtime)</h3>

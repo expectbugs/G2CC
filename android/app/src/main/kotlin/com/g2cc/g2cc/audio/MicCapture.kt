@@ -31,7 +31,9 @@ import java.io.IOException
  *      wideband ceiling — DJI caps BT-to-phone there). Routed via
  *      AudioManager.setCommunicationDevice() + MODE_IN_COMMUNICATION; captured
  *      with AudioSource.VOICE_COMMUNICATION (the only source that rides SCO).
- *   3. **PhoneMic** — the phone's own mic, 16 kHz mono 16-bit. Last resort.
+ *   3. **PhoneMic** — REMOVED from the chain (DJI-only policy, spec §8; the
+ *      enum value remains for the parked startPhoneMic, which has NO call
+ *      site — never re-add it). The chain LOUD-FAILS after BT-SCO.
  *
  * Pass-through for the USB/phone paths — no on-device DSP, no downmix, no
  * denoise; the server runs the NR + DeepFilterNet + Parakeet pipeline.
@@ -77,7 +79,8 @@ class MicCapture(private val context: Context) {
     var isCapturing: Boolean = false
         private set
 
-    /** Try DJI USB first; fall back to phone mic. Emits events on the supplied callback.
+    /** Try DJI USB, then DJI-over-BT-SCO; loud-fail after that (NO phone mic
+     *  — spec §8). Emits events on the supplied callback.
      *  The callback is called from a background coroutine — caller must marshal to its
      *  preferred dispatcher. */
     fun start(onEvent: (Event) -> Unit) {
@@ -196,7 +199,7 @@ class MicCapture(private val context: Context) {
             it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
         }
         if (usbDevice == null) {
-            Log.i(TAG, "no USB audio input device found; falling back to phone mic")
+            Log.i(TAG, "no USB audio input device found; falling through to BT-SCO (chain ends there — no phone mic)")
             return null
         }
 
@@ -206,7 +209,7 @@ class MicCapture(private val context: Context) {
         // Bug-fix-pass-2 #7: removed CHANNEL_IN_FRONT_BACK fallback — that mask
         // is also stereo (2 channels) but the original code's channelCount math
         // treated it as mono. Stick to CHANNEL_IN_STEREO for USB; if the device
-        // doesn't support stereo input via USB-audio, we fall back to phone mic.
+        // doesn't support stereo input via USB-audio, we fall through to BT-SCO.
         val channelMask = AudioFormat.CHANNEL_IN_STEREO
         val encoding = AudioFormat.ENCODING_PCM_FLOAT     // 32-bit float per spec §B2
         val bufCheck = AudioRecord.getMinBufferSize(sampleRate, channelMask, encoding)
@@ -255,8 +258,8 @@ class MicCapture(private val context: Context) {
      * setCommunicationDevice() + MODE_IN_COMMUNICATION, then captures 16 kHz mono
      * 16-bit through AudioSource.VOICE_COMMUNICATION (the only source that rides
      * SCO). Returns null + logs (not a Failure event) when no BT comms device is
-     * paired or the route can't be taken — so the chain falls through to the
-     * phone mic without aborting the whole capture.
+     * paired or the route can't be taken — the chain then LOUD-FAILS (no phone
+     * mic; spec §8).
      */
     @SuppressLint("MissingPermission")
     private fun startBluetoothSco(onEvent: (Event) -> Unit): AttemptResult? {
@@ -273,13 +276,22 @@ class MicCapture(private val context: Context) {
         // HFP mic (DJI TX over BT) appears as TYPE_BLUETOOTH_SCO (or TYPE_BLE_HEADSET
         // for an LE-Audio device). Selecting it as the comms device is what routes
         // the *capture* mic to that headset — you do not setPreferredDevice an input.
-        val btDevice = am.availableCommunicationDevices.firstOrNull {
+        val comms = am.availableCommunicationDevices.filter {
             it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
                 it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
         }
+        // DJI-only policy (review 2026-06-11b): prefer the DJI TX by product
+        // name — `firstOrNull` could silently capture a car kit / earbuds and
+        // announce it to the server as "dji-bt". A non-DJI device is still
+        // usable as a last resort (name heuristics can miss), but LOUDLY.
+        val btDevice = comms.firstOrNull { it.productName?.toString()?.contains("DJI", ignoreCase = true) == true }
+            ?: comms.firstOrNull()
         if (btDevice == null) {
             Log.i(TAG, "no Bluetooth comms (SCO/LE) device paired; falling through")
             return null
+        }
+        if (btDevice.productName?.toString()?.contains("DJI", ignoreCase = true) != true) {
+            Log.w(TAG, "BT comms device '${btDevice.productName}' does not look like the DJI TX — capturing from it anyway (only comms device available); check the pairing if dictation sounds wrong")
         }
 
         // Take over the comms route. MODE_IN_COMMUNICATION is what brings the SCO

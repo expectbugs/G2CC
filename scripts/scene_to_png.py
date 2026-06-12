@@ -49,7 +49,10 @@ def main(out_path):
     if len(captures) > 1:
         problems.append(f"event-capture regions = {captures} (a page allows exactly ONE)")
     elif len(captures) == 0:
-        print("warn: no event-capture region — input will be dead on this page")
+        # NOT dead input on the OS path: SceneCodec promotes the injected clock
+        # to the input antenna when the wire scene has zero captures (review
+        # 2026-06-11b corrected this message).
+        print("warn: no event-capture region — the client falls back to the clock-antenna (double-tap only)")
     # Native-list caps (mirrors G2Renderer.validate)
     for r in lists:
         c = r.get("content") or {}
@@ -59,16 +62,32 @@ def main(out_path):
         if not items:
             problems.append(f"list '{r['name']}' has ZERO items (SceneCodec rejects)")
         for it in items:
-            # Kotlin measures UTF-16 code units, not Python code points (astral
-            # chars count double there) — mirror it exactly (review 2026-06-11).
-            if len(it.encode("utf-16-le")) // 2 > 64:
-                problems.append(f"list '{r['name']}' item >64 UTF-16 units: {it[:40]}…")
+            # UTF-8 BYTES (review 2026-06-11b): the client changed to byte
+            # measurement in the same 2026-06-11 review this file used to cite
+            # for UTF-16 — two agents mirrored in opposite directions, so a
+            # ≤64-UTF-16-unit CJK label passed here but the client rejected
+            # the whole scene. G2Renderer.validate is the ground truth.
+            if len(it.encode("utf-8")) > 64:
+                problems.append(f"list '{r['name']}' item >64 UTF-8 bytes: {it[:40]}…")
     ids = [r["id"] for r in regions]
     if len(set(ids)) != len(ids) or 1 in ids:
         problems.append(f"region id problem (dup or reserved clock id 1): {ids}")
     names = [r["name"] for r in regions]
     if len(set(names)) != len(names) or "clock" in names:
         problems.append(f"region name problem (dup or reserved 'clock'): {names}")
+    # Client rules previously unmirrored here (review 2026-06-11b):
+    for r in regions:
+        if len(r["name"].encode("utf-8")) > 16:           # G2Renderer: names ≤16 UTF-8 B
+            problems.append(f"region name '{r['name']}' >16 UTF-8 bytes")
+        if r["w"] <= 0 or r["h"] <= 0:                    # Scene.Region init throws
+            problems.append(f"region '{r['name']}' has non-positive size {r['w']}x{r['h']}")
+        st = r.get("style")
+        if st:
+            if r["kind"] == "image":                      # SceneCodec rejects styled images
+                problems.append(f"image region '{r['name']}' carries a style (client rejects)")
+            if not (0 <= st.get("borderWidth", 0) <= 5 and 0 <= st.get("borderColor", 0) <= 15
+                    and 0 <= st.get("borderRadius", 0) <= 10 and 0 <= st.get("padding", 0) <= 32):
+                problems.append(f"region '{r['name']}' style out of range: {st}")
 
     # THE MULTI-PACKET WALL (review 2026-06-11) — the one rule that actually
     # wedges hardware, previously unchecked here: the firmware silently ignores
@@ -84,7 +103,8 @@ def main(out_path):
         if r["kind"] == "text":
             frame += 4 + len(str(c.get("text", "")).encode("utf-8"))
         elif r["kind"] == "list":
-            frame += 8 + sum(2 + len(it.encode("utf-8")) for it in (c.get("items") or []))
+            # 3 B/item — mirrors the server estimator's 2026-06-11b bump
+            frame += 8 + sum(3 + len(it.encode("utf-8")) for it in (c.get("items") or []))
         else:
             frame += 4
     if frame > 1000:

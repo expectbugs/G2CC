@@ -281,6 +281,14 @@ export class CCSession extends EventEmitter {
     if (!this.proc?.stdin?.writable) {
       throw new Error('CC process not running')
     }
+    if (this._isProcessingTurn) {
+      // A second stdin user message mid-turn KILLS CC (error_during_execution;
+      // hardware 2026-06-11). Every caller is supposed to queue — this throw is
+      // the source-level backstop so an unguarded path (the legacy dispatcher
+      // and the DE share pool entries) surfaces loudly instead of killing the
+      // subprocess (review 2026-06-11b). Callers catch and surface.
+      throw new Error('sendPrompt while a turn is processing — queue it (a mid-turn stdin message kills CC)')
+    }
     this.currentTurnTextParts = []
     this.toolCallsSeen = []
     this._requestCount++
@@ -313,6 +321,9 @@ export class CCSession extends EventEmitter {
       console.log('[cc-session] interrupt: no turn in flight — ignored')
       return
     }
+    if (this._interruptRequested) {
+      console.log('[cc-session] interrupt: already requested — re-sending (retry semantics)')
+    }
     this._interruptRequested = true
     const msg = JSON.stringify({
       type: 'control_request',
@@ -320,9 +331,11 @@ export class CCSession extends EventEmitter {
       request: { subtype: 'interrupt' },
     }) + '\n'
     this.proc.stdin.write(msg)
-    // Clear the processing flag now for instant UI feedback; the turn's terminal
-    // result event re-clears it (idempotent).
-    this._isProcessingTurn = false
+    // The turn stays "processing" until its terminal result event actually
+    // arrives — clearing the flag here opened a window where a new prompt
+    // bypassed every mid-turn guard and the second stdin user message killed
+    // CC (review 2026-06-11b). The result/error_during_execution that follows
+    // the abort clears it (and `close`/`kill` clear it on the death paths).
   }
 
   isAlive(): boolean {

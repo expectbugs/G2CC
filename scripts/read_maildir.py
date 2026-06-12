@@ -106,15 +106,23 @@ def scan_messages(md_path):
             continue
         with os.scandir(d) as it:
             for ent in it:
-                if not ent.is_file():
-                    continue
-                name = ent.name
-                if ":2," in name:
-                    key, flags = name.rsplit(":2,", 1)
-                    unread = "S" not in flags
-                else:
-                    key, unread = name, default_unread
-                out.append((key, ent.path, unread, ent.stat().st_mtime))
+                # Per-entry isolation (review 2026-06-11b): is_file()/stat()
+                # raise if mbsync moved/expunged the file between scandir and
+                # the syscall (new/→cur/ happens on EVERY 5-min sync) — one
+                # vanished message used to brick the whole scan. Same rationale
+                # as cmd_list's parse-step isolation; loud skip, never fatal.
+                try:
+                    if not ent.is_file():
+                        continue
+                    name = ent.name
+                    if ":2," in name:
+                        key, flags = name.rsplit(":2,", 1)
+                        unread = "S" not in flags
+                    else:
+                        key, unread = name, default_unread
+                    out.append((key, ent.path, unread, ent.stat().st_mtime))
+                except OSError as e:
+                    print(f"read_maildir: skipping vanished entry {ent.path}: {e}", file=sys.stderr)
     return out
 
 

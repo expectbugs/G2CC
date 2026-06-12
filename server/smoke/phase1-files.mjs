@@ -2,6 +2,7 @@
 // Composes the new locations views and asserts the hardware rules hold:
 // exactly one event-capture region, frame estimate under the wall budget,
 // and blankScene()'s load-bearing wake antenna untouched (B2).
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { composeScene, blankScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
 
@@ -69,7 +70,9 @@ assert.equal(wake.kind, 'text')
 assert.equal(wake.content.scroll, true, 'wake region MUST keep scroll=true (input dies otherwise — hardware, twice)')
 console.error('  blankScene wake antenna intact ✓')
 
-// --- 5. Emit the passive scene for scene_to_png parity (run-all pipes it) ---
+// --- 5. Emit the passive scene for scene_to_png parity (MANUAL step:
+//     `node phase1-files.mjs --emit-scene | scripts/scene_to_png.py` — run-all
+//     does NOT pipe it; the old comment claimed it did, review 2026-06-11b) ---
 if (process.argv.includes('--emit-scene')) {
   process.stdout.write(JSON.stringify(passive))
 } else {

@@ -78,6 +78,11 @@ export function fwTextWidth(s: string): number {
     else if (ch >= '0' && ch <= '9') w += 11.0
     else if (ch === 'W' || ch === 'M') w += 15.8
     else if (ch >= 'A' && ch <= 'Z') w += 11.6
+    // Cyrillic/Greek CAPITALS render ~Latin-capital wide — pricing them at
+    // lowercase 9.6 under-measured caps-dense lines toward the invisible
+    // 7th-row clip (review 2026-06-11b; same class as the CJK fix below.
+    // Estimate pending a hardware cal — strictly safer than 9.6 either way).
+    else if ((ch >= 'А' && ch <= 'Я') || ch === 'Ё' || (ch >= 'Α' && ch <= 'Ω')) w += 11.6
     // CJK + fullwidth glyphs render ~full-em wide — treating them as lowercase
     // let a Chinese page wrap past the 6-row window (review 2026-06-11).
     // Conservative estimate pending a hardware cal.
@@ -114,16 +119,20 @@ function clampPx(s: string, maxPx: number, what: string): string {
 }
 
 /** Middle-ellipsize to a pixel budget — for paths, where the TAIL (the deep dir
- *  name) carries the meaning and the head (the mount root) anchors it. */
+ *  name) carries the meaning and the head (the mount root) anchors it.
+ *  Iterates CODE POINTS (review 2026-06-11b): the old UTF-16-index decrements
+ *  could land the cut mid-surrogate-pair, sending a lone surrogate to the
+ *  glass as U+FFFD mojibake (emoji/astral chars in a title). */
 function clampPxMiddle(s: string, maxPx: number, what: string): string {
   if (fwTextWidth(s) <= maxPx) return s
-  let head = Math.ceil(s.length * 0.4)
-  let tail = s.length - head
-  while (head + tail > 4 && fwTextWidth(s.slice(0, head) + '…' + s.slice(s.length - tail)) > maxPx) {
+  const cps = [...s]
+  let head = Math.ceil(cps.length * 0.4)
+  let tail = cps.length - head
+  while (head + tail > 4 && fwTextWidth(cps.slice(0, head).join('') + '…' + cps.slice(cps.length - tail).join('')) > maxPx) {
     if (head >= tail) head-- ; else tail--
   }
   console.warn(`[os-compose] ${what} middle-clamped to ${maxPx}px: "${s.slice(0, 60)}…"`)
-  return s.slice(0, head) + '…' + s.slice(s.length - tail)
+  return cps.slice(0, head).join('') + '…' + cps.slice(cps.length - tail).join('')
 }
 
 /** Conservative wire-size estimate of the LAYOUT frame this region set encodes
@@ -140,7 +149,12 @@ export function estimateLayoutFrameBytes(regions: SceneRegion[]): number {
     const c = r.content
     if (!c) continue
     if (c.kind === 'text') bytes += 4 + Buffer.byteLength(c.text, 'utf8')
-    else if (c.kind === 'list') bytes += 8 + c.items.reduce((n, it) => n + 2 + Buffer.byteLength(it, 'utf8'), 0)
+    // 3 B/item (was 2): items >127 B encoded need a 2-byte length varint plus
+    // the wrapper growth — the per-region estimate could undershoot the real
+    // encoding by ~2 B at exactly the frame sizes where the wall matters
+    // (review 2026-06-11b; frame-level margins absorbed it, but the estimator
+    // claims "conservative" and should be).
+    else if (c.kind === 'list') bytes += 8 + c.items.reduce((n, it) => n + 3 + Buffer.byteLength(it, 'utf8'), 0)
     else bytes += 4   // image content rides separate chunked messages, not the layout frame
   }
   return bytes

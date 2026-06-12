@@ -30,6 +30,7 @@ import {
   DEFAULT_BROWSE_MENU, type WinView,
 } from './os-compose.js'
 import type { SessionPool, PoolEntry } from './session-pool.js'
+import type { CCUsage } from './cc-session.js'
 import {
   ensureConversation, recordTurn, listConversations, listTurns, getTurn,
   type TurnKind,
@@ -41,7 +42,7 @@ import {
 import { createTimer, cancelTimer, listPending, nextPending, fmtRemaining, type TimerRow } from './timers.js'
 import { parseIntent, appendNote } from './intents.js'
 import { savePosition, getPosition, listChapters, readChapter, type EpubChapter } from './reader.js'
-import { listUpcoming, getEvent, type EventRow } from './calendar.js'
+import { listUpcoming, getEvent } from './calendar.js'
 import { rpgRun, chessMove, renderBoard, DUNGEON_ROOT, type ChessState } from './games.js'
 import { hostname } from 'node:os'
 
@@ -111,8 +112,12 @@ export interface OsWindow {
   readonly id: string
   readonly tab: string
   readonly label: string
-  /** One-line live status for the Main switcher row. */
-  summary(): string
+  /** One-line live status for the Main switcher row. May be async — windows
+   *  whose state lives in the DB (Timers/Calendar) query it fresh, so the
+   *  dashboard can't contradict itself on a cold connection (it showed
+   *  "Timers: none pending" beside a live next-timer line until the window
+   *  was first visited; review 2026-06-11b). Main isolates failures per row. */
+  summary(): string | Promise<string>
   /** Live activity phase for the bottom status bar (g2aria-style: listening →
    *  transcribing → confirm → thinking → tool → writing). null = idle. */
   statusLine?(): string | null
@@ -249,7 +254,9 @@ class SessionLevel {
   /** Live turn phase for the status bar (g2aria-style feedback): 'thinking'
    *  from prompt-send until the first stream activity, 'writing' once
    *  text_deltas flow; tools show through [toolLine]. */
-  private turnPhase: 'thinking' | 'writing' | null = null
+  private turnPhase: 'thinking' | 'writing' | 'interrupting' | null = null
+  /** Single-flight guard for respawn() — see the zombie-CC race note there. */
+  private respawning = false
   private opening: Promise<void> | null = null   // concurrent-open guard (double-tap during spawn)
   /** Entry ids THIS level wired. getOrCreateByDirectory returning wired=true
    *  for an id not in here means ANOTHER consumer (the Aria window / legacy
@@ -316,6 +323,18 @@ class SessionLevel {
       this.wire(entry)
       this.myEntryIds.add(entry.id)
       await entry.session.spawn()
+      // Identity re-check AFTER the spawn await (the watchdog's own pattern,
+      // watchdog.ts): close()/respawn() may have killed + pool-evicted this
+      // entry while spawn was in flight. Registering it anyway handed the
+      // watchdog a dead, pool-less entry that it respawned FOREVER — an
+      // immortal zombie CC owned by nothing (review 2026-06-11b).
+      if (this.entry !== entry) {
+        this.ctx.log(`[os] ${this.who}: session was closed/replaced during spawn — killing the fresh process (no register)`)
+        entry.session.kill()
+        this.ctx.pool.closeSession(entry.id)
+        this.myEntryIds.delete(entry.id)
+        return
+      }
       this.ctx.registerWatchdog(entry)
       this.ctx.pool.persistSessionMeta()
     }
@@ -331,23 +350,30 @@ class SessionLevel {
     const stale = () => this.entry?.session !== session
     session.on('tool_use', (info: { name: string; summary: string }) => {
       if (stale()) return
+      if (this.turnPhase === 'interrupting') return   // the abort is in flight — keep the phase honest
       this.toolLine = `${info.name} ${info.summary}`.trim()
       this.requestRender()   // status/title text update — cheap on the wire
     })
     session.on('text_delta', () => {
       if (stale()) return
       // One status flip per turn (NOT per delta — deltas arrive many times/sec).
-      if (this.busy && this.turnPhase !== 'writing') {
+      // 'interrupting' wins over late deltas from the aborting turn.
+      if (this.busy && this.turnPhase !== 'writing' && this.turnPhase !== 'interrupting') {
         this.turnPhase = 'writing'
         this.toolLine = ''
         this.requestRender()
       }
     })
-    session.on('turn_complete', (info: { text: string; toolCalls: string[] }) => {
+    session.on('turn_complete', (info: { text: string; toolCalls: string[]; usage: CCUsage }) => {
       if (stale()) return
       this.busy = false
       this.toolLine = ''
       this.turnPhase = null
+      // Keep the pool's per-entry stats live for DE turns too — without this
+      // contextPct stayed 0 and lastActivity froze at creation, corrupting the
+      // legacy session list, closeSession's recency promotion, AND the
+      // sessions.json recency sort that feeds --resume (review 2026-06-11b).
+      this.ctx.pool.updateUsage(entry.id, info.usage)
       // Persist NOW — ccSessionId arrives via the async init event AFTER the
       // post-spawn persist, so without this no DE session ever lands in
       // sessions.json and a WS drop loses the conversation (review 2026-06-10;
@@ -401,15 +427,19 @@ class SessionLevel {
       if (stale()) return
       this.lastError = message
       this.busy = false
+      this.turnPhase = null
       this.dropQueued('turn error')
       this.dropPermissions('turn error')   // the turn that asked is dead; CC won't honor late answers
+      this.discardUnreadTranscript('turn error')
       this.requestRender()
     })
     session.on('process_died', (code: number | null) => {
       if (stale()) return
       this.busy = false
+      this.turnPhase = null
       this.dropQueued('process died')
       this.dropPermissions('process died')
+      this.discardUnreadTranscript('process died')
       this.showError(`CC process died (code=${code}).`,
         `The watchdog auto-respawns it — ${this.verb} again, or Options → New session.`)
     })
@@ -624,11 +654,13 @@ class SessionLevel {
         return null
       }
       case 'Cancel': {
-        // From listening OR from the confirm step: discard everything pending.
-        if (this.listening) this.ctx.audio('stop')
-        this.listening = false
-        this.transcribing = false   // a late STT result discards (not transcribing)
-        if (this.pendingStt) { this.pendingStt = null; this.restorePages() }
+        // From listening, transcribing, OR the confirm step: discard everything
+        // pending. stopDictation (not a local copy) so the transcribing case
+        // also sends the belt-and-braces audio('stop') — the rejected-start
+        // wedge leaves the phone capturing while our flags say transcribing,
+        // and this Cancel path was the one exit that skipped the stop
+        // (review 2026-06-11b; the phone-side stop is an idempotent no-op).
+        this.stopDictation('cancel')
         this.requestRender()
         return null
       }
@@ -654,8 +686,18 @@ class SessionLevel {
         return null
       }
       case 'Interrupt': {
+        // Do NOT clear `busy` here: the aborted turn only ends when its
+        // result/error_during_execution event arrives (mid-tool that can take
+        // seconds). Clearing busy early let a new prompt bypass the queue and
+        // write a SECOND user message mid-turn — the documented CC-killer
+        // (review 2026-06-11b). busy clears via the turn's terminal events;
+        // a prompt sent meanwhile rides the existing one-slot queue and
+        // drains on the abort's turn_complete.
         this.entry?.session.interrupt()
-        this.busy = false
+        if (this.busy) {
+          this.turnPhase = 'interrupting'
+          this.toolLine = ''
+        }
         if (this.pendingPrompt) {
           this.ctx.log(`[os] ${this.who}: Interrupt — dropping queued prompt "${this.pendingPrompt.slice(0, 60)}"`)
           this.pendingPrompt = null
@@ -747,11 +789,37 @@ class SessionLevel {
   }
 
   /** The Reload action: unstick any wedged dictation state + clear the error
-   *  banner (the WM separately re-takes the display and recomposes). */
+   *  banner (the WM separately re-takes the display and recomposes). Also
+   *  re-derives `busy` from the subprocess's own turn flag — safe by
+   *  construction, and it makes Reload the documented unstick for the
+   *  busy-with-no-turn wedge (a prompt landing in the exit→close event gap
+   *  auto-revives but the old proc's close is stale()-suppressed, leaving
+   *  busy=true with nothing in flight; review 2026-06-11b). */
   async onReload(): Promise<void> {
     this.stopDictation('reload')
     this.dropQueued('reload')
     this.lastError = null
+    const actuallyBusy = this.entry?.session.isProcessingTurn ?? false
+    if (this.busy && !actuallyBusy) {
+      this.ctx.log(`[os] ${this.who}: Reload cleared a wedged busy flag (no turn in flight)`)
+      this.busy = false
+      this.turnPhase = null
+      this.toolLine = ''
+    }
+  }
+
+  /** Discard an unconfirmed transcript when the page it's shown on is about to
+   *  be replaced by an error/death card — a Confirm tap after the repaint
+   *  would send words the user can no longer re-read (the onSttError rule,
+   *  extended to the error/process_died exits; review 2026-06-11b). Listening/
+   *  transcribing states are left alone: the mic flow can complete and the
+   *  eventual Confirm auto-revives the session. */
+  private discardUnreadTranscript(why: string): void {
+    if (this.pendingStt) {
+      this.ctx.log(`[os] ${this.who}: discarding unconfirmed transcript (${why}): "${this.pendingStt.slice(0, 60)}"`)
+      this.pendingStt = null
+      this.restorePages()
+    }
   }
 
   /** Drop a queued prompt LOUDLY (never fire it into a changed/recovered context). */
@@ -885,6 +953,24 @@ class SessionLevel {
 
   /** Respawn with current opts (Options model/effort change; resumes context). */
   async respawn(fresh = false): Promise<void> {
+    // Single-flight: a second Options tap during the ~0.5-1 s spawn window ran a
+    // CONCURRENT respawn — it read ccSessionId off the still-initializing entry
+    // (null → silently dropped the --resume conversation), killed the mid-spawn
+    // process, and the first respawn then registered its dead entry with the
+    // watchdog: an immortal zombie CC (review 2026-06-11b). Reject, loudly.
+    if (this.respawning) {
+      this.ctx.log(`[os] ${this.who}: respawn already in flight — tap ignored (LOUD)`)
+      return
+    }
+    this.respawning = true
+    try {
+      await this.respawnInner(fresh)
+    } finally {
+      this.respawning = false
+    }
+  }
+
+  private async respawnInner(fresh: boolean): Promise<void> {
     this.stopDictation('respawn')
     // The old session's process_died is stale()-suppressed after the swap, so its
     // dropQueued never runs — drop here or a stale queued prompt fires after some
@@ -916,6 +1002,15 @@ class SessionLevel {
     this.wire(entry)
     this.myEntryIds.add(entry.id)
     await entry.session.spawn()
+    // Identity re-check after the await (mirrors openInner + the watchdog):
+    // close() may have run during the spawn — never register a dead entry.
+    if (this.entry !== entry) {
+      this.ctx.log(`[os] ${this.who}: session closed during respawn — killing the fresh process (no register)`)
+      entry.session.kill()
+      this.ctx.pool.closeSession(entry.id)
+      this.myEntryIds.delete(entry.id)
+      return
+    }
     this.ctx.registerWatchdog(entry)
     this.ctx.pool.persistSessionMeta()
     this.busy = false
@@ -979,8 +1074,10 @@ class SessionOptions {
   }
 
   /** Returns 'close' when the close row was tapped, 'history' for the History
-   *  row (window decides what those mean). */
-  async onSelect(index: number): Promise<'close' | 'history' | null> {
+   *  row, 'error' when a respawn failed (the window flips back to session
+   *  level so the error card is actually visible — the bare lastError flag
+   *  rendered NOTHING at the options level; review 2026-06-11b). */
+  async onSelect(index: number): Promise<'close' | 'history' | 'error' | null> {
     const l = this.level()
     const rows = this.items()
     const label = rows[index]
@@ -1004,11 +1101,12 @@ class SessionOptions {
         return null
       }
     } catch (e) {
-      // The old entry is already dead at this point — make the failure visible
-      // on-glass (it used to vanish into the WM log; review 2026-06-10).
-      l.lastError = `respawn failed: ${(e as Error).message}`
-      this.requestRender()
-      return null
+      // The old entry is already dead at this point — render the full error
+      // card at the session level (message + recovery hint), not a bare flag.
+      this.log(`[os] options: respawn failed: ${(e as Error).message}`)
+      l.showError(`respawn failed: ${(e as Error).message}`,
+        'Options → New session for a fresh start, or Reload to retry.')
+      return 'error'
     }
     return 'close'
   }
@@ -1023,10 +1121,13 @@ function fmtStamp(d: Date): string {
 
 /** Collapse whitespace runs and pre-trim a browse-row preview. This is a
  *  NAVIGATIONAL summary (the full text is one tap away in the read view) —
- *  the compose-side clampLabel byte cap remains the loud backstop. */
+ *  the compose-side clampLabel byte cap remains the loud backstop. The cut is
+ *  marked with '…' so truncation is VISIBLE (it used to be silent — two
+ *  distinct rows could render identically with no hint; review 2026-06-11b).
+ *  No log: this runs per row per render (logging here would spam). */
 function oneLine(s: string, max = 34): string {
   const flat = s.replace(/\s+/g, ' ').trim()
-  return flat.length > max ? flat.slice(0, max) : flat
+  return flat.length > max ? [...flat].slice(0, max - 1).join('') + '…' : flat
 }
 
 /** Read-only session-history browser (upgrades Phase 3): conversations →
@@ -1297,6 +1398,13 @@ class CcWindow implements OsWindow {
     }
     if (this.level === 'options') {
       const r = await this.options.onSelect(index)
+      if (r === 'error') {
+        // The respawn failure card is waiting at the session level — show it.
+        this.level = 'session'
+        this.focus = 'content'
+        this.requestRender()
+        return
+      }
       if (r === 'history') {
         const cur = this.current
         if (!cur) { this.ctx.log('[os] cc: History tapped without a session — ignored (LOUD)'); return }
@@ -1368,9 +1476,12 @@ class CcWindow implements OsWindow {
     return this.level === 'session' ? this.current?.phase() ?? null : null
   }
 
-  /** Overlays must queue behind live dictation/permission UI (Phase 4, B5). */
+  /** Overlays must queue behind live dictation/permission UI (Phase 4, B5).
+   *  Consult dictationBusy at EVERY level (mirror of the Aria fix — review
+   *  2026-06-11b): a live mic must never be repainted over, whatever level
+   *  the window object thinks it's at. */
   interruptible(): boolean {
-    return this.level !== 'session' || !this.current || !this.current.dictationBusy()
+    return !this.current || !this.current.dictationBusy()
   }
 
   async onReload(): Promise<void> {
@@ -1473,9 +1584,26 @@ class AriaWindow implements OsWindow {
   }
 
   async onMenuSelect(label: string): Promise<void> {
+    if (label === 'Ask' && this.level !== 'session') {
+      // Main's `Ask` (SwitchTo) can land while this window sits at options/
+      // prompts/history. The verb is a SESSION-level action: running it under
+      // a browse view turned the mic on with no Done/Cancel menu, no status
+      // line, and interruptible()=true — a notification overlay could repaint
+      // over a live mic (review 2026-06-11b, three finders). Land on the
+      // session level first, then run the verb through the normal path.
+      this.log(`[os] aria: Ask at '${this.level}' level — landing on session level first`)
+      this.level = 'session'
+      this.focus = 'content'
+    }
     if (this.level === 'history' && this.history) {
       if (this.history.onMenu(label)) { this.requestRender(); return }
       this.log(`[os] aria history: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
+    if (this.level !== 'session') {
+      // Mirror CcWindow's gate (it had one; the Aria copy didn't): stale menu
+      // taps at options/prompts must not reach the session level invisibly.
+      this.log(`[os] aria: menu '${label}' outside session level — ignored`)
       return
     }
     const r = await this.session.onMenu(label)
@@ -1506,6 +1634,13 @@ class AriaWindow implements OsWindow {
     }
     if (this.level !== 'options') { this.log(`[os] aria: browse select ${index} outside options — ignored`); return }
     const r = await this.options.onSelect(index)
+    if (r === 'error') {
+      // The respawn failure card is waiting at the session level — show it.
+      this.level = 'session'
+      this.focus = 'content'
+      this.requestRender()
+      return
+    }
     if (r === 'history') {
       this.history = new HistoryLevel(ARIA_CWD, this.label, this.log)
       this.level = 'history'
@@ -1552,8 +1687,11 @@ class AriaWindow implements OsWindow {
 
   onDeactivate(): void { this.session.stopDictation('window switch') }
   statusLine(): string | null { return this.level === 'session' ? this.session.phase() : null }
-  /** Overlays must queue behind live dictation/permission UI (Phase 4, B5). */
-  interruptible(): boolean { return this.level !== 'session' || !this.session.dictationBusy() }
+  /** Overlays must queue behind live dictation/permission UI (Phase 4, B5).
+   *  Consult dictationBusy at EVERY level — dictation can only start at the
+   *  session level now, but if a live mic ever coexists with a browse level
+   *  again, the overlay must still queue (review 2026-06-11b). */
+  interruptible(): boolean { return !this.session.dictationBusy() }
   async onReload(): Promise<void> { await this.session.onReload(); this.focus = 'content' }
   async onStt(text: string): Promise<void> { await this.session.onStt(text) }
   async onSttError(error: string): Promise<void> { await this.session.onSttError(error) }
@@ -1710,6 +1848,11 @@ class FilesWindow implements OsWindow {
   private page = 0
   private readName = ''
   private img: RenderedImage | null = null   // the image-viewer payload
+  /** Navigation sequence — bumped on every browse action/back so an in-flight
+   *  image render can detect it was superseded (stale-swap guard, review
+   *  2026-06-11b — the chart/board pattern, applied to the one await that
+   *  lacked it). */
+  private navSeq = 0
   /** tree-level focus: content rows (default) ⇄ the menu list (double-tap) — without
    *  this the tree's rendered Reload/Main menu was dead UI (review 2026-06-11). */
   private focus: 'content' | 'menu' = 'content'
@@ -1828,6 +1971,7 @@ class FilesWindow implements OsWindow {
   }
 
   async onBrowseSelect(index: number): Promise<void> {
+    this.navSeq++   // any new browse action supersedes an in-flight image render
     if (this.level === 'locations') {
       const { map } = browsePageItems(this.locs.map((l) => l.label), this.locOffset)
       const m = map[index]
@@ -1867,10 +2011,26 @@ class FilesWindow implements OsWindow {
     // Image viewer (Adam 2026-06-11): fit + dither + 4 tiles, aspect preserved.
     if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(e.name)) {
       this.readName = e.name
+      // Stale-swap guard (the documented pattern — chart/board renders have it;
+      // this was the one awaited-render swap without one, review 2026-06-11b):
+      // any navigation during the PIL subprocess invalidates this request —
+      // committing level='image' afterwards yanked the user out of wherever
+      // they'd gone, and two rapid image taps paired old tiles with the new
+      // title. navSeq bumps on every browse action + back.
+      const seq = ++this.navSeq
       try {
-        this.img = await renderImageFile(path, DE_CONTENT_W, DE_CONTENT_H)
+        const img = await renderImageFile(path, DE_CONTENT_W, DE_CONTENT_H)
+        if (seq !== this.navSeq) {
+          this.ctx.log(`[os] files: image render for '${e.name}' superseded by newer navigation — discarded`)
+          return
+        }
+        this.img = img
         this.level = 'image'
       } catch (err) {
+        if (seq !== this.navSeq) {
+          this.ctx.log(`[os] files: image render FAILURE for '${e.name}' superseded — discarded: ${(err as Error).message}`)
+          return
+        }
         this.pages = [`ERROR rendering image ${e.name}:\n${(err as Error).message}`]
         this.page = 0
         this.level = 'read'
@@ -1939,6 +2099,7 @@ class FilesWindow implements OsWindow {
   /** image/read → tree → (tree menu focus) → locations → (locations menu
    *  focus) → Main. */
   async onBack(): Promise<boolean> {
+    this.navSeq++   // navigation supersedes an in-flight image render
     if (this.level === 'image') { this.level = 'tree'; this.img = null; this.focus = 'content'; this.requestRender(); return true }
     if (this.level === 'read') { this.level = 'tree'; this.focus = 'content'; this.requestRender(); return true }
     if (this.level === 'tree') {
@@ -1990,8 +2151,14 @@ class GamesWindow implements OsWindow {
   private chessInfo = 'New game to start. You play white.'
   private gameOver = false
   private moveInFlight = false
+  /** Bumped when an in-flight chessMove is superseded (Reload unstick, New
+   *  game) — its late completion checks this and discards (review 2026-06-11b). */
+  private chessSeq = 0
   private board: RenderedImage | null = null
   private boardFen: string | null = null
+  /** The last board render FAILED (placeholder must not claim "rendering…"
+   *  forever; Reload re-requests it — review 2026-06-11b). */
+  private boardFailed = false
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -2002,21 +2169,34 @@ class GamesWindow implements OsWindow {
 
   // ------------------------------------------------ rpg helpers
 
-  private async rpgAction(args: string[]): Promise<void> {
-    if (this.rpgBusy) { this.ctx.log('[os] games: rpg action while one is running — ignored (LOUD)'); return }
+  /** Run one rpg-cli action. Returns true when the action actually RAN and
+   *  succeeded — callers that mirror game state (the `cd` cwd update) must
+   *  gate on it: the busy early-return and the error path both used to be
+   *  invisible to callers, which committed `cwd` for a cd that never happened
+   *  (review 2026-06-11b). Only forces the rpg-out level if the user is still
+   *  in the rpg area — a slow result must not yank them out of chess/menu. */
+  private async rpgAction(args: string[]): Promise<boolean> {
+    if (this.rpgBusy) { this.ctx.log('[os] games: rpg action while one is running — ignored (LOUD)'); return false }
     this.rpgBusy = true
     this.requestRender()
+    let ok = false
     try {
       const out = await rpgRun(args, this.cwd)
       this.rpgPages = paginateText(out)
+      ok = true
     } catch (e) {
       this.ctx.log(`[os] games: rpg ${args.join(' ')} failed: ${(e as Error).message}`)
       this.rpgPages = paginateText(`ERROR running rpg-cli ${args.join(' ')}:\n\n${(e as Error).message}`)
     }
     this.rpgBusy = false
     this.rpgPage = 0
-    this.level = 'rpg-out'
+    if (this.level === 'rpg' || this.level === 'rpg-out') {
+      this.level = 'rpg-out'
+    } else {
+      this.ctx.log(`[os] games: rpg output ready but the user left the rpg area (level=${this.level}) — stored, not shown`)
+    }
     this.requestRender()
+    return ok
   }
 
   private listDungeonDirs(): string[] {
@@ -2053,14 +2233,21 @@ class GamesWindow implements OsWindow {
   private prefetchBoard(): void {
     const fen = this.fen
     if (!fen) return
+    this.boardFailed = false
     void renderBoard(fen, DE_CONTENT_W, DE_CONTENT_H).then((img) => {
       if (this.fen !== fen) return   // a newer position superseded this render
       this.board = img
       this.boardFen = fen
       this.requestRender()
     }).catch((e: unknown) => {
+      if (this.fen !== fen) {
+        // A stale render's failure must not clobber the CURRENT position's info.
+        this.ctx.log(`[os] games: stale board render failed (superseded): ${e instanceof Error ? e.message : String(e)}`)
+        return
+      }
       this.ctx.log(`[os] games: board render failed: ${e instanceof Error ? e.message : String(e)}`)
-      this.chessInfo = `Board render FAILED: ${e instanceof Error ? e.message : String(e)}\n(the game state is intact — Moves still works)`
+      this.boardFailed = true
+      this.chessInfo = `Board render FAILED: ${e instanceof Error ? e.message : String(e)}\n(the game state is intact — Moves still works; Reload retries the board)`
       this.requestRender()
     })
   }
@@ -2068,12 +2255,25 @@ class GamesWindow implements OsWindow {
   private async applyChessMove(move: string | null): Promise<void> {
     if (this.moveInFlight) { this.ctx.log('[os] games: move while engine is thinking — ignored (LOUD)'); return }
     this.moveInFlight = true
+    // Generation token: onReload's unstick (and New game after it) supersede an
+    // in-flight move — its late result must NOT clobber the new game state
+    // (the comment in onReload used to CLAIM a fen-identity check that only
+    // existed for board images; review 2026-06-11b).
+    const seq = ++this.chessSeq
     this.level = 'chess'
     this.requestRender()   // title shows thinking…
     try {
       const st = await chessMove(move ? this.fen : null, move, this.skill)
+      if (seq !== this.chessSeq) {
+        this.ctx.log(`[os] games: stale chess result for '${move ?? 'new game'}' discarded (superseded by Reload/New game)`)
+        return
+      }
       this.applyChessState(st)
     } catch (e) {
+      if (seq !== this.chessSeq) {
+        this.ctx.log(`[os] games: stale chess FAILURE for '${move ?? 'new game'}' discarded: ${(e as Error).message}`)
+        return
+      }
       this.ctx.log(`[os] games: chess move '${move}' failed: ${(e as Error).message}`)
       this.chessInfo = `Move FAILED: ${(e as Error).message}`
     }
@@ -2129,8 +2329,10 @@ class GamesWindow implements OsWindow {
       if (this.fen && this.board && this.boardFen === this.fen) {
         return { mode: 'tiles', tilesRect: { w: this.board.w, h: this.board.h }, title, menu, tiles: this.board.tiles }
       }
+      // boardFailed: show the failure honestly — the old "⏳ board rendering…"
+      // header above a render FAILURE was a permanent lie (review 2026-06-11b).
       const text = this.fen
-        ? `⏳ board rendering…\n\n${this.chessInfo}`
+        ? (this.boardFailed ? this.chessInfo : `⏳ board rendering…\n\n${this.chessInfo}`)
         : `Chess vs Stockfish (skill ${this.skill})\n\n${this.chessInfo}`
       return { mode: 'text', title, menu, text }
     }
@@ -2175,16 +2377,24 @@ class GamesWindow implements OsWindow {
         case '..': {
           const parent = this.cwd.split('/').slice(0, -1).join('/') || '/'
           if (!parent.startsWith(DUNGEON_ROOT)) { this.ctx.log('[os] games: rpg .. blocked at dungeon root'); return }
-          await this.rpgAction(['cd', '..'])
-          this.cwd = parent
-          this.rpgOffset = 0
+          // Advance the window's cwd ONLY when the cd actually ran — a busy-
+          // ignored or failed cd used to desync it from the hero's real
+          // location (review 2026-06-11b). Re-render so the rpg-out title
+          // shows the NEW cwd.
+          if (await this.rpgAction(['cd', '..'])) {
+            this.cwd = parent
+            this.rpgOffset = 0
+            this.requestRender()
+          }
           return
         }
         default: {
           const dir = row.endsWith('/') ? row.slice(0, -1) : row
-          await this.rpgAction(['cd', dir])   // battles can trigger on the way
-          this.cwd = join(this.cwd, dir)
-          this.rpgOffset = 0
+          if (await this.rpgAction(['cd', dir])) {   // battles can trigger on the way
+            this.cwd = join(this.cwd, dir)
+            this.rpgOffset = 0
+            this.requestRender()
+          }
           return
         }
       }
@@ -2240,15 +2450,35 @@ class GamesWindow implements OsWindow {
 
   async onReload(): Promise<void> {
     this.focus = 'content'
-    // Unstick a wedged in-flight flag (the documented Reload contract): the
-    // orphaned subprocess result will be dropped by the fen-identity check.
-    if (this.moveInFlight) { this.ctx.log('[os] games: Reload cleared a stuck chess moveInFlight'); this.moveInFlight = false }
-    if (this.rpgBusy) { this.ctx.log('[os] games: Reload cleared a stuck rpgBusy'); this.rpgBusy = false }
+    // Unstick a wedged in-flight flag (the documented Reload contract). The
+    // chessSeq bump makes the orphaned subprocess result ACTUALLY drop — the
+    // old comment claimed a fen-identity check that only existed for board
+    // images (review 2026-06-11b). NOTE: the orphaned rpg-cli/chess process
+    // may still be running and mutating its own state; the unstick only
+    // detaches the UI from it.
+    if (this.moveInFlight) {
+      this.ctx.log('[os] games: Reload cleared a stuck chess moveInFlight (orphaned result will be discarded)')
+      this.moveInFlight = false
+      this.chessSeq++
+    }
+    if (this.rpgBusy) { this.ctx.log('[os] games: Reload cleared a stuck rpgBusy (the orphaned run may still mutate the dungeon)'); this.rpgBusy = false }
+    // A failed board render retries on Reload (the failure card says so).
+    if (this.fen && this.boardFen !== this.fen) {
+      this.ctx.log('[os] games: Reload re-requesting the board render')
+      this.prefetchBoard()
+    }
   }
 
   async onBack(): Promise<boolean> {
     if (this.level === 'rpg-out') { this.level = 'rpg'; this.focus = 'content'; this.requestRender(); return true }
-    if (this.level === 'chess-moves') { this.level = 'chess'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'chess-moves') {
+      // Browse level: first pop flips content→menu so the rendered Reload/Main
+      // list is actually reachable (the standard flip every other browse level
+      // has — this one was missing it; review 2026-06-11b).
+      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+      this.focus = 'content'
+      this.level = 'chess'; this.requestRender(); return true
+    }
     if (this.level === 'chess' || this.level === 'rpg') {
       if (this.focus === 'content' && (this.level === 'rpg')) { this.focus = 'menu'; this.requestRender(); return true }
       this.focus = 'content'
@@ -2284,7 +2514,6 @@ class CalendarWindow implements OsWindow {
   private level: 'agenda' | 'read' = 'agenda'
   private offset = 0
   private rows: ({ kind: 'header'; label: string } | { kind: 'event'; uid: string; label: string })[] = []
-  private nextEvent: EventRow | null = null
   private pages: string[] = []
   private page = 0
   private readTitle = ''
@@ -2292,8 +2521,12 @@ class CalendarWindow implements OsWindow {
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
-  summary(): string {
-    const n = this.nextEvent
+  /** DB-backed (not the view cache): a fresh connection used to show
+   *  "no events / 14d" until the agenda was first opened, even with rows in
+   *  the DB (review 2026-06-11b). Pure — view() owns this.nextEvent. */
+  async summary(): Promise<string> {
+    const events = await listUpcoming()
+    const n = events.find((e) => e.startsAt.getTime() >= Date.now()) ?? events[0] ?? null
     if (!n) return 'no events / 14d'
     const d = n.startsAt
     return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${oneLine(n.title, 22)}`
@@ -2314,7 +2547,6 @@ class CalendarWindow implements OsWindow {
       }
     }
     const events = await listUpcoming()
-    this.nextEvent = events.find((e) => e.startsAt.getTime() >= Date.now()) ?? events[0] ?? null
     this.rows = []
     let lastDay = ''
     for (const e of events) {
@@ -2538,12 +2770,21 @@ class ReaderWindow implements OsWindow {
     return readdirSync(BOOKS_DIR).filter((f) => /\.epub$/i.test(f)).sort()
   }
 
-  /** Persist the resume position — fire-and-forget, loud on failure (B3). */
+  /** Persist the resume position — fire-and-forget, loud on failure (B3).
+   *  SERIALIZED (the capture-chain pattern): two rapid page flips used to race
+   *  their upserts on separate pool clients, and out-of-order commits could
+   *  store the OLDER page (review 2026-06-11b). The chain guarantees the last
+   *  call's values win. */
+  private persistChain: Promise<void> = Promise.resolve()
   private persist(): void {
     const p = this.bookPath
     if (!p) return
-    void savePosition(p, this.chapter, this.page).catch((e: unknown) =>
-      this.ctx.log(`[reader] position save failed (${basename(p)}): ${e instanceof Error ? e.message : String(e)}`))
+    const chapter = this.chapter
+    const page = this.page
+    this.persistChain = this.persistChain
+      .then(() => savePosition(p, chapter, page))
+      .catch((e: unknown) =>
+        this.ctx.log(`[reader] position save failed (${basename(p)}): ${e instanceof Error ? e.message : String(e)}`))
   }
 
   /** Load chapter `idx` and land on `page` (-1 = last page — Prev across a
@@ -2738,10 +2979,14 @@ class TimersWindow implements OsWindow {
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
-  summary(): string {
-    if (!this.pending.length) return 'none pending'
-    const next = this.pending[0]
-    return `⏱ ${fmtRemaining(next.firesAt)}${next.label ? ` · ${next.label}` : ''}`
+  /** DB-backed (not the view cache): the dashboard line must be live even
+   *  before this window is first visited (review 2026-06-11b). Pure — never
+   *  mutates `pending` (taps resolve against what view() rendered). */
+  async summary(): Promise<string> {
+    const pending = await listPending()
+    if (!pending.length) return 'none pending'
+    const next = pending[0]
+    return `⏱ ${fmtRemaining(next.firesAt)}${next.label ? ` · ${oneLine(next.label, 20)}` : ''}`
   }
 
   async view(): Promise<WinView> {
@@ -2881,10 +3126,20 @@ class MainWindow implements OsWindow {
       timerLine = '⏱ (timers unavailable — see log)'
     }
     const battery = this.ctx.phoneBattery?.() ?? null
+    // Summaries may be async (DB-backed) — gather concurrently, isolate
+    // failures per row so one down subsystem can't blank the dashboard.
+    const summaries = await Promise.all(this.others().map(async (w) => {
+      try {
+        return `${w.label}: ${await w.summary()}`
+      } catch (e) {
+        this.ctx.log(`[os] main: ${w.id} summary failed: ${(e as Error).message}`)
+        return `${w.label}: (unavailable — see log)`
+      }
+    }))
     const lines = [
       this.dashLine(`${hostname()} · ${this.ctx.pool.count} cc${battery !== null ? ` · ☎${battery}%` : ''}${unseen ? ` · ⚠${unseen} unseen` : ''}`),
       ...(timerLine ? [this.dashLine(timerLine)] : []),
-      ...this.others().map((w) => this.dashLine(`${w.label}: ${w.summary()}`)),
+      ...summaries.map((s) => this.dashLine(s)),
     ]
     const pages = paginateText(lines.join('\n'))
     this.pageCount = pages.length
@@ -2978,6 +3233,9 @@ export class WindowManager {
   /** While set, requestRender composes THIS instead of the active window;
    *  lastView tap resolution works unchanged (the overlay IS the rendered view). */
   private activeOverlay: WinView | null = null
+  /** True once the render loop has actually COMPOSED+SENT the active overlay —
+   *  overlay tap resolution is gated on it (see setOverlay / onSelect). */
+  private overlayRendered = false
   private overlayEvt: NotifyEvent | null = null
   /** True when the overlay is a blanked-screen popup (auto-re-blanks). */
   private overlayFromBlank = false
@@ -2986,7 +3244,10 @@ export class WindowManager {
   private pendingNotifs: NotifyEvent[] = []
   /** Latest unseen info/sms/email — rendered as the ⚠ title-bar override
    *  until read in Notices. */
-  private titleFlash: { id: number; title: string } | null = null
+  /** id=null: the event was never persisted (DB down) — it still flashes (the
+   *  os-notify "still reaches the glasses" promise); the next chrome refresh
+   *  clears it since there's no durable row to track (review 2026-06-11b). */
+  private titleFlash: { id: number | null; title: string } | null = null
   private unseen = 0
   /** Adam's 10 s blanked-popup auto-dismiss (display pacing, blanked case
    *  only). Cleared on EVERY exit path: tap, double-tap, replacement, dispose. */
@@ -3058,6 +3319,11 @@ export class WindowManager {
     this.activeOverlay = notificationView(evt)
     this.overlayEvt = evt
     this.overlayFromBlank = fromBlank
+    // The overlay exists but has NOT been rendered yet — until the render loop
+    // composes it, taps must not resolve as overlay actions (a tap aimed at a
+    // window's own 'Main' row was marking the undisplayed alarm seen +
+    // dismissing it; review 2026-06-11b).
+    this.overlayRendered = false
   }
 
   /** Re-derive the unseen badge + title flash from the durable record
@@ -3111,7 +3377,10 @@ export class WindowManager {
     }
     // Title-flash class (info/sms/email): a chrome-only change — safe during
     // dictation (menu/content untouched); persists until read in Notices.
-    if (evt.id !== null) this.titleFlash = { id: evt.id, title: evt.title }
+    // A null id (persistence failed, DB down) STILL flashes — an SMS arriving
+    // while the DB was down used to surface as nothing but a log line
+    // (review 2026-06-11b); markSeen(null) is already a loud no-op.
+    this.titleFlash = { id: evt.id, title: evt.title }
     this.requestRender()
   }
 
@@ -3190,10 +3459,24 @@ export class WindowManager {
             view = errorView(`${this.active.label} · error`, (e as Error).message)
             scene = composeScene(view, [], this.statusLeft())
           }
+          // Re-check the blank state AFTER the awaits: a double-tap blank, the
+          // popup auto-re-blank, or an overlay Dismiss-from-blank may have sent
+          // blankScene() while view() was in flight (Mail execFile, Aria first-
+          // view spawn = seconds). Sending the composed scene now would paint
+          // OVER the blank screen with nothing to repaint it — the display
+          // stays lit on a stale window while the WM thinks it's dark and
+          // ignores every tap (review 2026-06-11b). Skip the send; lastView
+          // stays at the pre-blank view, which is fine — taps are ignored
+          // while blanked and the wake render recomposes everything.
+          if (this.blanked && !this.activeOverlay) {
+            this.ctx.log('[os] render completed after blank — discarded (screen stays dark)')
+            continue
+          }
           // Normalize the menu the user actually SEES — MUST match compose's own
           // browse default exactly (they diverged: compose rendered Reload/Main
           // while taps resolved Back/Main — index-0 misroute; review 2026-06-11).
           this.lastView = { ...view, menu: view.mode === 'browse' ? (view.menu ?? [...DEFAULT_BROWSE_MENU]) : view.menu }
+          if (this.activeOverlay && view === this.activeOverlay) this.overlayRendered = true
           this.ctx.send(scene)
           // Phase 4 queue flush: promote ONE pending overlay once nothing
           // blocks. Setting state + renderQueued re-iterates the already-
@@ -3265,9 +3548,18 @@ export class WindowManager {
   async onSelect(region: string, index: number): Promise<void> {
     if (this.activeOverlay) {
       // Phase 4: the overlay owns the screen (even while blanked — the popup
-      // HAS a live menu). Resolve against lastView like everything else; a
-      // tap racing the overlay render resolves to a window label and falls to
-      // the resync below — eaten, never misrouted (the standing race policy).
+      // HAS a live menu). Resolve against lastView like everything else — but
+      // ONLY once the overlay has actually rendered: before that, lastView is
+      // still the pre-overlay window view, and 'Main' appears in virtually
+      // every window menu, so a tap aimed at a window's own Main row was
+      // executing overlayAction('Main') — silently marking a timer/call alarm
+      // seen + dismissing it without it ever being displayed (review
+      // 2026-06-11b). Eaten + resynced instead, like every stale tap.
+      if (!this.overlayRendered) {
+        this.ctx.log(`[os] ${region} tap [${index}] raced the overlay render — eaten (overlay not yet on glass)`)
+        this.requestRender()
+        return
+      }
       if (region !== 'menu') {
         this.ctx.log(`[os] ${region} tap [${index}] during a notification overlay — ignored`)
         return
@@ -3356,6 +3648,13 @@ export class WindowManager {
       // Double-tap on an overlay = Dismiss. A blanked popup additionally
       // WAKES (the user is clearly engaging — and "double-tap wakes" holds);
       // it was already marked seen at display time.
+      if (!this.overlayRendered) {
+        // Same race policy as onSelect: the double-tap was aimed at the view
+        // still on glass, not at an overlay the user hasn't seen — eat it.
+        this.ctx.log('[os] double-tap raced the overlay render — eaten (overlay not yet on glass)')
+        this.requestRender()
+        return
+      }
       if (this.overlayFromBlank) {
         this.ctx.log('[notify] blanked popup dismissed by double-tap — waking')
         this.clearPopupTimer()
@@ -3393,7 +3692,13 @@ export class WindowManager {
 
   async onStt(text: string): Promise<void> {
     try {
-      await this.active.onStt?.(text)
+      if (this.active.onStt) await this.active.onStt(text)
+      else {
+        // Dictate → Done → switch windows while Parakeet runs: the transcript
+        // routes to the new active window, which takes no dictation. Dropping
+        // it SILENTLY violated the no-silent-failure rule (review 2026-06-11b).
+        this.ctx.log(`[os] STT result arrived for '${this.active.id}' which takes no dictation — DISCARDED (${text.length} chars): "${text.slice(0, 80)}"`)
+      }
     } catch (e) {
       this.ctx.log(`[os] stt handler failed (${this.active.id}): ${(e as Error).message}`)
       this.requestRender()
@@ -3402,7 +3707,8 @@ export class WindowManager {
 
   async onSttError(error: string): Promise<void> {
     try {
-      await this.active.onSttError?.(error)
+      if (this.active.onSttError) await this.active.onSttError(error)
+      else this.ctx.log(`[os] STT error arrived for '${this.active.id}' which takes no dictation — logged only: ${error}`)
     } catch (e) {
       this.ctx.log(`[os] stt-error handler failed (${this.active.id}): ${(e as Error).message}`)
     }

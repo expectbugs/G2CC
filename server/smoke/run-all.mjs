@@ -9,9 +9,14 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
+// NUMERIC phase order (review 2026-06-11b: lexicographic ran 1,10,11,2,…9 —
+// the header's "in order" claim was false; harmless today, confusing the day
+// an inter-phase dependency appears). _env.mjs is the shared isolation
+// preamble, not a phase.
+const phaseNum = (f) => Number(/^phase(\d+)/.exec(f)?.[1] ?? 999)
 const scripts = readdirSync(here)
-  .filter((f) => f.endsWith('.mjs') && f !== 'run-all.mjs')
-  .sort()
+  .filter((f) => f.endsWith('.mjs') && f !== 'run-all.mjs' && !f.startsWith('_'))
+  .sort((a, b) => phaseNum(a) - phaseNum(b) || a.localeCompare(b))
 
 if (scripts.length === 0) {
   console.error('run-all: no smoke scripts found — that is itself a failure')

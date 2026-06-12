@@ -24,14 +24,21 @@ All accepted actions are **logged** in logcat under tag `G2CCIntent`.
 Deprecated actions stay in the manifest filter so they keep LOGGING — removing them would
 turn a stale Tasker recipe into a silent no-op, which violates the loud-failure rule.
 
+**⚠ Implicit broadcasts do NOT reach manifest receivers on Android 8+** (review
+2026-06-11b): a broadcast without an explicit package/component is suppressed by the OS
+for manifest-declared receivers ("Background execution not allowed" in the system log —
+our receiver never runs, so the loud-logging promise above only holds for EXPLICIT
+sends). Tasker recipes MUST set the Package field to `com.g2cc.g2cc` (or Component
+`com.g2cc.g2cc/.intents.IntentReceiver`); adb tests MUST pass `-p` or `-n` as below.
+
 ## Testing via adb
 
 ```bash
-adb shell am broadcast -a com.g2cc.intent.action.PING
+adb shell am broadcast -p com.g2cc.g2cc -a com.g2cc.intent.action.PING
 # logcat: G2CCIntent: received action=com.g2cc.intent.action.PING extras=null
 # logcat: G2CCIntent: PING (service running=true)
 
-adb shell am broadcast -a com.g2cc.intent.action.START_RECORDING
+adb shell am broadcast -p com.g2cc.g2cc -a com.g2cc.intent.action.START_RECORDING
 # logcat: G2CCIntent: ...START_RECORDING is DEPRECATED since v1.7 — DE dictation is server-initiated...
 ```
 

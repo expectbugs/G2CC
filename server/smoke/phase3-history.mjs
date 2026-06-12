@@ -1,6 +1,7 @@
 // Phase 3 smoke — session history: capture API round-trip + all three History
 // levels compose under the wall budget. Self-cleaning (synthetic conversation
 // deleted at the end; turns cascade).
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { ensureConversation, recordTurn, listConversations, listTurns, getTurn } from '../dist/history.js'
 import { composeScene, paginateText, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'

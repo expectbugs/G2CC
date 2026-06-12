@@ -12,15 +12,19 @@
 // are logged loudly — a misfire should be visible in the server log.
 
 import { appendFile, mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 
 export type Intent =
   | { kind: 'timer'; minutes: number; label: string }
   | { kind: 'note'; text: string }
 
-const NOTES_DIR = join(homedir(), 'notes')
-const NOTES_FILE = join(NOTES_DIR, 'glasses-inbox.md')
+// G2CC_NOTES_FILE override exists for the SMOKE SUITE ONLY (review
+// 2026-06-11b: phase6 used to append to + filter-rewrite Adam's REAL inbox —
+// a concurrent live note could be dropped by the rewrite). Production never
+// sets it.
+const NOTES_FILE = process.env.G2CC_NOTES_FILE ?? join(homedir(), 'notes', 'glasses-inbox.md')
+const NOTES_DIR = dirname(NOTES_FILE)
 
 /** Small spoken-number map — Parakeet sometimes emits words, not digits.
  *  Unknown words simply fail the parse (→ normal Aria prompt; safe). */

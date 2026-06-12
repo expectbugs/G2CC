@@ -2,6 +2,7 @@
 // with a scene-capturing context: title flash, awake overlay, queue-behind-
 // overlay, queue-behind-dictation + flush, blanked popup (10s rule, here
 // shortened), newest-wins, double-tap wake, seen-marking. Self-cleaning.
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { WindowManager, setBlankPopupMsForSmoke } from '../dist/os-windows.js'
 import { notify } from '../dist/os-notify.js'

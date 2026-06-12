@@ -2,14 +2,18 @@
 // (Adam's real ~/.rpg save is never touched), chess vs Stockfish scripted
 // exchange (new game → e4 → engine reply; illegal move loud-fails), board
 // render through the shared splitter, tiles compose for parity.
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { chessMove, renderBoard } from '../dist/games.js'
 import { composeScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
 
+// self-anchored (review 2026-06-11b: process.cwd() broke run-from-anywhere)
+const here = dirname(fileURLToPath(import.meta.url))
 const EMIT = process.argv.includes('--emit-scene')
 if (EMIT) console.log = (...a) => console.error(...a)
 
@@ -17,7 +21,7 @@ if (EMIT) console.log = (...a) => console.error(...a)
 const sandbox = mkdtempSync(join(tmpdir(), 'g2cc-rpg-smoke-'))
 try {
   const code = `
-    import { rpgRun } from '${join(process.cwd(), 'server', 'dist', 'games.js').replace(/\\/g, '/')}'
+    import { rpgRun } from '${join(here, '..', 'dist', 'games.js').replace(/\\/g, '/')}'
     const stat = await rpgRun(['stat'], process.env.HOME)
     const ls = await rpgRun(['ls'], process.env.HOME)
     const battle = await rpgRun(['battle'], process.env.HOME)

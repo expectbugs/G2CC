@@ -4,6 +4,62 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-11 r14 — **Review #4 remediation: 8-agent post-batch sweep, ~45 verified fixes (server + APK v1.8)**
+
+The full record lives in `docs/CODE_REVIEW_2026-06-11b.md` (findings, rejections, and
+the open-question batch for Adam). Every agent finding was personally re-verified against
+source before any fix. The WHY-highlights, by lesson:
+
+**The recurring shapes struck again, in fresh code.** The Phases 1–11 batch reproduced
+exactly the bug classes the per-phase work had just fixed elsewhere: a register-after-await
+without an identity re-check (SessionLevel respawn/open — the watchdog had the guard, its
+twin didn't → immortal zombie CC + silently dropped --resume on an options double-tap); an
+awaited render without the stale-swap token (Files image viewer — charts and boards had
+it); a browse level without the focus flip (chess-moves — Files tree had it); a state flag
+cleared at REQUEST time instead of COMPLETION (Interrupt → the second-mid-turn-message CC
+killer the queue exists to prevent); and a copy that dropped its template's guard
+(AriaWindow.onMenuSelect lost CcWindow's level gate → Main→Ask = hot mic under a browse
+view, found by three agents independently). Lesson re-learned: when a pattern is
+load-bearing, grep for every sibling at fix time, not at the next review.
+
+**Tests must not share state with production.** The smoke suite — THE regression gate,
+run after every server change — operated on the live `g2cc` DB: phase6/phase9 ARMED real
+timers in the test process (a due timer fired there; the glasses never saw it), smoke
+rows flashed onto the live chrome, and cleanup could delete a real battery alert. The
+suite now runs in `g2cc_smoke` via a mandatory `_env.mjs` preamble (store/intents honor
+G2CC_PG_DATABASE/G2CC_NOTES_FILE — test-only knobs, production never sets them).
+
+**Two mirrors of one rule diverged.** scene_to_png still measured list items in UTF-16
+"per the client" while the same review had flipped the client to UTF-8 bytes — the
+offline checker passed exactly the scenes the client rejects. When two agents mirror a
+contract toward each other, one of them must cite the OTHER side's line, not its memory.
+
+**Silent-window hunts paid off**: calendar all-day events vanished from the agenda at
+exactly noon on their day (12 h lookback vs midnight-anchored rows — and all-day events
+deliberately have no reminder, so after noon they surfaced NOWHERE); the chess board's
+file letters rendered 100% below the canvas (empirically zero ink rows — nobody noticed
+because the board looks complete without them); NotifyListener's re-post debounce never
+suppressed anything (postTime inside the stamp it was supposed to transcend).
+
+**Client (APK v1.8, staged — NOT installed; v1.6/v1.7 stay wire-compatible):** BLE
+notify-thread crash via unvalidated varint lengths (the decodeHubAck class, one exception
+type over); BT-toggle recovery (adapter-state receiver + `_connecting` release + no more
+client-pair stacking); BootReceiver re-registered AND rewritten (it was triply dead);
+incoming-call popups un-filtered (CallStyle is ongoing — both gates dropped it; [U]
+hardware-unverified); setText wall-check ordering; IMAGE_PARK_STALE_MS 3→8 s (the
+in-tree ~6 s empirical ack-pause note contradicted it; conservative direction);
+DJI-by-name preference on the SCO path; the raw NUL byte that made git treat
+NotifyListener.kt as a binary file. Gradle 226/226; server smoke 11/11; server restarted
+clean. APK staging moved to `~/.g2cc/g2cc-harness.apk` (/tmp is wiped every boot).
+
+**2026-06-12 follow-up (Adam's gate answers, all four resolved):** late calendar
+reminders implemented per his "yes" — the missed-reminder branch now fires a `(late)`
+timer-priority popup, however late (the timers analog, no invented cutoff; body says how
+late), smoke-pinned in phase10; the smaller-board-with-labels stays; the call popup waits
+on his on-glass test; the 8 s park-stale constant is approved.
+
+---
+
 ## (unstamped) — 2026-06-11 r13 — **Upgrades Phase 11: Games — rpg-cli + chess vs Stockfish (server-only)**
 
 **rpg-cli** (B9-verified in a sandbox FIRST: save lives at `$HOME/.rpg/data` ONLY —

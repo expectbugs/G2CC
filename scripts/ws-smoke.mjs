@@ -18,10 +18,14 @@ const ws = new WebSocket(URL)
 const seen = []
 const fired = new Set()
 
-function waitFor(predicate, label) {
+function waitFor(predicate, label, fromIndex = 0) {
+  // fromIndex: only match messages at/after this index — without it a second
+  // waitFor for the same message TYPE was satisfied by the FIRST occurrence
+  // already in `seen` (the "auto-pushed after target select" assertion was
+  // vacuous; review 2026-06-11b).
   return new Promise((resolve, reject) => {
     const tick = () => {
-      const idx = seen.findIndex(m => predicate(m))
+      const idx = seen.findIndex((m, i) => i >= fromIndex && predicate(m))
       if (idx >= 0) {
         if (!fired.has(label)) {
           fired.add(label)
@@ -77,10 +81,12 @@ ws.on('open', async () => {
       'directory_list_reply contains /home/user/aria',
     )
 
+    const beforeSelect = seen.length   // only a reply AFTER this point counts
     ws.send(JSON.stringify({ type: 'dispatch_target_select', targetId: 'cc' }))
     await waitFor(
       m => m.type === 'dispatch_target_set' && m.targetId === 'cc' && m.flow === 'directory-picker',
       'dispatch_target_set cc/directory-picker',
+      beforeSelect,
     )
     // Selecting target='cc' with flow='directory-picker' also pushes the directory list.
     await waitFor(
@@ -88,6 +94,7 @@ ws.on('open', async () => {
         && Array.isArray(m.entries)
         && m.entries.length > 0,
       'directory_list_reply auto-pushed after target select',
+      beforeSelect,
     )
 
     console.log('all expectations satisfied — closing')

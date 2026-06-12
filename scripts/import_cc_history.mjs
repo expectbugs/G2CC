@@ -11,7 +11,10 @@
 //     (the DIRNAME is ambiguous: '-home-user-aria-notes' could be two paths)
 // Everything else is skipped and COUNTED — the summary prints exactly what was
 // left behind. Idempotent: turns carry source_uuid with a unique index +
-// ON CONFLICT DO NOTHING; conversations dedupe on cc_session_id.
+// ON CONFLICT DO NOTHING; conversations dedupe on cc_session_id; conversations
+// that contain LIVE-CAPTURED turns (NULL source_uuid — recordTurn has no
+// uuids) are skipped whole on re-runs, since the session file also contains
+// that content under uuids and would duplicate it (review 2026-06-11b).
 //
 // Usage: node scripts/import_cc_history.mjs [--dry-run]
 import { readdirSync, readFileSync } from 'node:fs'
@@ -126,13 +129,33 @@ for (const dir of dirs) {
          ON CONFLICT (cc_session_id) DO NOTHING RETURNING id`,
         [parsed.projectPath, sessionId, parsed.startedAt])
       let convId
+      let reused = false
       if (ins.rowCount) { convId = ins.rows[0].id; convsNew++ }
       else {
         const sel = await client.query('SELECT id FROM conversations WHERE cc_session_id = $1', [sessionId])
         convId = sel.rows[0].id
         convsReused++
+        reused = true
+      }
+      // RE-RUN SAFETY (review 2026-06-11b): live capture (recordTurn) writes
+      // turns with source_uuid NULL, and the unique index is NULLS-DISTINCT —
+      // so a conversation that has live-captured turns would receive uuid'd
+      // SECOND COPIES of that same content from the session file (CC keeps
+      // appending to the file the live session also wrote). Skip those
+      // conversations whole, loudly. Null-uuid FILE turns are likewise
+      // re-insertable every run — skip them on reuse, count them.
+      if (reused) {
+        const live = await client.query(
+          'SELECT count(*) AS n FROM turns WHERE conversation_id = $1 AND source_uuid IS NULL', [convId])
+        if (Number(live.rows[0].n) > 0) {
+          console.warn(`  ~ ${dir.name}/${f}: conversation ${convId} has ${live.rows[0].n} live-captured turn(s) (NULL source_uuid) — skipped to avoid duplicating them`)
+          await client.query('ROLLBACK')
+          skip('live-captured-conversation')
+          continue
+        }
       }
       for (const t of parsed.turns) {
+        if (t.uuid === null && reused) { skip('null-uuid-on-rerun'); continue }
         const r = await client.query(
           `INSERT INTO turns (conversation_id, kind, text, tool_calls, model, source_uuid, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, now()))
@@ -144,7 +167,7 @@ for (const dir of dirs) {
       }
       await client.query('COMMIT')
     } catch (e) {
-      await client.query('ROLLBACK').catch(() => {})
+      await client.query('ROLLBACK').catch((re) => console.error(`  ! rollback also failed: ${re.message}`))
       console.error(`  ! import failed for ${dir.name}/${f}: ${e.message}`)
       skip('file-import-error')
     } finally {

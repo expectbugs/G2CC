@@ -140,8 +140,13 @@ export async function listTurns(
 ): Promise<{ total: number; rows: TurnRow[] }> {
   const total = await query<{ n: string }>(
     'SELECT count(*) AS n FROM turns WHERE conversation_id = $1', [conversationId])
+  // left(text, 200) — not 80 (review 2026-06-11b): the on-glass row trims to
+  // ~34 chars via oneLine() AFTER whitespace-collapse, and a whitespace-heavy
+  // first 80 chars could flatten below the row width, hiding that a cut
+  // happened. 200 raw chars always survives collapse past the row clamp, so
+  // oneLine's visible '…' is the single trim marker.
   const rows = await query<{ id: string; kind: TurnKind; preview: string; created_at: Date }>(
-    `SELECT id, kind, left(text, 80) AS preview, created_at
+    `SELECT id, kind, left(text, 200) AS preview, created_at
      FROM turns WHERE conversation_id = $1
      ORDER BY created_at, id
      LIMIT $2 OFFSET $3`,

@@ -45,6 +45,10 @@ function stripInline(s: string): string {
     .replace(/\*\*([^]+?)\*\*/g, '$1')
     .replace(/\*(\S(?:[^*]*?\S)?)\*/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
+    // Images BEFORE links (review 2026-06-11b): without an image rule the link
+    // rule matched the `[alt](url)` substring of `![alt](url)` and left a
+    // stray `!alt` in the rendered paragraph. Same balanced-paren URL shape.
+    .replace(/!\[([^\]]*)\]\([^()]*(?:\([^()]*\)[^()]*)*\)/g, '[$1]')
     .replace(/\[([^\]]+)\]\([^()]*(?:\([^()]*\)[^()]*)*\)/g, '$1')
 }
 

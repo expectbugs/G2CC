@@ -28,10 +28,14 @@ def main():
     w = int(req["width"]) & ~1
     h = int(req["height"]) & ~1
 
-    sq = min((w - 18) // 8, (h - 4) // 8)  # leave margin for coords
+    # Margins: 18 px horizontal for the rank digits, 16 px VERTICAL for the
+    # file letters (review 2026-06-11b: the old 4 px bottom margin drew the
+    # a-h labels at y=220..231 on a 222 px canvas — 100% invisible, verified
+    # empirically with PIL; an 11 px label row needs real room).
+    sq = min((w - 18) // 8, (h - 16) // 8)
     bw = sq * 8
     ox = (w - bw) // 2 + 7                  # nudge right of the rank labels
-    oy = (h - bw) // 2
+    oy = max(2, (h - bw - 13) // 2)         # bias up so the label row fits below
 
     img = Image.new("L", (w, h), 0)
     d = ImageDraw.Draw(img)
@@ -53,9 +57,10 @@ def main():
                 gw, gh = bbox[2] - bbox[0], bbox[3] - bbox[1]
                 d.text((x0 + (sq - gw) / 2 - bbox[0], y0 + (sq - gh) / 2 - bbox[1]), glyph,
                        font=piece_font, fill=g(15))
+    label_y = min(oy + bw + 2, h - 13)  # keep the 11 px glyph row fully on-canvas
     for i in range(8):
         d.text((ox - 9, oy + (7 - i) * sq + sq / 2 - 6), str(i + 1), font=coord_font, fill=g(9))
-        d.text((ox + i * sq + sq / 2 - 3, oy + bw + 1), chr(ord("a") + i), font=coord_font, fill=g(9))
+        d.text((ox + i * sq + sq / 2 - 3, label_y), chr(ord("a") + i), font=coord_font, fill=g(9))
 
     gray4 = img.point(lambda v: v * 15 // 255)
     sys.stdout.buffer.write(struct.pack("<HH", w, h))

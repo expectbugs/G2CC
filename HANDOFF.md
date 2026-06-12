@@ -36,14 +36,18 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
 - **Server**: the DE — window manager, compositor, content pipeline, CC-subprocess
   bridge, Postgres store (`g2cc` DB, unix-socket peer auth), notification hub, timers,
   calendar sync, games glue. Running on `:7300` (restart procedure below).
-- **Android client: APK v1.7 BUILT + STAGED at `/tmp/g2cc-harness.apk`** — check
+- **Android client: APK v1.8 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
+  /tmp is wiped every boot; a legacy /tmp copy also exists) — check
   `os/OsLayout.OS_VERSION` on the connect splash for what's actually installed; Adam
   installs from `http://100.107.139.121:7300/setup`. **The on-glass verification batch
   for the whole upgrade is still PENDING** (checklist in UPGRADE_PROGRESS.md / the
   2026-06-11 session log). v1.7: Connect → auto server mode (Test/Server buttons gone),
   NotificationListener mirroring (read-only; one-time Settings grant via the new harness
-  row), phone battery on the heartbeat. The server half is additive-optional — v1.6
-  keeps working until he installs.
+  row), phone battery on the heartbeat. **v1.8 (review #4 — docs/CODE_REVIEW_2026-06-11b.md):
+  BLE notify-thread crash fix, BT-toggle recovery, BootReceiver restored (auto-start after
+  reboot/update), incoming-call popups un-filtered [U], NotifyListener dedup fixed, park
+  stale 3→8 s.** The server half is additive-optional — v1.6 keeps working until he installs.
+  Add the ringing-phone call-popup check to the on-glass batch.
 - **The TEN windows** (`server/src/os-windows.ts`): **Main** (live dashboard: host/pool/
   battery/unseen/next-timer + one summary line per window; menu = switcher + `Ask`) ·
   **Aria** (CC subprocess @ ~/aria, `server/prompts/aria-g2.md` display prompt; the Ask
@@ -156,7 +160,8 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   pipeline incl. ```chart) · `docs/GLASSES_OS.md` (architecture/vision) ·
   `docs/HAT_BRIDGE_SPEC.md` · `docs/SIM_TOOLING.md` · `docs/HOLDS.md` (old deferral
   catalog — superseded by upgrades.md; C3/C4/C5 resolved 2026-06-11) ·
-  `docs/CODE_REVIEW_2026-06-11.md` · `CHANGELOG.md` (the WHY of every change) ·
+  `docs/CODE_REVIEW_2026-06-11.md` · `docs/CODE_REVIEW_2026-06-11b.md` (review #4 — incl.
+  the OPEN QUESTIONS batch for Adam) · `CHANGELOG.md` (the WHY of every change) ·
   `UPGRADE_PROGRESS.md` (the batch record + Adam's gate answers).
 - **Server (`server/src/`):** `os-windows.ts` (WM + the ten windows + SessionLevel/
   HistoryLevel — the heart, ~2.9k lines) · `os-compose.ts` (WinView→WireScene; budgets/
@@ -182,8 +187,10 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   (PING live; rest deprecated-with-log). Parked, not in manifest: ProbeActivity,
   G2Pipeline, G2CCService, hud/*.
 - **Verification:** `server/smoke/run-all.mjs` — 11 scripts, THE regression suite; run it
-  after every server change (some need Postgres up; phase9-wire spawns a hermetic server
-  on :7399; phase10 hits the real Google Calendar read-only). `scripts/scene_to_png.py`
+  after every server change. **ISOLATED since review #4: everything store-backed runs in
+  the `g2cc_smoke` DB + a temp notes file (`server/smoke/_env.mjs` preamble — never the
+  production g2cc DB, which the suite used to pollute/consume timers from); phase9-wire
+  spawns a hermetic server on :7399; phase10 hits the real Google Calendar read-only.** `scripts/scene_to_png.py`
   for new compose surfaces. Android: `gradlew testDebugUnitTest` must stay green.
 
 ## Build / deploy / restart
@@ -197,7 +204,7 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
 - **Android (only when the client changes):** `JAVA_HOME=/opt/openjdk-bin-17
   ANDROID_HOME=/opt/android-sdk ./android/gradlew -p android testDebugUnitTest
   assembleDebug` → bump `OsLayout.OS_VERSION` → `cp android/app/build/outputs/apk/debug/
-  app-debug.apk /tmp/g2cc-harness.apk` → Adam installs from
+  app-debug.apk ~/.g2cc/g2cc-harness.apk` (durable; /tmp is wiped on boot) → Adam installs from
   `http://100.107.139.121:7300/setup`. Client diag → `/tmp/g2cc-harness-diag.log`.
 - **Postgres:** DB `g2cc`, role `user`, unix-socket peer auth; OpenRC service
   `postgresql-17`. CAUTION: stopping it also stops the dependent `n8n` service and

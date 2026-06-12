@@ -2,6 +2,7 @@
 // (text first, charts strictly after), real matplotlib render through the
 // shared gray4 splitter, promise-cache dedupe, malformed-spec loud failure
 // (without poisoning the cache), and a composed tiles page for parity.
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { parseMarkdown, splitDocForPages, renderChart } from '../dist/os-content.js'
 import { composeScene, paginateText, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'

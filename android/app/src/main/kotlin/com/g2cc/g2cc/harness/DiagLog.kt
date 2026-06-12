@@ -36,14 +36,20 @@ object DiagLog {
 
     private val queue = ConcurrentLinkedQueue<String>()
     private val seq = AtomicInteger(0)
-    private val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    // ThreadLocal (review 2026-06-11b): log() runs on main, OkHttp socket
+    // threads, the BLE notify thread and the mic IO thread — SimpleDateFormat
+    // is NOT thread-safe (garbled timestamps; rare AIOOBE that would propagate
+    // into whatever callback was logging).
+    private val fmt = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue() = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    }
     private val http = OkHttpClient()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val url = "http://${BuildConfig.SERVER_HOST}:${BuildConfig.SERVER_PORT}/diag"
     private var pump: Job? = null
 
     fun log(tag: String, msg: String) {
-        val line = "${fmt.format(Date())} #${seq.incrementAndGet()} [$tag] $msg"
+        val line = "${fmt.get()!!.format(Date())} #${seq.incrementAndGet()} [$tag] $msg"
         Log.i(TAG, line)
         if (enabled) queue.add(line)
     }

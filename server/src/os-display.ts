@@ -168,7 +168,17 @@ export function gImageScene(frame: number): WireScene {
   return { regions: [antRegion(), { id: 20, name: 'gimg', x: GIMG.x, y: GIMG.y, w: GIMG.w, h: GIMG.h, kind: 'image', content: { kind: 'image', bmpBase64: b } }] }
 }
 
-/** Loud, visible fallback if rasterization fails — never a silent blank. */
+/** Loud, visible fallback if rasterization fails — never a silent blank.
+ *  The message is BOUNDED (review 2026-06-11b): an unbounded Python traceback
+ *  pushed the frame past the ~1000 B multi-packet wall, so the "never a silent
+ *  blank" scene was itself client-rejected into a silent blank. ~700 B of
+ *  message + chrome stays well under the wall; the full error is in the
+ *  server log. (Dormant today — osScreen never leaves 'de' — but this stays
+ *  wired for probe re-runs.) */
 export function errorScene(message: string): WireScene {
-  return { regions: [{ id: 40, name: 'err', x: 0, y: OS_CONTENT_Y, w: SCREEN_WIDTH, h: 200, kind: 'text', content: { kind: 'text', text: `probe error:\n${message}`, scroll: true } }] }
+  const cap = 700
+  const text = message.length > cap
+    ? `probe error:\n${message.slice(0, cap)}\n… (truncated — full error in the server log)`
+    : `probe error:\n${message}`
+  return { regions: [{ id: 40, name: 'err', x: 0, y: OS_CONTENT_Y, w: SCREEN_WIDTH, h: 200, kind: 'text', content: { kind: 'text', text, scroll: true } }] }
 }

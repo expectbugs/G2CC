@@ -1,6 +1,7 @@
 // Phase 6 smoke — timers (arm → fire → notification + DB flag; late-fire on
 // re-arm; re-arm idempotence; create/cancel) + the dictation intent regex
 // cases + note capture round-trip. Self-cleaning.
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { readFile, writeFile, unlink, stat } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -64,18 +65,19 @@ try {
   assert.equal(await cancelTimer(t.id), false, 'double cancel reports honestly')
   console.error('  4. create/cancel round-trip ✓')
 
-  // --- 5. note capture (REAL file; surgically cleaned) ---
-  const notesFile = join(homedir(), 'notes', 'glasses-inbox.md')
-  const existedBefore = await stat(notesFile).then(() => true, () => false)
+  // --- 5. note capture (the _env.mjs-pointed TEMP file — never Adam's real
+  // inbox: the old filter-rewrite cleanup could drop a concurrently-appended
+  // live note, and a failed assert left the marker behind; review 2026-06-11b) ---
+  const notesFile = process.env.G2CC_NOTES_FILE
+  assert.ok(notesFile && notesFile !== join(homedir(), 'notes', 'glasses-inbox.md'),
+    '_env.mjs must point G2CC_NOTES_FILE away from the real inbox')
   const marker = `smoke-note-${process.pid} (safe to delete)`
   await appendNote(marker)
   const content = await readFile(notesFile, 'utf8')
   assert.ok(content.includes(marker), 'note line landed')
   assert.match(content, /- \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] smoke-note/, 'timestamped format')
-  const remaining = content.split('\n').filter((l) => !l.includes(marker)).join('\n')
-  if (!existedBefore && remaining.trim() === '') await unlink(notesFile)
-  else await writeFile(notesFile, remaining, 'utf8')
-  console.error('  5. note capture → ~/notes/glasses-inbox.md (cleaned) ✓')
+  await unlink(notesFile).catch(() => { /* temp file; best-effort */ })
+  console.error(`  5. note capture → ${notesFile} (temp, removed) ✓`)
 
   console.log('phase6-timers: ALL OK')
 } finally {

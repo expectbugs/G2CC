@@ -1,6 +1,7 @@
 // Phase 2 smoke — Postgres store foundation: migration runner + insert/read
 // round-trip through the one query() door. Cleans up after itself so reruns
 // stay idempotent (scratch table + its migration row are dropped at the end).
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { registerMigration, ensureMigrated, query, getPool } from '../dist/store.js'
 

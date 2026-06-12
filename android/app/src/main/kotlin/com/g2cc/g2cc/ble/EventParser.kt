@@ -228,10 +228,11 @@ object EventParser {
      *  carries f6). Falls back to Unknown if the prefix doesn't match. */
     private fun decodeHubAck(payload: ByteArray): Event = try {
         decodeHubAckInner(payload)
-    } catch (e: IllegalArgumentException) {
+    } catch (e: Exception) {
         // Same never-throw contract as the sibling decoders (review 2026-06-11): a
         // CRC-valid-but-truncated varint here propagated out of parse() into the BLE
-        // notify callback and killed the process.
+        // notify callback and killed the process. Exception (not just IAE) since
+        // 2026-06-11b — index errors are not IAE.
         Event.Malformed("hub-ack: ${e.message}", payload.toHex())
     }
 
@@ -279,7 +280,7 @@ object EventParser {
                 0x1A -> decodeHubGesture(f13, payload.toHex())     // f13.f3 = gesture
                 else -> Event.Unknown(svc, payload.toHex())
             }
-        } catch (e: IllegalArgumentException) {
+        } catch (e: Exception) {
             Event.Malformed("hub input: ${e.message}", payload.toHex())
         }
     }
@@ -300,7 +301,13 @@ object EventParser {
                     0x08 -> { val (_, u) = Varint.decode(sub, i); i += u }   // f1 containerId (ignored)
                     0x12 -> {                                                 // f2 widgetType string
                         val (len, u) = Varint.decode(sub, i); i += u
-                        if (i + len > sub.size) return Event.Malformed("hub select: name overruns", rawHex)
+                        // len can be NEGATIVE or huge (a 5-byte varint keeps only the
+                        // low 32 bits) — `i + len > sub.size` passes for both via sign
+                        // or overflow, and String(sub, i, len) then throws
+                        // StringIndexOutOfBounds PAST the IAE-only catch, killing the
+                        // BLE notify thread (review 2026-06-11b — the decodeHubAck
+                        // crash class, one exception type over).
+                        if (len < 0 || len > sub.size - i) return Event.Malformed("hub select: name overruns", rawHex)
                         widgetType = String(sub, i, len, Charsets.UTF_8); i += len
                     }
                     0x20 -> { val (v, u) = Varint.decode(sub, i); i += u; index = v }  // f4 index
@@ -309,7 +316,9 @@ object EventParser {
             }
             if (widgetType != null) Event.HubSelect(widgetType, index)
             else Event.Malformed("hub select: no widgetType", rawHex)
-        } catch (e: IllegalArgumentException) {
+        } catch (e: Exception) {
+            // Exception, not just IAE — malformed frames become Event.Malformed,
+            // they never throw past parse() (review 2026-06-11b).
             Event.Malformed("hub select: ${e.message}", rawHex)
         }
     }
@@ -325,7 +334,7 @@ object EventParser {
             if (sub.isEmpty() || sub[0] != 0x08.toByte()) return Event.HubGesture(-1)
             val (code, _) = Varint.decode(sub, 1)
             Event.HubGesture(code)
-        } catch (e: IllegalArgumentException) {
+        } catch (e: Exception) {
             Event.Malformed("hub gesture: ${e.message}", rawHex)
         }
     }
@@ -349,7 +358,8 @@ object EventParser {
                     0x08 -> { val (v, u) = Varint.decode(sub, i); i += u; containerId = v }   // f1 containerId
                     0x12 -> {                                                                  // f2 name string
                         val (len, u) = Varint.decode(sub, i); i += u
-                        if (i + len > sub.size) return Event.Malformed("hub focus: name overruns", rawHex)
+                        // Same negative/overflow guard as decodeHubSelection (review 2026-06-11b).
+                        if (len < 0 || len > sub.size - i) return Event.Malformed("hub focus: name overruns", rawHex)
                         name = String(sub, i, len, Charsets.UTF_8); i += len
                     }
                     0x18 -> { val (v, u) = Varint.decode(sub, i); i += u; f3 = v }             // f3 direction/state
@@ -358,7 +368,7 @@ object EventParser {
             }
             if (name != null) Event.HubFocus(containerId, name, f3)
             else Event.Malformed("hub focus: no name", rawHex)
-        } catch (e: IllegalArgumentException) {
+        } catch (e: Exception) {
             Event.Malformed("hub focus: ${e.message}", rawHex)
         }
     }

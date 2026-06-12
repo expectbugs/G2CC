@@ -14,6 +14,8 @@
 import Fastify from 'fastify'
 import websocket from '@fastify/websocket'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { loadConfig } from './config.js'
 import { startDiscovery, stopDiscovery } from './discovery.js'
 import { handleConnection, setWatchdog } from './ws-handler.js'
@@ -26,6 +28,17 @@ import { armTimersFromDb } from './timers.js'
 import { startCalendarSync } from './calendar.js'
 
 const VERSION = '0.0.1'
+
+// Loud-not-fatal backstop (review 2026-06-11b): Node's default for an
+// unhandled rejection is PROCESS EXIT — for the all-day DE that means a dark
+// display at the factory over one missed `.catch`. Every instance logged here
+// is a bug to fix (fire-and-forget paths must carry their own catches); this
+// just converts "server death" into a LOUD log. uncaughtException keeps the
+// default crash (state is untrustworthy after one).
+process.on('unhandledRejection', (reason) => {
+  console.error('[g2cc-server] UNHANDLED REJECTION (bug — a fire-and-forget path is missing its .catch):',
+    reason instanceof Error ? reason.stack ?? reason.message : reason)
+})
 
 const config = loadConfig()
 const watchdogInstance = new Watchdog()
@@ -90,7 +103,11 @@ server.post('/diag', async (req, reply) => {
 // Harness APK download — token-gated (the APK has the auth token baked in, so it must NOT be
 // served publicly; this keeps it inside the same Tailscale/LAN trust boundary as /setup).
 // Linked from /setup. Token via ?token= (matches the setup-page link) or Authorization: Bearer.
-const APK_PATH = '/tmp/g2cc-harness.apk'
+// Staged under ~/.g2cc (review 2026-06-11b): /tmp is wiped on every boot
+// (bootmisc wipe_tmp=YES), so a reboot before Adam installed silently expired
+// the staged build. /tmp kept as a fallback for older build instructions.
+const APK_PATH = join(homedir(), '.g2cc', 'g2cc-harness.apk')
+const APK_PATH_LEGACY = '/tmp/g2cc-harness.apk'
 server.get('/apk', async (req, reply) => {
   const token = (req.query as { token?: string } | undefined)?.token
   const bearer = req.headers.authorization
@@ -98,15 +115,16 @@ server.get('/apk', async (req, reply) => {
     reply.code(401).send({ error: 'unauthorized' })
     return
   }
-  if (!existsSync(APK_PATH)) {
-    reply.code(404).send({ error: 'harness APK not present on server' })
+  const path = existsSync(APK_PATH) ? APK_PATH : APK_PATH_LEGACY
+  if (!existsSync(path)) {
+    reply.code(404).send({ error: 'harness APK not present on server (rebuild + stage to ~/.g2cc/g2cc-harness.apk)' })
     return
   }
   // readFileSync (Buffer) so Fastify sets Content-Length and sends the whole file. NOTE: a streamed
   // reply in this async handler sent 0 bytes (content-length:0) → browsers reported "download
   // failed" with no reason. The ~17 MB sync read is a few ms on a rare manual download — not worth a
   // streaming regression. (Review finding #apk-readFileSync intentionally NOT applied; see HANDOFF.)
-  const apk = readFileSync(APK_PATH)
+  const apk = readFileSync(path)
   reply
     .type('application/vnd.android.package-archive')
     .header('Content-Disposition', 'attachment; filename="g2cc-harness.apk"')
@@ -144,8 +162,18 @@ try {
   // loudly and every store feature lazily retries; the server must not care.
   warmStore()
   // Re-arm durable timers (crash-safe; misses fire immediately as "(late)").
-  void armTimersFromDb().catch((e: unknown) =>
-    console.error(`[timers] startup re-arm failed (will affect only pre-existing timers): ${e instanceof Error ? e.message : String(e)}`))
+  // RETRIES until it succeeds (review 2026-06-11b): the old one-shot meant a
+  // Postgres that was down AT BOOT left every pre-existing timer dormant until
+  // the next restart, even after the store self-healed. 60 s = supervision
+  // cadence; armOne() is re-arm-idempotent and fire() is atomically guarded,
+  // so a retry can never double-fire.
+  const armTimers = (attempt: number): void => {
+    void armTimersFromDb().catch((e: unknown) => {
+      console.error(`[timers] startup re-arm failed (attempt ${attempt}; retrying in 60 s — pre-existing timers stay dormant until this succeeds): ${e instanceof Error ? e.message : String(e)}`)
+      setTimeout(() => armTimers(attempt + 1), 60_000)
+    })
+  }
+  armTimers(1)
   // Google Calendar sync (15-min pacing) + the 60 s reminder tick (Phase 10).
   startCalendarSync()
 } catch (err) {

@@ -138,13 +138,33 @@ export function loadConfig(): G2CCConfig {
   }
   const defaults = defaultConfig()
 
-  return {
+  const merged: G2CCConfig = {
     ...defaults,
     ...saved,
     stt: { ...defaults.stt, ...(saved.stt ?? {}) },
     claude: { ...defaults.claude, ...(saved.claude ?? {}) },
     notifications: { ...defaults.notifications, ...(saved.notifications ?? {}) },
   }
+
+  // authToken stability (review 2026-06-11b): defaultConfig() mints a FRESH
+  // random token per call, so a config.json missing authToken silently rotated
+  // the token on every restart — the paired phone failed auth with zero hints.
+  // Persist the generated one (self-healing, mirrors first-run) and say so.
+  if (typeof saved.authToken !== 'string' || !saved.authToken) {
+    console.error(`[config] ${CONFIG_PATH} has NO authToken — generated a new one and SAVED it back. The phone/APK must re-pair via /setup (their baked token no longer matches).`)
+    saveConfig(merged)
+  }
+  // Light shape validation — wrong types here used to surface as confusing
+  // failures deep in browse rendering (review 2026-06-11b).
+  if (!Array.isArray(merged.claude.quickPrompts) || merged.claude.quickPrompts.some((p) => typeof p !== 'string')) {
+    console.error('[config] claude.quickPrompts is not a string array — using defaults')
+    merged.claude.quickPrompts = defaults.claude.quickPrompts
+  }
+  if (typeof merged.notifications.packageMap !== 'object' || merged.notifications.packageMap === null || Array.isArray(merged.notifications.packageMap)) {
+    console.error('[config] notifications.packageMap is not an object — using defaults')
+    merged.notifications.packageMap = defaults.notifications.packageMap
+  }
+  return merged
 }
 
 export function saveConfig(config: G2CCConfig): void {

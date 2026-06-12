@@ -2,6 +2,7 @@
 // as a text dashboard (no tiles, no python), composeScene with empty tabs
 // skips the tabs region, status spans the full width, and the frame estimate
 // DROPS vs the old tabbed equivalent.
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { WindowManager } from '../dist/os-windows.js'
 import { composeScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'

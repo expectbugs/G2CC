@@ -11,6 +11,8 @@ import { SCROLLBACK_MAX_LINES, PAGE_CHAR_TARGET } from '@g2cc/shared'
 
 export class ScrollbackBuffer {
   private lines: string[] = []
+  private hasMarker = false
+  private droppedTotal = 0
 
   append(text: string): void {
     const newLines = text.split('\n')
@@ -18,14 +20,23 @@ export class ScrollbackBuffer {
     if (this.lines.length > SCROLLBACK_MAX_LINES) {
       // Loud trim (review 2026-06-11): silent oldest-line drops violated the
       // no-truncation rule — leave a visible marker where history was cut.
-      const dropped = this.lines.length - SCROLLBACK_MAX_LINES
-      this.lines = this.lines.slice(-SCROLLBACK_MAX_LINES)
-      this.lines[0] = `[… ${dropped} earlier line${dropped === 1 ? '' : 's'} dropped — scrollback cap ${SCROLLBACK_MAX_LINES} …]`
+      // The marker takes its OWN slot (review 2026-06-11b: overwriting
+      // lines[0] destroyed one retained line and under-counted by one);
+      // droppedTotal is cumulative across trims, the previous marker line
+      // excluded from the count.
+      const keep = SCROLLBACK_MAX_LINES - 1
+      const removed = this.lines.length - keep
+      this.droppedTotal += removed - (this.hasMarker ? 1 : 0)
+      this.lines = this.lines.slice(-keep)
+      this.lines.unshift(`[… ${this.droppedTotal} earlier line${this.droppedTotal === 1 ? '' : 's'} dropped — scrollback cap ${SCROLLBACK_MAX_LINES} …]`)
+      this.hasMarker = true
     }
   }
 
   clear(): void {
     this.lines = []
+    this.hasMarker = false
+    this.droppedTotal = 0
   }
 
   getPage(pageIndex: number): { text: string; page: number; totalPages: number } {

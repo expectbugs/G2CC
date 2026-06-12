@@ -77,10 +77,19 @@ export function notify(evt: {
     .then((id) => {
       console.log(`[notify] ${evt.priority} from ${evt.source}: "${evt.title}" (id=${id ?? 'unpersisted'}${evt.quiet ? ', quiet' : ''})`)
       if (evt.quiet) return
-      notifyHub.emit('notification', {
-        id, source: evt.source, priority: evt.priority, title: evt.title,
-        body: evt.body, ts, targetWindow: evt.targetWindow ?? 'notices',
-      } satisfies NotifyEvent)
+      try {
+        // EventEmitter.emit re-throws listener exceptions SYNCHRONOUSLY — an
+        // uncaught one here would reject this promise, and every caller is
+        // `void notify(…)` trusting the never-rejects contract: one throwing
+        // hub listener would be an unhandled rejection (process exit) and
+        // later-subscribed WMs would never get the event (review 2026-06-11b).
+        notifyHub.emit('notification', {
+          id, source: evt.source, priority: evt.priority, title: evt.title,
+          body: evt.body, ts, targetWindow: evt.targetWindow ?? 'notices',
+        } satisfies NotifyEvent)
+      } catch (e) {
+        console.error(`[notify] a hub listener THREW on (${evt.priority} "${evt.title}") — listener bug, fix it: ${e instanceof Error ? e.stack ?? e.message : String(e)}`)
+      }
     })
 }
 
@@ -89,7 +98,13 @@ export function notify(evt: {
 export async function markSeen(id: number | null): Promise<void> {
   if (id === null) { console.log('[notify] markSeen skipped — event was never persisted'); return }
   await query('UPDATE notifications SET seen_at = now() WHERE id = $1 AND seen_at IS NULL', [id])
-  notifyHub.emit('seen', id)
+  try {
+    notifyHub.emit('seen', id)
+  } catch (e) {
+    // Same contract as notify(): a listener throw must not masquerade as a
+    // markSeen failure in the caller's catch (review 2026-06-11b).
+    console.error(`[notify] a 'seen' hub listener THREW (id=${id}) — listener bug, fix it: ${e instanceof Error ? e.stack ?? e.message : String(e)}`)
+  }
 }
 
 export async function unseenCount(): Promise<number> {

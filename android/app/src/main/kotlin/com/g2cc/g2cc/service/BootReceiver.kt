@@ -4,24 +4,27 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import com.g2cc.g2cc.storage.Prefs
+import com.g2cc.g2cc.BuildConfig
 
-/** Auto-start the G2CC service after device boot or app update.
+/** Auto-start the bridge after device boot or a sideload update.
  *
- *  Triggers:
- *    - BOOT_COMPLETED        normal boot
- *    - MY_PACKAGE_REPLACED   sideload update; restart service immediately
+ *  Re-registered + REWRITTEN for the v1.7+ architecture (review 2026-06-11b):
+ *  the old receiver had silently fallen out of the manifest with the parked
+ *  G2CCService — after ANY reboot the bridge stayed down until Adam opened
+ *  the app (and "system reboot" is a required reconnect scenario, project
+ *  CLAUDE.md). It was also triply dead as written: it gated on Prefs keys the
+ *  BuildConfig flow never writes, started the PARKED G2CCService, and its
+ *  notification deep-linked an Activity that isn't in the manifest. Now:
+ *    - gate = BuildConfig.AUTH_TOKEN (the real config source since v1.6)
+ *    - starts ConnectionService via startAndConnect (the harness's own path);
+ *      connectedDevice-type FGS is allowed from BOOT_COMPLETED — the mic FGS
+ *      type is denied in background and re-granted by the existing
+ *      micFgsGranted retry on the next app-open (dictation until then gets
+ *      the loud audio_request refusal, not silence)
+ *    - the battery-opt re-grant prompt deep-links HarnessActivity
  *
- *  4th-pass review LOW: LOCKED_BOOT_COMPLETED was previously declared in
- *  the manifest filter, but the receiver is `directBootAware="false"` so it
- *  never actually fires for that intent. Removed from both manifest and
- *  here to keep the code honest.
- *
- *  Only auto-starts if the user has already completed setup (server URL +
- *  auth token persisted) AND battery-optimization exemption is granted —
- *  otherwise this would launch a service that fails to connect OR gets
- *  killed by Doze within minutes, and we want LOUD failure points the user
- *  controls. */
+ *  Triggers: BOOT_COMPLETED (normal boot) + MY_PACKAGE_REPLACED (sideload
+ *  update — restart immediately so an install doesn't strand the bridge). */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action
@@ -31,48 +34,40 @@ class BootReceiver : BroadcastReceiver() {
         ) {
             return
         }
-        val prefs = Prefs(context.applicationContext)
-        if (prefs.serverUrl == null || prefs.authToken == null) {
-            Log.i(TAG, "skipping auto-start: setup incomplete")
+        if (BuildConfig.AUTH_TOKEN.isEmpty()) {
+            // A build without harness-secrets.properties can't auth anyway —
+            // starting a service that loops on auth failures helps nobody.
+            Log.w(TAG, "skipping auto-start: no AUTH_TOKEN baked into this build")
             return
         }
-        // 4th-pass review LOW: re-check battery-opt exemption at boot. The
-        // user could have revoked the exemption since setup; auto-starting
-        // a service the OS will Doze-kill in minutes is worse than not
-        // starting at all (no failure surface, user thinks G2CC is broken).
-        //
-        // 4th-pass-final review MEDIUM: don't silently return when revoked.
-        // Post a high-priority notification telling the user to re-grant
-        // — otherwise the app sits dormant after every reboot with no
-        // visible failure surface (defeats LOUD AND PROUD).
+        // Re-check the battery-opt exemption: auto-starting a service the OS
+        // will Doze-kill in minutes is worse than not starting (no failure
+        // surface) — prompt loudly instead (4th-pass review decision, kept).
         if (!com.g2cc.g2cc.setup.BatteryOptimization.isExempt(context.applicationContext)) {
-            Log.w(TAG, "skipping auto-start: battery-opt exemption revoked since setup — posting notification")
+            Log.w(TAG, "skipping auto-start: battery-opt exemption revoked — posting re-grant prompt")
             postBatteryOptRevokedNotification(context.applicationContext)
             return
         }
-        G2CCService.start(context.applicationContext)
+        Log.i(TAG, "auto-starting ConnectionService (connect)")
+        ConnectionService.startAndConnect(context.applicationContext)
     }
 
     private fun postBatteryOptRevokedNotification(context: Context) {
-        // On Android 13+ posting ANY notification requires the runtime
-        // POST_NOTIFICATIONS permission (the FG-service notification is exempt;
-        // this standalone one is NOT). If it's denied, nm.notify() silently
-        // no-ops — which would reproduce the very silent-dormancy this method
-        // exists to prevent. We can't launch an Activity from a background boot
-        // receiver either, so the honest move is to log LOUDLY that the user
-        // won't see the prompt; they'll still discover "not running" next time
-        // they open MainActivity. (Don't pretend we surfaced it.)
+        // POST_NOTIFICATIONS may be denied — nm.notify() would silently no-op,
+        // reproducing the silent dormancy this prompt exists to prevent. We
+        // can't launch an Activity from a boot receiver; log LOUDLY that the
+        // user won't see the prompt (they'll find "not running" in the app).
         if (!androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()) {
             Log.w(
                 TAG,
                 "battery-opt exemption revoked AND notifications are disabled " +
                     "(POST_NOTIFICATIONS denied) — cannot surface the re-grant prompt. " +
-                    "G2CC will stay stopped until the user reopens the app.",
+                    "G2CC stays stopped until the app is reopened.",
             )
             return
         }
         try {
-            val launchIntent = android.content.Intent(context, com.g2cc.g2cc.MainActivity::class.java)
+            val launchIntent = Intent(context, com.g2cc.g2cc.harness.HarnessActivity::class.java)
             val pi = android.app.PendingIntent.getActivity(
                 context, 0, launchIntent,
                 android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
@@ -80,7 +75,7 @@ class BootReceiver : BroadcastReceiver() {
             val notif = androidx.core.app.NotificationCompat.Builder(context, com.g2cc.g2cc.G2CCApp.CHANNEL_ID)
                 .setSmallIcon(com.g2cc.g2cc.R.drawable.ic_notification)
                 .setContentTitle("G2CC: battery optimization re-enabled")
-                .setContentText("Tap to grant exemption — without it, G2CC will be killed by Doze.")
+                .setContentText("Tap to re-grant the exemption — without it Doze kills the bridge.")
                 .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .setContentIntent(pi)

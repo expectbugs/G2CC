@@ -4,6 +4,7 @@
 // (package→priority mapping) + `client_hb` battery ≤15% crossing → rows in
 // the shared notifications table. The LIVE server/glasses never see these
 // (separate process = separate hub). Self-cleaning.
+import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -91,7 +92,20 @@ try {
   ws.close()
   console.log('phase9-wire: ALL OK')
 } finally {
-  child.kill('SIGTERM')
+  // Await the child's actual exit with SIGKILL escalation (review 2026-06-11b:
+  // an unawaited SIGTERM could leak a live throwaway holding :7399 + its DB
+  // timers/calendar intervals). The deletes below land in the smoke DB only
+  // now (_env.mjs) — the old cleanup deleted REAL battery notifications.
+  if (child.exitCode === null) {
+    const gone = new Promise((res) => child.once('exit', res))
+    child.kill('SIGTERM')
+    const killTimer = setTimeout(() => {
+      console.error('  throwaway server ignored SIGTERM for 5 s — SIGKILL')
+      child.kill('SIGKILL')
+    }, 5000)
+    await gone
+    clearTimeout(killTimer)
+  }
   try {
     await query("DELETE FROM notifications WHERE title LIKE 'smoke mail %' OR (source = 'phone' AND title LIKE 'Phone battery %' AND ts > now() - interval '5 minutes')")
   } catch (e) { console.error(`  cleanup failed: ${e.message}`) }
