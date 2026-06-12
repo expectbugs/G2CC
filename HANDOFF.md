@@ -36,7 +36,7 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
 - **Server**: the DE — window manager, compositor, content pipeline, CC-subprocess
   bridge, Postgres store (`g2cc` DB, unix-socket peer auth), notification hub, timers,
   calendar sync, games glue. Running on `:7300` (restart procedure below).
-- **Android client: APK v1.9 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
+- **Android client: APK v1.10 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
   /tmp is wiped every boot; a legacy /tmp copy also exists) — check
   `os/OsLayout.OS_VERSION` on the connect splash for what's actually installed; Adam
   installs from `http://100.107.139.121:7300/setup`. **The on-glass verification batch
@@ -51,8 +51,12 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   Main + the Stats level (stats.ts sampler), chess piece-group→preview→Confirm flow,
   mail/notices read-marking, battery status cluster, title-flash append, notification
   image pages.** The server half is additive-optional — older APKs keep working until he
-  installs. On-glass batch additions: ring the phone (call popup), send an MMS (image
-  page), check the G2 battery readout (the 09-20 poll is [U]).
+  installs. **v1.10 (2026-06-12, CHANGELOG r17): the G2-battery decoder fixed (varint
+  tags — the live frames from Adam's session proved the poll itself works and are
+  pinned as unit tests; §10 no longer [U]) + MMS images actually extracted
+  (MessagingStyle data URIs, not EXTRA_PICTURE) + image-aware notify dedup; server:
+  Files delete confirm is Cancel-first.** On-glass batch additions: ring the phone
+  (call popup), send an MMS (image page), check the G battery slot.
 - **The TEN windows** (`server/src/os-windows.ts`): **Main** (live dashboard: host/pool/
   battery/unseen/next-timer + one summary line per window; menu = switcher + `Ask`) ·
   **Aria** (CC subprocess @ ~/aria, `server/prompts/aria-g2.md` display prompt; the Ask

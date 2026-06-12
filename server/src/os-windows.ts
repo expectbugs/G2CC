@@ -15,9 +15,10 @@
 // window switches (each window object persists for the client's lifetime).
 
 import { execFile } from 'node:child_process'
-import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync, existsSync, constants as fsConstants } from 'node:fs'
+import { rename, copyFile, unlink } from 'node:fs/promises'
 import { join, basename } from 'node:path'
-import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
+import { DE_CONTENT_W, DE_CONTENT_H, SCREEN_WIDTH } from '@g2cc/shared'
 import type { WireScene } from '@g2cc/shared'
 import type { G2CCConfig } from './config.js'
 import { listProjectDirectories } from './directory-picker.js'
@@ -26,7 +27,7 @@ import {
   type Block, type RenderedImage,
 } from './os-content.js'
 import {
-  composeScene, paginateText, errorView, blankScene,
+  composeScene, paginateText, errorView, blankScene, fwTextWidth,
   DEFAULT_BROWSE_MENU, type WinView,
 } from './os-compose.js'
 import type { SessionPool, PoolEntry } from './session-pool.js'
@@ -1848,11 +1849,33 @@ class MailWindow implements OsWindow {
  *  files open a bounded head preview / the image viewer). Double-tap walks
  *  back with the Mail-style focus flip at each browse level: read → tree →
  *  tree menu → locations → locations menu → Main. */
+/** Human size: 1536 → "1.5K", 3 GB → "3.0G". */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n}B`
+  const units = ['K', 'M', 'G', 'T']
+  let v = n
+  let u = -1
+  while (v >= 1024 && u < units.length - 1) { v /= 1024; u++ }
+  return `${v.toFixed(v >= 100 ? 0 : 1)}${units[u]}`
+}
+
+/** `-rwxr-x---`-style mode string from st_mode. */
+function fmtMode(mode: number): string {
+  const r = (b: number): string => `${b & 4 ? 'r' : '-'}${b & 2 ? 'w' : '-'}${b & 1 ? 'x' : '-'}`
+  return r((mode >> 6) & 7) + r((mode >> 3) & 7) + r(mode & 7)
+}
+
 class FilesWindow implements OsWindow {
   readonly id = 'files'
   readonly tab = 'Files'
   readonly label = 'Files'
-  private level: 'locations' | 'tree' | 'read' | 'image' = 'locations'
+  /** The REAL-file-manager rework (Adam 2026-06-12): `..` is ALWAYS row 0 at
+   *  the tree level (at a location root it pops to locations — "trapped in DL
+   *  forever" is dead), the tree menu carries Up/Stats, tapping a FILE opens
+   *  an ACTION level (Open/Move/Copy/Del/Stats) instead of auto-opening, and
+   *  Move/Copy run a destination picker where tapping a folder asks
+   *  Open vs "<verb> here". Dirs still descend on tap (fast navigation). */
+  private level: 'locations' | 'tree' | 'read' | 'image' | 'actions' | 'confirmDel' | 'stats' | 'pickDest' | 'pickAction' | 'opResult' = 'locations'
   private locs: { label: string; path: string }[] = []
   private locOffset = 0
   private stack: string[] = []
@@ -1863,13 +1886,29 @@ class FilesWindow implements OsWindow {
   private readName = ''
   private img: RenderedImage | null = null   // the image-viewer payload
   /** Navigation sequence — bumped on every browse action/back so an in-flight
-   *  image render can detect it was superseded (stale-swap guard, review
-   *  2026-06-11b — the chart/board pattern, applied to the one await that
-   *  lacked it). */
+   *  image render / du can detect it was superseded (stale-swap guard). */
   private navSeq = 0
   /** tree-level focus: content rows (default) ⇄ the menu list (double-tap) — without
-   *  this the tree's rendered Reload/Main menu was dead UI (review 2026-06-11). */
+   *  this the tree's rendered menu was dead UI (review 2026-06-11). */
   private focus: 'content' | 'menu' = 'content'
+  // ---- file-manager state (Adam 2026-06-12) ----
+  /** The file the actions level is operating on (files only in v1 — dirs
+   *  descend on tap; the CURRENT dir's properties live in the tree menu's
+   *  Stats). */
+  private actionPath: string | null = null
+  private actionName = ''
+  private actionSize = 0
+  private actionVerb: 'move' | 'copy' | null = null
+  /** Destination picker: empty destStack = picking a location first. */
+  private destStack: string[] = []
+  private destOffset = 0
+  private destEntries: string[] = []
+  /** The folder tapped in the picker (the Open vs "<verb> here" prompt). */
+  private pickTarget: string | null = null
+  /** Where the stats level was opened from (Back returns there). */
+  private statsFrom: 'actions' | 'tree' = 'tree'
+  /** One filesystem operation at a time — taps during one are loud no-ops. */
+  private opBusy = false
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -1878,6 +1917,7 @@ class FilesWindow implements OsWindow {
   }
 
   private cwd(): string { return this.stack[this.stack.length - 1] ?? FILES_ROOT }
+  private destCwd(): string | null { return this.destStack[this.destStack.length - 1] ?? null }
 
   /** The common areas (Adam's list; 'DL' = Downloads, kept short from the
    *  antenna era) + drives that are ACTUALLY MOUNTED per /proc/mounts (an
@@ -1948,6 +1988,82 @@ class FilesWindow implements OsWindow {
         text: this.pages[this.page] ?? '',
       }
     }
+    if (this.level === 'actions') {
+      return {
+        mode: 'text',
+        title: `Files · ${this.actionName}`,
+        menu: ['Open', 'Move', 'Copy', 'Del', 'Stats', 'Back', 'Reload', 'Main'],
+        text: `${this.actionName}\n${fmtBytes(this.actionSize)}\n\nin ${this.cwd()}`,
+      }
+    }
+    if (this.level === 'confirmDel') {
+      return {
+        mode: 'text',
+        title: `Files · delete?`,
+        // Cancel FIRST (Adam 2026-06-12): an accidental second tap on the
+        // same spot lands on Cancel, never on the destructive option — the
+        // Approve/Deny-at-index-2/3 permission-menu rationale.
+        menu: ['Cancel', 'DELETE', 'Reload', 'Main'],
+        text: `DELETE ${this.actionName}?\n(${fmtBytes(this.actionSize)})\n\nThis cannot be undone.`,
+      }
+    }
+    if (this.level === 'stats') {
+      const pageSuffix = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
+      return {
+        mode: 'text',
+        title: `Files · stats${pageSuffix}`,
+        menu: ['Next', 'Prev', 'Back', 'Reload', 'Main'],
+        text: this.pages[this.page] ?? '',
+      }
+    }
+    if (this.level === 'opResult') {
+      return {
+        mode: 'text',
+        title: 'Files · result',
+        menu: ['Back', 'Reload', 'Main'],
+        text: this.pages[0] ?? '',
+      }
+    }
+    if (this.level === 'pickAction') {
+      const verb = this.actionVerb === 'move' ? 'Move here' : 'Copy here'
+      return {
+        mode: 'text',
+        title: `Files · ${this.actionVerb} ${this.actionName}`,
+        menu: ['Open', verb, 'Cancel', 'Reload', 'Main'],
+        text: `${this.pickTarget ?? '?'}\n\nOpen = browse into it\n${verb} = ${this.actionVerb} ${this.actionName} into it`,
+      }
+    }
+    if (this.level === 'pickDest') {
+      const verb = this.actionVerb === 'move' ? 'Move here' : 'Copy here'
+      const cwd = this.destCwd()
+      if (cwd === null) {
+        // Stage 1: pick a location (no "<verb> here" — a list isn't a folder).
+        this.refreshLocations()
+        const paged = browsePageItems(this.locs.map((l) => l.label), this.destOffset)
+        return {
+          mode: 'browse',
+          menuMode: this.focus === 'menu' ? 'capture' : 'passive',
+          title: `Files · ${this.actionVerb} → pick location`,
+          menu: ['Cancel', 'Reload', 'Main'],
+          items: paged.items,
+        }
+      }
+      let dirs: string[]
+      try {
+        dirs = this.listDir(cwd).filter((e) => e.isDir).map((e) => e.name)
+      } catch (e) {
+        return errorView('Files · error', (e as Error).message)
+      }
+      this.destEntries = dirs
+      const paged = browsePageItems(dirs.map((d) => d + '/'), this.destOffset)
+      return {
+        mode: 'browse',
+        menuMode: this.focus === 'menu' ? 'capture' : 'passive',
+        title: `Files · ${this.actionVerb} → ${cwd}`,
+        menu: [verb, 'Cancel', 'Reload', 'Main'],
+        items: ['..', ...paged.items],
+      }
+    }
     if (this.level === 'locations') {
       this.refreshLocations()
       if (this.locs.length === 0) return errorView('Files · error', 'no locations found')
@@ -1970,82 +2086,82 @@ class FilesWindow implements OsWindow {
     this.entries = listed
     const labels = this.entries.map((e) => (e.isDir ? e.name + '/' : e.name))
     const paged = browsePageItems(labels, this.offset)
-    const up = this.stack.length > 1 ? ['..'] : []
     return {
       mode: 'browse',
       menuMode: this.focus === 'menu' ? 'capture' : 'passive',
       title: `Files · ${this.cwd()}`,
-      menu: ['Reload', 'Main'],
-      items: [...up, ...paged.items],
+      // Up + Stats (Adam 2026-06-12): an explicit up-a-level in the menu and
+      // the CURRENT DIR's properties (entry counts + du total).
+      menu: ['Up', 'Stats', 'Reload', 'Main'],
+      // `..` is ALWAYS row 0 — at a location root it pops to locations
+      // (the old gate on stack depth left no visible way out of e.g. DL).
+      items: ['..', ...paged.items],
     }
   }
 
   async onReload(): Promise<void> {
     this.focus = 'content'   // a menu action hands focus back to the rows
+    // view() re-lists the current level fresh on the recompose — Reload
+    // REFRESHES IN PLACE at every level (it never resets to locations; a
+    // fresh WS connection is what resets window state).
   }
 
-  async onBrowseSelect(index: number): Promise<void> {
-    this.navSeq++   // any new browse action supersedes an in-flight image render
-    if (this.level === 'locations') {
-      const { map } = browsePageItems(this.locs.map((l) => l.label), this.locOffset)
-      const m = map[index]
-      if (m === undefined) { this.ctx.log(`[os] files locations: index ${index} out of range`); return }
-      if (m === -1) { this.locOffset = Math.max(0, this.locOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.locOffset += BROWSE_PAGE; this.requestRender(); return }
-      const loc = this.locs[m]
-      if (!loc) { this.ctx.log(`[os] files locations: no location at ${m} — resyncing`); this.requestRender(); return }
-      this.stack = [loc.path]
-      this.offset = 0
-      this.focus = 'content'
-      this.level = 'tree'
-      this.requestRender()
-      return
-    }
-    if (this.level !== 'tree') { this.ctx.log(`[os] files: browse select ${index} outside tree/locations — ignored`); return }
-    // row 0 may be the '..' ascender (only below the location root)
-    let i = index
+  // ---- navigation helpers ----
+
+  private upOne(): void {
+    this.navSeq++
     if (this.stack.length > 1) {
-      if (i === 0) { this.stack.pop(); this.offset = 0; this.requestRender(); return }
-      i -= 1
-    }
-    const labels = this.entries.map((e) => (e.isDir ? e.name + '/' : e.name))
-    const { map } = browsePageItems(labels, this.offset)
-    const m = map[i]
-    if (m === undefined) { this.ctx.log(`[os] files: index ${index} out of range`); return }
-    if (m === -1) { this.offset = Math.max(0, this.offset - BROWSE_PAGE); this.requestRender(); return }
-    if (m === -2) { this.offset += BROWSE_PAGE; this.requestRender(); return }
-    const e = this.entries[m]
-    const path = join(this.cwd(), e.name)
-    if (e.isDir) {
-      this.stack.push(path)
+      this.stack.pop()
       this.offset = 0
-      this.requestRender()
-      return
+    } else {
+      this.level = 'locations'
+      this.offset = 0
     }
+    this.requestRender()
+  }
+
+  /** Open the actions level for a tapped FILE (Adam 2026-06-12: tap = options,
+   *  Open is the top one — "like a real file manager"). */
+  private openActions(path: string, name: string): void {
+    try {
+      const st = statSync(path)
+      this.actionPath = path
+      this.actionName = name
+      this.actionSize = st.size
+      this.level = 'actions'
+      this.requestRender()
+    } catch (e) {
+      this.pages = [`ERROR statting ${name}:\n${(e as Error).message}`]
+      this.page = 0
+      this.readName = name
+      this.level = 'read'
+      this.requestRender()
+    }
+  }
+
+  /** The proven open path (preview/image/FIFO guard) — now behind the
+   *  actions level's Open. */
+  private async openFile(path: string, name: string): Promise<void> {
     // Image viewer (Adam 2026-06-11): fit + dither + 4 tiles, aspect preserved.
-    if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(e.name)) {
-      this.readName = e.name
-      // Stale-swap guard (the documented pattern — chart/board renders have it;
-      // this was the one awaited-render swap without one, review 2026-06-11b):
-      // any navigation during the PIL subprocess invalidates this request —
-      // committing level='image' afterwards yanked the user out of wherever
-      // they'd gone, and two rapid image taps paired old tiles with the new
-      // title. navSeq bumps on every browse action + back.
+    if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(name)) {
+      this.readName = name
+      // Stale-swap guard (review 2026-06-11b): any navigation during the PIL
+      // subprocess invalidates this request.
       const seq = ++this.navSeq
       try {
         const img = await renderImageFile(path, DE_CONTENT_W, DE_CONTENT_H)
         if (seq !== this.navSeq) {
-          this.ctx.log(`[os] files: image render for '${e.name}' superseded by newer navigation — discarded`)
+          this.ctx.log(`[os] files: image render for '${name}' superseded by newer navigation — discarded`)
           return
         }
         this.img = img
         this.level = 'image'
       } catch (err) {
         if (seq !== this.navSeq) {
-          this.ctx.log(`[os] files: image render FAILURE for '${e.name}' superseded — discarded: ${(err as Error).message}`)
+          this.ctx.log(`[os] files: image render FAILURE for '${name}' superseded — discarded: ${(err as Error).message}`)
           return
         }
-        this.pages = [`ERROR rendering image ${e.name}:\n${(err as Error).message}`]
+        this.pages = [`ERROR rendering image ${name}:\n${(err as Error).message}`]
         this.page = 0
         this.level = 'read'
       }
@@ -2062,9 +2178,9 @@ class FilesWindow implements OsWindow {
         // openSync on a writer-less FIFO blocks in the kernel FOREVER — single
         // thread, whole server frozen, nothing recovers it (review 2026-06-11).
         // Sockets/devices are equally not preview material.
-        this.pages = [`(special file — not previewable)\n\n${e.name}`]
+        this.pages = [`(special file — not previewable)\n\n${name}`]
         this.page = 0
-        this.readName = e.name
+        this.readName = name
         this.level = 'read'
         this.requestRender()
         return
@@ -2080,7 +2196,7 @@ class FilesWindow implements OsWindow {
       }
       const head = buf.subarray(0, 8192)
       if (head.includes(0)) {
-        this.pages = [`(binary file)\n\n${e.name}\n${size} bytes`]
+        this.pages = [`(binary file)\n\n${name}\n${size} bytes`]
       } else {
         const text = buf.toString('utf8')
         const banner = size > FILE_PREVIEW_BYTES
@@ -2089,36 +2205,323 @@ class FilesWindow implements OsWindow {
         this.pages = paginateText(banner + text)
       }
       this.page = 0
-      this.readName = e.name
+      this.readName = name
       this.level = 'read'
       this.requestRender()
     } catch (err) {
-      this.pages = [`ERROR reading ${e.name}:\n${(err as Error).message}`]
+      this.pages = [`ERROR reading ${name}:\n${(err as Error).message}`]
       this.page = 0
-      this.readName = e.name
+      this.readName = name
       this.level = 'read'
       this.requestRender()
     }
   }
 
-  async onMenuSelect(label: string): Promise<void> {
-    if (this.level !== 'read') { this.ctx.log(`[os] files: menu '${label}' outside read level — ignored`); return }
-    switch (label) {
-      case 'Next': if (this.page < this.pages.length - 1) { this.page++; this.requestRender() } break
-      case 'Prev': if (this.page > 0) { this.page--; this.requestRender() } break
-      default: this.ctx.log(`[os] files read: unknown menu label '${label}' — ignored (LOUD)`)
+  // ---- file operations (Adam 2026-06-12) ----
+
+  /** Stats for the tapped FILE or the CURRENT DIR. Dir totals run du -sbx
+   *  async (one filesystem, no mount crossing — du across / would count
+   *  every drive) with a placeholder + the seq stale-guard. */
+  private showStats(target: 'file' | 'dir'): void {
+    this.statsFrom = target === 'file' ? 'actions' : 'tree'
+    if (target === 'file' && this.actionPath) {
+      try {
+        const st = statSync(this.actionPath)
+        this.pages = paginateText([
+          this.actionName,
+          '',
+          `size:   ${fmtBytes(st.size)} (${st.size} bytes)`,
+          `mode:   ${fmtMode(st.mode)} (${(st.mode & 0o7777).toString(8)})`,
+          `owner:  uid ${st.uid} · gid ${st.gid}`,
+          `modified: ${st.mtime.toLocaleString()}`,
+          `changed:  ${st.ctime.toLocaleString()}`,
+          '',
+          `in ${this.cwd()}`,
+        ].join('\n'))
+      } catch (e) {
+        this.pages = [`ERROR statting ${this.actionName}:\n${(e as Error).message}`]
+      }
+      this.page = 0
+      this.level = 'stats'
+      this.requestRender()
+      return
     }
+    // Current-dir stats: instant counts, async du total swap.
+    const dir = this.cwd()
+    let dirs = 0; let files = 0
+    try {
+      for (const e of this.listDir(dir)) { if (e.isDir) dirs++; else files++ }
+    } catch (e) {
+      this.pages = [`ERROR listing ${dir}:\n${(e as Error).message}`]
+      this.page = 0
+      this.level = 'stats'
+      this.requestRender()
+      return
+    }
+    const seq = ++this.navSeq
+    this.pages = paginateText(`${dir}\n\n${dirs} dir(s) · ${files} file(s) (dotfiles hidden)\n\ntotal size: ⏳ computing (du)…`)
+    this.page = 0
+    this.level = 'stats'
+    this.requestRender()
+    execFile('du', ['-sbx', dir], { maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      if (seq !== this.navSeq) { this.ctx.log(`[os] files: du for ${dir} superseded — discarded`); return }
+      const total = err
+        ? `du FAILED: ${stderr?.toString().split('\n')[0] ?? err.message}`
+        : `${fmtBytes(Number(stdout.toString().split('\t')[0]))} (same filesystem; dotfiles included)`
+      this.pages = paginateText(`${dir}\n\n${dirs} dir(s) · ${files} file(s) (dotfiles hidden)\n\ntotal size: ${total}`)
+      this.requestRender()
+    })
   }
 
-  /** image/read → tree → (tree menu focus) → locations → (locations menu
-   *  focus) → Main. */
-  async onBack(): Promise<boolean> {
-    this.navSeq++   // navigation supersedes an in-flight image render
-    if (this.level === 'image') { this.level = 'tree'; this.img = null; this.focus = 'content'; this.requestRender(); return true }
-    if (this.level === 'read') { this.level = 'tree'; this.focus = 'content'; this.requestRender(); return true }
+  private async doDelete(): Promise<void> {
+    const path = this.actionPath
+    if (!path || this.opBusy) { this.ctx.log('[os] files: delete with no target / op in flight — ignored (LOUD)'); return }
+    this.opBusy = true
+    try {
+      await unlink(path)
+      this.ctx.log(`[os] files: DELETED ${path}`)
+      this.pages = [`Deleted ${this.actionName}.`]
+    } catch (e) {
+      this.ctx.log(`[os] files: delete ${path} FAILED: ${(e as Error).message}`)
+      this.pages = [`DELETE FAILED:\n${(e as Error).message}`]
+    } finally {
+      this.opBusy = false
+    }
+    this.actionPath = null
+    this.page = 0
+    this.level = 'opResult'
+    this.requestRender()
+  }
+
+  /** Move/copy actionPath into [destDir]. No overwrites — a name collision
+   *  loud-fails (pick a different folder). Move falls back to copy+unlink
+   *  across filesystems (EXDEV — /mnt drives are separate FSes). */
+  private async doTransfer(destDir: string): Promise<void> {
+    const src = this.actionPath
+    const verb = this.actionVerb
+    if (!src || !verb || this.opBusy) { this.ctx.log('[os] files: transfer with no source/verb / op in flight — ignored (LOUD)'); return }
+    this.opBusy = true
+    const dst = join(destDir, this.actionName)
+    try {
+      if (existsSync(dst)) throw new Error(`${dst} already exists (no overwrites — pick another folder or rename first)`)
+      if (verb === 'copy') {
+        await copyFile(src, dst, fsConstants.COPYFILE_EXCL)
+      } else {
+        try {
+          await rename(src, dst)
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
+          // Cross-filesystem move: copy then remove the source.
+          await copyFile(src, dst, fsConstants.COPYFILE_EXCL)
+          await unlink(src)
+        }
+      }
+      this.ctx.log(`[os] files: ${verb.toUpperCase()} ${src} → ${dst}`)
+      this.pages = [`${verb === 'move' ? 'Moved' : 'Copied'} ${this.actionName}\n→ ${destDir}`]
+      if (verb === 'move') this.actionPath = null
+    } catch (e) {
+      this.ctx.log(`[os] files: ${verb} ${src} → ${dst} FAILED: ${(e as Error).message}`)
+      this.pages = [`${verb.toUpperCase()} FAILED:\n${(e as Error).message}`]
+    } finally {
+      this.opBusy = false
+    }
+    this.actionVerb = null
+    this.pickTarget = null
+    this.destStack = []
+    this.destOffset = 0
+    this.page = 0
+    this.level = 'opResult'
+    this.requestRender()
+  }
+
+  // ---- input ----
+
+  async onBrowseSelect(index: number): Promise<void> {
+    this.navSeq++   // any new browse action supersedes an in-flight image render/du
+    if (this.level === 'locations') {
+      const { map } = browsePageItems(this.locs.map((l) => l.label), this.locOffset)
+      const m = map[index]
+      if (m === undefined) { this.ctx.log(`[os] files locations: index ${index} out of range`); return }
+      if (m === -1) { this.locOffset = Math.max(0, this.locOffset - BROWSE_PAGE); this.requestRender(); return }
+      if (m === -2) { this.locOffset += BROWSE_PAGE; this.requestRender(); return }
+      const loc = this.locs[m]
+      if (!loc) { this.ctx.log(`[os] files locations: no location at ${m} — resyncing`); this.requestRender(); return }
+      this.stack = [loc.path]
+      this.offset = 0
+      this.focus = 'content'
+      this.level = 'tree'
+      this.requestRender()
+      return
+    }
+    if (this.level === 'pickDest') {
+      const cwd = this.destCwd()
+      if (cwd === null) {
+        // Stage 1: pick the destination location.
+        const { map } = browsePageItems(this.locs.map((l) => l.label), this.destOffset)
+        const m = map[index]
+        if (m === undefined) { this.ctx.log(`[os] files pick: index ${index} out of range`); return }
+        if (m === -1) { this.destOffset = Math.max(0, this.destOffset - BROWSE_PAGE); this.requestRender(); return }
+        if (m === -2) { this.destOffset += BROWSE_PAGE; this.requestRender(); return }
+        const loc = this.locs[m]
+        if (!loc) { this.ctx.log(`[os] files pick: no location at ${m} — resyncing`); this.requestRender(); return }
+        this.destStack = [loc.path]
+        this.destOffset = 0
+        this.requestRender()
+        return
+      }
+      // Stage 2: '..' row 0, then dirs; tapping a dir prompts Open vs "<verb> here".
+      let i = index
+      if (i === 0) {
+        if (this.destStack.length > 1) this.destStack.pop()
+        else this.destStack = []
+        this.destOffset = 0
+        this.requestRender()
+        return
+      }
+      i -= 1
+      const { map } = browsePageItems(this.destEntries.map((d) => d + '/'), this.destOffset)
+      const m = map[i]
+      if (m === undefined) { this.ctx.log(`[os] files pick: index ${index} out of range`); return }
+      if (m === -1) { this.destOffset = Math.max(0, this.destOffset - BROWSE_PAGE); this.requestRender(); return }
+      if (m === -2) { this.destOffset += BROWSE_PAGE; this.requestRender(); return }
+      const dir = this.destEntries[m]
+      if (!dir) { this.ctx.log(`[os] files pick: no dir at ${m} — resyncing`); this.requestRender(); return }
+      this.pickTarget = join(cwd, dir)
+      this.level = 'pickAction'
+      this.requestRender()
+      return
+    }
+    if (this.level !== 'tree') { this.ctx.log(`[os] files: browse select ${index} outside a browse level — ignored`); return }
+    // `..` is ALWAYS row 0 (Adam 2026-06-12) — at a location root it pops to
+    // the locations list instead of trapping.
+    if (index === 0) { this.upOne(); return }
+    const i = index - 1
+    const labels = this.entries.map((e) => (e.isDir ? e.name + '/' : e.name))
+    const { map } = browsePageItems(labels, this.offset)
+    const m = map[i]
+    if (m === undefined) { this.ctx.log(`[os] files: index ${index} out of range`); return }
+    if (m === -1) { this.offset = Math.max(0, this.offset - BROWSE_PAGE); this.requestRender(); return }
+    if (m === -2) { this.offset += BROWSE_PAGE; this.requestRender(); return }
+    const e = this.entries[m]
+    const path = join(this.cwd(), e.name)
+    if (e.isDir) {
+      this.stack.push(path)
+      this.offset = 0
+      this.requestRender()
+      return
+    }
+    // A FILE: open the action menu (Open/Move/Copy/Del/Stats) — Adam 2026-06-12.
+    this.openActions(path, e.name)
+  }
+
+  async onMenuSelect(label: string): Promise<void> {
     if (this.level === 'tree') {
-      // First pop flips focus to the menu list (Reload/Main reachable — review
-      // 2026-06-11: they rendered but could never be tapped at this level).
+      if (label === 'Up') { this.upOne(); return }
+      if (label === 'Stats') { this.showStats('dir'); return }
+      this.ctx.log(`[os] files tree: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
+    if (this.level === 'actions') {
+      const path = this.actionPath
+      if (!path) { this.ctx.log('[os] files: action with no target — back to tree'); this.level = 'tree'; this.requestRender(); return }
+      switch (label) {
+        case 'Open': await this.openFile(path, this.actionName); return
+        case 'Move': case 'Copy': {
+          this.actionVerb = label === 'Move' ? 'move' : 'copy'
+          this.destStack = []
+          this.destOffset = 0
+          this.focus = 'content'
+          this.level = 'pickDest'
+          this.requestRender()
+          return
+        }
+        case 'Del': { this.level = 'confirmDel'; this.requestRender(); return }
+        case 'Stats': { this.showStats('file'); return }
+        default: this.ctx.log(`[os] files actions: unknown menu label '${label}' — ignored (LOUD)`)
+      }
+      return
+    }
+    if (this.level === 'confirmDel') {
+      if (label === 'DELETE') { await this.doDelete(); return }
+      if (label === 'Cancel') { this.level = 'actions'; this.requestRender(); return }
+      this.ctx.log(`[os] files confirmDel: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
+    if (this.level === 'pickDest') {
+      if (label === 'Cancel') {
+        this.actionVerb = null
+        this.destStack = []
+        this.level = 'actions'
+        this.requestRender()
+        return
+      }
+      if (label === 'Move here' || label === 'Copy here') {
+        const cwd = this.destCwd()
+        if (!cwd) { this.ctx.log('[os] files pick: "here" at the location list — pick a location first (LOUD)'); return }
+        await this.doTransfer(cwd)
+        return
+      }
+      this.ctx.log(`[os] files pickDest: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
+    if (this.level === 'pickAction') {
+      if (label === 'Open') {
+        const t = this.pickTarget
+        if (t) { this.destStack.push(t); this.destOffset = 0 }
+        this.pickTarget = null
+        this.level = 'pickDest'
+        this.requestRender()
+        return
+      }
+      if (label === 'Move here' || label === 'Copy here') {
+        const t = this.pickTarget
+        if (!t) { this.ctx.log('[os] files pick: no target folder — ignored (LOUD)'); return }
+        await this.doTransfer(t)
+        return
+      }
+      if (label === 'Cancel') {
+        this.pickTarget = null
+        this.level = 'pickDest'
+        this.requestRender()
+        return
+      }
+      this.ctx.log(`[os] files pickAction: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
+    if (this.level === 'read' || this.level === 'stats') {
+      switch (label) {
+        case 'Next': if (this.page < this.pages.length - 1) { this.page++; this.requestRender() } break
+        case 'Prev': if (this.page > 0) { this.page--; this.requestRender() } break
+        default: this.ctx.log(`[os] files ${this.level}: unknown menu label '${label}' — ignored (LOUD)`)
+      }
+      return
+    }
+    this.ctx.log(`[os] files: menu '${label}' at ${this.level} — ignored`)
+  }
+
+  /** Back chain: image/read → whence they came; actions → tree; confirmDel →
+   *  actions; stats → actions|tree; pickAction → pickDest; pickDest → up a
+   *  dir → location stage → actions (cancel); opResult → tree; tree →
+   *  (menu-focus flip) → locations; locations → (flip) → Main. */
+  async onBack(): Promise<boolean> {
+    this.navSeq++   // navigation supersedes an in-flight image render/du
+    if (this.level === 'image') { this.level = this.actionPath ? 'actions' : 'tree'; this.img = null; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'read') { this.level = this.actionPath ? 'actions' : 'tree'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'actions') { this.actionPath = null; this.level = 'tree'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'confirmDel') { this.level = 'actions'; this.requestRender(); return true }
+    if (this.level === 'stats') { this.level = this.statsFrom === 'actions' && this.actionPath ? 'actions' : 'tree'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'pickAction') { this.pickTarget = null; this.level = 'pickDest'; this.requestRender(); return true }
+    if (this.level === 'pickDest') {
+      if (this.destStack.length > 1) { this.destStack.pop(); this.destOffset = 0 }
+      else if (this.destStack.length === 1) { this.destStack = []; this.destOffset = 0 }
+      else { this.actionVerb = null; this.level = 'actions' }
+      this.requestRender()
+      return true
+    }
+    if (this.level === 'opResult') { this.level = 'tree'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'tree') {
+      // First pop flips focus to the menu list (Up/Stats/Reload/Main reachable —
+      // review 2026-06-11); `..` row 0 is the always-visible up-a-level.
       if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
       this.focus = 'content'
       this.level = 'locations'
@@ -3467,6 +3870,18 @@ class MainWindow implements OsWindow {
   }
 }
 
+/** Compose `left …spaces… right` so [right] lands at the status bar's right
+ *  edge (Adam 2026-06-12: the battery cluster rides there, always). Space
+ *  width ≈5.2 px (fwTextWidth) → ±a few px of true right-alignment, plenty
+ *  for a status readout. When the left text crowds the bar, degrade to a
+ *  single separator space — compose's px clamp stays the loud backstop. */
+function padStatusRight(left: string, right: string): string {
+  const budget = SCREEN_WIDTH - 24   // the status region width minus padding/inset
+  const room = budget - fwTextWidth(left) - fwTextWidth(right)
+  const spaces = Math.floor(room / 5.2)
+  return spaces >= 1 ? left + ' '.repeat(spaces) + right : `${left} ${right}`
+}
+
 // ============================================================ WindowManager
 
 /** Control-flow signal thrown by windows; caught by the WM. The optional
@@ -3787,11 +4202,12 @@ export class WindowManager {
   }
 
   private statusLeft(): string {
-    // Battery cluster FIRST (Adam 2026-06-12: "the bottom left of the status
-    // bar should always show the battery state of the G2, the R1, my phone,
-    // and the hat module"). R1 + hat are placeholders until the R1 battery
-    // signal is decoded / the hat exists; G2 is [U] until the client's
-    // 09-00/09-01 decode is hardware-verified — '--' until reported.
+    // Battery cluster at the RIGHT END of the status bar (Adam 2026-06-12,
+    // corrected from his first ask — "my bad!"): right-aligned by measured
+    // space padding (fwTextWidth; ~5.2 px/space) inside the single status
+    // region. R1 + hat are placeholders until the R1 battery signal is
+    // decoded / the hat exists; G2 is [U] until the client's 09-00/09-01
+    // decode is hardware-verified — '--' until reported.
     const b = (v: number | null | undefined): string => (typeof v === 'number' ? String(v) : '--')
     const bat = `G${b(this.ctx.g2Battery?.())} R-- P${b(this.ctx.phoneBattery?.())} H--`
     // The active window's live phase takes the slot while something is
@@ -3799,7 +4215,8 @@ export class WindowManager {
     // Phase 4: the unseen-notification badge rides along in both forms.
     const badge = this.unseen > 0 ? ` · ⚠${this.unseen}` : ''
     const phase = this.active.statusLine?.()
-    return phase ? `${bat} ● ${phase}${badge}` : `${bat} ● ${hostname()} · ${this.ctx.pool.count} cc${badge}`
+    const left = phase ? `● ${phase}${badge}` : `● ${hostname()} · ${this.ctx.pool.count} cc${badge}`
+    return padStatusRight(left, bat)
   }
 
   switchTo(id: string): void {

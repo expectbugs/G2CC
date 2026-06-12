@@ -76,5 +76,125 @@ console.error('  blankScene wake antenna intact ✓')
 if (process.argv.includes('--emit-scene')) {
   process.stdout.write(JSON.stringify(passive))
 } else {
-  console.log('phase1-files: ALL OK')
+  // --- 6. The file-manager rework (Adam 2026-06-12): drive the REAL Files
+// window in a sandbox dir — `..`-always, file tap → actions, move/copy/del
+// round-trips, dir stats. WM windows are exercised via the public tap API.
+{
+  const { WindowManager } = await import('../dist/os-windows.js')
+  const { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { tmpdir } = await import('node:os')
+
+  const sandbox = mkdtempSync(join(tmpdir(), 'g2cc-files-smoke-'))
+  mkdirSync(join(sandbox, 'sub'))
+  writeFileSync(join(sandbox, 'a.txt'), 'hello files\n')
+
+  const scenes = []
+  const wm = new WindowManager({
+    send: (sc) => scenes.push(sc),
+    audio: () => {}, displayReload: () => {},
+    log: (m) => console.error(`    ${m}`),
+    pool: { count: 0 },
+    config: { claude: { model: 'opus', effort: 'max', defaultMode: 'bypassPermissions' } },
+    registerWatchdog: () => {}, unregisterWatchdog: () => {},
+  })
+  const settle = async (pred, what) => {
+    const t0 = Date.now()
+    while (Date.now() - t0 < 5000) {
+      const sc = scenes[scenes.length - 1]
+      if (sc && pred(sc)) return sc
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    throw new Error(`timeout settling: ${what}`)
+  }
+  const text = (sc, name = 'content') => sc.regions.find((r) => r.name === name)?.content?.text ?? ''
+  const items = (sc) => sc.regions.find((r) => r.name === 'browse')?.content?.items ?? []
+  const menu = (sc) => sc.regions.find((r) => r.name === 'menu')?.content?.items ?? []
+  try {
+    const files = wm.windows.find((w) => w.id === 'files')
+    assert.ok(files, 'files window present')
+    // Steer the window into the sandbox without UI-walking the locations list:
+    // locations → tree happens via onBrowseSelect in production; the sandbox
+    // isn't a location, so seed the stack directly (private-state poke, the
+    // same approach phase5 avoids — justified: the LEVELS under test all sit
+    // BELOW tree).
+    files.stack = [sandbox]
+    files.level = 'tree'
+    wm.switchTo('files')
+    let sc = await settle((x) => items(x)[0] === '..' && items(x).includes('a.txt'), 'tree list')
+    assert.equal(items(sc)[1], 'sub/', 'dirs sort first after ..')
+    assert.deepEqual(menu(sc), ['Up', 'Stats', 'Reload', 'Main'], 'tree menu has Up + Stats')
+    console.error('  6a. tree: `..` always row 0, Up/Stats in the menu ✓')
+
+    // file tap → ACTIONS level
+    await files.onBrowseSelect(2)   // ['..', 'sub/', 'a.txt'] → a.txt
+    sc = await settle((x) => menu(x)[0] === 'Open', 'actions level')
+    assert.deepEqual(menu(sc), ['Open', 'Move', 'Copy', 'Del', 'Stats', 'Back', 'Reload', 'Main'])
+    assert.match(text(sc), /a\.txt/)
+    console.error('  6b. file tap → actions (Open top) ✓')
+
+    // COPY → pick dest: location stage → seed dest dir directly → "Copy here"
+    await files.onMenuSelect('Copy')
+    sc = await settle((x) => (x.regions.find((r) => r.name === 'title')?.content?.text ?? '').includes('pick location'), 'pick location stage')
+    files.destStack = [sandbox]   // seed (sandbox isn't a location)
+    files.requestRender?.() ?? wm.requestRender()
+    await files.onBrowseSelect(1)   // ['..', 'sub/'] → sub/ → pickAction prompt
+    sc = await settle((x) => menu(x).includes('Copy here') && menu(x)[0] === 'Open', 'pickAction prompt')
+    await files.onMenuSelect('Copy here')
+    sc = await settle((x) => /Copied/.test(text(x)), 'copy result')
+    assert.ok(existsSync(join(sandbox, 'sub', 'a.txt')), 'copy landed')
+    assert.ok(existsSync(join(sandbox, 'a.txt')), 'copy kept the source')
+    console.error('  6c. Copy → folder prompt → "Copy here" round-trip ✓')
+
+    // back to tree, MOVE the copy out of sub via direct dest, then DELETE it
+    await files.onBack()   // opResult → tree
+    files.stack = [join(sandbox, 'sub')]
+    wm.requestRender()
+    await settle((x) => items(x).includes('a.txt') && (x.regions.find((r) => r.name === 'title')?.content?.text ?? '').includes('sub'), 'sub listing')
+    await files.onBrowseSelect(1)   // ['..', 'a.txt'] → a.txt → actions
+    await settle((x) => menu(x)[0] === 'Open', 'actions for sub/a.txt')
+    await files.onMenuSelect('Move')
+    files.destStack = [sandbox]
+    await files.onMenuSelect('Move here')   // collision → loud FAIL page (a.txt exists at dest)
+    sc = await settle((x) => /FAILED/.test(text(x)), 'collision refused')
+    assert.match(text(sc), /already exists/)
+    console.error('  6d. move collision → loud no-overwrite refusal ✓')
+
+    await files.onBack()   // opResult → tree
+    files.stack = [join(sandbox, 'sub')]
+    wm.requestRender()
+    await settle((x) => items(x).includes('a.txt') && (x.regions.find((r) => r.name === 'title')?.content?.text ?? '').includes('sub'), 'sub listing again')
+    await files.onBrowseSelect(1)   // a.txt → actions
+    await settle((x) => menu(x)[0] === 'Open', 'actions again')
+    await files.onMenuSelect('Del')
+    sc = await settle((x) => menu(x)[0] === 'Cancel' && menu(x)[1] === 'DELETE', 'confirm page (Cancel first — accidental double-tap safe)')
+    assert.match(text(sc), /cannot be undone/)
+    await files.onMenuSelect('DELETE')
+    sc = await settle((x) => /Deleted/.test(text(x)), 'delete result')
+    assert.ok(!existsSync(join(sandbox, 'sub', 'a.txt')), 'file actually deleted')
+    console.error('  6e. Del → confirmation → deleted ✓')
+
+    // dir stats (du async swap)
+    await files.onBack()   // opResult → tree
+    files.stack = [sandbox]
+    wm.requestRender()
+    await settle((x) => items(x).includes('sub/'), 'sandbox listing')
+    await files.onMenuSelect('Stats')
+    sc = await settle((x) => /total size: (?!⏳)/.test(text(x)), 'du swap')
+    assert.match(text(sc), /1 dir\(s\) · 1 file\(s\)/)
+    console.error('  6f. dir Stats: counts + async du total ✓')
+
+    // `..` at the location root pops to locations (the DL trap)
+    await files.onBack()   // stats → tree
+    await settle((x) => items(x)[0] === '..', 'tree again')
+    await files.onBrowseSelect(0)
+    sc = await settle((x) => (x.regions.find((r) => r.name === 'title')?.content?.text ?? '').includes('locations'), 'locations after ..')
+    console.error('  6g. `..` at the location root → locations (no more DL trap) ✓')
+  } finally {
+    wm.dispose()
+    rmSync(sandbox, { recursive: true, force: true })
+  }
+}
+
+console.log('phase1-files: ALL OK')
 }

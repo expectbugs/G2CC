@@ -184,4 +184,33 @@ class EventParserTest {
         assertEquals("body", ev.name)
         assertEquals(2, ev.f3)
     }
+
+    /** Build a notification on the device-info response service 0x09-00. */
+    private fun deviceInfoNotif(payload: ByteArray): ByteArray {
+        val pkt = G2Frame.command(seq = 0x10, service = byteArrayOf(0x09, 0x00), payload = payload)
+        pkt[1] = 0x12.toByte()
+        return pkt
+    }
+
+    @Test
+    fun parse_deviceInfo_extractsBattery_fromLiveFrame() {
+        // EXACT payload from Adam's own session (diag 2026-06-12 21:29:42):
+        // 09-00 response to our 09-20 type-2 poll — f1=2, f2=498(glasses ctr),
+        // f4={f2=35,f3=6,f4=2,f5="2.2.2.202",f6="2.2.2.208",f7=1,f8=30,
+        //     f12=73(BATTERY), f18=1(two-byte varint TAG 90 01 — the one-byte
+        //     tag read used to misalign here and Malform the whole frame)}.
+        val hex = "08 02 10 F2 03 22 23 10 23 18 06 20 02 2A 08 32 2E 32 2E 32 2E 32 30 32 08 32 2E 32 2E 32 2E 32 30 38 01 40 1E 60 49 90 01 01"
+        val payload = hex.split(" ").map { it.toInt(16).toByte() }.toByteArray()
+        val ev = EventParser.parse(deviceInfoNotif(payload))
+        assertTrue("expected DeviceInfo, got $ev", ev is EventParser.Event.DeviceInfo)
+        assertEquals(73, (ev as EventParser.Event.DeviceInfo).battery)
+    }
+
+    @Test
+    fun parse_deviceInfo_noF4_isNullBattery() {
+        // A type-1 (firmware-only) response without f4 must not crash or lie.
+        val ev = EventParser.parse(deviceInfoNotif(byteArrayOf(0x08, 0x01, 0x10, 0x05)))
+        assertTrue("expected DeviceInfo, got $ev", ev is EventParser.Event.DeviceInfo)
+        assertEquals(null, (ev as EventParser.Event.DeviceInfo).battery)
+    }
 }

@@ -397,7 +397,13 @@ object EventParser {
             var battery: Int? = null
             var i = 0
             while (i < f4.size) {
-                val tag = f4[i].toInt() and 0xFF; i++
+                // TAGS ARE VARINTS (live-frame fix, 2026-06-12): field 18's tag
+                // is the two-byte varint `90 01` — the old one-byte read
+                // misaligned by a byte and the leftover parsed as a wire-type-1
+                // tag, so the WHOLE frame (battery already walked!) was thrown
+                // away as Malformed. Hardware-proven against Adam's own session
+                // frames (battery 73→71% across four 09-00 responses).
+                val (tag, tu) = Varint.decode(f4, i); i += tu
                 val fieldNo = tag ushr 3
                 when (tag and 0x07) {
                     0 -> {   // varint
@@ -409,7 +415,16 @@ object EventParser {
                         if (len < 0 || len > f4.size - i) return Event.Malformed("device-info: field $fieldNo overruns", payload.toHex())
                         i += len
                     }
-                    else -> return Event.Malformed("device-info: wire type ${tag and 0x07} unexpected", payload.toHex())
+                    else -> {
+                        // Unknown wire type past the known fields (firmware
+                        // drift): salvage the battery if we already have it —
+                        // never discard a good reading over an odd tail.
+                        if (battery != null) {
+                            Log.w(TAG, "device-info: wire type ${tag and 0x07} (field $fieldNo) unexpected past battery — salvaging $battery%")
+                            return Event.DeviceInfo(battery)
+                        }
+                        return Event.Malformed("device-info: wire type ${tag and 0x07} unexpected", payload.toHex())
+                    }
                 }
             }
             Event.DeviceInfo(battery)
@@ -419,11 +434,13 @@ object EventParser {
     }
 
     /** First len-delimited field [fieldNo] at the TOP level of [buf], skipping
-     *  varint/len-delim fields before it. Null when absent/unwalkable. */
+     *  varint/len-delim fields before it (varint TAGS — see decodeDeviceInfo).
+     *  Null when absent/unwalkable. */
     private fun findLenDelimField(buf: ByteArray, fieldNo: Int): ByteArray? {
         var i = 0
         while (i < buf.size) {
-            val tag = buf[i].toInt() and 0xFF; i++
+            val (tag, tu) = try { Varint.decode(buf, i) } catch (e: Exception) { return null }
+            i += tu
             val no = tag ushr 3
             when (tag and 0x07) {
                 0 -> { val (_, u) = Varint.decode(buf, i); i += u }

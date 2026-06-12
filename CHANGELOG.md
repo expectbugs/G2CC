@@ -4,6 +4,71 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-12 r17 — **G2 battery decode fixed (live-frame proven) + MMS images actually extracted + Cancel-first delete (APK v1.10)**
+
+Adam's on-glass report: no battery, no MMS pictures. His Diag log had both
+roots within minutes — **the [U] battery poll WORKS** (four `09-00` responses
+in the log, battery hardware-correlated 73→71% across his session); the v1.9
+DECODER was the bug: protobuf TAGS are varints, and f18's two-byte tag
+(`90 01`) misaligned the one-byte tag reader so the whole frame Malformed —
+after walking straight past a good f12 battery value. Tags now decode as
+varints (both walkers), an odd tail SALVAGES an already-found battery instead
+of discarding it, and the EXACT live frame from his session is pinned as a
+unit test (EventParserTest 17/17). §10 of the protocol doc records the
+confirmed response shape — the poll is no longer [U].
+
+**MMS** — "it just says Image": Google Messages uses **MessagingStyle**, so
+the picture rides a message DATA URI in EXTRA_MESSAGES; EXTRA_PICTURE (the
+v1.9 path) is BigPictureStyle-only and never fires for MMS. The listener now
+extracts MessagingStyle data URIs first (newest image message; the system
+grants approved listeners read access to notification content URIs;
+two-pass sampled decode so a multi-MB photo never decodes full-size), then
+EXTRA_PICTURE, then EXTRA_PICTURE_ICON (API 31+). The dedup stamp now
+includes the image identity — two same-sender MMS both say "Image", and the
+content-hash debounce would have silently eaten the second one.
+
+**Files delete confirm is Cancel-FIRST** (Adam, same session): an accidental
+second tap lands on Cancel, never DELETE — the Approve/Deny-index rationale
+applied to the new destructive menu; smoke pin updated.
+
+Verification: gradle 17/17 EventParser (incl. the live frame) + suite green;
+server smoke 11/11; APK v1.10 staged (dex-verified "G2 OS v1.10").
+
+---
+
+## (unstamped) — 2026-06-12 r16 — **Files becomes a real file manager + the battery cluster moves right (server-only)**
+
+Adam's second feedback batch. **The DL trap**: the tree level only showed `..`
+below a location root and the only way out was the (invisible) double-tap
+focus-flip — "trapped there forever". Now `..` is ALWAYS row 0 (at a location
+root it pops to the locations list), the tree menu carries explicit
+**Up + Stats** (current-dir entry counts + async `du -sbx` total — one
+filesystem, no mount crossing, placeholder-swapped with the stale-seq guard),
+and Reload refreshes IN PLACE at every level (it never reset to locations —
+that was the per-connection window reset on a WS reconnect; documented).
+
+**Tap a file → actions, like a real file manager**: Open (the proven
+preview/image path, unchanged) / **Move** / **Copy** / **Del** / **Stats**.
+Move/Copy open a destination picker — locations first, then a dirs-only
+browse where tapping a folder prompts **Open vs "<verb> here"** (Adam's exact
+spec) and the menu's "<verb> here" drops into the current dir. Safety rails:
+NO overwrites (collisions loud-fail with the reason), Del demands an explicit
+DELETE/Cancel confirmation page, one filesystem op at a time, every outcome
+renders a result page + a loud `[os] files:` log. Cross-filesystem moves
+(the /mnt drives) fall back to copy+unlink on EXDEV.
+
+**Battery cluster → right end of the status bar** (his correction of
+yesterday's left placement): right-aligned by measured space padding
+(fwTextWidth, ~5.2 px/space) inside the single status region; the phase/host
+text keeps the left edge.
+
+Verification: phase1 grew a 7-assertion sandboxed round-trip (tap→actions,
+copy→"Copy here", move collision refusal, confirmed delete, du stats swap,
+root-`..`→locations); suite 11/11; server-only — no APK bump (v1.9 stays
+staged).
+
+---
+
 ## (unstamped) — 2026-06-12 r15 — **First on-glass feedback batch: Main/Stats redesign, chess confirm flow, mail/notices read-marking, MMS images, battery cluster (server + APK v1.9)**
 
 Adam's first hands-on session produced seven asks, all landed same-day:

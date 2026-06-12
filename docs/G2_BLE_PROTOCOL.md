@@ -437,7 +437,13 @@ no-timeout, ack-driven model — wait for the matching `msgId` ack, then send th
 
 ## 10. Battery — glasses (SOLVED) + ring (residual)
 
-**Glasses battery** = `09-00` device-info response, **field `f12`**. Hardware-correlated: on-glass
+**Glasses battery** = `09-00` device-info response, **field `f12`**. **LIVE-CONFIRMED
+under OUR hijack session 2026-06-12** (diag frames from Adam's own glasses): our `09-20`
+type-2 poll (`08 02 10 <msgId>`) draws the 45 B response — `{f1=2, f2=<glasses ctr>,
+f4={f2=35, f3=6, f4=2, f5="2.2.2.202", f6="2.2.2.208", f7=1, f8=30, f12=<battery%>,
+f18=1}}`, battery hardware-correlated 73→71% across a session. NOTE: f18's TAG is a
+two-byte varint (`90 01`) — protobuf tags are varints; a one-byte tag read misparses
+this frame (the v1.9 decoder bug). Hardware-correlated: on-glass
 STATUS read "batt=90%" (19:16:12) and the `09-00` response carried `f12=90` (19:15:09.457). Full
 response: `f4 = {f1=1, f2=<35/50, varies — unknown>, f3=6, f4=2, f5="2.2.2.20", f6="2.2.2.20", f7=1,
 f8=30, f12=90 (battery%), f18=1}`. `f5`/`f6` = firmware per lens (8-char field; full is "2.2.2.20x",

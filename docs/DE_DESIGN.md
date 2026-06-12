@@ -96,6 +96,8 @@ twocol mode — Adam 2026-06-12, Main's one-page dashboard).
   waits). Idle shows `● host · N cc`. **Battery cluster leads the slot, ALWAYS** (Adam
   2026-06-12): `G<g2> R<r1> P<phone> H<hat>` — `--` for not-yet-reported; R1 + hat are
   placeholders until their signals exist; G2 is [U] (client 09-00/09-01 decode).
+  RIGHT-ALIGNED at the bar's end (Adam's correction, same day) via measured
+  space padding; the phase/host text keeps the left.
 - **Title flash APPENDS** (Adam 2026-06-12): an unseen info/sms/email notification renders
   as `<window title> · ⚠ <notification title>` (it used to replace the title); the px
   middle-clamp keeps the title head + flash tail visible.
@@ -123,7 +125,7 @@ twocol mode — Adam 2026-06-12, Main's one-page dashboard).
 | `cc` | CC | browse→text | root = directory picker (browse /home/user/*); then the CC session: response→firmware-text pages, dynamic action menu, permission flow via menu. |
 | `aria` | Aria | text | CC subprocess, cwd `/home/user/aria`, `--append-system-prompt` = `server/prompts/aria-g2.md` (teaches the ~44×6 text surface). |
 | `mail` | Mail | browse→text | Maildir `~/Mail/marzello.net/` (mbsync cron, every 5 min). List = INBOX newest-first; read = text/plain body, text mode. `scripts/read_maildir.py` (stdlib). |
-| `files` | Files | browse→browse→text/image | locations list (Root/Home/DL/G2CC + /proc/mounts drives; plain browse rows since 2026-06-11) → tree browse ('..' ascends) → bounded head preview, or the **image viewer** (2026-06-11): png/jpg/gif/bmp/webp → aspect-preserving largest-fit ≤480×222, Floyd–Steinberg-dithered to gray4, 4 centered tiles. |
+| `files` | Files | browse→text/tiles | **Real file manager (Adam 2026-06-12):** locations → tree (`..` ALWAYS row 0 — at a location root it pops to locations; menu = Up/Stats/Reload/Main, Stats = current-dir counts + async `du -sbx` total). Tapping a FILE opens the ACTIONS level — Open (preview/image, the proven path) / Move / Copy / Del / Stats; dirs descend on tap. Move/Copy run a destination picker (locations → dirs-only browse; tapping a folder prompts Open vs "<verb> here"; the menu's "<verb> here" targets the current dir). No overwrites — collisions loud-fail; cross-FS moves fall back to copy+unlink (EXDEV). Del has an explicit DELETE/Cancel confirmation. Reload refreshes IN PLACE at every level. |
 | `reader` | Reader | browse→browse→text | EPUB library (`~/books`) → chapters → paginated text (upgrades Ph7). **Resume position is the feature**: every page/chapter change persists (`reader_positions`); re-opening a book drops straight back into the page; Next/Prev roll across chapter boundaries. Parsing via `read_epub.py` subprocess. |
 | `timers` | Timers | browse→text | pending timers (tap → detail → `Cancel timer`) + `New 5/10/20/30/60 min` rows (Ph6). DB-backed (`timers`), re-armed at boot (missed fires fire late, marked); fires arrive as 'timer'-priority notifications. Voice creation via the Aria Ask intent pre-parse. |
 | `calendar` | Calendar | browse→text | 14-day day-grouped agenda → event read view (Ph10, READ-ONLY). Synced from Google every 15 min via aria's OAuth (`read_gcal.py`); 10-min-lead reminders for timed events ride the notification layer. |
