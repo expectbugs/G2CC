@@ -19,7 +19,7 @@ import {
 } from '@g2cc/shared'
 import type { WireScene, SceneRegion, RegionStyle } from '@g2cc/shared'
 
-export type WinMode = 'tiles' | 'tile' | 'browse' | 'text'
+export type WinMode = 'tiles' | 'tile' | 'browse' | 'text' | 'twocol'
 
 /** Browse-mode menu behavior (docs/DE_DESIGN.md §2, revised 2026-06-10;
  *  the 'antenna' per-notch preview mode was REVERTED 2026-06-11 — Adam: "feels
@@ -45,6 +45,11 @@ export interface WinView {
   items?: string[]
   /** text mode: pre-paginated page content. */
   text?: string
+  /** twocol mode (Adam 2026-06-12 — the one-page Main): two side-by-side text
+   *  columns. Lines must be PRE-FIT to the column width (compose px-clamps
+   *  each line as a backstop, logged) — there is no per-column pagination. */
+  textLeft?: string
+  textRight?: string
   /** tiles mode: 4 base64 gray4 BMPs (t0..t3, 2x2 row-major). */
   tiles?: [string, string, string, string]
   /** tiles mode, optional: the FULL composed size (w×h ≤ content pane). When
@@ -255,6 +260,24 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
       id: DE_REGION_IDS.browse, name: 'browse', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: DE_CONTENT_W, h: DE_CONTENT_H,
       kind: 'list', style: { ...CHROME, padding: 4 },
       content: { kind: 'list', items: rows, selectBorder: contentCaptures, eventCapture: contentCaptures },
+    })
+  } else if (view.mode === 'twocol') {
+    // Two side-by-side text columns (Adam 2026-06-12 — the one-page Main).
+    // 237 px each + 6 px gap = 480. Each LINE is px-clamped to its column as
+    // the loud backstop (producers pre-fit; a slipped-through long line must
+    // not firmware-wrap and push rows off the pane).
+    const colW = Math.floor((DE_CONTENT_W - 6) / 2)   // 237
+    const clampCol = (text: string, what: string): string =>
+      (text ?? '').split('\n').map((l) => clampPx(l, colW - 14, what)).join('\n')
+    regions.push({
+      id: DE_REGION_IDS.contentText, name: 'content', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: colW, h: DE_CONTENT_H,
+      kind: 'text', style: { ...CHROME, padding: 6 },
+      content: { kind: 'text', text: clampCol(view.textLeft ?? '', 'twocol-left') },
+    })
+    regions.push({
+      id: DE_REGION_IDS.contentRight, name: 'content2', x: DE_CONTENT_X + colW + 6, y: DE_CONTENT_Y, w: colW, h: DE_CONTENT_H,
+      kind: 'text', style: { ...CHROME, padding: 6 },
+      content: { kind: 'text', text: clampCol(view.textRight ?? '', 'twocol-right') },
     })
   } else {
     regions.push({

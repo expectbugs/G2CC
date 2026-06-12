@@ -1167,6 +1167,9 @@ class G2Pipeline(
                 is EventParser.Event.HubAck -> {
                     // e0-00 ack for a display write — not user input (the renderer ack-gates on it).
                 }
+                is EventParser.Event.DeviceInfo -> {
+                    Log.d(TAG, "device-info frame (battery=${event.battery}) — not pipeline input")
+                }
                 is EventParser.Event.Malformed -> {
                     Log.w(TAG, "malformed BLE event: ${event.reason}")
                 }

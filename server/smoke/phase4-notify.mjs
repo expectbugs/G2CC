@@ -5,7 +5,7 @@
 import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { WindowManager, setBlankPopupMsForSmoke } from '../dist/os-windows.js'
-import { notify } from '../dist/os-notify.js'
+import { notify, getNotification } from '../dist/os-notify.js'
 import { query, getPool } from '../dist/store.js'
 
 setBlankPopupMsForSmoke(250)
@@ -126,6 +126,20 @@ try {
   await wm.onBackGesture()
   await waitFor(() => !isBlank(last()) && !titleOf(last()).includes('⚠ info · smoke-blank'), 'woke to a real window')
   console.error('  8. double-tap on popup → dismiss + wake ✓')
+
+  // --- image attachment round-trip (Adam 2026-06-12 — MMS pictures) ---
+  {
+    const row = await query("SELECT id FROM notifications WHERE title = $1", [`smoke-img-${process.pid}`])
+    if (row.rowCount) await query("DELETE FROM notifications WHERE id = $1", [row.rows[0].id])
+  }
+  await notify({ source: 'smoke', priority: 'info', title: `smoke-img-${process.pid}`, body: 'with image', quiet: true, imagePath: '/tmp/smoke-fake.jpg' })
+  const imgRow = await query("SELECT id, image_path FROM notifications WHERE title = $1", [`smoke-img-${process.pid}`])
+  assert.equal(imgRow.rowCount, 1)
+  assert.equal(imgRow.rows[0].image_path, '/tmp/smoke-fake.jpg', 'image_path persists')
+  const back = await getNotification(Number(imgRow.rows[0].id))
+  assert.equal(back?.imagePath, '/tmp/smoke-fake.jpg', 'getNotification carries imagePath')
+  await query("DELETE FROM notifications WHERE title = $1", [`smoke-img-${process.pid}`])
+  console.error('  image_path round-trip (notify → row → getNotification) ✓')
 
   console.log('phase4-notify: ALL OK')
 } catch (e) {

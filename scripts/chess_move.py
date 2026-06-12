@@ -44,7 +44,9 @@ def main():
     move = req.get("move")
     if move:
         board.push_san(move)  # raises on illegal SAN — loud exit 1
-        if status_of(board) == "ongoing":
+        # preview mode (Adam 2026-06-12): the confirm-before-apply board — the
+        # player's move applies, Stockfish does NOT reply. Pure position math.
+        if not req.get("preview") and status_of(board) == "ongoing":
             engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH, timeout=None)
             try:
                 engine.configure({"Skill Level": skill})

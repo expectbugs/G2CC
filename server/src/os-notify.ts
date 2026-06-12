@@ -29,6 +29,10 @@ registerMigration('notify-v1', `
   CREATE INDEX IF NOT EXISTS notifications_unseen ON notifications (id) WHERE seen_at IS NULL;
 `)
 
+registerMigration('notify-v2', `
+  ALTER TABLE notifications ADD COLUMN IF NOT EXISTS image_path text;
+`)
+
 export type NotifyPriority = 'call' | 'timer' | 'sms' | 'email' | 'info'
 export const PRIORITY_RANK: Record<NotifyPriority, number> = { call: 0, timer: 1, sms: 2, email: 3, info: 4 }
 /** Priorities that surface as a full overlay when the screen is awake; the
@@ -46,6 +50,8 @@ export interface NotifyEvent {
   ts: Date
   /** Window the overlay's `Open` action switches to (default 'notices'). */
   targetWindow: string
+  /** Attached image on disk (MMS pictures — Adam 2026-06-12), if any. */
+  imagePath?: string | null
 }
 
 /** Singleton event bus: 'notification' (NotifyEvent) + 'seen' (id). */
@@ -63,12 +69,14 @@ export function notify(evt: {
   body: string
   targetWindow?: string
   quiet?: boolean
+  /** Path of an already-saved attached image (MMS — Adam 2026-06-12). */
+  imagePath?: string | null
 }): Promise<void> {
   const ts = new Date()
   return query<{ id: string }>(
-    `INSERT INTO notifications (source, priority, title, body, ts, seen_at)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-    [evt.source, evt.priority, evt.title, evt.body, ts, evt.quiet ? ts : null])
+    `INSERT INTO notifications (source, priority, title, body, ts, seen_at, image_path)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [evt.source, evt.priority, evt.title, evt.body, ts, evt.quiet ? ts : null, evt.imagePath ?? null])
     .then((r) => Number(r.rows[0].id))
     .catch((e: unknown) => {
       console.error(`[notify] persist FAILED (${evt.priority} "${evt.title}"): ${e instanceof Error ? e.message : String(e)} — ${evt.quiet ? 'quiet ack lost' : 'surfacing live without a durable record'}`)
@@ -86,6 +94,7 @@ export function notify(evt: {
         notifyHub.emit('notification', {
           id, source: evt.source, priority: evt.priority, title: evt.title,
           body: evt.body, ts, targetWindow: evt.targetWindow ?? 'notices',
+          imagePath: evt.imagePath ?? null,
         } satisfies NotifyEvent)
       } catch (e) {
         console.error(`[notify] a hub listener THREW on (${evt.priority} "${evt.title}") — listener bug, fix it: ${e instanceof Error ? e.stack ?? e.message : String(e)}`)
@@ -129,6 +138,7 @@ export interface NotificationRow {
   body: string
   ts: Date
   seen: boolean
+  imagePath: string | null
 }
 
 export async function listNotifications(
@@ -136,8 +146,8 @@ export async function listNotifications(
 ): Promise<{ total: number; unseen: number; rows: NotificationRow[] }> {
   const totals = await query<{ n: string; u: string }>(
     'SELECT count(*) AS n, count(*) FILTER (WHERE seen_at IS NULL) AS u FROM notifications')
-  const rows = await query<{ id: string; source: string; priority: NotifyPriority; title: string; body: string; ts: Date; seen_at: Date | null }>(
-    `SELECT id, source, priority, title, body, ts, seen_at FROM notifications
+  const rows = await query<{ id: string; source: string; priority: NotifyPriority; title: string; body: string; ts: Date; seen_at: Date | null; image_path: string | null }>(
+    `SELECT id, source, priority, title, body, ts, seen_at, image_path FROM notifications
      ORDER BY ts DESC, id DESC LIMIT $1 OFFSET $2`, [limit, offset])
   return {
     total: Number(totals.rows[0].n),
@@ -145,17 +155,19 @@ export async function listNotifications(
     rows: rows.rows.map((r) => ({
       id: Number(r.id), source: r.source, priority: r.priority,
       title: r.title, body: r.body, ts: r.ts, seen: r.seen_at !== null,
+      imagePath: r.image_path,
     })),
   }
 }
 
 export async function getNotification(id: number): Promise<NotificationRow | null> {
-  const r = await query<{ id: string; source: string; priority: NotifyPriority; title: string; body: string; ts: Date; seen_at: Date | null }>(
-    'SELECT id, source, priority, title, body, ts, seen_at FROM notifications WHERE id = $1', [id])
+  const r = await query<{ id: string; source: string; priority: NotifyPriority; title: string; body: string; ts: Date; seen_at: Date | null; image_path: string | null }>(
+    'SELECT id, source, priority, title, body, ts, seen_at, image_path FROM notifications WHERE id = $1', [id])
   if (!r.rowCount) return null
   const row = r.rows[0]
   return {
     id: Number(row.id), source: row.source, priority: row.priority,
     title: row.title, body: row.body, ts: row.ts, seen: row.seen_at !== null,
+    imagePath: row.image_path,
   }
 }

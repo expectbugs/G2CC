@@ -26,6 +26,7 @@ import { warmParakeet } from './stt.js'
 import { warmStore } from './store.js'
 import { armTimersFromDb } from './timers.js'
 import { startCalendarSync } from './calendar.js'
+import { startStatsSampler } from './stats.js'
 
 const VERSION = '0.0.1'
 
@@ -176,6 +177,8 @@ try {
   armTimers(1)
   // Google Calendar sync (15-min pacing) + the 60 s reminder tick (Phase 10).
   startCalendarSync()
+  // System-stats sampler (Adam 2026-06-12) — feeds Main → Stats charts.
+  startStatsSampler()
 } catch (err) {
   console.error('[g2cc-server] Failed to start:', err)
   process.exit(1)

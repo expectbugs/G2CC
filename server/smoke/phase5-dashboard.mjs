@@ -54,25 +54,39 @@ try {
     await new Promise((r) => setTimeout(r, 25))
   }
   const main = scenes[scenes.length - 1]
+  // Adam 2026-06-12: ONE page, TWO columns (content + content2), Stats first
+  // in the menu, never paginated.
   const content = main.regions.find((r) => r.name === 'content')
-  assert.ok(content, 'Main must be TEXT mode (dashboard), not a tile')
+  const content2 = main.regions.find((r) => r.name === 'content2')
+  assert.ok(content && content2, 'Main must be TWOCOL mode (two text columns)')
+  assert.ok(content.w < 250 && content2.w < 250, 'columns split the pane')
   assert.ok(!main.regions.some((r) => r.name === 't0'), 'logo tile gone')
   assert.ok(!main.regions.some((r) => r.name === 'tabs'), 'no tabs on a real render')
-  assert.match(content.content.text, /Aria: /)
-  assert.match(content.content.text, /Mail: /)
-  assert.match(content.content.text, /\d+ cc/)
+  const both = `${content.content.text}\n${content2.content.text}`
+  assert.match(both, /Aria: /)
+  assert.match(both, /Mail: /)
   const menu = main.regions.find((r) => r.name === 'menu')
   const items = menu.content.items
-  // Contract: switcher tabs first (derived from the live window list so this
-  // assertion survives new windows), then Ask, then (Next/Prev only when the
-  // dashboard paginates), Reload last.
+  // Contract: Stats first, then the switcher tabs (derived from the live
+  // window list so this assertion survives new windows), Ask, Reload last —
+  // and NO Next/Prev (the dashboard is one page by design now).
   const tabs = wm.windows.filter((w) => w.id !== 'main').map((w) => w.tab)
-  assert.deepEqual(items.slice(0, tabs.length + 1), [...tabs, 'Ask'])
-  assert.equal(items[items.length - 1], 'Reload')
-  const rest = items.slice(tabs.length + 1, -1)
-  assert.ok(rest.length === 0 || (rest.length === 2 && rest[0] === 'Next' && rest[1] === 'Prev'),
-    `unexpected menu middle: ${rest}`)
-  console.error(`  WM render: dashboard + switcher menu (paged=${rest.length > 0}), no tile/tabs ✓`)
+  assert.deepEqual(items, ['Stats', ...tabs, 'Ask', 'Reload'])
+  console.error('  WM render: two-column dashboard + Stats-first switcher menu, no tile/tabs ✓')
+  // Stats level: composes (text or tiles per page) within budget.
+  await wm.onSelect('menu', 0)   // 'Stats'
+  const t1 = Date.now()
+  while (Date.now() - t1 < 5000) {
+    const s = scenes[scenes.length - 1]
+    const title = s?.regions.find((r) => r.name === 'title')?.content?.text ?? ''
+    if (title.includes('Stats')) break
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  const stats = scenes[scenes.length - 1]
+  const statsTitle = stats.regions.find((r) => r.name === 'title')?.content?.text ?? ''
+  assert.ok(statsTitle.includes('Stats'), `Stats level renders (title: ${statsTitle})`)
+  assert.ok(estimateLayoutFrameBytes(stats.regions) <= LAYOUT_FRAME_BUDGET_BYTES, 'stats page within budget')
+  console.error(`  Stats level renders ("${statsTitle.trim()}") within budget ✓`)
   if (EMIT) process.stdout.write(JSON.stringify(main))
   else console.log('phase5-dashboard: ALL OK')
 } finally {

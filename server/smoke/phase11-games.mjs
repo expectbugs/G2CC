@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { chessMove, renderBoard } from '../dist/games.js'
+import { chessMove, chessPreview, renderBoard } from '../dist/games.js'
 import { composeScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
 
 // self-anchored (review 2026-06-11b: process.cwd() broke run-from-anywhere)
@@ -55,6 +55,18 @@ assert.ok(after.legalMoves.length > 0)
 console.error(`  2. chess: e4 → Stockfish ${after.engineMove} (skill 5) ✓`)
 await assert.rejects(() => chessMove(after.fen, 'Qxh9', 5), /chess_move failed/, 'illegal SAN loud-fails')
 console.error('  3. illegal move → loud rejection ✓')
+
+// --- 3b. preview mode (Adam 2026-06-12): applies the SAN, NO engine reply ---
+{
+  const fresh = await chessMove(null, null, 5)
+  const prev = await chessPreview(fresh.fen, 'e4')
+  assert.equal(prev.engineMove, null, 'preview must not let Stockfish reply')
+  assert.ok(prev.fen.includes(' b '), 'preview position has black to move (e4 applied)')
+  await chessPreview(fresh.fen, 'Zz9').then(
+    () => { throw new Error('illegal preview SAN must reject') },
+    () => {})
+  console.error('  3b. preview applies the move without an engine reply ✓')
+}
 
 // --- 3. board render → tiles → compose parity ---
 const img = await renderBoard(after.fen, 480, 222)

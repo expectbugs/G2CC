@@ -77,6 +77,9 @@ export const DE_TAB_RIGHT_TRIM = 30
 export const DE_REGION_IDS = {
   title: 2, menu: 3, status: 4, tabs: 5, browse: 6, contentText: 7,
   tile0: 10, tile1: 11, tile2: 12, tile3: 13,
+  /** twocol mode (Adam 2026-06-12 — the one-page Main dashboard): the RIGHT
+   *  column; the left column reuses contentText(7). 14 was previously unused. */
+  contentRight: 14,
 } as const
 /** Menu items that fit without firmware list scrolling (~40px rows in 222px). */
 export const DE_MENU_VISIBLE_ITEMS = 5

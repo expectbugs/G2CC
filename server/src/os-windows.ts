@@ -43,7 +43,8 @@ import { createTimer, cancelTimer, listPending, nextPending, fmtRemaining, type 
 import { parseIntent, appendNote } from './intents.js'
 import { savePosition, getPosition, listChapters, readChapter, type EpubChapter } from './reader.js'
 import { listUpcoming, getEvent } from './calendar.js'
-import { rpgRun, chessMove, renderBoard, DUNGEON_ROOT, type ChessState } from './games.js'
+import { rpgRun, chessMove, chessPreview, renderBoard, DUNGEON_ROOT, type ChessState } from './games.js'
+import { overviewText, chartSpecs, readStorage, readTopProcs, storageText } from './stats.js'
 import { hostname } from 'node:os'
 
 /** How long a notification popup holds a BLANKED screen before auto-returning
@@ -106,6 +107,9 @@ export interface WmContext {
   unregisterWatchdog(entryId: string): void
   /** Latest phone battery % from client_hb (Phase 9; null until reported). */
   phoneBattery?(): number | null
+  /** Latest GLASSES battery % from client_hb (Adam 2026-06-12; null until the
+   *  client decodes a 09-00/09-01 device-info frame — [U] on-glass pending). */
+  g2Battery?(): number | null
 }
 
 export interface OsWindow {
@@ -1788,6 +1792,16 @@ class MailWindow implements OsWindow {
       this.page = 0
       this.readSubject = m.subject.length > 24 ? m.subject.slice(0, 24) + '…' : m.subject   // title only; body is complete
       this.level = 'read'
+      // Mark READ at open (Adam 2026-06-12: "reading an E-Mail does not mark
+      // it as read") — Maildir S-flag rename (new/→cur/), fire-and-forget +
+      // loud catch; mbsync propagates the flag to the IMAP server on its next
+      // sync. The local row updates immediately so the list/summary agree.
+      if (sel.unread) {
+        sel.unread = false
+        this.unreadTotal = Math.max(0, this.unreadTotal - 1)
+        void this.runMaildir(['mark_read', MAILDIR_PATH, sel.key]).catch((e: unknown) =>
+          this.ctx.log(`[os] mail: mark_read ${sel.key} FAILED (stays unread on disk): ${e instanceof Error ? e.message : String(e)}`))
+      }
       this.requestRender()
     } catch (e) {
       // Render the failure as a READ-level page. Parking it in lastError was a
@@ -2133,7 +2147,7 @@ class GamesWindow implements OsWindow {
   readonly id = 'games'
   readonly tab = 'Games'
   readonly label = 'Games'
-  private level: 'menu' | 'rpg' | 'rpg-out' | 'chess' | 'chess-moves' = 'menu'
+  private level: 'menu' | 'rpg' | 'rpg-out' | 'chess' | 'chess-pieces' | 'chess-moves' | 'chess-confirm' = 'menu'
   private focus: 'content' | 'menu' = 'content'
   // --- rpg state ---
   private cwd = DUNGEON_ROOT
@@ -2145,7 +2159,17 @@ class GamesWindow implements OsWindow {
   // --- chess state ---
   private fen: string | null = null
   private legal: string[] = []
+  /** Moves flow (Adam 2026-06-12): board stays in the content window; the
+   *  MENU carries piece groups → that group's SAN moves (paginated under the
+   *  client's 20-item list cap) → a Confirm/Cancel step over a PREVIEW board
+   *  (the move applied, no engine reply) before anything is committed. */
+  private moveGroup: string | null = null
   private movesOffset = 0
+  private pendingMove: string | null = null
+  private previewBoard: RenderedImage | null = null
+  private previewFailed: string | null = null
+  /** Bumped per preview request — a stale render must not paint a newer one. */
+  private previewSeq = 0
   private skill: number = 5
   private chessTitle = 'no game'
   private chessInfo = 'New game to start. You play white.'
@@ -2281,6 +2305,87 @@ class GamesWindow implements OsWindow {
     this.requestRender()
   }
 
+  // -------------------------------------- chess Moves flow (Adam 2026-06-12)
+
+  private static readonly PIECE_ORDER = ['Pawn', 'Knight', 'Bishop', 'Rook', 'Queen', 'King'] as const
+
+  private groupOf(san: string): string {
+    if (san.startsWith('O-O')) return 'King'   // castling
+    const m: Record<string, string> = { N: 'Knight', B: 'Bishop', R: 'Rook', Q: 'Queen', K: 'King' }
+    return m[san[0]] ?? 'Pawn'
+  }
+
+  private pieceGroups(): { name: string; moves: string[] }[] {
+    const by = new Map<string, string[]>()
+    for (const san of this.legal) {
+      const g = this.groupOf(san)
+      const arr = by.get(g) ?? []
+      arr.push(san)
+      by.set(g, arr)
+    }
+    return GamesWindow.PIECE_ORDER.filter((n) => by.has(n)).map((n) => ({ name: n, moves: by.get(n)! }))
+  }
+
+  /** The SAN page for the selected group — ≤12 moves + optional » prev/» more
+   *  rows keeps the MENU under the client's 20-item native-list cap (a pawn
+   *  group can exceed 20 SANs with promotions). */
+  private movesMenuPage(): string[] {
+    const g = this.pieceGroups().find((x) => x.name === this.moveGroup)
+    const moves = g?.moves ?? []
+    const page = moves.slice(this.movesOffset, this.movesOffset + 12)
+    const menu: string[] = []
+    if (this.movesOffset > 0) menu.push('» prev')
+    menu.push(...page)
+    if (this.movesOffset + 12 < moves.length) menu.push('» more')
+    menu.push('Back', 'Reload', 'Main')
+    return menu
+  }
+
+  /** Kick the preview render (move applied, NO engine reply) for the confirm
+   *  step. Stale-guarded: navigation/Cancel bumps previewSeq. */
+  private startPreview(san: string): void {
+    const fen = this.fen
+    if (!fen) return
+    const seq = ++this.previewSeq
+    this.pendingMove = san
+    this.previewBoard = null
+    this.previewFailed = null
+    this.level = 'chess-confirm'
+    this.requestRender()
+    void chessPreview(fen, san).then(async (st) => {
+      if (seq !== this.previewSeq) return
+      const img = await renderBoard(st.fen, DE_CONTENT_W, DE_CONTENT_H)
+      if (seq !== this.previewSeq) return
+      this.previewBoard = img
+      this.requestRender()
+    }).catch((e: unknown) => {
+      if (seq !== this.previewSeq) return
+      const msg = e instanceof Error ? e.message : String(e)
+      this.ctx.log(`[os] games: preview '${san}' failed: ${msg}`)
+      this.previewFailed = msg
+      this.requestRender()
+    })
+  }
+
+  private clearPreview(): void {
+    this.previewSeq++
+    this.pendingMove = null
+    this.previewBoard = null
+    this.previewFailed = null
+  }
+
+  /** The board view shared by the chess sub-levels (current board for
+   *  pieces/moves, preview board for confirm; text placeholder while a
+   *  render is in flight). */
+  private chessBoardView(title: string, menu: string[], preview: boolean): WinView {
+    const img = preview ? this.previewBoard : (this.fen && this.boardFen === this.fen ? this.board : null)
+    if (img) return { mode: 'tiles', tilesRect: { w: img.w, h: img.h }, title, menu, tiles: img.tiles }
+    const text = preview
+      ? (this.previewFailed ? `preview FAILED:\n${this.previewFailed}\n\nCancel to go back.` : `⏳ previewing ${this.pendingMove}…`)
+      : (this.boardFailed ? this.chessInfo : `⏳ board rendering…\n\n${this.chessInfo}`)
+    return { mode: 'text', title, menu, text }
+  }
+
   // ------------------------------------------------ views
 
   async view(): Promise<WinView> {
@@ -2310,15 +2415,18 @@ class GamesWindow implements OsWindow {
         items: paged.items,
       }
     }
+    if (this.level === 'chess-pieces') {
+      const groups = this.pieceGroups()
+      const menu = [...groups.map((g) => `${g.name} (${g.moves.length})`), 'Back', 'Reload', 'Main']
+      return this.chessBoardView(`Chess · pick a piece`, menu, false)
+    }
     if (this.level === 'chess-moves') {
-      const paged = browsePageItems(this.legal, this.movesOffset)
-      return {
-        mode: 'browse',
-        menuMode,
-        title: `Chess · pick a move (${this.legal.length} legal)`,
-        menu: ['Reload', 'Main'],
-        items: paged.items.length ? paged.items : ['(no legal moves)'],
-      }
+      const g = this.pieceGroups().find((x) => x.name === this.moveGroup)
+      return this.chessBoardView(`Chess · ${this.moveGroup ?? '?'} (${g?.moves.length ?? 0})`, this.movesMenuPage(), false)
+    }
+    if (this.level === 'chess-confirm') {
+      return this.chessBoardView(`Chess · ${this.pendingMove ?? '?'} — confirm?`,
+        ['Confirm', 'Cancel', 'Reload', 'Main'], true)
     }
     if (this.level === 'chess') {
       const thinking = this.moveInFlight ? ' · thinking…' : ''
@@ -2399,18 +2507,6 @@ class GamesWindow implements OsWindow {
         }
       }
     }
-    if (this.level === 'chess-moves') {
-      const { map } = browsePageItems(this.legal, this.movesOffset)
-      const m = map[index]
-      if (m === undefined) { this.ctx.log(`[os] games: move index ${index} out of range`); return }
-      if (m === -1) { this.movesOffset = Math.max(0, this.movesOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.movesOffset += BROWSE_PAGE; this.requestRender(); return }
-      const san = this.legal[m]
-      if (!san) { this.ctx.log(`[os] games: no move at ${m} — resyncing`); this.requestRender(); return }
-      this.focus = 'content'
-      await this.applyChessMove(san)
-      return
-    }
     this.ctx.log(`[os] games: browse select ${index} at ${this.level} — ignored`)
   }
 
@@ -2423,12 +2519,52 @@ class GamesWindow implements OsWindow {
       }
       return
     }
+    if (this.level === 'chess-pieces') {
+      const g = this.pieceGroups().find((x) => label === `${x.name} (${x.moves.length})`)
+      if (g) {
+        this.moveGroup = g.name
+        this.movesOffset = 0
+        this.level = 'chess-moves'
+        this.requestRender()
+        return
+      }
+      this.ctx.log(`[os] games pieces: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
+    if (this.level === 'chess-moves') {
+      if (label === '» more') { this.movesOffset += 12; this.requestRender(); return }
+      if (label === '» prev') { this.movesOffset = Math.max(0, this.movesOffset - 12); this.requestRender(); return }
+      const g = this.pieceGroups().find((x) => x.name === this.moveGroup)
+      if (g?.moves.includes(label)) {
+        this.startPreview(label)   // → chess-confirm with the preview board
+        return
+      }
+      this.ctx.log(`[os] games moves: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
+    if (this.level === 'chess-confirm') {
+      if (label === 'Confirm') {
+        const san = this.pendingMove
+        this.clearPreview()
+        if (!san) { this.ctx.log('[os] games: Confirm with no pending move — ignored (LOUD)'); this.level = 'chess'; this.requestRender(); return }
+        await this.applyChessMove(san)   // the REAL path — engine replies; lands on 'chess'
+        return
+      }
+      if (label === 'Cancel') {
+        this.clearPreview()
+        this.level = 'chess-moves'   // back to the move list, board reverts (cached)
+        this.requestRender()
+        return
+      }
+      this.ctx.log(`[os] games confirm: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
     if (this.level === 'chess') {
       if (label === 'Moves') {
         if (!this.fen || this.gameOver || this.moveInFlight) { this.ctx.log('[os] games: Moves unavailable right now — ignored (LOUD)'); return }
-        this.level = 'chess-moves'
+        this.level = 'chess-pieces'
+        this.moveGroup = null
         this.movesOffset = 0
-        this.focus = 'content'
         this.requestRender()
         return
       }
@@ -2462,6 +2598,12 @@ class GamesWindow implements OsWindow {
       this.chessSeq++
     }
     if (this.rpgBusy) { this.ctx.log('[os] games: Reload cleared a stuck rpgBusy (the orphaned run may still mutate the dungeon)'); this.rpgBusy = false }
+    if (this.level === 'chess-confirm' && this.pendingMove && !this.previewBoard && !this.previewFailed) {
+      this.ctx.log('[os] games: Reload retrying the stuck preview')
+      const san = this.pendingMove
+      this.clearPreview()
+      this.startPreview(san)
+    }
     // A failed board render retries on Reload (the failure card says so).
     if (this.fen && this.boardFen !== this.fen) {
       this.ctx.log('[os] games: Reload re-requesting the board render')
@@ -2471,14 +2613,15 @@ class GamesWindow implements OsWindow {
 
   async onBack(): Promise<boolean> {
     if (this.level === 'rpg-out') { this.level = 'rpg'; this.focus = 'content'; this.requestRender(); return true }
-    if (this.level === 'chess-moves') {
-      // Browse level: first pop flips content→menu so the rendered Reload/Main
-      // list is actually reachable (the standard flip every other browse level
-      // has — this one was missing it; review 2026-06-11b).
-      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
-      this.focus = 'content'
-      this.level = 'chess'; this.requestRender(); return true
+    if (this.level === 'chess-confirm') {
+      // Double-tap on the confirm step = Cancel (never silently apply).
+      this.clearPreview()
+      this.level = 'chess-moves'
+      this.requestRender()
+      return true
     }
+    if (this.level === 'chess-moves') { this.level = 'chess-pieces'; this.requestRender(); return true }
+    if (this.level === 'chess-pieces') { this.level = 'chess'; this.requestRender(); return true }
     if (this.level === 'chess' || this.level === 'rpg') {
       if (this.focus === 'content' && (this.level === 'rpg')) { this.focus = 'menu'; this.requestRender(); return true }
       this.focus = 'content'
@@ -2633,31 +2776,42 @@ class NoticesWindow implements OsWindow {
   private offset = 0
   private rows: { id: number; label: string }[] = []
   private total = 0
-  private unseenCached = 0
-  private pages: string[] = []
+  /** Read pages: text + an optional trailing IMAGE page (MMS pictures — Adam
+   *  2026-06-12; rendered via the Files image pipeline, page-2-class tiles). */
+  private pages: (string | { kind: 'image'; img: RenderedImage | null; failed: string | null })[] = []
   private page = 0
   private readTitle = ''
   private focus: 'content' | 'menu' = 'content'
+  /** Stale-swap guard for the async image render (the documented pattern). */
+  private readSeq = 0
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
-  summary(): string {
-    return this.unseenCached ? `${this.unseenCached} unseen` : 'notifications'
+  /** DB-backed (Adam 2026-06-12, bug #2): reading a notification marks it
+   *  seen at OPEN, but this summary used the list-view cache — jumping
+   *  read→Main showed the OLD unseen count ("does not mark it as read"). */
+  async summary(): Promise<string> {
+    const n = await unseenCount()
+    return n ? `${n} unseen` : 'quiet'
   }
 
   async view(): Promise<WinView> {
     if (this.level === 'read') {
       const pageSuffix = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
-      return {
-        mode: 'text',
-        title: `Notices · ${this.readTitle}${pageSuffix}`,
-        menu: ['Next', 'Prev', 'Back', 'Reload', 'Main'],
-        text: this.pages[this.page] ?? '',
+      const title = `Notices · ${this.readTitle}${pageSuffix}`
+      const menu = ['Next', 'Prev', 'Back', 'Reload', 'Main']
+      const cur = this.pages[this.page]
+      if (cur !== undefined && typeof cur !== 'string') {
+        if (cur.img) return { mode: 'tiles', tilesRect: { w: cur.img.w, h: cur.img.h }, title, menu, tiles: cur.img.tiles }
+        return {
+          mode: 'text', title, menu,
+          text: cur.failed ? `image render FAILED:\n${cur.failed}` : '⏳ image rendering…',
+        }
       }
+      return { mode: 'text', title, menu, text: (cur as string | undefined) ?? '' }
     }
     const { total, unseen, rows } = await listNotifications(BROWSE_PAGE, this.offset)
     this.total = total
-    this.unseenCached = unseen
     const P: Record<string, string> = { call: 'C', timer: 'T', sms: 'S', email: 'E', info: 'i' }
     this.rows = rows.map((r) => ({
       id: r.id,
@@ -2692,6 +2846,26 @@ class NoticesWindow implements OsWindow {
       if (!n) throw new Error(`notification ${sel.id} not found`)
       this.pages = paginateText(`${n.title}\n${n.priority} · ${n.source} · ${fmtStamp(n.ts)}\n\n${n.body}`)
       this.readTitle = oneLine(n.title, 24)
+      if (n.imagePath) {
+        // MMS picture (Adam 2026-06-12): a trailing IMAGE page via the Files
+        // image pipeline (fit + dither + 4 tiles). PAGE-2 RULE: text first,
+        // imagery on a later page; the ~4 s tile push happens only when the
+        // user flips TO it. Stale-guarded like every async render swap.
+        const seq = ++this.readSeq
+        const pageObj = { kind: 'image' as const, img: null as RenderedImage | null, failed: null as string | null }
+        this.pages = [...this.pages, pageObj]
+        void renderImageFile(n.imagePath, DE_CONTENT_W, DE_CONTENT_H).then((img) => {
+          if (seq !== this.readSeq) return
+          pageObj.img = img
+          this.requestRender()
+        }).catch((e: unknown) => {
+          if (seq !== this.readSeq) return
+          const msg = e instanceof Error ? e.message : String(e)
+          this.ctx.log(`[os] notices: image render failed (${n.imagePath}): ${msg}`)
+          pageObj.failed = msg
+          this.requestRender()
+        })
+      }
       // Reading marks SEEN — the hub 'seen' event refreshes every WM's chrome.
       void markSeen(n.id).catch((e: unknown) =>
         console.error(`[notices] markSeen(${n.id}) failed: ${e instanceof Error ? e.message : String(e)}`))
@@ -2720,7 +2894,7 @@ class NoticesWindow implements OsWindow {
   }
 
   async onBack(): Promise<boolean> {
-    if (this.level === 'read') { this.level = 'list'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'read') { this.readSeq++; this.level = 'list'; this.focus = 'content'; this.requestRender(); return true }
     if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
     this.focus = 'content'
     return false
@@ -3085,13 +3259,25 @@ class TimersWindow implements OsWindow {
  *  Content paginates if the window count ever outgrows a page (Next/Prev rows
  *  appear in the menu only then — no truncation, ever). A 30 s WM pacer
  *  re-renders the dashboard while Main is active (pacing, allowed). */
+/** A Stats page: pre-built text, or an async-rendered chart/image. */
+type StatsPage =
+  | { kind: 'text'; name: string; text: string }
+  | { kind: 'image'; name: string; img: RenderedImage | null; failed: string | null }
+
 class MainWindow implements OsWindow {
   readonly id = 'main'
   readonly tab = 'Main'
   readonly label = 'Main'
   private others: () => OsWindow[]
-  private page = 0
-  private pageCount = 1
+  /** dash = the one-page two-column dashboard; stats = the deep-stats pages
+   *  (Adam 2026-06-12: "Main should just surface active things; Stats is
+   *  where extra stuff goes, many pages of deep stats"). */
+  private level: 'dash' | 'stats' = 'dash'
+  private statsPages: StatsPage[] = []
+  private statsPage = 0
+  /** Bumped per stats build — async chart/df/ps completions check it so a
+   *  superseded build can't paint over a newer one (the stale-swap pattern). */
+  private statsSeq = 0
 
   constructor(
     private ctx: WmContext,
@@ -3105,15 +3291,12 @@ class MainWindow implements OsWindow {
 
   summary(): string { return 'dashboard' }
 
-  /** ~40-char assembly clamp per dashboard line (sanctioned + logged; the
-   *  full state always lives one tap away in the window itself). */
-  private dashLine(s: string): string {
-    if (s.length <= 40) return s
-    this.ctx.log(`[os] main: dashboard line clamped: "${s.slice(0, 50)}"`)
-    return s.slice(0, 39) + '…'
-  }
+  /** Column-width clamp for the two-column dashboard (~23 ASCII chars per
+   *  237 px column; compose px-clamps each line as the logged backstop). */
+  private colLine(s: string): string { return oneLine(s, 23) }
 
   async view(): Promise<WinView> {
+    if (this.level === 'stats') return this.statsView()
     const unseen = this.unseen()
     // Next-timer line (Phase 6) — minute granularity only (per-second is
     // hat-gated; do not fake it). A down DB renders a loud placeholder.
@@ -3123,46 +3306,133 @@ class MainWindow implements OsWindow {
       if (nt) timerLine = `⏱ ${fmtRemaining(nt.firesAt)} · ${nt.label || 'timer'}`
     } catch (e) {
       this.ctx.log(`[os] main: next-timer query failed: ${(e as Error).message}`)
-      timerLine = '⏱ (timers unavailable — see log)'
+      timerLine = '⏱ (timers down — log)'
     }
-    const battery = this.ctx.phoneBattery?.() ?? null
     // Summaries may be async (DB-backed) — gather concurrently, isolate
     // failures per row so one down subsystem can't blank the dashboard.
     const summaries = await Promise.all(this.others().map(async (w) => {
       try {
-        return `${w.label}: ${await w.summary()}`
+        return `${w.tab}: ${await w.summary()}`
       } catch (e) {
         this.ctx.log(`[os] main: ${w.id} summary failed: ${(e as Error).message}`)
-        return `${w.label}: (unavailable — see log)`
+        return `${w.tab}: (down — log)`
       }
     }))
+    // ONE page, TWO columns (Adam 2026-06-12): active things first (the timer
+    // line leads the left column), then one short line per window, split
+    // across the columns. Host/pool/battery live in the status bar now.
     const lines = [
-      this.dashLine(`${hostname()} · ${this.ctx.pool.count} cc${battery !== null ? ` · ☎${battery}%` : ''}${unseen ? ` · ⚠${unseen} unseen` : ''}`),
-      ...(timerLine ? [this.dashLine(timerLine)] : []),
-      ...summaries.map((s) => this.dashLine(s)),
-    ]
-    const pages = paginateText(lines.join('\n'))
-    this.pageCount = pages.length
-    if (this.page >= pages.length) this.page = pages.length - 1
-    const pageSuffix = pages.length > 1 ? ` · ${this.page + 1}/${pages.length}` : ''
-    const menu = [...this.others().map((w) => w.tab), 'Ask']   // Ask → Aria dictation (Phase 6)
-    if (pages.length > 1) menu.push('Next', 'Prev')
-    menu.push('Reload')   // WM-level
+      ...(timerLine ? [timerLine] : []),
+      ...(unseen ? [`⚠ ${unseen} unseen`] : []),
+      ...summaries,
+    ].map((l) => this.colLine(l))
+    const half = Math.ceil(lines.length / 2)
+    const menu = ['Stats', ...this.others().map((w) => w.tab), 'Ask', 'Reload']
     return {
-      mode: 'text',
-      title: `Main${pageSuffix}`,
+      mode: 'twocol',
+      title: 'Main',
       menu,
-      text: pages[this.page] ?? '',
+      textLeft: lines.slice(0, half).join('\n'),
+      textRight: lines.slice(half).join('\n'),
     }
   }
 
+  // ---------------------------------------------------- Stats (Adam 2026-06-12)
+
+  private statsView(): WinView {
+    const n = this.statsPages.length
+    if (this.statsPage >= n) this.statsPage = Math.max(0, n - 1)
+    const cur = this.statsPages[this.statsPage]
+    const title = `Stats · ${cur ? cur.name : '…'} · ${this.statsPage + 1}/${Math.max(1, n)}`
+    const menu = ['Next', 'Prev', 'Back', 'Reload', 'Main']
+    if (!cur) return { mode: 'text', title, menu, text: '(building stats pages…)' }
+    if (cur.kind === 'image') {
+      if (cur.img) {
+        return { mode: 'tiles', tilesRect: { w: cur.img.w, h: cur.img.h }, title, menu, tiles: cur.img.tiles }
+      }
+      return {
+        mode: 'text', title, menu,
+        text: cur.failed
+          ? `${cur.name} chart FAILED:\n\n${cur.failed}\n\nReload retries.`
+          : `⏳ ${cur.name} chart rendering…`,
+      }
+    }
+    return { mode: 'text', title, menu, text: cur.text }
+  }
+
+  /** (Re)build the stats pages: instant text from the sampler ring, async
+   *  swaps for charts/df/ps (each stale-guarded by statsSeq — a Reload or
+   *  re-entry supersedes in-flight renders). */
+  private buildStats(): void {
+    const seq = ++this.statsSeq
+    const pages: StatsPage[] = [{ kind: 'text', name: 'now', text: overviewText() }]
+    const specs = chartSpecs()
+    if (specs) {
+      for (const c of specs) {
+        const pageObj: StatsPage = { kind: 'image', name: c.title, img: null, failed: null }
+        pages.push(pageObj)
+        void renderChart(JSON.stringify(c.spec), DE_CONTENT_W, DE_CONTENT_H).then((img) => {
+          if (seq !== this.statsSeq) return   // superseded build — discard
+          pageObj.img = img
+          this.requestRender()
+        }).catch((e: unknown) => {
+          if (seq !== this.statsSeq) return
+          const msg = e instanceof Error ? e.message : String(e)
+          this.ctx.log(`[os] stats: ${c.title} chart failed: ${msg}`)
+          pageObj.failed = msg
+          this.requestRender()
+        })
+      }
+    } else {
+      pages.push({ kind: 'text', name: 'charts', text: '(stats warming up — charts need ~30 s of samples; Reload to retry)' })
+    }
+    const storagePage: StatsPage = { kind: 'text', name: 'storage', text: '⏳ reading volumes…' }
+    pages.push(storagePage)
+    void readStorage().then((rows) => {
+      if (seq !== this.statsSeq) return
+      storagePage.text = storageText(rows)
+      this.requestRender()
+    }).catch((e: unknown) => {
+      if (seq !== this.statsSeq) return
+      storagePage.text = `storage read FAILED:\n${e instanceof Error ? e.message : String(e)}`
+      this.ctx.log(`[os] stats: df failed: ${e instanceof Error ? e.message : String(e)}`)
+      this.requestRender()
+    })
+    for (const by of ['cpu', 'mem'] as const) {
+      const procPage: StatsPage = { kind: 'text', name: `top by ${by}`, text: '⏳ ps…' }
+      pages.push(procPage)
+      void readTopProcs(by).then((rows) => {
+        if (seq !== this.statsSeq) return
+        procPage.text = ` %CPU %MEM   RSS comm\n${rows.join('\n')}`
+        this.requestRender()
+      }).catch((e: unknown) => {
+        if (seq !== this.statsSeq) return
+        procPage.text = `ps FAILED:\n${e instanceof Error ? e.message : String(e)}`
+        this.ctx.log(`[os] stats: ps failed: ${e instanceof Error ? e.message : String(e)}`)
+        this.requestRender()
+      })
+    }
+    this.statsPages = pages
+    this.statsPage = 0
+  }
+
   async onMenuSelect(label: string): Promise<void> {
-    if (label === 'Next') {
-      if (this.page < this.pageCount - 1) { this.page++; this.requestRender() }
+    if (label === 'Stats') {
+      this.level = 'stats'
+      this.buildStats()
+      this.requestRender()
       return
     }
-    if (label === 'Prev') {
-      if (this.page > 0) { this.page--; this.requestRender() }
+    if (this.level === 'stats') {
+      if (label === 'Next') {
+        if (this.statsPage < this.statsPages.length - 1) { this.statsPage++; this.requestRender() }
+        return
+      }
+      if (label === 'Prev') {
+        if (this.statsPage > 0) { this.statsPage--; this.requestRender() }
+        return
+      }
+      this.ctx.log(`[os] main stats: unknown menu label '${label}' — ignored (LOUD)`)
       return
     }
     if (label === 'Ask') {
@@ -3180,9 +3450,21 @@ class MainWindow implements OsWindow {
     this.ctx.log(`[os] main: browse select ${index} but Main has no browse list — ignored`)
   }
 
-  // false = at root: the WM blanks the screen (double-tap toggles it back —
-  // Adam 2026-06-10; replaces the old stay-consumed behavior).
-  async onBack(): Promise<boolean> { return false }
+  async onReload(): Promise<void> {
+    if (this.level === 'stats') this.buildStats()   // fresh samples + re-render charts
+  }
+
+  // dash root: false → the WM blanks the screen (double-tap toggles it back —
+  // Adam 2026-06-10). The stats level pops back to the dashboard first.
+  async onBack(): Promise<boolean> {
+    if (this.level === 'stats') {
+      this.level = 'dash'
+      this.statsSeq++   // supersede in-flight chart/df/ps completions
+      this.requestRender()
+      return true
+    }
+    return false
+  }
 }
 
 // ============================================================ WindowManager
@@ -3441,9 +3723,11 @@ export class WindowManager {
               this.ctx.log(`[os] view() failed for ${this.active.id}: ${(e as Error).message}`)
               view = errorView(`${this.active.label} · error`, (e as Error).message)
             }
-            // Phase 4 title flash: the latest unseen info/sms/email overrides
-            // the title bar (existing px clamp bounds it) until read in Notices.
-            if (this.titleFlash) view = { ...view, title: `⚠ ${this.titleFlash.title}` }
+            // Phase 4 title flash: the latest unseen info/sms/email APPENDS to
+            // the title bar with a separator (Adam 2026-06-12 — it used to
+            // OVERWRITE the window title; the px middle-clamp keeps both the
+            // title head and the flash tail visible) until read in Notices.
+            if (this.titleFlash) view = { ...view, title: `${view.title} · ⚠ ${this.titleFlash.title}` }
           }
           // Tab strip RETIRED (Phase 5, 2026-06-11): the Main dashboard carries
           // the window states now; the status slot takes the full bottom bar.
@@ -3503,12 +3787,19 @@ export class WindowManager {
   }
 
   private statusLeft(): string {
+    // Battery cluster FIRST (Adam 2026-06-12: "the bottom left of the status
+    // bar should always show the battery state of the G2, the R1, my phone,
+    // and the hat module"). R1 + hat are placeholders until the R1 battery
+    // signal is decoded / the hat exists; G2 is [U] until the client's
+    // 09-00/09-01 decode is hardware-verified — '--' until reported.
+    const b = (v: number | null | undefined): string => (typeof v === 'number' ? String(v) : '--')
+    const bat = `G${b(this.ctx.g2Battery?.())} R-- P${b(this.ctx.phoneBattery?.())} H--`
     // The active window's live phase takes the slot while something is
     // happening (the g2aria status-bar feel); idle shows the host + pool.
     // Phase 4: the unseen-notification badge rides along in both forms.
     const badge = this.unseen > 0 ? ` · ⚠${this.unseen}` : ''
     const phase = this.active.statusLine?.()
-    return phase ? `● ${phase}${badge}` : `● ${hostname()} · ${this.ctx.pool.count} cc${badge}`
+    return phase ? `${bat} ● ${phase}${badge}` : `${bat} ● ${hostname()} · ${this.ctx.pool.count} cc${badge}`
   }
 
   switchTo(id: string): void {

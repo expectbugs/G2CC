@@ -137,6 +137,10 @@ sealed interface ClientMessage {
         /** Phone battery % (Phase 9, APK v1.7+). Default null = omitted on the
          *  wire (encodeDefaults=false) so old servers see the v1.6 shape. */
         val battery: Int? = null,
+        /** GLASSES battery % (Adam 2026-06-12, APK v1.9+) — decoded from the
+         *  09-00/09-01 device-info frames (G2_BLE_PROTOCOL.md §10 f4.f12).
+         *  Default null = omitted; old servers ignore it. [U] on-glass. */
+        val g2Battery: Int? = null,
     ) : ClientMessage
 
     /** A phone notification forwarded by NotifyListener (Phase 9, READ-ONLY —
@@ -148,6 +152,9 @@ sealed interface ClientMessage {
         val text: String,
         val postedAt: Long,
         val key: String,
+        /** Downscaled JPEG (base64) from EXTRA_PICTURE — MMS images on glass
+         *  (Adam 2026-06-12, APK v1.9+). Default null = omitted on the wire. */
+        val imageB64: String? = null,
     ) : ClientMessage
 
     /** Audio format announcement. Defaults match the legacy 16 kHz mono int16

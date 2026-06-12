@@ -18,6 +18,10 @@
 // I/O timeout on a long-running operation. Allowed per the rules.
 
 import type { WebSocket } from '@fastify/websocket'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import {
   AUTH_TIMEOUT_MS,
   STREAMING_UPDATE_MS,
@@ -112,6 +116,8 @@ export interface WSClient {
   wm: WindowManager | null
   /** Latest phone battery % from client_hb (Phase 9; null until reported). */
   phoneBattery: number | null
+  /** Latest GLASSES battery % from client_hb (Adam 2026-06-12; [U]). */
+  g2Battery: number | null
 }
 
 export interface AudioFormat {
@@ -181,6 +187,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     osGTimer: null,
     wm: null,
     phoneBattery: null,
+    g2Battery: null,
   }
 
   pool.on('background_alert', (alert: { sessionId: string; alertType: string; details?: string }) => {
@@ -349,6 +356,11 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // per-connection one: per-connection state reset to null on every WS
       // reconnect, so a blippy day with a dying phone re-alerted on every
       // re-auth (review 2026-06-11b). Single-user server — global is correct.
+      // Glasses battery (Adam 2026-06-12) — decoded client-side from the
+      // 09-00/09-01 device-info frames ([U] until the on-glass batch).
+      if (typeof msg.g2Battery === 'number' && msg.g2Battery >= 0 && msg.g2Battery <= 100) {
+        client.g2Battery = msg.g2Battery
+      }
       if (typeof msg.battery === 'number' && msg.battery >= 0 && msg.battery <= 100) {
         const prev = lastKnownPhoneBattery
         lastKnownPhoneBattery = msg.battery
@@ -384,17 +396,47 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         if (VALID.has(mapped)) priority = mapped as NotifyPriority
         else console.error(`[ws] notifications.packageMap['${pkg}'] = '${mapped}' is not a valid priority — using 'info'`)
       }
-      console.log(`[ws] phone notify ${pkg} → ${priority}: "${msg.title}"`)
-      void notify({
-        source: pkg.split('.').pop() ?? pkg,
-        priority,
-        title: msg.title || '(no title)',
-        body: msg.text || '(no text)',
-        // ALWAYS 'notices' (review 2026-06-11b): the body lives there. The old
-        // email→'mail' jump opened the MailWindow's marzello.net Maildir —
-        // which does NOT contain the phone-gmail message that triggered it.
-        targetWindow: 'notices',
-      })
+      console.log(`[ws] phone notify ${pkg} → ${priority}: "${msg.title}"${msg.imageB64 ? ` +image(${msg.imageB64.length} b64)` : ''}`)
+      // Attached picture (Adam 2026-06-12 — MMS images on glass): decode +
+      // persist to ~/.g2cc/notify-img/, then notify() with the path. Caps are
+      // LOUD rejects (the notification itself still goes through, imageless).
+      const fire = (imagePath: string | null): void => {
+        void notify({
+          source: pkg.split('.').pop() ?? pkg,
+          priority,
+          title: msg.title || '(no title)',
+          body: msg.text || '(no text)',
+          // ALWAYS 'notices' (review 2026-06-11b): the body lives there. The old
+          // email→'mail' jump opened the MailWindow's marzello.net Maildir —
+          // which does NOT contain the phone-gmail message that triggered it.
+          targetWindow: 'notices',
+          imagePath,
+        })
+      }
+      if (typeof msg.imageB64 === 'string' && msg.imageB64.length > 0) {
+        if (msg.imageB64.length > 800_000) {   // ~600 KB decoded — way past the client's own downscale
+          console.error(`[ws] notify image REJECTED: ${msg.imageB64.length} b64 chars exceeds the 800k cap (client should downscale)`)
+          fire(null)
+        } else {
+          void (async () => {
+            try {
+              const buf = Buffer.from(msg.imageB64 as string, 'base64')
+              const dir = join(homedir(), '.g2cc', 'notify-img')
+              await mkdir(dir, { recursive: true })
+              const name = `${Date.now()}-${createHash('sha1').update(buf).digest('hex').slice(0, 12)}.jpg`
+              const path = join(dir, name)
+              await writeFile(path, buf)
+              console.log(`[ws] notify image saved: ${path} (${buf.length} B)`)
+              fire(path)
+            } catch (e) {
+              console.error(`[ws] notify image save FAILED (notification fires imageless): ${e instanceof Error ? e.message : String(e)}`)
+              fire(null)
+            }
+          })()
+        }
+      } else {
+        fire(null)
+      }
       break
     }
 
@@ -886,6 +928,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
               registerWatchdog: (entry) => watchdog?.register(entry.id, entry.session, entry.projectPath),
               unregisterWatchdog: (entryId) => watchdog?.unregister(entryId),
               phoneBattery: () => client.phoneBattery,
+              g2Battery: () => client.g2Battery,
             })
           }
           client.wm.requestRender()

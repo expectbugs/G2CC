@@ -4,6 +4,55 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-12 r15 — **First on-glass feedback batch: Main/Stats redesign, chess confirm flow, mail/notices read-marking, MMS images, battery cluster (server + APK v1.9)**
+
+Adam's first hands-on session produced seven asks, all landed same-day:
+
+**Mark-as-read, both kinds.** Reading an e-mail now sets the Maildir S flag (atomic
+rename, new/→cur/ promotion — `read_maildir.py mark_read`, tested against a throwaway
+maildir; mbsync propagates to migadu on its next sync) and the row/summary update
+immediately. The SMS case was subtler: Notices already marked seen AT OPEN — what Adam
+saw was the DASHBOARD's stale `unseenCached` summary (read → Main showed the old count);
+Notices' summary is now DB-backed live, the same staleness class review #4 fixed for
+Timers/Calendar.
+
+**Main is ONE page, two columns** (new `twocol` compose mode: two text regions, ids
+7+14, per-line px-clamp backstop) — active things lead (next timer, unseen count), then
+one short line per window; host/pool/battery moved out. **`Stats` leads the menu**: a
+new in-window level with the deep pages — now-overview, CPU%/temps/GPU/RAM-over-time
+charts (new `stats.ts` 10 s sampler, 1 h ring, rendered via the Phase-8 chart pipeline
+as page-≥2-class tiles), per-volume storage, top-by-CPU/MEM process pages. Reload
+re-samples; in-flight renders are seq-fenced (the documented stale-swap pattern).
+
+**Status bar battery cluster** — `G-- R-- P64 H--` leads the bottom-left slot, always
+(R1 + hat are placeholders by Adam's call until those signals exist). **G2 battery** is
+wired end-to-end: the protocol doc's §10 decode (09-00/09-01 → f4.f12, hardware-
+correlated) now lives in EventParser; ConnectionService polls `09-20` type 2 every 60 s
+(payload follows the proven f1-type/f2-msgId request convention — the original capture
+is gone from disk, so the poll is [U]; the unsolicited 09-01 path is listen-only) and
+rides `client_hb.g2Battery` (additive-optional). **Title flash now APPENDS** to the
+window title with a separator instead of overwriting it.
+
+**Chess Moves rework**: the board never leaves the content window; the MENU walks piece
+groups → that group's SAN moves (paginated under the 20-item native-list cap — a pawn
+group with promotions can exceed it) → a tapped move renders a PREVIEW board
+(`chess_move.py preview` mode: move applied, NO engine reply) with Confirm/Cancel; only
+Confirm commits. Double-tap on the confirm step = Cancel, never a silent apply.
+
+**MMS pictures on glass**: NotifyListener extracts EXTRA_PICTURE, downscales to ≤480 px
+JPEG (≤400 KB, quality back-off), base64s it onto the additive `notify.imageB64`; the
+server saves to `~/.g2cc/notify-img/` (sha1-named; 800k b64 hard cap, loud), persists
+`image_path` (migration notify-v2), and the Notices read view appends an IMAGE page
+through the Files image pipeline — text first per THE PAGE-2 RULE, picture one flip
+away. [U] needs a real MMS in the on-glass batch.
+
+Verification: smoke 11/11 (phase4 image round-trip, phase5 twocol+Stats, phase10 late
+reminder, phase11 preview — all new assertions); gradle 226/226; server restarted clean
+(notify-v2 applied, stats sampler up). APK v1.9 staged at `~/.g2cc/g2cc-harness.apk` —
+v1.7/v1.8 stay wire-compatible (additions are client→server optional).
+
+---
+
 ## (unstamped) — 2026-06-11 r14 — **Review #4 remediation: 8-agent post-batch sweep, ~45 verified fixes (server + APK v1.8)**
 
 The full record lives in `docs/CODE_REVIEW_2026-06-11b.md` (findings, rejections, and

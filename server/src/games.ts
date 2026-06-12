@@ -54,21 +54,32 @@ export interface ChessState {
   moveNumber: number
 }
 
-/** One chess round: apply Adam's SAN move (null = just report state /
- *  new game) and let Stockfish reply at the given Skill Level. */
-export function chessMove(fen: string | null, move: string | null, skill: number): Promise<ChessState> {
+function chessRound(req: Record<string, unknown>, what: string): Promise<ChessState> {
   return new Promise((resolve, reject) => {
     const child = execFile(PY, [CHESS_SCRIPT], { maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) { reject(new Error(`chess_move failed: ${err.message}${stderr ? ' :: ' + stderr : ''}`)); return }
+      if (err) { reject(new Error(`${what} failed: ${err.message}${stderr ? ' :: ' + stderr : ''}`)); return }
       try {
         resolve(JSON.parse(stdout) as ChessState)
       } catch (e) {
-        reject(new Error(`chess_move output unparseable: ${(e as Error).message}`))
+        reject(new Error(`${what} output unparseable: ${(e as Error).message}`))
       }
     })
-    child.stdin?.on('error', (e: Error) => console.error(`[games] chess_move stdin: ${e.message}`))
-    child.stdin?.end(JSON.stringify({ fen, move, skill }))
+    child.stdin?.on('error', (e: Error) => console.error(`[games] ${what} stdin: ${e.message}`))
+    child.stdin?.end(JSON.stringify(req))
   })
+}
+
+/** One chess round: apply Adam's SAN move (null = just report state /
+ *  new game) and let Stockfish reply at the given Skill Level. */
+export function chessMove(fen: string | null, move: string | null, skill: number): Promise<ChessState> {
+  return chessRound({ fen, move, skill }, 'chess_move')
+}
+
+/** PREVIEW a move (Adam 2026-06-12 — the confirm-before-apply flow): apply
+ *  the SAN to the FEN and return the resulting position WITHOUT an engine
+ *  reply. Pure board math (python-chess), milliseconds. */
+export function chessPreview(fen: string, move: string): Promise<ChessState> {
+  return chessRound({ fen, move, preview: true }, 'chess_preview')
 }
 
 /** FEN → board tiles (render_image contract via the shared splitter). Tiny

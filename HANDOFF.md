@@ -36,7 +36,7 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
 - **Server**: the DE — window manager, compositor, content pipeline, CC-subprocess
   bridge, Postgres store (`g2cc` DB, unix-socket peer auth), notification hub, timers,
   calendar sync, games glue. Running on `:7300` (restart procedure below).
-- **Android client: APK v1.8 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
+- **Android client: APK v1.9 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
   /tmp is wiped every boot; a legacy /tmp copy also exists) — check
   `os/OsLayout.OS_VERSION` on the connect splash for what's actually installed; Adam
   installs from `http://100.107.139.121:7300/setup`. **The on-glass verification batch
@@ -46,8 +46,13 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   row), phone battery on the heartbeat. **v1.8 (review #4 — docs/CODE_REVIEW_2026-06-11b.md):
   BLE notify-thread crash fix, BT-toggle recovery, BootReceiver restored (auto-start after
   reboot/update), incoming-call popups un-filtered [U], NotifyListener dedup fixed, park
-  stale 3→8 s.** The server half is additive-optional — v1.6 keeps working until he installs.
-  Add the ringing-phone call-popup check to the on-glass batch.
+  stale 3→8 s.** **v1.9 (Adam's first feedback batch, 2026-06-12 — CHANGELOG r15):
+  G2-battery decode/poll [U], MMS EXTRA_PICTURE forwarding; server: one-page two-column
+  Main + the Stats level (stats.ts sampler), chess piece-group→preview→Confirm flow,
+  mail/notices read-marking, battery status cluster, title-flash append, notification
+  image pages.** The server half is additive-optional — older APKs keep working until he
+  installs. On-glass batch additions: ring the phone (call popup), send an MMS (image
+  page), check the G2 battery readout (the 09-20 poll is [U]).
 - **The TEN windows** (`server/src/os-windows.ts`): **Main** (live dashboard: host/pool/
   battery/unseen/next-timer + one summary line per window; menu = switcher + `Ask`) ·
   **Aria** (CC subprocess @ ~/aria, `server/prompts/aria-g2.md` display prompt; the Ask

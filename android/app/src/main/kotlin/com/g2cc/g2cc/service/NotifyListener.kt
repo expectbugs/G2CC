@@ -115,7 +115,52 @@ class NotifyListener : NotificationListenerService() {
             text = text,
             postedAt = sbn.postTime,
             key = sbn.key,
+            imageB64 = extractPicture(extras),
         )
+    }
+
+    /** EXTRA_PICTURE → downscaled JPEG base64 (Adam 2026-06-12 — MMS images
+     *  on glass; the server renders it through the Files image pipeline).
+     *  Best-effort: any failure logs + forwards the notification imageless.
+     *  Downscale to ≤480 px (the glasses' content pane), JPEG q70 → q50 if
+     *  still over the ~400 KB raw cap (the server hard-rejects ~600 KB). */
+    private fun extractPicture(extras: android.os.Bundle): String? {
+        val bmp = (try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                extras.getParcelable(android.app.Notification.EXTRA_PICTURE, android.graphics.Bitmap::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                extras.getParcelable<android.graphics.Bitmap>(android.app.Notification.EXTRA_PICTURE)
+            }
+        } catch (e: Exception) {
+            DiagLog.log("notify", "EXTRA_PICTURE read failed: $e")
+            null
+        }) ?: return null
+        return try {
+            val maxDim = 480
+            val scale = maxDim.toFloat() / maxOf(bmp.width, bmp.height)
+            val scaled = if (scale < 1f) {
+                android.graphics.Bitmap.createScaledBitmap(
+                    bmp, (bmp.width * scale).toInt().coerceAtLeast(1), (bmp.height * scale).toInt().coerceAtLeast(1), true)
+            } else bmp
+            var quality = 70
+            var bytes: ByteArray
+            do {
+                val out = java.io.ByteArrayOutputStream()
+                scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, out)
+                bytes = out.toByteArray()
+                quality -= 20
+            } while (bytes.size > 400_000 && quality >= 30)
+            if (bytes.size > 400_000) {
+                DiagLog.log("notify", "picture still ${bytes.size} B at q$quality — dropped (notification forwards imageless)")
+                return null
+            }
+            DiagLog.log("notify", "picture ${bmp.width}x${bmp.height} → ${scaled.width}x${scaled.height} JPEG ${bytes.size} B")
+            android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        } catch (e: Exception) {
+            DiagLog.log("notify", "picture encode failed (forwarding imageless): $e")
+            null
+        }
     }
 
     companion object {

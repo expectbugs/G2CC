@@ -81,6 +81,12 @@ object EventParser {
          *  §6.6.) The server (ws-handler) already maps 1→prev / 2→next. Wire:
          *  `08 02 6a <l> 12 <l> 08 <id> 12 <l> <name> 18 <f3>`. */
         data class HubFocus(val containerId: Int, val name: String, val f3: Int) : Event
+        /** Device-info frame (`09-00` response / `09-01` unsolicited update) —
+         *  G2_BLE_PROTOCOL.md §10: `f4 = {…, f12 = battery%}` (hardware-
+         *  correlated 2026-06-09: on-glass STATUS read batt=90 while the
+         *  09-00 carried f12=90). [battery] null when the frame has no f4.f12
+         *  (e.g. a type-1 firmware-only response) — callers ignore those. */
+        data class DeviceInfo(val battery: Int?) : Event
         /** EvenHub (`e0-00`) ack for one of our `e0-20` writes: [ackType] = `req.f1 + 1`
          *  (launch 0→1, image 3→4, text 5→6, layout 7→8, keepalive 12→12), [msgId] = the echoed
          *  request msgId (`ack.f2`). The renderer ack-gates image chunks on these (G2Renderer.onImageAck).
@@ -113,6 +119,13 @@ object EventParser {
         // ack-gates image chunks on these, so decode the (ackType, msgId).
         if (service.first == 0xE0.toByte() && service.second == 0x00.toByte()) {
             return decodeHubAck(payload)
+        }
+        // Service 0x09-00 (device-info response) / 0x09-01 (unsolicited update):
+        // carries the GLASSES BATTERY in f4.f12 (G2_BLE_PROTOCOL.md §10) —
+        // polled by ConnectionService every ~60 s. [U] on-glass pending.
+        if (service.first == 0x09.toByte() &&
+            (service.second == 0x00.toByte() || service.second == 0x01.toByte())) {
+            return decodeDeviceInfo(payload)
         }
         // Everything else (auth acks, display config responses, etc.) — surface
         // as Unknown so the caller can filter quietly without us losing data.
@@ -371,6 +384,59 @@ object EventParser {
         } catch (e: Exception) {
             Event.Malformed("hub focus: ${e.message}", rawHex)
         }
+    }
+
+    /** Walk a protobuf-shaped payload for f4 (tag 0x22, len-delim) and inside
+     *  it f12 (tag 0x60, varint) = battery % — G2_BLE_PROTOCOL.md §10. Unknown
+     *  fields are SKIPPED by wire type (the response carries firmware strings
+     *  etc. we don't need); anything unwalkable becomes Event.Malformed, never
+     *  a throw (the EventParser contract). */
+    private fun decodeDeviceInfo(payload: ByteArray): Event {
+        return try {
+            val f4 = findLenDelimField(payload, fieldNo = 4) ?: return Event.DeviceInfo(null)
+            var battery: Int? = null
+            var i = 0
+            while (i < f4.size) {
+                val tag = f4[i].toInt() and 0xFF; i++
+                val fieldNo = tag ushr 3
+                when (tag and 0x07) {
+                    0 -> {   // varint
+                        val (v, u) = Varint.decode(f4, i); i += u
+                        if (fieldNo == 12 && v in 0..100) battery = v
+                    }
+                    2 -> {   // len-delim (firmware strings etc.) — skip
+                        val (len, u) = Varint.decode(f4, i); i += u
+                        if (len < 0 || len > f4.size - i) return Event.Malformed("device-info: field $fieldNo overruns", payload.toHex())
+                        i += len
+                    }
+                    else -> return Event.Malformed("device-info: wire type ${tag and 0x07} unexpected", payload.toHex())
+                }
+            }
+            Event.DeviceInfo(battery)
+        } catch (e: Exception) {
+            Event.Malformed("device-info: ${e.message}", payload.toHex())
+        }
+    }
+
+    /** First len-delimited field [fieldNo] at the TOP level of [buf], skipping
+     *  varint/len-delim fields before it. Null when absent/unwalkable. */
+    private fun findLenDelimField(buf: ByteArray, fieldNo: Int): ByteArray? {
+        var i = 0
+        while (i < buf.size) {
+            val tag = buf[i].toInt() and 0xFF; i++
+            val no = tag ushr 3
+            when (tag and 0x07) {
+                0 -> { val (_, u) = Varint.decode(buf, i); i += u }
+                2 -> {
+                    val (len, u) = Varint.decode(buf, i); i += u
+                    if (len < 0 || len > buf.size - i) return null
+                    if (no == fieldNo) return buf.copyOfRange(i, i + len)
+                    i += len
+                }
+                else -> return null
+            }
+        }
+        return null
     }
 
     private fun ByteArray.toHex(): String =

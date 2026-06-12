@@ -37,7 +37,8 @@ containers, **4 ≤ 8** text, **4 ≤ 4** image, exactly **one** event-capture. 
 
 **Stable region ids** (server-assigned, identical across windows so switches diff small):
 clock=1 (client), title=2, menu=3 (ALWAYS a list), status=4, tabs=5, browse list=6,
-content text=7, tiles=10..13 (`t0..t3`).
+content text=7, tiles=10..13 (`t0..t3`), content right-column=14 (`content2`, the
+twocol mode — Adam 2026-06-12, Main's one-page dashboard).
 
 ## 2. Interaction model
 
@@ -92,7 +93,12 @@ content text=7, tiles=10..13 (`t0..t3`).
 - **Live status bar** (g2aria-style, 2026-06-11): the bottom-left status slot shows the
   active session's phase as it moves — `listening… → transcribing… → confirm? → thinking…
   → tool X → writing…` (one ~62 ms text write per phase change; `+queued` when a prompt
-  waits). Idle shows `● host · N cc`.
+  waits). Idle shows `● host · N cc`. **Battery cluster leads the slot, ALWAYS** (Adam
+  2026-06-12): `G<g2> R<r1> P<phone> H<hat>` — `--` for not-yet-reported; R1 + hat are
+  placeholders until their signals exist; G2 is [U] (client 09-00/09-01 decode).
+- **Title flash APPENDS** (Adam 2026-06-12): an unseen info/sms/email notification renders
+  as `<window title> · ⚠ <notification title>` (it used to replace the title); the px
+  middle-clamp keeps the title head + flash tail visible.
 
 ## 3. Content modes (per window state — "browsing → firmware text/list; reading → image tiles")
 
@@ -113,7 +119,7 @@ content text=7, tiles=10..13 (`t0..t3`).
 
 | id | tab | modes | notes |
 |---|---|---|---|
-| `main` | Main | text | menu = window list + Reload (tap switches); content = the live dashboard (host/pool/unseen + one summary line per window, 30 s pacing). Double-tap target at every root. |
+| `main` | Main | twocol/text/tiles | menu = `Stats` + window list + Ask + Reload (tap switches); content = ONE page, TWO columns of very short per-window summaries (timer/unseen lines lead; host/pool/battery live in the status bar). `Stats` opens the deep-stats level: overview, CPU/temps/GPU/RAM charts (1 h ring, page-≥2-class imagery), storage volumes, top processes by CPU/MEM — Next/Prev pages, Back to the dashboard. Double-tap target at every root. (Adam 2026-06-12.) |
 | `cc` | CC | browse→text | root = directory picker (browse /home/user/*); then the CC session: response→firmware-text pages, dynamic action menu, permission flow via menu. |
 | `aria` | Aria | text | CC subprocess, cwd `/home/user/aria`, `--append-system-prompt` = `server/prompts/aria-g2.md` (teaches the ~44×6 text surface). |
 | `mail` | Mail | browse→text | Maildir `~/Mail/marzello.net/` (mbsync cron, every 5 min). List = INBOX newest-first; read = text/plain body, text mode. `scripts/read_maildir.py` (stdlib). |
@@ -121,7 +127,7 @@ content text=7, tiles=10..13 (`t0..t3`).
 | `reader` | Reader | browse→browse→text | EPUB library (`~/books`) → chapters → paginated text (upgrades Ph7). **Resume position is the feature**: every page/chapter change persists (`reader_positions`); re-opening a book drops straight back into the page; Next/Prev roll across chapter boundaries. Parsing via `read_epub.py` subprocess. |
 | `timers` | Timers | browse→text | pending timers (tap → detail → `Cancel timer`) + `New 5/10/20/30/60 min` rows (Ph6). DB-backed (`timers`), re-armed at boot (missed fires fire late, marked); fires arrive as 'timer'-priority notifications. Voice creation via the Aria Ask intent pre-parse. |
 | `calendar` | Calendar | browse→text | 14-day day-grouped agenda → event read view (Ph10, READ-ONLY). Synced from Google every 15 min via aria's OAuth (`read_gcal.py`); 10-min-lead reminders for timed events ride the notification layer. |
-| `games` | Games | browse→text/tiles | rpg-cli (filesystem dungeon rooted at /home/user; action rows + dir descent; output paginated) and chess vs Stockfish (Ph11): board = IMAGE page (render_board.py → tiles, placeholder-swapped), moves picked from a paged legal-SAN list, Skill 1/5/10/20. Lichess deferred (gate A3.2). |
+| `games` | Games | browse→text/tiles | rpg-cli (filesystem dungeon rooted at /home/user; action rows + dir descent; output paginated) and chess vs Stockfish (Ph11): board = IMAGE page (render_board.py → tiles, placeholder-swapped). **Moves flow (Adam 2026-06-12): the board STAYS in the content window; the MENU carries piece groups (`Pawn (12)`, `Knight (4)`, …) → that group's SAN moves (paginated ≤12 + » prev/» more under the 20-item list cap) → tap a move → PREVIEW board (move applied, no engine reply) + Confirm/Cancel; only Confirm commits (engine replies). Double-tap = Cancel.** Skill 1/5/10/20. Lichess deferred (gate A3.2). |
 | `notices` | Notices | browse→text | the persisted notification history, newest-first → read view (Ph4). Reading marks SEEN (clears the ⚠ title flash + badge). |
 
 Notification surfacing (Ph4, WM-owned): info/sms/email = ⚠ title-bar override (until read

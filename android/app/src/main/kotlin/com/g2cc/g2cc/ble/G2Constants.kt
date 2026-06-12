@@ -87,6 +87,10 @@ object G2Constants {
         val TELEPROMPTER = byteArrayOf(0x06.toByte(), 0x20)
         val DASHBOARD = byteArrayOf(0x07.toByte(), 0x20)
         val DEVICE_INFO = byteArrayOf(0x09.toByte(), 0x00)
+        /** Device-info QUERY (write channel) — G2_BLE_PROTOCOL.md init table
+         *  rows 4+12: `09-20` type 1/2; type 2 → the 45 B `09-00` carrying
+         *  firmware + battery (§10). */
+        val DEVICE_INFO_QUERY = byteArrayOf(0x09.toByte(), 0x20)
         val CONVERSATE = byteArrayOf(0x0B.toByte(), 0x20)     // Glasses → Phone (output only)
         val TASKS = byteArrayOf(0x0C.toByte(), 0x20)
         val CONFIGURATION = byteArrayOf(0x0D.toByte(), 0x00)

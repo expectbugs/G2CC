@@ -222,14 +222,39 @@ def cmd_read(md_path, key):
     }))
 
 
+def cmd_mark_read(md_path, key):
+    """Maildir-standard mark-read (Adam 2026-06-12): set the S flag via an
+    atomic rename — new/<key> moves to cur/<key>:2,S; cur/<key>:2,<flags>
+    gains S (flags kept ASCII-sorted per the Maildir spec). mbsync syncs the
+    flag to the IMAP server on its next run. Idempotent; loud-fails if the
+    message vanished (mbsync race) — the caller logs, the UI already moved on."""
+    path = find_message(md_path, key)
+    d, name = os.path.split(path)
+    sub = os.path.basename(d)
+    if ":2," in name:
+        base, flags = name.rsplit(":2,", 1)
+    else:
+        base, flags = name, ""
+    if "S" in flags and sub == "cur":
+        print(json.dumps({"key": key, "already": True}))
+        return
+    new_flags = "".join(sorted(set(flags) | {"S"}))
+    new_dir = os.path.join(os.path.dirname(d), "cur")   # new/ promotes to cur/
+    new_path = os.path.join(new_dir, f"{base}:2,{new_flags}")
+    os.rename(path, new_path)
+    print(json.dumps({"key": key, "already": False}))
+
+
 def main():
     if len(sys.argv) < 3:
-        raise ValueError("usage: read_maildir.py list <maildir> <limit> <offset> | read <maildir> <key>")
+        raise ValueError("usage: read_maildir.py list <maildir> <limit> <offset> | read <maildir> <key> | mark_read <maildir> <key>")
     cmd, md_path = sys.argv[1], sys.argv[2]
     if cmd == "list":
         cmd_list(md_path, int(sys.argv[3]), int(sys.argv[4]))
     elif cmd == "read":
         cmd_read(md_path, sys.argv[3])
+    elif cmd == "mark_read":
+        cmd_mark_read(md_path, sys.argv[3])
     else:
         raise ValueError(f"unknown command '{cmd}'")
 

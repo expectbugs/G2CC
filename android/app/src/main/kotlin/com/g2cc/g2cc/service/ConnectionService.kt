@@ -115,6 +115,10 @@ class ConnectionService : Service(), TestHarness {
     // post-cold-launch state (Adam 2026-06-11: Connect = straight into the DE),
     // so recovery doesn't need to remember whether to re-enter it.
     @Volatile private var lastRecoverMs = 0L  // rate-limit auto-recoveries (no thrashing)
+    /** Latest glasses battery % from a 09-00/09-01 device-info frame (Adam
+     *  2026-06-12; null until one arrives). [U] on-glass pending. */
+    @Volatile private var g2Battery: Int? = null
+    private var batteryPollJob: Job? = null
     @Volatile private var lastNotifyMs = 0L   // last notify (incl e0-00 ack) from R lens
     private var syncSeq = 0x10
     private var syncMsgId = 0x20
@@ -213,14 +217,14 @@ class ConnectionService : Service(), TestHarness {
     /** Phase 9: forward a phone notification (from [com.g2cc.g2cc.service.NotifyListener])
      *  to the server. Loud no-op when the WS isn't up — missed phone
      *  notifications stay on the phone; the server only mirrors live ones. */
-    fun sendNotify(pkg: String, title: String, text: String, postedAt: Long, key: String) {
+    fun sendNotify(pkg: String, title: String, text: String, postedAt: Long, key: String, imageB64: String? = null) {
         val conn = connection
         if (conn == null) {
             DiagLog.log("notify", "dropped $pkg \"$title\" — no WS connection")
             return
         }
-        val sent = conn.send(ClientMessage.Notify(pkg = pkg, title = title, text = text, postedAt = postedAt, key = key))
-        DiagLog.log("notify", "$pkg \"$title\" → ${if (sent) "sent" else "DROPPED (ws not ready)"}")
+        val sent = conn.send(ClientMessage.Notify(pkg = pkg, title = title, text = text, postedAt = postedAt, key = key, imageB64 = imageB64))
+        DiagLog.log("notify", "$pkg \"$title\"${if (imageB64 != null) " +img(${imageB64.length})" else ""} → ${if (sent) "sent" else "DROPPED (ws not ready)"}")
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -370,6 +374,7 @@ class ConnectionService : Service(), TestHarness {
             authToken = BuildConfig.AUTH_TOKEN,
             httpClient = OkHttpClient(),
             batteryPct = { readBatteryPct() },   // Phase 9: battery rides client_hb
+            g2BatteryPct = { g2Battery },        // Adam 2026-06-12: glasses battery [U]
             onMessage = { msg -> scope.launch { onServerMessage(msg) } },
             onConnected = {
                 DiagLog.log("os", "WS authed → sending os_attach")
@@ -585,6 +590,12 @@ class ConnectionService : Service(), TestHarness {
                     // image-chunk msgId; other acks just advance its liveness marker).
                     if (ev is EventParser.Event.HubAck) renderer?.onImageAck(ev.msgId)
                 }
+                // Glasses battery (Adam 2026-06-12): 09-00 poll responses +
+                // unsolicited 09-01 updates, either lens. Rides client_hb.
+                if (ev is EventParser.Event.DeviceInfo && ev.battery != null) {
+                    if (g2Battery != ev.battery) DiagLog.log("batt", "glasses battery → ${ev.battery}%")
+                    g2Battery = ev.battery
+                }
                 DiagLog.log("input", "$side $ev")
                 // Forward ring input to the PC when the server is driving the display.
                 if (_serverMode.value && side == Side.Right) {
@@ -674,6 +685,7 @@ class ConnectionService : Service(), TestHarness {
                 startSyncTrigger()
                 startWatchdog()
                 startRenewal()
+                startBatteryPoll()
                 _scene.value = rend.currentScene
                 if (recovering) {
                     recovering = false
@@ -719,6 +731,38 @@ class ConnectionService : Service(), TestHarness {
         syncSeq = if (syncSeq >= 0xFF) 0x10 else syncSeq + 1
         syncMsgId = (syncMsgId + 1) and 0xFF        // 1-byte wrap (same constraint as G2Renderer.nextMsgId)
         return f
+    }
+
+    /** Device-info query `09-20` type 2 → the glasses reply `09-00` with
+     *  battery in f4.f12 (G2_BLE_PROTOCOL.md §10 + init-table row 12). Payload
+     *  `08 02 10 <msgId>` follows the proven request convention (f1=type,
+     *  f2=msgId — the same shape as the BTSnoop-verbatim sync_trigger; the
+     *  imagestatus capture that carried the original exchange is no longer on
+     *  disk, so the exact trailing bytes are [U] — worst case the firmware
+     *  ignores the query and the battery slot stays '--'; the unsolicited
+     *  09-01 updates are a second, listen-only source). */
+    private fun nextDeviceInfoQuery(): ByteArray {
+        val payload = byteArrayOf(0x08, 0x02, 0x10) + Varint.encode(syncMsgId)
+        val f = G2Frame.command(syncSeq, G2Constants.Services.DEVICE_INFO_QUERY, payload)
+        syncSeq = if (syncSeq >= 0xFF) 0x10 else syncSeq + 1
+        syncMsgId = (syncMsgId + 1) and 0xFF
+        return f
+    }
+
+    /** Poll the glasses battery every ~60 s (pacing cadence) on the R lens —
+     *  the primary command channel; the 09-00 response (and any unsolicited
+     *  09-01) lands in the events collector above. */
+    private fun startBatteryPoll() {
+        batteryPollJob?.cancel()
+        batteryPollJob = scope.launch {
+            while (isActive) {
+                val r = right ?: break
+                r.sendPacket(nextDeviceInfoQuery(), "BATT:09-20") { ok ->
+                    if (!ok) DiagLog.log("batt", "device-info query write FAILED")
+                }
+                delay(60_000)
+            }
+        }
     }
 
     /** sync_trigger (service 80-00, type 14) to BOTH lenses every ~15 s, staggered ~2 s —
@@ -839,6 +883,7 @@ class ConnectionService : Service(), TestHarness {
         syncJob?.cancel(); syncJob = null
         watchdogJob?.cancel(); watchdogJob = null
         renewalJob?.cancel(); renewalJob = null
+        batteryPollJob?.cancel(); batteryPollJob = null
         coldLaunchJob?.cancel(); coldLaunchJob = null
         testJob?.cancel(); testJob = null
         sessionGen++   // invalidate any in-flight cold-launch/test coroutine that completes after this
@@ -1026,13 +1071,13 @@ class ConnectionService : Service(), TestHarness {
         private var instance: ConnectionService? = null
 
         /** NotifyListener → server forwarding entry point. */
-        fun forwardNotification(pkg: String, title: String, text: String, postedAt: Long, key: String) {
+        fun forwardNotification(pkg: String, title: String, text: String, postedAt: Long, key: String, imageB64: String? = null) {
             val svc = instance
             if (svc == null) {
                 DiagLog.log("notify", "dropped $pkg \"$title\" — ConnectionService not running")
                 return
             }
-            svc.sendNotify(pkg, title, text, postedAt, key)
+            svc.sendNotify(pkg, title, text, postedAt, key, imageB64)
         }
 
         /** Start the FG service and tell it to connect. Survives Activity unbind / background. */

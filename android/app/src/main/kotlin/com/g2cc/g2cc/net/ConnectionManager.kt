@@ -73,6 +73,8 @@ class ConnectionManager(
      *  provider (or sample) omits the field — the v1.6 wire shape. NAMED
      *  argument at call sites (trailing-lambda rebinding bit us — B7). */
     private val batteryPct: (() -> Int?)? = null,
+    /** Glasses battery % supplier (Adam 2026-06-12, v1.9 — see ClientHb.g2Battery). */
+    private val g2BatteryPct: (() -> Int?)? = null,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -353,7 +355,7 @@ class ConnectionManager(
                 }
                 is ServerMessage.Hb -> {
                     // Reply immediately so the server knows our event loop is alive.
-                    send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke()))
+                    send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke(), g2Battery = g2BatteryPct?.invoke()))
                 }
                 else -> {
                     onMessage(msg)
@@ -471,7 +473,7 @@ class ConnectionManager(
             while (wsGen.get() == myGen) {
                 delay(HEARTBEAT_INTERVAL_MS)
                 if (wsGen.get() != myGen) break
-                send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke()))
+                send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke(), g2Battery = g2BatteryPct?.invoke()))
             }
         }
     }

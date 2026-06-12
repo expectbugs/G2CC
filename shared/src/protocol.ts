@@ -177,6 +177,10 @@ export interface ClientHbMsg {
   /** Phone battery percent 0-100 (Phase 9; optional — old APKs omit it).
    *  Feeds the dashboard line + the ≤15% notification. */
   battery?: number
+  /** GLASSES battery percent 0-100 (Adam 2026-06-12; optional — v≤1.8 APKs
+   *  omit it). Decoded client-side from the 09-00/09-01 device-info frames
+   *  (G2_BLE_PROTOCOL.md §10, f4.f12) — [U] until the on-glass batch. */
+  g2Battery?: number
 }
 
 /** A phone notification forwarded by the client's NotificationListenerService
@@ -193,6 +197,10 @@ export interface NotifyMsg {
   postedAt: number
   /** StatusBarNotification.key — client-side debounce key. */
   key: string
+  /** Optional EXTRA_PICTURE payload (Adam 2026-06-12 — MMS images on glass):
+   *  client-downscaled JPEG, base64. Absent for picture-less notifications
+   *  and on v≤1.8 APKs. The server caps the decoded size (loud reject). */
+  imageB64?: string
 }
 
 /** Audio format the phone is about to stream. The server routes on
