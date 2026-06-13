@@ -7,6 +7,22 @@ import { strict as assert } from 'node:assert'
 import { fetchCalendar, syncCalendar, upsertEvents, listUpcoming, sweepReminders } from '../dist/calendar.js'
 import { query, getPool } from '../dist/store.js'
 
+// sweepReminders() fires reminders fire-and-forget (`void notify(...)`) and
+// returns its count from the atomic `reminded_at` UPDATE — it does NOT await
+// the durable INSERT into `notifications` (that decoupling is deliberate; the
+// live glasses react to the hub emit, not a DB read). So a SYNCHRONOUS
+// read-after-sweep races the INSERT across the pg Pool — the old phase10 flake
+// (review 2026-06-13). Poll for the row instead. Bounded so a genuine miss
+// fails LOUDLY rather than hanging the supervised suite.
+async function waitForRows(sql, want = 1) {
+  for (let i = 0; i < 300; i++) {
+    const r = await query(sql)
+    if (r.rowCount >= want) return r
+    await new Promise((res) => setTimeout(res, 10))
+  }
+  throw new Error(`waitForRows timed out waiting for ≥${want} row(s): ${sql}`)
+}
+
 try {
   // --- 1. REAL sync, twice (idempotent) ---
   const real = await fetchCalendar(14)
@@ -47,10 +63,10 @@ try {
   assert.ok(fired1 >= 2, 'the 5-min-out event AND the already-started event must both fire')
   const fired2 = await sweepReminders()
   assert.equal(fired2, 0, 'reminded_at must dedupe the sweep (incl. the late branch)')
-  const note = await query("SELECT priority, title FROM notifications WHERE source = 'calendar' AND title LIKE '%smoke standup%'")
+  const note = await waitForRows("SELECT priority, title FROM notifications WHERE source = 'calendar' AND title LIKE '%smoke standup%'")
   assert.equal(note.rowCount, 1)
   assert.equal(note.rows[0].priority, 'timer', 'reminders ride timer priority')
-  const late = await query("SELECT priority, title, body FROM notifications WHERE source = 'calendar' AND title LIKE '%smoke retro%'")
+  const late = await waitForRows("SELECT priority, title, body FROM notifications WHERE source = 'calendar' AND title LIKE '%smoke retro%'")
   assert.equal(late.rowCount, 1, 'late reminder fires exactly once')
   assert.ok(late.rows[0].title.includes('(late)'), 'late reminder is marked (late)')
   assert.ok(/\d+m ago/.test(late.rows[0].body), 'late body says how late')

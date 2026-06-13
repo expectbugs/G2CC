@@ -25,6 +25,9 @@ const SMOKE_DB = 'g2cc_smoke'
 
 process.env.G2CC_PG_DATABASE ??= SMOKE_DB
 process.env.G2CC_NOTES_FILE ??= `/tmp/g2cc-smoke-notes-${process.pid}.md`
+// Files trash (Phase 17): isolate so deletes never land in Adam's real
+// ~/.g2cc-trash (trash.ts honors G2CC_TRASH_DIR). Production never sets it.
+process.env.G2CC_TRASH_DIR ??= `/tmp/g2cc-smoke-trash-${process.pid}`
 
 if (process.env.G2CC_PG_DATABASE === SMOKE_DB) {
   // Existence check FIRST: postgres rejects createdb on the CREATEDB privilege

@@ -76,13 +76,71 @@ assert.equal(img.tiles.length, 4)
 const scene = composeScene({
   mode: 'tiles',
   tilesRect: { w: img.w, h: img.h },
-  title: 'Chess · mv2',
-  menu: ['Moves', 'New game', 'Skill: 5', 'Back', 'Reload', 'Main'],
+  title: 'Chess · mv2 · skill 5',
+  menu: ['Moves', 'New game', 'Skill', 'Back', 'Reload', 'Main'],   // constant Skill (Phase 18)
   tiles: img.tiles,
 }, [], '● beardos · 1 cc')
 const est = estimateLayoutFrameBytes(scene.regions)
 assert.ok(est <= LAYOUT_FRAME_BUDGET_BYTES, `board layout frame ${est}B over budget`)
 console.error(`  4. board 480×222 → 4 tiles, layout ${est}B ≤ ${LAYOUT_FRAME_BUDGET_BYTES} ✓`)
+
+// --- 5. Phase-18 redraw fix (Adam 2026-06-13): the board re-pushed all 4 tiles
+// on every menu change. Drive the REAL chess window and assert the SELECTION
+// levels render NO image regions (text-only → no f1=7 board re-push), and the
+// chess Skill control is a CONSTANT menu label (cycling it never changes the
+// menu, so the board can't be wiped). ---
+if (!EMIT) {
+  const { WindowManager } = await import('../dist/os-windows.js')
+  const scenes = []
+  const wm = new WindowManager({
+    send: (sc) => scenes.push(sc),
+    audio: () => {}, displayReload: () => {},
+    log: (m) => console.error(`    ${m}`),
+    pool: { count: 0 },
+    config: { claude: { model: 'opus', effort: 'max', defaultMode: 'bypassPermissions' } },
+    registerWatchdog: () => {}, unregisterWatchdog: () => {},
+  })
+  const settle = async (pred, what, ms = 15000) => {
+    const t0 = Date.now()
+    while (Date.now() - t0 < ms) {
+      const sc = scenes[scenes.length - 1]
+      if (sc && pred(sc)) return sc
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    throw new Error(`timeout settling: ${what}`)
+  }
+  const menuOf = (sc) => sc.regions.find((r) => r.name === 'menu')?.content?.items ?? []
+  const titleOf = (sc) => sc.regions.find((r) => r.name === 'title')?.content?.text ?? ''
+  const imageRegions = (sc) => sc.regions.filter((r) => r.kind === 'image')
+  try {
+    const games = wm.windows.find((w) => w.id === 'games')
+    games.level = 'chess'
+    wm.switchTo('games')
+    await games.onMenuSelect('New game')   // startpos, white to move
+    let sc = await settle((x) => menuOf(x).includes('Moves') && !titleOf(x).includes('thinking'), 'chess level after new game')
+    assert.ok(menuOf(sc).includes('Skill') && !menuOf(sc).some((m) => m.startsWith('Skill:')), 'chess menu has a CONSTANT "Skill" label (value in the title)')
+    assert.match(titleOf(sc), /skill 5/, 'skill value rides the title')
+    console.error('  5a. chess level: constant "Skill" menu label, value in title ✓')
+
+    const beforeMenu = menuOf(sc)
+    await games.onMenuSelect('Skill')      // 5 → 10
+    sc = await settle((x) => titleOf(x).includes('skill 10'), 'skill cycled in the title')
+    assert.deepEqual(menuOf(sc), beforeMenu, 'cycling Skill must NOT change the menu list (no f1=7 board re-push)')
+    console.error('  5b. cycling Skill keeps the menu identical (no tile re-push) ✓')
+
+    await games.onMenuSelect('Moves')
+    sc = await settle((x) => titleOf(x).includes('pick a piece'), 'chess-pieces')
+    assert.equal(imageRegions(sc).length, 0, 'piece selection must render NO board tiles (text-only)')
+    const piece = menuOf(sc).find((m) => /\(\d+\)$/.test(m))
+    assert.ok(piece, 'a piece group is offered')
+    await games.onMenuSelect(piece)
+    sc = await settle((x) => !titleOf(x).includes('pick a piece') && titleOf(x).includes('Chess ·'), 'chess-moves')
+    assert.equal(imageRegions(sc).length, 0, 'move selection must render NO board tiles (text-only)')
+    console.error('  5c. piece + move selection are text-only (no redundant tile re-push) ✓')
+  } finally {
+    wm.dispose()
+  }
+}
 
 if (EMIT) process.stdout.write(JSON.stringify(scene))
 else console.log('phase11-games: ALL OK')

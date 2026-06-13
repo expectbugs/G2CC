@@ -4,6 +4,106 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-13 r18 — **Chess tile-redraw fix + Files file-manager overhaul (the "970 B" wall) + 3 upgrades phases + a whole-project review (server-only)**
+
+Adam's two explicit asks, plus a batch of the upgrades.md v2 queue, plus the
+mandated thorough review.
+
+**Chess (Phase 18) — "tiles should ONLY redraw when changed, not all 4 every
+time."** Root cause (traced through the wire stack, not guessed): the board is
+4 image tiles and the menu is a native LIST; the 2026-06-12 "board stays in the
+content pane during the Moves flow" design meant every selection tap CHANGED
+the menu list, and on the client `Scene.diff` flags ANY list-items change as
+`layoutChanged` → an f1=7 rebuild re-declares every region and re-pushes ALL
+image content (a re-declared image container is emptied on the firmware; there
+is NO list-content-update opcode — confirmed in DisplayProto). So picking a
+piece re-pushed the unchanged board (~4 tiles × ~1 s) 3-4× per move. Fix
+(server-only, firmware-safe — does NOT gamble on whether an f1=7 preserves
+pixels): the piece/move SELECTION levels now render TEXT (no tiles); the board
+shows only where the position is NEW — the `chess` level (live) and
+`chess-confirm` (preview). The cycling `Skill: N` menu item became a CONSTANT
+`Skill` with the value in the TITLE (a cheap text update), so cycling skill —
+or any secondary action — no longer changes the menu, no longer re-pushes the
+board. Net: ≤2 genuine board pushes per move (preview + result) instead of 4,
+and selection is instant. Trade-off documented: this drops the "board visible
+during selection" choice for responsiveness (a 1-line revert restores it).
+
+**Files (Phase 19) — the "won't list a directory … error about 970 bytes"
+bug.** Root cause: `composeScene` THROWS over the 960 B multi-packet-wall guard,
+and Files paginated with a FIXED 14 rows — a deep cwd (long title) + long
+filenames + the `..` row tipped a page to ~970 B, so the directory fell into
+errorView and NEVER displayed. Fix: **byte-aware pagination** — `browsePageItems`
+now packs as many rows as fit a conservative content budget (compose clamps
+each row to ≤40 B, so the wall is purely a row-COUNT function) capped under the
+20-item SDK list cap, and returns prev/next page-START offsets (variable pages
+can't use ±BROWSE_PAGE). Every in-memory-list tap site was converted; the Files
+`..` reserve is mirrored view↔tap; Timers got a shared `listRows()` (its tap
+used to paginate an empty-string array — fine with fixed pages, broken with
+byte-aware). DB-paged windows (Mail/Notices/History) keep their fixed fetch
+(short titles + tiny menus stay safe). PLUS the file-manager pass: **directories
+are first-class** — Copy/Move/Del/Rename now work on dirs (recursive `fs.cp`/
+`fs.rm`, EXDEV copy+remove, a self-copy-into-descendant guard) via the tree menu
+acting on the CURRENT dir when descended below a location root; **Rename + New
+folder** take a name through a new dictation 'name' level (mirrors SessionLevel's
+sacred confirm flow); and **Phase 17 trash** folded in — Del moves to
+`~/.g2cc-trash/<ms>-<name>` (restorable 30 days via the Trash location + Move),
+a daily purge sweep drops entries past the TTL.
+
+**Phase 2 — blank-screen flash.** A blanked screen now gets a 5 s ONE-LINE text
+flash (kind + sender) in the content slot — NOT the full overlay UI ("i use
+blank mode when driving … i don't need the whole-ass UI hitting me"). Keeps
+blankScene's load-bearing wake antenna; NOT marked seen (the ⚠ badge nags until
+read, Adam Q1); newest-wins; double-tap wakes. BLANK_POPUP_MS 10 s → 5 s.
+
+**Phase 10 — stats threshold alerts.** The 10 s sampler + a 5-min volume check
+feed sustained-crossing rules (GPU>87 °C/10 m, CPU>95 °C/5 m, RAM>95 %∧swap>50 %/
+10 m, any vol>95 %/30 m) with a 2 h re-arm that a drop-below + re-cross bypasses
+("sustained means sustained" — a brief dip restarts the clock). Fires priority
+`info` (the title flash + the Phase-2 blank flash). swapTotalMb added to the
+sample for the swap% rule.
+
+**Whole-project review (the mandated finale).** Five parallel review passes
+(my new code; the WM/compose core; infra; client Kotlin; Python). Every
+candidate finding double-checked against the code before acting. CONFIRMED +
+FIXED (server, smoke-verified): (1) the Files **pickDest navigation** — its menu
+(the "Move/Copy here" verb + Cancel/Reload/Main) was a passive region with no
+focus-flip, so it was dead UI and depositing into a location ROOT was
+impossible; and cancelling/backing a current-dir op landed in the file-actions
+level showing the directory as a 0-byte file. pickDest now flips focus like
+every other browse level and returns to the right level for dir-ops. (2) the
+**phase10-calendar flake** — a TEST bug: `sweepReminders()` fires reminders
+fire-and-forget (`void notify`) and returns a count from the atomic UPDATE, so
+the test's synchronous read-after-sweep raced the INSERT across the pg Pool; the
+test now polls (the product is correct — coupling the sweep to the store write
+would violate no-await-store-in-hot-path). CONFIRMED-NOT-REAL (verified, so they
+aren't re-chased): the calendar "ghost-delete on a soft-empty fetch wipes the
+agenda" (read_gcal exits 1 on every error, so `[]` only means a genuinely-empty
+calendar — the delete is correct); and the turn_complete `void this.setDoc/
+prompt` "unhandled rejection" (prompt is fully try/caught, setDoc is synchronous
++ robust). REAL but DEFERRED to Adam (client/BLE changes can't be on-glass
+verified here, and the rules forbid breaking the working app blind): Notify
+Listener decodes/re-encodes MMS images on the MAIN thread (ANR/listener-death
+risk — offload to a background scope); a reconnect dead-end if a lens
+*disconnects* (not errors) mid-`recoverSession`; `_connecting` never reset on a
+successful launch (masked); the `startForeground` fallback catch is itself
+uncaught. All four documented with file:line + the fix for Adam to apply +
+verify on glass.
+
+Lessons: (a) a stray NUL byte slipped into a regex character class during an
+edit (`/[\x00-\x1f]/` instead of `/\s+/`) — it made `grep` treat the whole file
+as binary (silent: `grep` found nothing while `rg` did); ALWAYS `rg`, and scan
+edited files for control bytes. (b) The firmware f1=7-wipes-images constraint is
+unverifiable here, so the chess fix works WITH the client diff (don't push tiles
+unless the position is new) rather than betting on firmware behavior.
+
+Verification: server smoke **12/12** (new phase12-stats-alerts; phase10 flake
+gone, 3/3); shared+server build clean; control-byte scan clean. No APK this
+batch (all server-only); the deferred client findings + the unimplemented
+upgrades phases (3/5/8/11/12/13/14 server + 1/4/6/7/9/15/16 client) carry
+readiness notes in the session summary.
+
+---
+
 ## (unstamped) — 2026-06-12 r17 — **G2 battery decode fixed (live-frame proven) + MMS images actually extracted + Cancel-first delete (APK v1.10)**
 
 Adam's on-glass report: no battery, no MMS pictures. His Diag log had both

@@ -1,486 +1,532 @@
-# G2CC Upgrades — THE implementation guide (2026-06-11)
+# G2CC upgrades v2 — the 2026-06-12 queue
 
-> **STATUS: IMPLEMENTED 2026-06-11 — Phases 1–11 complete, smoke suite 11/11 green.**
-> Per-phase record + Adam's gate answers: `UPGRADE_PROGRESS.md`; the WHY: `CHANGELOG.md`
-> r3–r13. Still open: Adam's batched on-glass verification + APK v1.7 install, the
-> Lichess deferral (Ph11 note below), and the gated Phase 12 / Section D items. This file
-> stays as the spec of record — Section C phase specs remain the reference for the
-> deferred slices.
+> **This file REPLACES the 2026-06-11 upgrades doc** (Phases 1–11, all shipped and
+> smoke-verified — the full annotated v1 lives in git at `60e6578:upgrades.md`; the WHY
+> is CHANGELOG r3–r17; the per-phase record is UPGRADE_PROGRESS.md). Same contract as
+> v1: this is the WORK QUEUE — dependency-sorted, individually shippable phases, each
+> smoke-verified before the next; Adam's gate answers get recorded inline; §D lists
+> what is deliberately OUT or carried over still-gated. Scope extended
+> 2026-06-12 (Adam's idea-reviews): navigation line, media controls, full
+> mail, Reader voice-paging, stats alerts, universal search, deliveries,
+> audio memos, phone finder, OBD-II, Files trash, the category-launcher Main.
+> Rejections recorded in §D. **Scope extended again 2026-06-13 (Adam's two
+> explicit asks): Phase 18 (chess tile-redraw fix) and Phase 19 (Files
+> file-manager overhaul incl. the "970 bytes" dir-listing wall) — these go
+> FIRST.**
+>
+> House rules apply unchanged (HANDOFF.md "Hard-learned lessons" + CLAUDE.md): the
+> multi-packet wall, B2 blank-wake, B4 subprocess-everything, B5 state hygiene, the
+> Three Absolute Rules, additive-optional wire changes, prime directive.
 
-This file is the COMPLETE work specification for the next major build-out, written for a
-fresh Claude Code instance to implement end-to-end with minimal risk of mistakes,
-regressions, or rule violations. **Read `HANDOFF.md` first** — it carries the project
-context, architecture, and hard-learned lessons. This file deliberately does NOT repeat it.
+## Implementation status (2026-06-13)
 
-How to use this file: do Section A completely before writing ANY code. Internalize Section B
-(it is the distillation of a ~45-fix code review of this exact codebase — every rule here is
-a bug that actually happened). Then execute the phases in Section C **in order** — they are
-dependency-sorted and individually shippable. Section D lists what is deliberately OUT and
-why; do not "helpfully" pull it in.
+**DONE + smoke-verified (server-only; CHANGELOG r18; NO APK):** Phase 18 (chess
+tile-redraw), Phase 19 (Files overhaul incl. the "970 B" wall, dir ops,
+rename/mkdir), Phase 17 (trash — folded into 19), Phase 2 (blank flash),
+Phase 10 (stats alerts). Whole-project review done → `docs/CODE_REVIEW_2026-06-13.md`
+(fixed the Files pickDest navigation + the phase10 smoke flake; 4 client findings
+deferred there).
 
----
-
-## A. Before any code (mandatory, in this order)
-
-### A1. Read these files completely (they are the substrate everything below modifies)
-
-1. `HANDOFF.md` + `docs/DE_DESIGN.md` — the system + the UI contract.
-2. `server/src/os-windows.ts` — the WM, the five windows, SessionLevel. ~90% of new work
-   lands here or follows its patterns. Note: menu()/phase() state machines, lastView tap
-   resolution, the WM-reserved menu labels (`Retry`/`Reload`/`Back`/`Main` — window menus
-   must NEVER use these), stopDictation, the per-window focus-flip pattern (Mail), the
-   browsePageItems paging pattern, requestRender conflation.
-3. `server/src/os-compose.ts` — composeScene, paginateText, clampLabel/clampPx/clampPxMiddle,
-   `estimateLayoutFrameBytes` + `LAYOUT_FRAME_BUDGET_BYTES`, errorView, blankScene,
-   DEFAULT_BROWSE_MENU. Every new on-screen surface goes through these helpers.
-4. `server/src/ws-handler.ts` — message routing, the WSClient lifecycle, sttResult/sttError,
-   sendMsg, wireSessionEvents vs the DE's SessionLevel.wire (two separate consumers).
-5. `server/src/cc-session.ts` + `session-pool.ts` + `watchdog.ts` — subprocess patterns:
-   the spawn-outcome race, stdin 'error' listener, stale() guards, the interrupt
-   control_request, persistSessionMeta (atomic temp+rename).
-6. `server/src/os-content.ts` + `scripts/render_image.py` + `scripts/read_maildir.py` —
-   the execFile subprocess pattern (stdin EPIPE handler, maxBuffer, exact byte asserts,
-   loud stderr) and the python-helper contract style. New helpers COPY these patterns.
-7. `shared/src/protocol.ts` + `shared/src/constants.ts` — the wire contract. Additive,
-   optional-field changes only (see B6).
-8. `docs/CODE_REVIEW_2026-06-11.md` — skim the fix list; it is the catalog of what goes
-   wrong in this codebase.
-9. Only when Phase 9 starts: `android/.../service/ConnectionService.kt`,
-   `harness/HarnessActivity.kt`, `net/WsProtocol.kt`, `android/INTENTS.md`.
-
-### A2. Verify the baseline is green BEFORE changing anything
-
-```bash
-cd /home/user/G2CC
-npm run build -w server                          # must be clean
-JAVA_HOME=/opt/openjdk-bin-17 ANDROID_HOME=/opt/android-sdk \
-  ./android/gradlew -p android testDebugUnitTest -q   # must pass (~225 tests)
-node server/smoke/run-all.mjs 2>/dev/null || true # if present; else see B8 to create it
-git status --short                                # expect clean; if not, ASK Adam first
-```
-
-Confirm the server is running (`ss -ltnp | grep :7300`) and note the pid — you will restart
-it after each server phase (HANDOFF has the restart incantation).
-
-### A3. Ask Adam ALL decision-gate questions in ONE batch, up front
-
-He answers from a factory between machine cycles — never trickle questions. Ask:
-
-1. **Calendar source** (Phase 10): Google Calendar via OAuth'd CLI, or CalDAV URL+creds?
-   (Phase 10 is skippable this session if he doesn't want to deal with creds.)
-2. **Lichess** (Phase 11): does he want online correspondence play now? If yes he must
-   create an API token (https://lichess.org/account/oauth/token, `board:play` scope).
-   Engine-only (Stockfish, installed) needs nothing — confirm which.
-3. **Books directory** for the Reader (suggest `~/Books`; create if absent?).
-4. **Quick-prompts list** (Phase 6): 3-6 canned prompts (e.g. "What's the current status?").
-5. **Notification defaults** (Phase 4): confirm priority ladder call>timer>SMS>email>info;
-   which priorities WAKE a blanked screen (suggest: timer only, until calls exist).
-6. **Postgres**: DB name `g2cc` owned by role `user` OK?
-7. **rpg-cli dungeon root** (Phase 11): which directory should be the dungeon?
-8. Which phases he wants on-glass-verified as you go vs batched at the end (each server
-   phase below ends with a 2-minute on-glass check he runs).
-
-### A4. One-time environment setup (verify each step's output — do not assume)
-
-```bash
-# Postgres role + DB (psql as 'user' currently fails — the role likely doesn't exist;
-# verified 2026-06-11):
-sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='user'" | grep -q 1 \
-  || sudo -u postgres createuser user
-sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='g2cc'" | grep -q 1 \
-  || sudo -u postgres createdb -O user g2cc
-psql -d g2cc -c 'SELECT 1'        # MUST print 1 via unix-socket peer auth — if not, STOP and fix
-# Python deps (Reader + chess; venv already has matplotlib 3.10.9 — verified 2026-06-11;
-# ebooklib + python-chess verified ABSENT):
-audio/venv/bin/pip install ebooklib python-chess
-# Node deps (server workspace):
-npm install -w server pg && npm install -w server -D @types/pg
-```
+**NOT yet implemented:**
+- Server, ready to build: **3** (Suggest — touches SessionLevel's confirm flow),
+  **5** (tmux), **8** (full Mail), **11** (Main categories — premature; gated on a
+  window count we haven't reached), **12** (Search), **14** (memos — needs the PCM
+  buffer plumbed from ws-handler to the intent handler).
+- Server, gated: **13** (Deliveries — needs the one-time `gmail.readonly`
+  re-consent at home).
+- Client (need an APK + Adam's on-glass verify): **1** (MMS retry), **4a/4b**
+  (SMS), **6** (nav line), **7** (media), **9** (voice), **15** (phone finder).
+- Hardware-gated: **16** (OBD — vGate dongle on backorder).
 
 ---
 
-## B. Iron rules for this batch (each one is a real bug from the 2026-06-11 review)
+## Status corrections from on-glass testing (2026-06-12)
 
-**B1. The wall + budgets — every new surface, no exceptions.** Any new text reaching a scene
-goes through `paginateText` (px-measured, byte-capped) or a `clampPx*` helper; any new
-browse list through `browsePageItems` (14 rows) with ≤40-byte labels (`clampLabel`); compose
-already runs `estimateLayoutFrameBytes` and THROWS over budget — never bypass composeScene
-to send a scene. Region budget incl. the client clock: ≤12 containers, ≤8 text, ≤4 images,
-EXACTLY one event-capture. New full-screen views must keep ≥1 text region and never overlap
-the clock cutout (x≥469, y<33).
-
-**B2. DO NOT TOUCH (hardware-proven, crash-adjacent):** `blankScene()`/the wake antenna
-(a scroll-text region must exist while blanked or ALL input dies — hardware, twice);
-`G2Renderer.kt` send/park/preempt/abort semantics; msgId width (1 byte); the image-chunk
-ack-gating; `/home/user/g2code/`, `/home/user/g2aria/` (read-only reference). Do not re-add
-a phone-mic path (policy), do not re-probe image compression (closed — firmware rejects all
-but the current raw format), do not log the auth token.
-
-**B3. Three Absolute Rules, applied:** no I/O timeouts (allowed: pacing delays, resource
-caps, supervision intervals, security windows — pattern-match `FORBIDDEN_PATTERN_AUDIT.md`);
-no silent failures (every catch logs with a `[subsystem]` prefix; fire-and-forget promises
-get `.catch`; subprocess stdin gets an 'error' listener); no truncation (paginate; the
-documented byte-cap label clamps are the only sanctioned trims and they log).
-
-**B4. The event loop is the display.** Any I/O that can be slow or block — EPUB parsing,
-chart rasterization, DB queries, directory walks, anything network — must be async or a
-subprocess (`execFile` per the os-content pattern: stdin error handler, maxBuffer, exact
-output asserts, stderr surfaced in the reject). The review found a FIFO `openSync` that
-froze the entire server and a per-entry stat pass that dropped the WS link. `readFileSync`
-on small/known files only.
-
-**B5. Session/WM state machine discipline.** New transient state must be cleared on EVERY
-exit path (close(), respawn(), process_died, error, window switch — the review found five
-leaks of exactly this kind). New interrupting UI (notifications) must QUEUE behind
-listening/transcribing/pendingStt/pendingPermission states — never repaint over the confirm
-step (its guarantee is "nothing reaches CC unread"). Taps resolve against `lastView`: any
-new menu must come from `view()` so render and resolution can't diverge; never reuse the
-WM-reserved labels.
-
-**B6. Wire-contract changes are additive-optional only.** New `ServerMessage`/`ClientMessage`
-types or fields: optional on both sides, `protocol.ts` and `WsProtocol.kt` updated in the
-same phase, old-APK tolerated by the server and new-APK tolerated by the old server (the
-glasses APK lags until Adam installs). kotlinx needs default values for omitted fields.
-Deploy the server half first.
-
-**B7. Client (Kotlin) changes:** only Phase 9 touches the APK. Bump `OsLayout.OS_VERSION`,
-keep `testDebugUnitTest` green, beware Kotlin trailing-lambda binding when adding
-constructor params (use named args — this bit us), `cp` the APK to `/tmp/g2cc-harness.apk`,
-put the install link LAST in any message to Adam.
-
-**B8. Verification ritual — after EVERY phase:**
-1. `npm run build -w server` clean.
-2. Write/extend a smoke script under `server/smoke/<phase>.mjs` (commit it — they accumulate
-   into the regression suite; model: the 9-case compositor smoke described in
-   `docs/CODE_REVIEW_2026-06-11.md` §Verification). Create `server/smoke/run-all.mjs` in
-   Phase 1 that executes every sibling script and exits non-zero on failure.
-3. New compose surfaces additionally piped through `scripts/scene_to_png.py` (client-rule
-   parity incl. the 1000 B wall).
-4. Restart the server (HANDOFF procedure), `tail /tmp/g2cc-server.log` for startup errors.
-5. Give Adam the 2-minute on-glass checklist for the phase (listed per phase below).
-6. Append a CHANGELOG.md entry. Do NOT git-commit unless Adam says to.
-
-**B9. Verify-before-execute applies to every external surface in this file:** run
-`rpg-cli --help` / read ebooklib + python-chess docs / read the Lichess Board-API docs / read
-one real `~/.claude/projects/*/*.jsonl` BEFORE writing code against them. The specifics in
-Section C are design intent, not verified API contracts — the implementing instance verifies.
+- **G2 battery: VERIFIED WORKING** (v1.10) — diag shows `[batt] glasses battery →
+  73…76%` live; §10 of G2_BLE_PROTOCOL.md is de-[U]'d. The status-bar G slot is real.
+- **MMS images: STILL BROKEN — root cause #2 in hand** (Phase 1 below).
 
 ---
 
-## C. The phases, in order
+## Decision answers (Adam, 2026-06-12 — all questions resolved)
 
-> Sizing note: phases 1-8 are server-only (no APK). Phase 9 is the single client batch.
-> Each phase = one coherent, shippable change set. Finish + verify before starting the next.
+1. **Blank-flash mark-seen**: do NOT mark seen; the ⚠ badge nags until read.
+2. **SMS scope**: BOTH slices — 4a notification-reply, then 4b full Telephony
+   threads (he uses Google Messages; the watch precedent is full-history).
+3. **tmux**: opens into a SESSION MENU (`tmux ls` + `New session`) — pick one;
+   a `Sessions` menu option re-picks for easy juggling. Read-only-until-focus
+   default stands.
+4. **Suggest model**: `claude-opus-4-8` + `--effort medium`, locked.
+5. **Lyrics**: LRCLIB fetch approved (cache-forever in Postgres).
+6. **Voice-paging mic budget**: approved — the DJI is built for all-day wear
+   and he rotates two TXs through a charging case; the phone is active all
+   day regardless. (This approval unlocked the full Phase-9 voice layer.)
+7. **Main categories**: grouping approved as proposed WITH one change — the
+   top-level verb is renamed **Ask → Dictate** and becomes the voice-control
+   entry point (see the reshaped Phase 9).
+8. **Deliveries source**: NOT migadu (human-only box) — carrier/bulk mail
+   lives in his GMAIL; Phase 13 reads Gmail instead.
+9. **OBD**: "whatever is most useful" — spec locks to a classic-BT ELM327
+   with AUTO-SLEEP (vGate iCar Pro BT3.0) so it can live plugged in; the
+   G2CC app itself is the bridge (no Tasker/Aria hop — see Phase 16).
+10. **Trash purge**: 30 days confirmed.
 
-### Phase 1 — Files: revert the locations antenna to a plain list  *(small; do first)*
-
-**Why first:** deletes complexity every later phase would otherwise have to stay consistent
-with. Adam's verdict: the per-notch live preview "feels janky."
-
-- `FilesWindow`: locations level becomes a normal `mode:'browse'` view like the tree level —
-  content list = the locations (labels from `refreshLocations()`, which stays), menu
-  `['Reload','Main']`, tap a row → set stack/offset → tree level. DELETE: `antennaWindow()`,
-  `previewRows()`, `onMenuScroll`, `onTap`, `locIndex` scroll tracking, the live preview.
-  Keep the Mail-style focus-flip on double-tap (locations is now the window root level:
-  content→menu→Main).
-- `os-compose.ts`: with its only producer gone, delete the `menuMode:'antenna'` branch +
-  `menuLines`/`menuSelected` from `WinView` + the antenna-line clamp. `MenuMode` becomes
-  `'passive'|'capture'`.
-- `ws-handler.ts` / WM: the `focus`→`wm.onScroll` route and the window-interface
-  `onMenuScroll`/`onTap` hooks become producer-less. Keep WM `onTapGesture` (it guards
-  `blanked` and sys-taps still arrive); delete the rest only after grepping for references.
-- **TRAPS:** `blankScene()`'s `wake` region is ALSO a scroll-text antenna — it is load-bearing
-  hardware behavior and completely separate from this revert. Do not touch it, and do not
-  "clean up" scroll-text support in protocol.ts/SceneCodec/scene_to_png (the wake region and
-  the wire contract still use it).
-- **Verify:** smoke composing the new locations view (budget, exactly one capture); on-glass:
-  scroll locations list, tap into a drive, browse, `..`, double-tap chain back to Main.
-
-### Phase 2 — Postgres store foundation
-
-- New `server/src/store.ts`: lazy singleton `pg.Pool` over the unix socket
-  (`host: '/run/postgresql', database: 'g2cc'` — peer auth, no password; leave pg's
-  no-timeout defaults alone). A tiny idempotent migration runner: `migrations` table, each
-  feature registers `CREATE TABLE IF NOT EXISTS`-style DDL with an id. Loud `.on('error')`
-  on the pool.
-- **Failure policy (important):** a dead/missing DB must NOT crash or wedge the server or
-  any render path. UI paths receive either data or a loud error they render via the normal
-  error views; capture paths are fire-and-forget with `.catch(console.error)`.
-- Do NOT migrate `~/.g2cc/sessions.json` — it feeds CC `--resume` and is fine as-is.
-- **Verify:** smoke that inserts/reads a row; stop postgres (`sudo rc-service postgresql-17
-  stop`), confirm the server keeps serving scenes and logs loudly, start it again.
-
-### Phase 3 — Session history (capture + backfill + on-glass browsing)
-
-- **Schema:** `conversations(id, window_id, project_path, cc_session_id, started_at)`;
-  `turns(id, conversation_id, kind ['prompt'|'response'|'error'|'interrupted'], text,
-  tool_calls jsonb, model, effort, created_at)`. Index (conversation_id, created_at).
-  **Unlimited retention — no caps, no pruning (Adam: "do not curtail capability").**
-- **Capture** in `SessionLevel` (single choke point): record the prompt in `prompt()` after
-  a successful `sendPrompt`; record response/error in the `turn_complete` handler (it
-  already distinguishes error turns and 'Interrupted'); open a conversation row when the
-  entry's `ccSessionId` first becomes known (respawn-with-resume continues the same
-  conversation). Fire-and-forget + `.catch` (B3); NEVER await store calls in render/turn
-  paths.
-- **Backfill importer** `scripts/import_cc_history.mjs` (offline, run once): walk
-  `~/.claude/projects/*/`, parse session JSONLs → conversations/turns. READ a real file
-  first (B9) — map only what's unambiguous (user prompts, assistant text, timestamps,
-  session id); skip + count the rest, print a summary. Idempotent: unique key on
-  (cc_session_id, source uuid/index) + `ON CONFLICT DO NOTHING`.
-- **UI:** add a `History` row to the session Options level (CC + Aria). Levels:
-  conversations (browse, newest-first, label `MM/DD HH:MM · first-prompt-words…`) → turns
-  (browse) → turn text via `paginateText` + Next/Prev (copy the Mail read pattern incl. its
-  read-level error-page handling). Unlimited depth via `— prev —`/`— more —` paging backed
-  by LIMIT/OFFSET.
-- **TRAPS:** no reserved menu labels; all list labels through clampLabel; queries async
-  (B4); the history levels are read-only — keep them level-state only so leaving them can't
-  disturb session state.
-- **Verify:** smoke: synthetic conversation → all three levels compose under budget;
-  on-glass: dictate, then find that turn in History; `psql` spot-check; backfill counts
-  reported to Adam.
-
-### Phase 4 — Notification layer (the shared infrastructure)
-
-- New `server/src/os-notify.ts` + WM integration. Event = `{source, priority
-  ('call'|'timer'|'sms'|'email'|'info'), title, body, ts}`. ALL events also persist to a
-  `notifications` store table (the durable record).
-- **v1 surfacing (keep it this simple):** (a) info/sms/email: the latest unseen notification
-  renders as a `⚠ `-prefixed TITLE-BAR override (the existing title clamp bounds it) + an
-  unseen-count in the status slot; it clears when read in the Notices window. (b) timer/call
-  priorities: a full-page WM overlay view — composed exactly like `errorView` (text mode,
-  bounded body) with menu `['Open','Dismiss','Main']` (none reserved). `Open` switches to
-  the relevant window; `Dismiss` returns to the prior view. The WM holds
-  `activeOverlay: WinView | null`; while set, `requestRender` composes IT instead of the
-  active window, and `lastView` tap resolution works unchanged. NO auto-dismiss timers (B3)
-  — overlays persist until acted on.
-- **Precedence (B5, critical):** before surfacing, ask the active window if it is
-  interruptible — add optional `OsWindow.interruptible?(): boolean`; session windows return
-  false while `listening || transcribing || pendingStt || pendingPermissionId`. Not
-  interruptible → queue; flush when a render observes interruptible again (cheap check in
-  the render loop; set-flag + single requestRender, no reentrancy).
-- **Blanked screen:** priorities in the wake set (gate A3.5) clear `blanked` and surface;
-  others queue until wake.
-- **Notices window** (new, registered in the WM): browse persisted notifications
-  newest-first → read view. Absorbs HOLDS C3 (badges come from this layer).
-- **TRAPS:** the overlay is a full VIEW, not an extra region — budgets stay at the proven
-  worst case; queue flushing must not recurse the render loop.
-- **Verify:** smoke: synthetic events of each priority vs an interruptible and a fake
-  dictating window — assert queue/overlay/title behavior; on-glass: a test notification
-  while reading Mail (title flash), one mid-dictation (held until after Confirm), a
-  timer-priority overlay, blanked-wake behavior.
-
-### Phase 5 — Dashboard Main + tab-strip retirement
-
-- `MainWindow.view()` → `mode:'text'`: drop the logo tile. Content = one line per window
-  from its `summary()` (+ unseen-notification count + `beardos · N cc`), assembled through
-  `paginateText`. Menu stays the window list + Reload (the switcher). Clamp each summary
-  line at assembly (~40 chars).
-- Re-render cadence: v1 = a 30 s pacing interval that requestRenders ONLY while Main is
-  active (pacing, allowed) — don't build a cross-window event bus for this yet.
-- **Tab retirement:** the WM render loop passes `tabs: []`; composeScene skips the tabs
-  region when the list is empty and the status region takes the full width
-  (`tabX = SCREEN_WIDTH`). Remove the first-letter mapping (it becomes dead). Do NOT
-  renumber region ids; update DE_DESIGN §1's sketch.
-- `renderSingleTile`: MainWindow stops using it — mark `// parked, no producers`, leave it.
-- **TRAPS:** dropping a region from every scene diffs as one uniform rebuild then
-  stabilizes — verify the estimator numbers DROP; keep the statusLeft clamp (wider ≠
-  unbounded).
-- **Verify:** smoke: dashboard composes ≤ budget with 8 fake windows + clamped summaries;
-  on-glass: live states on Main, tabs gone, status spans the bottom bar.
-
-### Phase 6 — Timers + quick prompts + "Ask from Main" + quick capture
-
-- **Timers:** store table `timers(id, label, fires_at, fired)`. Server module arms
-  `setTimeout`s from the DB at startup (crash-safe re-arm; a fire missed while down fires
-  immediately on boot, marked "(late)"). Fire → Phase-4 notification (priority `timer`).
-  Dashboard shows the next pending timer ("⏱ 4m · furnace") — MINUTE granularity only
-  (per-second display is hat-gated; do not fake it).
-- **Set/cancel:** a `Timers` window (browse: pending timers [tap → cancel/details] +
-  `New 5/10/20/30/60 min` rows) AND a dictation intent: in the Ask flow below, a narrow
-  regex pre-parse for `^(timer|remind me)\b…` (minutes/hours + optional label) creates the
-  timer directly — deterministic, instant, logged loudly; everything else falls through to
-  Aria.
-- **Quick prompts:** `claude.quickPrompts: string[]` in config.ts (+ example file; values
-  from gate A3.4). Session menus gain `Prompts` → browse list → tap feeds the existing
-  `prompt()` path (mid-turn queue rules apply automatically). Absorbs HOLDS C5.
-- **Ask from Main + quick capture:** Main's menu gains `Ask`: switch to the Aria window and
-  invoke its EXISTING dictation verb path (`switchTo('aria')` + the same code the Ask menu
-  item runs — do NOT build a parallel dictation pipeline). The intent pre-parse hooks the
-  confirm-ACCEPT point only (after Adam confirms the transcript — the confirm step stays
-  sacred): `note: …` appends timestamped to `~/notes/glasses-inbox.md` (mkdir loudly if
-  missing) + ack notification; timer phrases create timers; everything else proceeds as a
-  normal Aria prompt.
-- **TRAPS:** pre-parse AFTER confirm, never on raw STT; reuse the busy/queue logic by going
-  through the real prompt path; labels `Timers`/`Prompts`/`Ask` are safe (not reserved).
-- **Verify:** smoke: arm → fire → notification + DB flag; restart re-arms; regex cases
-  asserted. On-glass: voice-set a 1-minute timer from Main, blank the screen, confirm
-  wake + overlay.
-
-### Phase 7 — Reader window
-
-- New `scripts/read_epub.py` (ebooklib — read its docs first, B9; copy read_maildir.py's
-  structure: `list <book>` → chapters JSON, `read <book> <idx>` → plain text reusing the
-  same html→text approach; loud stderr, exit 1 on failure).
-- `ReaderWindow` levels: library (browse `*.epub` in the configured dir) → chapters
-  (browse) → read (paginateText + Next/Prev; Mail-read pattern). All EPUB parsing via
-  execFile (B4) — never in-process.
-- **Position persistence:** store table `reader_positions(book_path, chapter, page,
-  updated_at)`; write on page/chapter change (fire-and-forget + catch); re-entry resumes
-  the saved position automatically.
-- Cache the current chapter's pages in memory only; re-derive on chapter change.
-- **TRAPS:** >14 chapters (browsePageItems handles); unicode titles (clamps handle); a
-  corrupt EPUB renders the read-level error page (Mail pattern), never wedges; replaces
-  Adam's EPUB→PDF→Teleprompt workflow — get resume-position right, it's the feature.
-- **Verify:** smoke against a real EPUB in the books dir (public-domain fetch if none);
-  on-glass: open → read 3 pages → leave → re-enter → resumed at position.
-
-### Phase 8 — LLM imagery, layer 2 + THE PAGE-2 RULE
-
-- **Scope:** ` ```chart ` fenced blocks only (matplotlib 3.10.9 is in the venv — verified).
-  Mermaid / ` ```image ` are OUT (Section D5).
-- New `scripts/render_chart.py`: stdin JSON `{spec, width, height}` → matplotlib Agg styled
-  for 576×288 green mono (white-on-black, thick lines, big fonts) → stdout raw 1 B/px gray
-  matching render_image.py's output contract (even dims). Factor os-content.ts's 2×2
-  tile-split + all-black-guard into a shared helper; reuse it.
-- `parseMarkdown`: ` ```chart ` fence → `{t:'chart', spec}` block; malformed JSON degrades
-  to the loud visible code-block (the existing ```stat pattern).
-- **SessionLevel pages become a union:** `(string | {kind:'image', img: RenderedImage,
-  caption: string})[]`. `view()` returns text mode for string pages, `mode:'tiles'` +
-  `tilesRect` for image pages (compose supports both today).
-- **THE PAGE-2 RULE (Adam's elegance constraint — enforced server-side, always):** assemble
-  ALL text pages first; image pages append strictly AFTER page 1 regardless of where the
-  model emitted the block (v1: all charts after all text). Page 1 never waits on or contains
-  imagery — the initial answer is always instant. Rendering is async: image pages start as
-  a text placeholder ("chart rendering…") and swap in on completion (requestRender);
-  failures become a loud text page. The ~4 s tile push happens only when the user flips TO
-  an image page — that is the rule working, not a regression.
-- Teach the model: extend `server/prompts/aria-g2.md` — text answer first, charts on a later
-  page ("chart on p.2"), one example spec.
-- **TRAPS:** cache rendered charts by spec hash (renderBlocks-LRU pattern) so page flips
-  don't re-rasterize; the pages-union touches `restorePages`, `showError`, the confirm-step
-  page, and Phase-3 history capture (store the spec text, not pixels) — grep every
-  `this.pages` write before starting; tiles ≤240×111 via the shared splitter.
-- **Verify:** smoke: text+2-chart response → text pages first, images ≥ p.2, placeholder
-  swap, every text page under budget, board… chart tiles through scene_to_png; on-glass:
-  "show me a sine wave chart" → instant text p.1, chart on p.2 after a beat.
-
-### Phase 9 — THE client batch (one APK: v1.7)
-
-Bundle ALL client work into one build+install cycle:
-
-1. **Connect = straight into the DE (Adam 2026-06-11):** remove the `Test` and `Server`
-   buttons from HarnessActivity. `Connect` → BLE connect → cold-launch → **auto
-   `enterServerMode()`** (no second tap; the splash becomes momentary). Keep Disconnect,
-   the Diag toggle, and the setup/permission rows. In ConnectionService: call
-   enterServerMode() unconditionally on cold-launch success; simplify/remove the
-   `wasServerMode` recovery flag (server mode is now always the post-launch state — read
-   the recovery paths in `maybeColdLaunch`/`recoverSession` carefully so auto-recovery
-   still re-enters cleanly); park `DisplayTestSequence`/`testJob`/`runTest()` with a
-   comment (keep the code, drop the button).
-2. **NotificationListenerService** (new `service/NotifyListener.kt` + manifest): forward
-   non-ongoing notifications as additive `ClientMessage.Notify {package, title, text,
-   postedAt, key}`; server maps package→priority (dialer→call [the caller-ID popup via the
-   Phase-4 overlay], messaging→sms, gmail→email, default info; data-driven map in config).
-   v1 is READ-ONLY (no inline-reply — D5). Needs the one-time "Notification access" Settings
-   grant — add a status row + deep-link intent in HarnessActivity (one-time, at home —
-   acceptable under the prime directive). Research listener-rebind best practice at
-   implementation time (the service classically needs a component-toggle kick after
-   crashes); never forward ongoing/foreground-service notifications (your own service is
-   one), and debounce duplicates by key+postedAt.
-3. **Phone battery:** optional `battery: Int?` on ClientHb (both protocol sides, default
-   null — B6); BatteryManager read; server keeps latest → dashboard line + a ≤15%
-   notification (once per downward crossing).
-4. **INTENTS re-audit** (android/INTENTS.md): keep PING; rewire START/STOP_RECORDING to the
-   DE dictation path or mark deprecated-with-log; document results in the file.
-5. OS_VERSION → 1.7; `testDebugUnitTest assembleDebug`; stage `/tmp/g2cc-harness.apk`.
-- **TRAPS:** B6 ordering (deploy/restart the server half FIRST — old APK must keep working
-  until Adam installs); kotlinx optional fields need defaults; the auto-server-mode change
-  interacts with the cold-launch failure/recovery state machine — re-read those paths and
-  keep every failure branch resetting state as the review left them.
-- **Verify:** gradle green; server smoke with a synthetic Notify; on-glass after install +
-  notification-access grant: Connect alone lands in the DE, an SMS pops the title banner, a
-  test call pops the overlay, battery on the dashboard.
-
-### Phase 10 — Calendar (decision-gated; skip cleanly if A3.1 unanswered)
-
-- Sync via the chosen CLI/CalDAV in a subprocess on a 15-min pacing interval → store table
-  `events(uid, title, starts_at, ends_at, location, raw)`; upsert by uid.
-- `Calendar` window: agenda browse (next 14 days, day-grouped rows) → event read view.
-  Reminders: lead-time (default 10 min) → Phase-4 notifications (timer priority).
-- v1 READ-ONLY (event creation later becomes an Ask intent).
-- **Verify:** sync smoke against the real source, idempotent on re-run; on-glass agenda.
-
-### Phase 11 — Games: rpg-cli + chess
-
-- **Games window** (registered like the others): browse list of games → per-game levels.
-- **rpg-cli adapter** (installed: `/usr/bin/rpg-cli` — filesystem-as-dungeon, command-driven
-  `stat`/`cd`/`ls`): run `--help` + play a sandbox round FIRST (B9 — verify where its save
-  lives, whether it ever mutates the real fs, and any plain-output flag). Adapter = execFile
-  per action, ANSI stripped; text page = command output via paginateText; browse list =
-  `ls` results + context actions. Dungeon root pinned to the A3.7 directory.
-- **Chess:** python-chess drives rules + legal-move lists; new `scripts/render_board.py`
-  draws the board with PIL/DejaVu (chess glyphs U+2654-265F exist in DejaVu — do NOT
-  attempt a firmware-text board, native glyph coverage is unverified) into the
-  render_image.py output contract → the proven image-tile path (page-2-class load
-  tolerance applies).
-  - **vs Stockfish** (installed): python-chess engine API over UCI subprocess (its async
-    API + external supervision — no wall-clock kills); strength via Skill Level menu.
-  - **vs Lichess** (only with an A3.2 token): Board API; incoming events via the ndjson
-    stream (a permanent connection with a reconnect-on-close loop — supervision, not
-    timeouts); your-turn → Phase-4 notification; state in a `lichess_games` table. Moves
-    via the legal-move browse list (14/page) or dictation of SAN through the Ask path.
-    **DEFERRED (Adam, gate A3.2, 2026-06-11): engine-only shipped in the Phase-11 batch;
-    set Lichess up AFTER the whole batch is tested — he mints the `board:play` token at
-    lichess.org/account/oauth/token, then this spec block is the work order.**
-- **TRAPS:** every engine/API interaction async/subprocess (B4); a dead Lichess stream
-  reconnects LOUDLY, never silently stops (B3); chess board is an IMAGE page.
-- **Verify:** rpg-cli round-trip smoke (no ANSI leakage, save persists); scripted
-  depth-1 Stockfish game in a smoke; board PNG through scene_to_png; on-glass: one rpg-cli
-  battle, one chess exchange.
-
-### Phase 12 — STRETCH (requires Adam's explicit go-ahead; do not start unprompted)
-
-- **Streaming STT engine:** parakeet daemon chunked mode + a live-caption page. Held until
-  the calls direction (D1) is decided — dictation works well post-review; building this
-  early risks churn.
-- **Layer-3 `display` tool:** an MCP server exposed to the CC subprocess (`--mcp-config`)
-  whose `display(blocks)` tool returns the user's interaction (tap/selection) as the tool
-  result. Touches the session busy/menu state machine — write a design doc first, get it
-  approved, then build.
+Standing micro-defaults (spec'd, not asked): the wake word is literally
+"G2" per Adam's examples (false-positive risk handled by requiring a
+grammar-matched command after it — [U] tune on factory audio); voice
+commands that SEND content (prompts/replies) require a VOICE confirm
+("G2 confirm" / "G2 cancel") — the confirm step stays sacred, voiced;
+Phase 13 needs a one-time Google re-consent at home (gmail.readonly added
+to aria's OAuth scopes).
 
 ---
 
-## D. Explicitly OUT of this batch — do not implement
+## Phase 1 — Fix MMS image display (small; client v1.11)
 
-1. **Phone calls:** direction TBD — current lean is rooting the Pixel (Tasker synergy;
-   Adam's "virtual BT headset" thought folds into the root investigation); SIP bridge is
-   the fallback (Adam dislikes Telnyx; other trunks exist if it comes to that). Wait for
-   Adam. The Phase-9 caller-ID popup is the approved v1 slice.
-2. **Glasses battery:** needs a hardware probe to enumerate BLE service 0x09-00 messages
-   (PROTOCOL_NOTES #4). Phone battery ships instead (Phase 9).
-3. **Hat-gated:** per-second timer displays; image pacing / rebuild-retention probes; rich
-   tiles for session content (nixed for latency, not capability — revisit post-hat).
-4. **Swarm items** (HOLDS S1-S4) and **confirm_on_hud** — parked BY CHOICE: Aria/CC run
-   `--dangerously-skip-permissions` deliberately (months of trouble-free use); revisit only
-   if that ever becomes a problem.
-5. **Mermaid / ```image blocks** (headless-browser dependency) and **SMS inline-reply
-   injection** (PendingIntent fire; needs careful research): v2 of Phases 8/9.
-6. **Gamebooks / parser-IF / LLM-DM RPG / idle game:** designed (see this file's git
-   history + docs/CODE_REVIEW era discussion) but they want Phases 3+4+8 mature. Next
-   session's menu. Aria-prompt fillers (20 questions, trivia) need NO code — just use them.
-7. **Obsolete by this batch — remove, don't maintain:** first-letter tab mapping (dies in
-   Phase 5), the antenna compose branch (dies in Phase 1), standalone C3 badge work
-   (absorbed by Phase 4), HOLDS C4 tool-result polish (absorbed by Phase 3), HOLDS C5
-   (absorbed by Phase 6), the harness Test/Server buttons (die in Phase 9).
-8. **sessions.json → DB migration:** no. It backs CC `--resume` and is correct as-is.
+**Evidence** (diag 2026-06-12 22:44): Messages posts the conversation notification
+TWICE — first text-only ("Image" placeholder, forwarded fine), then a re-post with
+the MessagingStyle data URI attached. v1.10 FINDS the URI
+(`content://com.google.android.apps.messaging.sharing.fileprovider/rcs_attachments/…`)
+but `openInputStream` yields nothing decodable — NO SecurityException (the listener
+URI grant is fine): the RCS attachment file isn't fully written/servable at
+notification time. Then the image-aware dedup stamp (r17) blocks every LATER re-post
+with the same URI, so it never retries.
 
-## E. Done-criteria per phase (fill before moving on)
+**Fix** (all in `NotifyListener.kt` + a small `ConnectionService` hook):
+- Split the unreadable diagnostics: stream-null vs zero-bounds vs exception (each
+  logged distinctly — next failure self-identifies).
+- **Delayed retry**: when an image URI exists but is unreadable, DEFER that forward
+  ~2s/5s/10s (bounded supervision retries — a resource cap, not an I/O timeout) and
+  send WITH the image on first success; after the window, forward imageless + loud.
+  Run retries on the service scope, never the NLS main thread.
+- **Dedup repair**: only commit an image-bearing stamp once the image actually
+  ENCODED (or the retry window expired) — a later re-post with the same URI must be
+  allowed to retry, not be eaten.
+- Verify: send an MMS, expect `[notify] picture WxH → … JPEG n B` in diag + the
+  image page in Notices. Unit-test the stamp/retry state machine.
 
-- [ ] `npm run build -w server` clean (+ gradle green if Phase 9)
-- [ ] `server/smoke/<phase>.mjs` written and passing; `run-all.mjs` green end-to-end
-- [ ] New compose surfaces passed `scene_to_png.py` (incl. the 1000 B wall check)
-- [ ] Re-grep your own diff for B3 violations (timeout-shaped waits, silent catches,
-      content trims)
-- [ ] Server restarted, log tail clean, Adam's 2-minute on-glass check done (or queued with
-      his agreement)
-- [ ] CHANGELOG.md entry written; commit only if Adam asked
+## Phase 2 — Blank-screen flash: 5 s, text-only, NO UI (small; server-only)
+
+Adam (2026-06-12): *"i use blank mode when driving … i don't need the whole-ass UI
+suddenly hitting me in the face."* Replaces the full-view blanked popup from gate
+A3.5. **The B2 hardware rule is load-bearing here: the flash scene must keep
+`blankScene()`'s scroll-text wake region** — compose the flash as
+blankScene-regions + ONE text region in the title-bar slot (y=0 h=33, px-clamped).
+
+- Content: `SMS from Becky` / `E-Mail from rfr82409@yahoo` / `Call from X` (kind
+  label from priority + the notification title, which carries the sender) and
+  `Timer: tea` for timers. One line. No menu, no body, no overlay machinery.
+- `BLANK_POPUP_MS` 10_000 → **5_000** (already smoke-tunable via
+  `setBlankPopupMsForSmoke`).
+- Semantics: every priority flashes while blanked; newest-wins replacement;
+  auto-re-blank; double-tap during the flash wakes (the user is engaging).
+  **NOT marked seen** (Adam 2026-06-12, Q1): the glance is missable — the ⚠
+  badge keeps nagging until read in Notices.
+- Touch points: `os-windows.ts` onNotification blanked-branch + a
+  `blankFlashScene(line)` in os-compose (estimator-guarded); phase4 smoke pins the
+  region set (wake region present, ≤1 capture, no menu).
+
+## Phase 3 — Suggest-next-prompt (medium; server-only)
+
+One-shot `claude --print --model claude-opus-4-8 --effort medium` predicts Adam's
+next prompt from the conversation; he confirms before anything is sent (the
+confirm step stays sacred — robot text gets the Parakeet treatment).
+
+- **Trigger**: `Suggest` appears as the TOP session-menu option when idle with ≥1
+  completed response. Tap → status `suggesting…` → one-shot subprocess (the
+  execFile pattern: stdin listener, maxBuffer, loud reject; stateless — no pool
+  slot, no watchdog).
+- **Context**: last ~15 turns from the Phase-3 history DB (already captures
+  everything, incl. tool-call names — "run the tests" vs "fix that" depends on what
+  CC just did) + a dedicated system prompt (`server/prompts/suggest.md`): predict
+  the USER's next message, terse, imperative, Adam's voice, output ONLY the prompt.
+- **UX**: result rides the existing confirm-page machinery — menu
+  `[Confirm, Regenerate, Cancel]`; Confirm → the normal `prompt()` path (queue/busy
+  rules apply); Regenerate re-runs (fresh subprocess); Cancel restores. Stale-seq
+  guard on the async return; hidden while busy; a failed call renders the error
+  card and never blocks Ask/Dictate.
+- Verify: smoke with a fake CLI (`CLAUDE_CLI` env override) asserting menu order,
+  confirm-send path, stale discard.
+
+## Phase 4 — Full SMS/MMS integration (large; client + server, two slices)
+
+**4a — Reply from the glasses via notification RemoteInput** (works for ANY
+messenger; no SMS permissions): the classic watch-bridge pattern — the client finds
+the active notification by key, fills the reply action's RemoteInput, fires its
+PendingIntent.
+- Wire (additive): `notify` gains `hasReply: bool` + the client handles a new
+  `notification_reply {key, text}` server message (old clients ignore it).
+- Server: Notices read view gains `Reply` when hasReply — dictation confirm flow
+  composes; the reply goes back over the WS. Loud result either way.
+- Caveat: only live (non-dismissed) notifications can be replied to — the client
+  reports failure loudly and the server renders it.
+
+**4b — The SMS window** (Google Messages data, true threads):
+- Client (v1.12): `READ_SMS` + `READ_CONTACTS` permissions (one-time grants at
+  home, prime-directive-compatible); a query surface over
+  `Telephony.Sms`/`Mms` + `canonical-addresses` + contact-name resolution; MMS
+  image parts via `Mms.Part` (same downscale/encode path as Phase 1). New additive
+  client messages: `sms_threads_reply` / `sms_thread_reply` (paged) — the client
+  becomes a data provider the server queries on demand.
+- Server: an `SMS` window — threads list (name · last line · unread) → thread view
+  (paginated, newest last; image parts = page-≥2 image pages) → `Reply` (dictation
+  confirm → 4a's RemoteInput when live, else `SmsManager.sendTextMessage` w/
+  `SEND_SMS`) → `New` (pick contact → dictate).
+- MMS SENDING is OUT for v1 (receive/view only — `sendMultimediaMessage` is a
+  swamp; text replies cover the need).
+- Verify: provider-query unit tests w/ fixtures client-side; server smoke with a
+  scripted provider double.
+
+## Phase 5 — The tmux window (large; server-only)
+
+The glasses become another client of Adam's REAL tmux session — no mosh needed:
+the G2CC transport (BLE→phone→WS with reconnect/backoff) IS the roaming layer, and
+the server is the tmux host.
+
+- **Entry = a session MENU** (Adam, A2): the window opens on a browse list from
+  `tmux ls` (name · windows · attached?) + a `New session` row; picking one
+  runs the control-mode attach. A `Sessions` menu option inside the terminal
+  re-opens the list for juggling multiple sessions; the title always names the
+  attached session.
+- **Attach**: `tmux -C attach -t <session>` control-mode subprocess (the cc-session
+  shape: long-lived, line-parsed `%output`/`%window-*` events, stdin 'error'
+  listener, watchdog-style respawn). Read-only until input focus is explicitly
+  taken (default stands).
+- **Display**: tail mode = firmware text, last ~6 wrapped lines, ~62 ms updates
+  (render-conflated; perfect for watching CC/builds); grid mode = page-≥2 IMAGE
+  page, PIL monospace 6×10 px → a true **80×22** terminal snapshot (~4 s tile push,
+  on-demand page flip; htop/vim legible). The PAGE-2 rule, again.
+- **Input**: quick-keys menu first (`Enter · Ctrl-C · q · y · n · ↑ ↓ Tab Esc` —
+  one tap each, covers most interactive life) → dictation via the confirm flow →
+  `tmux send-keys -l`; the on-screen keyboard level last (rows of character groups
+  in the native list, tap-row → tap-char, plus Bksp/Space/Shift rows — slow-ass by
+  design, it's the fallback).
+- Safety: keys go to ONE explicitly-focused pane; the window title always names
+  pane + focus state; losing the WS mid-input changes nothing server-side (tmux
+  session is local and durable).
+- Verify: hermetic smoke against a throwaway `tmux -L g2cc-smoke` server (mirror of
+  the phase9 sandbox pattern); send-keys round-trip; grid-render parity through
+  scene_to_png.
+
+## Phase 6 — Navigation line on glass (small; client allow-list + server)
+
+His pain: Maps auto-backgrounds itself mid-navigation; voice prompts arrive too
+late; the watch shows only the next maneuver. Google Maps' live nav
+notification is ongoing-flagged — we already RECEIVE ongoing (r17 manifest
+change) and drop it; allow-list `com.google.android.apps.maps` nav
+notifications through as a new `nav` class. It carries the current maneuver +
+distance + the "12 min · 3.4 mi · 14:32 ETA" line — that's the watch's data,
+now on glass: a PERSISTENT top-line while blanked (nav is continuous, not a
+5 s flash — the Phase-2 flash machinery with no auto-dismiss while the nav
+notification lives; updates in place; clears when navigation ends). Awake =
+a normal title-flash class. No Tasker needed — the listener sees everything
+Tasker would. Single-maneuver lookahead is inherent to the source (own-routing
+REJECTED — see §D).
+
+## Phase 7 — Media controls window (Adam-specced)
+
+MediaSessionManager via the existing NLS grant (`getActiveSessions`) — works
+for any player. New additive wire: client `media_state` (track/artist/album/
+duration/position/playing + small album-art JPEG b64, the Phase-1 downscale
+path) pushed on change; server `media_cmd {play_pause|next|prev|shuffle}`.
+
+- **Menu order is the safety design** (Adam): `Play/Pause` TOP, `Skip` below,
+  `Prev`, `Random`, … — an accidental tap pauses, never skips mid-song.
+- Content: "a real media player" — track · artist · album, a position bar
+  (text-rendered `▕████░░▏ 2:31/4:05`, ticked ~5 s by server-side extrapolation
+  from PlaybackState, no per-second wire spam) + a **small album-art image
+  region** beside the text (≤4-image-region budget allows a text+image mixed
+  compose mode; art pushes once per track, ~1 s).
+- **Lyrics**: LRCLIB lookup (artist+title+duration; Q6) → cached forever in
+  Postgres → a lyrics PAGE; when the LRC is synced, the CURRENT line renders
+  large and advances with position — glasses karaoke for free. No lyrics found
+  = the page says so; never blocks the player.
+
+## Phase 8 — Mail becomes a full mail program
+
+Adam: reply/compose/forward + "image conversion and display automatically" —
+the standard controls were always the plan's missing half.
+
+- **Read side**: `read_maildir.py read` grows part extraction — inline/attached
+  images (cid + attachments) saved to a temp cache → page-≥2 IMAGE pages via
+  the proven pipeline (the Notices/MMS pattern). HTML-only mail keeps the text
+  fallback; REMOTE images stay unfetched (privacy + complexity — out).
+- **Write side**: a `send_mail.py` (msmtp or smtplib → smtp.migadu.com, reusing
+  the ONE set of migadu credentials mbsync already uses — one-time ~/.msmtprc,
+  NEVER committed) building proper RFC822 — Reply (quoted original +
+  In-Reply-To/References threading), Reply-all, Forward (original attached),
+  Compose (contact = dictated or picked from recent senders). All text via the
+  dictation confirm flow; the read view menu gains
+  `[Reply, Forward, Del, Mark unread, …]`.
+- **Del** moves to the Maildir `.Trash` (mbsync propagates) — confirm page,
+  **Cancel-first** (the r17 rule). Mark-unread = S-flag removal (mark_read's
+  inverse). Sent mail lands in the Maildir Sent folder for mbsync.
+- Verify: sandbox-Maildir round-trips in smoke (compose→file exists w/ correct
+  headers; reply threading; image-part extraction against a fixture mail).
+
+## Phase 9 — The voice-control layer (Adam, A6/A7: "control everything via voice when necessary")
+
+Two slices; the hands-free pipeline is shared. The mic budget is approved
+(all-day-wear DJI, rotating TXs). Ask is renamed **Dictate** (lands with Ph11's
+menu work) — dictation is the entry point for BOTH prompts and OS control.
+
+**9a — Reader voice-paging** (the proof slice): while Reader is open AND its
+per-session `Voice: on` toggle is set, the mic streams continuously; the
+server VAD-segments → warm Parakeet (the GPU idles all day anyway) → accepts
+ONLY a bare "next"/"back" utterance (anything with other words is ignored —
+factory chatter must not page); one page per utterance. Client: a new additive
+`mode: handsfree` on audio_start; leaving Reader / toggling off / WS drop
+stops the stream (the established mic-hygiene rules).
+
+**9b — "G2" wake-word OS control** (gloves-on, input-free operation): an
+explicit always-on toggle streams continuously EVERYWHERE; utterances are
+transcribed and parsed against a DETERMINISTIC grammar gated on the "G2"
+prefix (Adam's examples: "G2 Mail", "G2 SMS", "G2 read first E-Mail",
+"G2 read Becky's last text"):
+- **Navigation/read commands execute immediately** (harmless + reversible):
+  window switching by name/category, blank/wake, next/back/up, "read first
+  e-mail", "read <name>'s last text" (the SMS half needs Ph4b), timers/notes
+  (the existing confirmed-dictation intents, now voice-reachable).
+- **Content-SENDING commands voice-confirm**: anything that would send a
+  prompt/reply renders the normal confirm page and waits for "G2 confirm" /
+  "G2 cancel" (or a tap) — nothing reaches CC/SMS/mail unread, voiced.
+- Non-matching utterances are silently ignored (logged at debug volume —
+  the one sanctioned quiet path, else 8 h of factory audio = log spam);
+  a "G2"-prefixed utterance that matches NO grammar rule logs loudly.
+- [U] heavy: wake-word false-positive/miss rates need factory-audio tuning;
+  the grammar ships small and grows from his real usage.
+
+## Phase 10 — Stats threshold alerts (small; server-only)
+
+The 10 s sampler feeds rules: `(metric, threshold, SUSTAIN duration, re-arm)` —
+**sustained means sustained** (Adam: "not just a couple of minutes while
+generating an image"). Defaults to tune in config:
+- GPU temp > 87 °C for 10 min · CPU temp > 95 °C for 5 min (throttle land)
+- RAM > 95 % AND swap > 50 % for 10 min · any volume > 95 % for 30 min
+- Re-arm: no repeat within 2 h unless it dropped below and re-crossed.
+Fires priority `info` through the notification layer (flash class — and the
+Phase-2 blank flash if dark). Smoke: synthetic ring injection → alert fires
+once, sustain window respected, re-arm honored.
+
+## Phase 11 — Main becomes a category launcher (Adam 2026-06-12, XFCE-style)
+
+The window count is about to double (SMS, Media, Terminal, Search, Deliveries,
+Car) — the flat switcher menu won't scale. New Main:
+- **Menu = categories** (approved, A7): **`Dictate`** (renamed from Ask —
+  the voice entry point for prompts AND OS control, Ph9) stays TOP-LEVEL,
+  then `AI` (Aria, CC) · `Comms` (Mail, SMS, Notices) · `Media` (Media
+  player, Reader) · `Tools` (Files, Terminal, Search, Timers) · `Info`
+  (Calendr, Stats, Deliveries, Car) · `Games` · `Reload`. Tap a category →
+  the MENU swaps to that category's programs (Back/double-tap returns to
+  categories — the established level pattern).
+- **Content = MRU dashboard**: the two-column summaries show only the MOST
+  RECENTLY USED windows — as many as fit ONE page (~10–12 across two columns;
+  WM tracks switch timestamps). Selecting a category swaps the content to that
+  category's programs' summaries. Never paginates.
+- Window `category` becomes an OsWindow field; the dash/menu derive from it
+  (new windows self-place). Smoke: category nav round-trip, MRU ordering,
+  one-page guarantee.
+
+## Phase 12 — Universal Search (server-only)
+
+Dictate a query (the Ask confirm flow, scoped to a new Search window) → ONE
+results list across: mail (subjects + read-path bodies via read_maildir), file
+NAMES under the Files locations (bounded find, B4 subprocess), conversation
+history (Postgres `turns` ILIKE/tsvector), and the notes inbox. Rows tagged by
+source (`✉/📄/🗨/📝`); tap opens the thing in its OWN window (Mail read /
+Files actions / History read / note view). Paged, loud empties, per-source
+failures isolated (one slow source can't blank the rest — Promise.all with
+per-row catches, the dashboard-summary pattern).
+
+## Phase 13 — Deliveries (server-only; GMAIL-driven — A8)
+
+Carrier/bulk mail lands in Adam's GMAIL (migadu is the human-only box), so the
+source is the Gmail API via **aria's existing Google OAuth + a one-time
+`gmail.readonly` scope re-consent** (the calendar precedent, gate A3.1; done
+at home once when this phase lands). A 15-min sync queries carrier senders
+(`from:(usps.com OR ups.com OR fedex.com OR amazon.com) newer_than:30d` —
+list grows from real mail), parses tracking id/carrier/status/last-update
+into a `deliveries` table; unparsed carrier mail renders LOUDLY as
+`(unparsed — see log)` rows, never a silent miss. Surfaces: a dashboard line
+(`Deliveries: 2 in transit · 1 out today`), a small window (list → detail),
+an out-for-delivery flash. Fallback if OAuth scope is refused: an mbsync
+gmail channel w/ app password into a second Maildir (same parser).
+
+## Phase 14 — Audio memos (small; server + intent)
+
+`memo: <anything>` at the Ask confirm step (sibling of `note:`): saves BOTH
+the raw audio clip (the buffered PCM already in hand → wav on disk under
+~/g2cc-memos/) AND the Parakeet transcript (Postgres row + a line in the
+notes inbox pointing at the wav). Retention unlimited (the standing rule).
+A `Memos` page under the Notes/Search surfaces later if volume warrants.
+
+## Phase 15 — Phone finder (tiny; client + intent)
+
+`find my phone` intent (Ask confirm) → server sends `phone_locate` (additive)
+→ client maxes STREAM_ALARM volume + plays a loud tone ~30 s (FGS may start
+playback; restore volume after; cancel on any phone interaction). Loud diag
+both ends.
+
+## Phase 16 — OBD-II Car window (hardware-gated; the G2CC app IS the bridge — A9)
+
+Simpler than the Tasker/Aria relay Adam sketched: the phone app already talks
+to both the truck's airspace and the server. **Dongle: vGate iCar Pro
+Bluetooth 3.0** (classic SPP — a separate radio path from the glasses' BLE;
+AUTO-SLEEP so it lives in the OBD port without draining the truck battery;
+~$25). Flow: the app watches for the bonded dongle's ACL_CONNECTED (it wakes
+with the ignition) → opens a classic BluetoothSocket worker in
+ConnectionService → polls PIDs (coolant, RPM, speed, voltage, DTCs) → streams
+additive `obd_state` over the EXISTING WS. The server STORES history
+(`obd_samples` — trends/DTC log, unlimited per the retention rule) and renders
+a `Car` window (live gauges page + DTC list w/ plain-English lookups) + a
+dashboard line while connected. Works with the glasses OFF too — phone→server
+logging continues, so drives are recorded regardless. [U] real-truck
+verification; final PID list tuned on the actual vehicle.
+
+## Phase 17 — Files trash can (small; server-only)
+
+`Del` moves to `~/.g2cc-trash/<timestamp>-<name>` instead of unlink (same-FS
+rename; EXDEV falls back to copy+remove — the r16 transfer machinery).
+Purge entries older than 30 days (confirmed, A10) on a daily sweep, LOUDLY
+logged. The
+confirm page stays Cancel-first; the result page says "moved to trash
+(restorable for 30 days)". A `Trash` location appears in Files locations —
+restore = the existing Move flow.
+
+## Phase 18 — Chess: tiles redraw ONLY when the board changes (Adam 2026-06-13)
+
+Adam: *"the image tiles for the chessboard should ONLY redraw when changed,
+not every single time I do anything, and only the changed tile should redraw,
+not all 4 every time."*
+
+**Root cause (verified in the wire stack, not guessed):** the board is 4 image
+tiles in the content pane; the menu is a native LIST in the left slot. The
+chess Moves flow (the 2026-06-12 design) keeps the board in the content pane
+while the MENU swaps piece-groups → SAN moves → Confirm. But on the client,
+`Scene.diff` flags ANY list-items change as `layoutChanged` (there is **no
+list-content-update opcode** — `DisplayProto` has only f1=0 launch / f1=3
+image / f1=5 text / f1=7 layout / f1=12 keepalive; list items ride the layout
+frame), and the f1=7 layout rebuild re-declares every region and re-pushes
+**all** image content (`setScene`→`imageContentOps(allImageRegions)` — a
+re-declared image container is emptied on the firmware, so unchanged tiles
+MUST be re-pushed or they blank). Net: every selection tap re-pushes the SAME
+board (~4 tiles × ~1 s = the multi-second lag), 3-4× per move.
+
+**The firmware constraint is load-bearing and UNVERIFIABLE here:** whether an
+f1=7 preserves an unchanged image container's pixels is untested on the glass,
+and an all-black tile CRASHES the glasses — so the fix must NOT gamble on
+"skip re-pushing unchanged tiles after a rebuild." It works WITH the diff
+instead: only let tiles ride the wire when the *position* is genuinely new,
+and keep the menu stable while a board is on screen so the per-tile content
+diff (already implemented, client-side) can do its job.
+
+**Fix (server-only; `os-windows.ts` GamesWindow + a smoke):**
+- **Selection leaves the board.** `chess-pieces` and `chess-moves` become
+  **content browse lists** (piece groups; then that group's SANs) with a
+  stable `[Back, Reload, Main]` menu — NO board tiles. Selection taps are now
+  instant (a browse-list is cheap text, no image push). The board is shown on:
+  `chess` (the live position) and `chess-confirm` (the move PREVIEW) — the two
+  places the board is the actual subject and the position is new.
+- **Board-bearing menus stay constant.** On the `chess` level the cycling
+  `Skill: N` item becomes a constant `Skill` (value shown in the title/info),
+  so cycling skill / other secondary actions don't change the list → no f1=7
+  → no board re-push. `New game`/`Moves` were already constant.
+- **No identical re-renders.** The window already tracks `boardFen` and the
+  `renderBoard` promise-cache dedups; assert no new tile push happens when the
+  FEN is unchanged. The per-tile diff then gives "only the changed tile" for
+  free on any board update that lands on an unchanged layout.
+- **Documented residue:** a genuinely-new board shown right after a layout
+  change (browse→preview, confirm→result) still pushes all 4 tiles — that f1=7
+  wipe is the firmware constraint above. The fix kills the REDUNDANT
+  same-position re-pushes (the complaint) and caps new-position pushes at ≤2
+  per move (preview + result) instead of 3-4. NOTE: this trades away the
+  2026-06-12 "board stays visible during selection" choice for responsiveness
+  — a 1-line revert restores tiles on those levels if Adam prefers the lag.
+- Verify: phase11-games smoke asserts chess-pieces/chess-moves render `browse`
+  (not `tiles`), the chess-level menu has a constant `Skill`, and re-entering a
+  level with the same FEN yields byte-identical board tiles (cache hit).
+
+## Phase 19 — Files becomes a real file manager, properly (Adam 2026-06-13)
+
+Adam: the file manager *"won't list the contents of a directory with too many
+files or files with really long names … an error about it being 970 bytes or
+something,"* plus *"add more file-manager-esque usages like copying
+directories and such … a well-considered pass … make it a lot better."*
+
+**Root cause of the "970 bytes" failure (verified):** `composeScene` runs
+`estimateLayoutFrameBytes()` and THROWS over `LAYOUT_FRAME_BUDGET_BYTES` (960)
+to stay under the multi-packet wall. Files paginates with a FIXED
+`BROWSE_PAGE = 14` rows; a deep cwd (long title, middle-clamped but still
+~110 B) + 14 long filenames (each clamped to 40 B = 43 B encoded) + the `..`
+row + chrome ≈ 970 B → the throw lands in `errorView` and the directory NEVER
+displays. The page size must be **byte-aware**, not a fixed count.
+
+**Fix A — byte-aware browse pagination (the bug; `os-windows.ts`):**
+- `browsePageItems(all, offset, reserveBytes?)` packs as many rows as fit a
+  conservative per-page byte budget (Σ 3 + UTF-8 bytes per row) AND ≤ a row cap
+  that leaves headroom under the 20-item SDK list cap for the prev/more rows.
+  Long names → fewer rows/page; short names → more (strictly better than 14).
+  It returns `{ items, map, prevOffset, nextOffset }` (variable pages mean
+  prev/more can't be `±BROWSE_PAGE` anymore — they jump to the real adjacent
+  page boundary, computed deterministically from 0 so view() and the tap
+  handler always agree). `reserveBytes` lets a caller that prepends rows (Files
+  prepends `..`) reserve their budget.
+- Update every `browsePageItems` tap site to set its offset from
+  `prevOffset`/`nextOffset` instead of `± BROWSE_PAGE`. The DB-paged windows
+  (Mail/Notices/History) keep their fixed-LIMIT fetch but render through the
+  same byte-aware trim so a full page of long subjects can't wall either.
+- The compose-side throw STAYS as the loud backstop (now effectively
+  unreachable for browse) — defense in depth, never a silent blank.
+
+**Fix B — directories are first-class (Adam's "copying directories and such"):**
+- `Move`/`Copy`/`Del`/`Stats`/`Rename` now work on DIRECTORIES, not just files.
+  Tapping a dir still DESCENDS (fast nav, the 2026-06-12 rule); to ACT on a
+  directory you enter it and use the tree-level menu, which operates on the
+  CURRENT dir: `[Up, New, Copy, Move, Del, Rename, Stats, Reload, Main]`. "Copy
+  folder A into B" = enter A → Copy → pick B → Copy here. Files get the existing
+  tap→actions menu (now with Rename).
+- `doTransfer` handles dirs: copy = `fs.cp(src,dst,{recursive,errorOnExist})`;
+  move = `rename` then EXDEV-fallback to recursive `cp`+`rm` (the r16 transfer
+  machinery, extended). Delete handles dirs via `fs.rm(path,{recursive})` —
+  the confirmDel page (Cancel-first) gains a "recursively, N items" warning for
+  dirs. All ops stay `opBusy`-serialized, loud on every outcome, no overwrites.
+- **New folder** and **Rename** take a name via the dictation confirm flow
+  (Files gains `onStt`/`onSttError`, mirroring SessionLevel): `New` → dictate →
+  confirm → `mkdir`; `Rename` → dictate → confirm → `rename` within the same
+  dir (name only; no path moves — that's Move). Robot text gets the Parakeet
+  confirm so a misheard name never lands silently.
+- Phase 17's trash integrates here (Del → `~/.g2cc-trash`, restorable) — built
+  together; a `Trash` location + restore-via-Move.
+- Verify: phase1-files smoke gets a deep dir of long-named files (no throw,
+  pages navigate), a recursive dir copy + move (EXDEV path with a temp other-FS
+  shim), a recursive delete, a mkdir, and a rename round-trip on a sandbox tree.
+
+## §D — Carried over / deliberately OUT (unchanged gates)
+
+- **Lichess** (v1 Phase 11 deferral, gate A3.2): waits for Adam's `board:play`
+  token after the on-glass batch tests clean; spec block lives in the v1 doc
+  (`60e6578:upgrades.md` §Phase 11).
+- **v1 Phase 12 stretch** (streaming STT; the layer-3 `display` MCP tool — needs a
+  design doc first): still gated on Adam's explicit go-ahead.
+- **v1 Section D**: calls (root-vs-SIP decision pending), hat-gated items
+  (HAT_BRIDGE_SPEC.md), swarm-gated dispatch, Mermaid/```image fences.
+- **MMS sending** (new): out until 4b proves the read path.
+- **REJECTED 2026-06-12 (Adam)**: own-routing GPS navigation ("implementing our
+  own entire parallel GPS tracker is a little much" — the Ph6 notification
+  mirror is the feature); RSVP speed-reading (split attention, gloves);
+  CC recipes (CC already does it); n8n intents (unused leftover); morning
+  briefing (aria covers it); notification profiles (manual tweaking preferred).
+
+## Order + verification contract
+
+Suggested order: **18 → 19 (+17) → 2 → 10 → 3 → 14 → 11 → 12 → 8 → 5 → 13 → 1
+→ 6 → 7 → 4a → 15 → 4b → 9 → 16** (Adam's two 2026-06-13 explicit asks FIRST —
+the chess redraw fix and the Files overhaul, with the Files trash P17 folded
+into P19 since they share the same code; then the server-only batch that can
+be fully smoke-verified here; then the client batch that needs an APK rebuild +
+Adam's on-glass check; OBD last — hardware-gated). Every phase: build → smoke
+(extend the suite — the isolated `g2cc_smoke` DB + temp-notes rules from
+`_env.mjs` apply) → restart → CHANGELOG WHY-entry → HANDOFF refresh → Adam's
+on-glass check for anything [U].
+
+// Note:  Wake-word should be "butterscotch" as that is ideal for the STT.

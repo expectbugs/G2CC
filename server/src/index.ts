@@ -27,6 +27,7 @@ import { warmStore } from './store.js'
 import { armTimersFromDb } from './timers.js'
 import { startCalendarSync } from './calendar.js'
 import { startStatsSampler } from './stats.js'
+import { startTrashPurge } from './trash.js'
 
 const VERSION = '0.0.1'
 
@@ -179,6 +180,8 @@ try {
   startCalendarSync()
   // System-stats sampler (Adam 2026-06-12) — feeds Main → Stats charts.
   startStatsSampler()
+  // Files trash daily purge (Phase 17) — drops entries older than 30 days.
+  startTrashPurge((m) => console.log(m))
 } catch (err) {
   console.error('[g2cc-server] Failed to start:', err)
   process.exit(1)

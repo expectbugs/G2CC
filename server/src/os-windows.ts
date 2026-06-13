@@ -16,8 +16,8 @@
 
 import { execFile } from 'node:child_process'
 import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync, existsSync, constants as fsConstants } from 'node:fs'
-import { rename, copyFile, unlink } from 'node:fs/promises'
-import { join, basename } from 'node:path'
+import { rename, copyFile, unlink, mkdir, rm, cp } from 'node:fs/promises'
+import { join, basename, dirname, resolve as resolvePath } from 'node:path'
 import { DE_CONTENT_W, DE_CONTENT_H, SCREEN_WIDTH } from '@g2cc/shared'
 import type { WireScene } from '@g2cc/shared'
 import type { G2CCConfig } from './config.js'
@@ -27,7 +27,7 @@ import {
   type Block, type RenderedImage,
 } from './os-content.js'
 import {
-  composeScene, paginateText, errorView, blankScene, fwTextWidth,
+  composeScene, paginateText, errorView, blankScene, blankFlashScene, fwTextWidth,
   DEFAULT_BROWSE_MENU, type WinView,
 } from './os-compose.js'
 import type { SessionPool, PoolEntry } from './session-pool.js'
@@ -45,15 +45,17 @@ import { parseIntent, appendNote } from './intents.js'
 import { savePosition, getPosition, listChapters, readChapter, type EpubChapter } from './reader.js'
 import { listUpcoming, getEvent } from './calendar.js'
 import { rpgRun, chessMove, chessPreview, renderBoard, DUNGEON_ROOT, type ChessState } from './games.js'
+import { moveToTrash, TRASH_DIR } from './trash.js'
 import { overviewText, chartSpecs, readStorage, readTopProcs, storageText } from './stats.js'
 import { hostname } from 'node:os'
 
-/** How long a notification popup holds a BLANKED screen before auto-returning
- *  to blank (Adam 2026-06-11: "pop up on a blanked screen for 10s, then
- *  disappear into the Notification History"). A sanctioned display-pacing
- *  cadence, NOT an I/O timeout — and scoped to the blanked case only; awake
- *  overlays persist until acted on. Mutable ONLY for the smoke suite. */
-export let BLANK_POPUP_MS = 10_000
+/** How long a notification FLASH holds a BLANKED screen before auto-returning
+ *  to blank. 10 s → 5 s (Adam 2026-06-12, Phase 2: "i use blank mode when
+ *  driving … i don't need the whole-ass UI suddenly hitting me in the face") —
+ *  and the blanked surface is now a one-line text flash, not the full overlay.
+ *  A sanctioned display-pacing cadence, NOT an I/O timeout; scoped to the
+ *  blanked case only (awake overlays persist until acted on). Smoke-mutable. */
+export let BLANK_POPUP_MS = 5_000
 export function setBlankPopupMsForSmoke(ms: number): void { BLANK_POPUP_MS = ms }
 
 const PY = '/home/user/G2CC/audio/venv/bin/python'
@@ -78,17 +80,27 @@ function cycleNext<T>(list: readonly T[], current: T): T {
   return list[i === -1 ? 0 : (i + 1) % list.length]
 }
 
-/** Rows per browse page. TWO budgets bound this:
- *  - the 20-item SDK cap (§6.1): Reload + prev + 14 + more = 17 ≤ 20 ✓
- *  - the single-message MULTI-PACKET WALL: a rebuild frame over ~4-5 AA packets
- *    (~1000 B) is SILENTLY IGNORED by the firmware (hardware 2026-06-10: Mail's
- *    7-packet rebuild never acked; same wall that hung the 83-entry directory
- *    list in the g2code era). 14 rows × ≤40 B (compose clamps browse rows to 40
- *    UTF-8 bytes) + nav rows + chrome ≈ ~880 B — comfortably under the client's
- *    1000 B hard cap (which loud-rejects anything that still slips through). */
+/** DB-fetch page size for the STORE-backed browse windows (History/Mail/Notices):
+ *  their LIMIT/OFFSET fetch count. Those windows have short titles + a tiny
+ *  [Reload, Main] menu, so 14 compose-clamped rows (≤43 B each) + chrome stays
+ *  under the multi-packet wall. The IN-MEMORY-list windows (Files/Reader/rpg/
+ *  picker/prompts/timers/calendar) do NOT use this — they paginate byte-aware
+ *  via browsePageItems below (review 2026-06-13). */
 const BROWSE_PAGE = 14
 const MORE_ROW = '— more —'
 const PREV_ROW = '— prev —'
+/** Byte-aware browse-page budget (review 2026-06-13 — the Files "≈970 B" wall:
+ *  a FIXED 14-row page + a deep cwd title (~110 B middle-clamped) + long
+ *  filenames tripped compose's 960 B frame guard, so the directory NEVER
+ *  displayed — it threw into errorView). compose clamps every browse row to
+ *  BROWSE_ROW_MAX_BYTES (40) before estimating, so a row costs ≤ 43 B on the
+ *  wire; the wall is therefore a function of ROW COUNT × 43 + chrome. This
+ *  packs as many rows as fit a conservative content budget that leaves headroom
+ *  for the worst chrome (deep title + tree menu + status + the prev/more nav
+ *  rows + a prepended `..`), capped so the list stays ≤ the 20-item SDK cap.
+ *  Long names → fewer rows; short names → more (strictly better than fixed 14). */
+const BROWSE_CONTENT_BUDGET_BYTES = 420
+const BROWSE_ROW_CAP = 17
 /** Files window head-preview bound (event-loop-blocking read guard). */
 const FILE_PREVIEW_BYTES = 256 * 1024
 
@@ -156,15 +168,51 @@ export interface OsWindow {
 
 // ============================================================ helpers
 
-function browsePageItems(all: string[], offset: number): { items: string[]; map: number[] } {
-  // map[i] = index into `all` for row i; -1 = PREV, -2 = MORE
-  const slice = all.slice(offset, offset + BROWSE_PAGE)
+/** A browse row's worst-case wire cost: compose clamps it to ≤40 B then the
+ *  estimator adds 3 B framing. */
+function browseRowBytes(s: string): number { return 3 + Math.min(Buffer.byteLength(s, 'utf8'), 40) }
+
+/** Page-START indices for `all` under a byte + row-count budget, computed from 0
+ *  so view() and the tap handler agree given the same `all`. Always ≥1 row per
+ *  page (a single over-budget row still shows — compose clamps it). */
+function browseBoundaries(all: string[], budget: number, rowCap: number): number[] {
+  const bounds = [0]
+  let i = 0
+  while (i < all.length) {
+    let bytes = 0
+    let count = 0
+    while (i < all.length && count < rowCap && (count === 0 || bytes + browseRowBytes(all[i]) <= budget)) {
+      bytes += browseRowBytes(all[i]); i++; count++
+    }
+    if (i >= all.length) break
+    bounds.push(i)
+  }
+  return bounds
+}
+
+/** Byte-aware browse pagination. `offset` is an item index, snapped down to a
+ *  page boundary. `reserveBytes`/`reserveRows` account for rows the CALLER
+ *  prepends after this (Files prepends `..`) so the list stays ≤ the 20-item
+ *  cap and under the wall. Returns the visible items, their `map` (-1 = PREV,
+ *  -2 = MORE, else the index into `all`), and the prev/next page-start offsets
+ *  — variable page sizes mean callers must JUMP to these, not ±BROWSE_PAGE. */
+function browsePageItems(
+  all: string[], offset: number, reserveBytes = 0, reserveRows = 0,
+): { items: string[]; map: number[]; prevOffset: number; nextOffset: number } {
+  const rowCap = Math.max(1, BROWSE_ROW_CAP - reserveRows)
+  // Leave room for the caller's prefix rows AND the (≤2) prev/more nav rows.
+  const budget = Math.max(120, BROWSE_CONTENT_BUDGET_BYTES - reserveBytes - 2 * browseRowBytes(MORE_ROW))
+  const bounds = browseBoundaries(all, budget, rowCap)
+  let pi = 0
+  for (let k = 0; k < bounds.length; k++) { if (bounds[k] <= offset) pi = k; else break }
+  const start = bounds[pi]
+  const end = pi + 1 < bounds.length ? bounds[pi + 1] : all.length
   const items: string[] = []
   const map: number[] = []
-  if (offset > 0) { items.push(PREV_ROW); map.push(-1) }
-  slice.forEach((s, i) => { items.push(s); map.push(offset + i) })
-  if (offset + BROWSE_PAGE < all.length) { items.push(MORE_ROW); map.push(-2) }
-  return { items, map }
+  if (pi > 0) { items.push(PREV_ROW); map.push(-1) }
+  for (let i = start; i < end; i++) { items.push(all[i]); map.push(i) }
+  if (pi + 1 < bounds.length) { items.push(MORE_ROW); map.push(-2) }
+  return { items, map, prevOffset: bounds[Math.max(0, pi - 1)], nextOffset: end }
 }
 
 function permissionSummary(rawEvent: Record<string, unknown>): Block[] {
@@ -1355,11 +1403,11 @@ class CcWindow implements OsWindow {
     }
     if (this.level === 'prompts') {
       const prompts = this.ctx.config.claude.quickPrompts ?? []
-      const { map } = browsePageItems(prompts, this.promptsOffset)
+      const { map, prevOffset, nextOffset } = browsePageItems(prompts, this.promptsOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[os] cc prompts: index ${index} out of range`); return }
-      if (m === -1) { this.promptsOffset = Math.max(0, this.promptsOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.promptsOffset += BROWSE_PAGE; this.requestRender(); return }
+      if (m === -1) { this.promptsOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.promptsOffset = nextOffset; this.requestRender(); return }
       const p = prompts[m]
       const c = this.current
       if (!p || !c) { this.ctx.log(`[os] cc prompts: ${!p ? 'no prompt' : 'no session'} at ${m} — ignored (LOUD)`); return }
@@ -1370,11 +1418,11 @@ class CcWindow implements OsWindow {
       return
     }
     if (this.level === 'picker') {
-      const { map } = browsePageItems(this.dirs.map((d) => d.name), this.pickerOffset)
+      const { map, prevOffset, nextOffset } = browsePageItems(this.dirs.map((d) => d.name), this.pickerOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[os] cc picker: index ${index} out of range`); return }
-      if (m === -1) { this.pickerOffset = Math.max(0, this.pickerOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.pickerOffset += BROWSE_PAGE; this.requestRender(); return }
+      if (m === -1) { this.pickerOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.pickerOffset = nextOffset; this.requestRender(); return }
       const dir = this.dirs[m]
       let level = this.sessions.get(dir.path)
       if (!level) {
@@ -1624,11 +1672,11 @@ class AriaWindow implements OsWindow {
     }
     if (this.level === 'prompts') {
       const prompts = this.cfg.claude.quickPrompts ?? []
-      const { map } = browsePageItems(prompts, this.promptsOffset)
+      const { map, prevOffset, nextOffset } = browsePageItems(prompts, this.promptsOffset)
       const m = map[index]
       if (m === undefined) { this.log(`[os] aria prompts: index ${index} out of range`); return }
-      if (m === -1) { this.promptsOffset = Math.max(0, this.promptsOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.promptsOffset += BROWSE_PAGE; this.requestRender(); return }
+      if (m === -1) { this.promptsOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.promptsOffset = nextOffset; this.requestRender(); return }
       const p = prompts[m]
       if (!p) { this.log(`[os] aria prompts: no prompt at ${m} — ignored (LOUD)`); return }
       this.level = 'session'
@@ -1872,10 +1920,14 @@ class FilesWindow implements OsWindow {
   /** The REAL-file-manager rework (Adam 2026-06-12): `..` is ALWAYS row 0 at
    *  the tree level (at a location root it pops to locations — "trapped in DL
    *  forever" is dead), the tree menu carries Up/Stats, tapping a FILE opens
-   *  an ACTION level (Open/Move/Copy/Del/Stats) instead of auto-opening, and
-   *  Move/Copy run a destination picker where tapping a folder asks
-   *  Open vs "<verb> here". Dirs still descend on tap (fast navigation). */
-  private level: 'locations' | 'tree' | 'read' | 'image' | 'actions' | 'confirmDel' | 'stats' | 'pickDest' | 'pickAction' | 'opResult' = 'locations'
+   *  an ACTION level (Open/Move/Copy/Rename/Del/Stats) instead of auto-opening,
+   *  and Move/Copy run a destination picker where tapping a folder asks
+   *  Open vs "<verb> here". Dirs still descend on tap (fast navigation).
+   *  2026-06-13 (Adam): directories are first-class — when descended BELOW a
+   *  location root, the tree menu's New/Copy/Move/Rename/Del act on the CURRENT
+   *  dir (recursive cp/rm); Rename + New folder take a name via dictation (the
+   *  'name' level mirrors SessionLevel's confirm flow). */
+  private level: 'locations' | 'tree' | 'read' | 'image' | 'actions' | 'confirmDel' | 'stats' | 'pickDest' | 'pickAction' | 'opResult' | 'name' = 'locations'
   private locs: { label: string; path: string }[] = []
   private locOffset = 0
   private stack: string[] = []
@@ -1892,12 +1944,16 @@ class FilesWindow implements OsWindow {
    *  this the tree's rendered menu was dead UI (review 2026-06-11). */
   private focus: 'content' | 'menu' = 'content'
   // ---- file-manager state (Adam 2026-06-12) ----
-  /** The file the actions level is operating on (files only in v1 — dirs
-   *  descend on tap; the CURRENT dir's properties live in the tree menu's
-   *  Stats). */
+  /** What the actions/op flow is operating on — a tapped FILE (a child of cwd),
+   *  or the CURRENT DIR itself (2026-06-13: dir ops live in the tree menu). */
   private actionPath: string | null = null
   private actionName = ''
   private actionSize = 0
+  /** The target is a directory (recursive cp/rm; "(directory)" not a byte size). */
+  private actionIsDir = false
+  /** The target IS the current dir (vs a child file/dir) — a move/del then pops
+   *  the stack to the parent, a rename rewrites the stack top. */
+  private actionIsCwd = false
   private actionVerb: 'move' | 'copy' | null = null
   /** Destination picker: empty destStack = picking a location first. */
   private destStack: string[] = []
@@ -1909,6 +1965,15 @@ class FilesWindow implements OsWindow {
   private statsFrom: 'actions' | 'tree' = 'tree'
   /** One filesystem operation at a time — taps during one are loud no-ops. */
   private opBusy = false
+  // ---- name-entry dictation (Adam 2026-06-13: Rename + New folder) ----
+  /** What the confirmed dictated name does, and where Back/Cancel returns. */
+  private nameVerb: 'rename' | 'mkdir' | null = null
+  private nameFrom: 'actions' | 'tree' = 'tree'
+  /** Dictation state machine, mirroring SessionLevel (the confirm step is
+   *  sacred — a misheard name never lands without Adam reading it). */
+  private listening = false
+  private transcribing = false
+  private pendingName: string | null = null
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -1929,6 +1994,9 @@ class FilesWindow implements OsWindow {
       { label: 'DL', path: '/home/user/Downloads' },
       { label: 'G2CC', path: '/home/user/G2CC' },
     ]
+    // The Trash location appears only once something has been trashed (Phase
+    // 17) — restore = navigate in + Move out.
+    if (existsSync(TRASH_DIR)) out.push({ label: 'Trash', path: TRASH_DIR })
     try {
       // /proc/mounts: "<dev> <mountpoint> <fstype> …" — mountpoints octal-escape
       // spaces etc. (\040). Keep real mounts under /mnt/ or /run/media/user/.
@@ -1992,11 +2060,34 @@ class FilesWindow implements OsWindow {
       return {
         mode: 'text',
         title: `Files · ${this.actionName}`,
-        menu: ['Open', 'Move', 'Copy', 'Del', 'Stats', 'Back', 'Reload', 'Main'],
+        menu: ['Open', 'Move', 'Copy', 'Rename', 'Del', 'Stats', 'Back', 'Reload', 'Main'],
         text: `${this.actionName}\n${fmtBytes(this.actionSize)}\n\nin ${this.cwd()}`,
       }
     }
+    if (this.level === 'name') {
+      // Dictation/confirm for Rename + New folder (mirrors SessionLevel).
+      const what = this.nameVerb === 'rename' ? `Rename ${this.actionName}` : 'New folder'
+      if (this.listening) {
+        return { mode: 'text', title: `Files · ${what}`, menu: ['Done', 'Cancel', 'Reload', 'Main'],
+          text: `🎤 listening… say the ${this.nameVerb === 'rename' ? 'new name' : 'folder name'}, then Done.` }
+      }
+      if (this.transcribing) {
+        return { mode: 'text', title: `Files · ${what}`, menu: ['Cancel', 'Reload', 'Main'], text: '⏳ transcribing…' }
+      }
+      if (this.pendingName !== null) {
+        const action = this.nameVerb === 'rename'
+          ? `rename to:\n  ${this.pendingName}`
+          : `create folder:\n  ${this.pendingName}\nin ${this.cwd()}`
+        return { mode: 'text', title: `Files · ${what} — confirm?`, menu: ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main'],
+          text: `Heard "${this.pendingName}".\nConfirm to ${action}` }
+      }
+      // Shouldn't render (entering 'name' starts listening) — recover loudly.
+      this.ctx.log('[os] files: name level with no dictation state — back to tree')
+      this.level = 'tree'
+      return this.view()
+    }
     if (this.level === 'confirmDel') {
+      const kind = this.actionIsDir ? 'directory (recursive)' : fmtBytes(this.actionSize)
       return {
         mode: 'text',
         title: `Files · delete?`,
@@ -2004,7 +2095,7 @@ class FilesWindow implements OsWindow {
         // same spot lands on Cancel, never on the destructive option — the
         // Approve/Deny-at-index-2/3 permission-menu rationale.
         menu: ['Cancel', 'DELETE', 'Reload', 'Main'],
-        text: `DELETE ${this.actionName}?\n(${fmtBytes(this.actionSize)})\n\nThis cannot be undone.`,
+        text: `Delete ${this.actionName}?\n(${kind})\n\nMoves to Trash — restorable for 30 days.`,
       }
     }
     if (this.level === 'stats') {
@@ -2055,7 +2146,7 @@ class FilesWindow implements OsWindow {
         return errorView('Files · error', (e as Error).message)
       }
       this.destEntries = dirs
-      const paged = browsePageItems(dirs.map((d) => d + '/'), this.destOffset)
+      const paged = browsePageItems(dirs.map((d) => d + '/'), this.destOffset, browseRowBytes('..'), 1)
       return {
         mode: 'browse',
         menuMode: this.focus === 'menu' ? 'capture' : 'passive',
@@ -2085,22 +2176,37 @@ class FilesWindow implements OsWindow {
     }
     this.entries = listed
     const labels = this.entries.map((e) => (e.isDir ? e.name + '/' : e.name))
-    const paged = browsePageItems(labels, this.offset)
+    const paged = browsePageItems(labels, this.offset, browseRowBytes('..'), 1)
     return {
       mode: 'browse',
       menuMode: this.focus === 'menu' ? 'capture' : 'passive',
       title: `Files · ${this.cwd()}`,
-      // Up + Stats (Adam 2026-06-12): an explicit up-a-level in the menu and
-      // the CURRENT DIR's properties (entry counts + du total).
-      menu: ['Up', 'Stats', 'Reload', 'Main'],
+      menu: this.treeMenu(),
       // `..` is ALWAYS row 0 — at a location root it pops to locations
       // (the old gate on stack depth left no visible way out of e.g. DL).
       items: ['..', ...paged.items],
     }
   }
 
+  /** Tree-level menu (Adam 2026-06-13). `New` (mkdir here) + `Stats` are always
+   *  offered; the CURRENT-DIR ops (Copy/Move/Rename/Del — recursive) appear only
+   *  when descended BELOW a location root (stack.length > 1), so a location root
+   *  like /home/user can never be moved/deleted out from under itself. */
+  private treeMenu(): string[] {
+    return this.stack.length > 1
+      ? ['Up', 'New', 'Copy', 'Move', 'Rename', 'Del', 'Stats', 'Reload', 'Main']
+      : ['Up', 'New', 'Stats', 'Reload', 'Main']
+  }
+
   async onReload(): Promise<void> {
     this.focus = 'content'   // a menu action hands focus back to the rows
+    // Reload is the unstick: a wedged name-entry dictation drops the mic and
+    // returns to the tree (the documented Reload contract — clear transients).
+    if (this.level === 'name') {
+      this.stopNameEntry('reload')
+      this.actionIsCwd = false; this.actionIsDir = false
+      this.level = 'tree'
+    }
     // view() re-lists the current level fresh on the recompose — Reload
     // REFRESHES IN PLACE at every level (it never resets to locations; a
     // fresh WS connection is what resets window state).
@@ -2128,6 +2234,8 @@ class FilesWindow implements OsWindow {
       this.actionPath = path
       this.actionName = name
       this.actionSize = st.size
+      this.actionIsDir = false   // the actions level is files-only; dirs act via the tree menu
+      this.actionIsCwd = false
       this.level = 'actions'
       this.requestRender()
     } catch (e) {
@@ -2217,6 +2325,138 @@ class FilesWindow implements OsWindow {
     }
   }
 
+  // ---- directory actions (Adam 2026-06-13) — operate on the CURRENT dir ----
+
+  /** A tree-menu op on the current directory (Copy/Move/Del). Targets cwd
+   *  itself; only valid when descended below a location root. */
+  private beginDirAction(verb: 'move' | 'copy' | 'del'): void {
+    if (this.stack.length <= 1) { this.ctx.log(`[os] files: ${verb} at a location root — refused (LOUD)`); return }
+    this.navSeq++
+    this.actionPath = this.cwd()
+    this.actionName = basename(this.cwd())
+    this.actionSize = 0
+    this.actionIsDir = true
+    this.actionIsCwd = true
+    if (verb === 'del') { this.level = 'confirmDel'; this.requestRender(); return }
+    this.actionVerb = verb
+    this.destStack = []
+    this.destOffset = 0
+    this.focus = 'content'
+    this.level = 'pickDest'
+    this.requestRender()
+  }
+
+  /** Start name-entry dictation for Rename (target = actionPath) or New folder
+   *  (mkdir in cwd). Mirrors SessionLevel: listening → Done → transcribing →
+   *  pendingName → Confirm. */
+  private startNameEntry(verb: 'rename' | 'mkdir', from: 'actions' | 'tree', target?: { path: string; name: string }): void {
+    this.navSeq++
+    this.nameVerb = verb
+    this.nameFrom = from
+    if (verb === 'rename') {
+      if (target) { this.actionPath = target.path; this.actionName = target.name }
+      // else the actions-level target (a file) is already set in actionPath/Name.
+      if (!this.actionPath) { this.ctx.log('[os] files: rename with no target — ignored (LOUD)'); return }
+    }
+    this.pendingName = null
+    this.transcribing = false
+    this.listening = true
+    this.level = 'name'
+    this.ctx.audio('start')
+    this.requestRender()
+  }
+
+  /** Clear the name-entry dictation (Cancel / Back / deactivate); stops the mic
+   *  if it's live (loud via the WS). */
+  private stopNameEntry(why: string): void {
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    if (this.listening || this.transcribing || this.pendingName !== null) {
+      this.ctx.log(`[os] files: name-entry cleared (${why})`)
+    }
+    this.listening = false
+    this.transcribing = false
+    this.pendingName = null
+    this.nameVerb = null
+  }
+
+  /** Validate a dictated file/dir name: trimmed, single path component, no
+   *  separators or dot-only names. Returns the clean name or an error string. */
+  private cleanName(raw: string): { name: string } | { error: string } {
+    // Trim + collapse internal whitespace; KEEP spaces (valid) + the rest verbatim.
+    const name = raw.trim().replace(/\s+/g, " ")
+    if (!name) return { error: 'empty name' }
+    if (name === '.' || name === '..') return { error: `"${name}" is not a valid name` }
+    if (name.includes('/')) return { error: 'name cannot contain "/" (use Move to change folders)' }
+    return { name }
+  }
+
+  private async doRename(): Promise<void> {
+    const src = this.actionPath
+    const raw = this.pendingName
+    if (!src || raw === null || this.opBusy) { this.ctx.log('[os] files: rename with no target/name / op in flight — ignored (LOUD)'); return }
+    const clean = this.cleanName(raw)
+    if ('error' in clean) {
+      this.ctx.log(`[os] files: rename rejected: ${clean.error}`)
+      this.pages = [`RENAME rejected:\n${clean.error}`]
+      this.page = 0; this.level = 'opResult'; this.requestRender(); return
+    }
+    this.opBusy = true
+    const dst = join(dirname(src), clean.name)
+    try {
+      if (dst === src) throw new Error('the name is unchanged')
+      if (existsSync(dst)) throw new Error(`${clean.name} already exists in this folder`)
+      await rename(src, dst)
+      this.ctx.log(`[os] files: RENAMED ${src} → ${dst}`)
+      this.pages = [`Renamed to\n${clean.name}`]
+      // If we renamed the dir we're standing in, follow it (rewrite the stack top).
+      if (this.actionIsCwd && this.stack.length > 0) this.stack[this.stack.length - 1] = dst
+      this.actionPath = this.actionIsCwd ? this.cwd() : null
+    } catch (e) {
+      this.ctx.log(`[os] files: rename ${src} → ${dst} FAILED: ${(e as Error).message}`)
+      this.pages = [`RENAME FAILED:\n${(e as Error).message}`]
+    } finally {
+      this.opBusy = false
+    }
+    this.pendingName = null
+    this.nameVerb = null
+    this.actionIsCwd = false
+    this.actionIsDir = false
+    this.page = 0
+    this.level = 'opResult'
+    this.requestRender()
+  }
+
+  private async doMkdir(): Promise<void> {
+    const raw = this.pendingName
+    if (raw === null || this.opBusy) { this.ctx.log('[os] files: mkdir with no name / op in flight — ignored (LOUD)'); return }
+    const clean = this.cleanName(raw)
+    if ('error' in clean) {
+      this.ctx.log(`[os] files: mkdir rejected: ${clean.error}`)
+      this.pages = [`NEW FOLDER rejected:\n${clean.error}`]
+      this.page = 0; this.level = 'opResult'; this.requestRender(); return
+    }
+    this.opBusy = true
+    const dst = join(this.cwd(), clean.name)
+    try {
+      if (existsSync(dst)) throw new Error(`${clean.name} already exists here`)
+      await mkdir(dst)
+      this.ctx.log(`[os] files: MKDIR ${dst}`)
+      this.pages = [`Created folder\n${clean.name}\nin ${this.cwd()}`]
+    } catch (e) {
+      this.ctx.log(`[os] files: mkdir ${dst} FAILED: ${(e as Error).message}`)
+      this.pages = [`NEW FOLDER FAILED:\n${(e as Error).message}`]
+    } finally {
+      this.opBusy = false
+    }
+    this.pendingName = null
+    this.nameVerb = null
+    this.actionIsCwd = false
+    this.actionIsDir = false
+    this.page = 0
+    this.level = 'opResult'
+    this.requestRender()
+  }
+
   // ---- file operations (Adam 2026-06-12) ----
 
   /** Stats for the tapped FILE or the CURRENT DIR. Dir totals run du -sbx
@@ -2277,48 +2517,73 @@ class FilesWindow implements OsWindow {
     const path = this.actionPath
     if (!path || this.opBusy) { this.ctx.log('[os] files: delete with no target / op in flight — ignored (LOUD)'); return }
     this.opBusy = true
+    const wasCwd = this.actionIsCwd
     try {
-      await unlink(path)
-      this.ctx.log(`[os] files: DELETED ${path}`)
-      this.pages = [`Deleted ${this.actionName}.`]
+      // Trash, not unlink (Phase 17): restorable for 30 days via the Trash
+      // location + the Move flow. moveToTrash handles dirs + cross-FS itself.
+      const dest = await moveToTrash(path, Date.now())
+      this.ctx.log(`[os] files: TRASHED ${this.actionIsDir ? 'dir ' : ''}${path} → ${dest}`)
+      this.pages = [`Moved ${this.actionName} to Trash.\n(restorable for 30 days)`]
+      // Deleting the dir we were standing in leaves the stack top dangling —
+      // pop to the parent so the tree relists a real directory.
+      if (wasCwd && this.stack.length > 1) this.stack.pop()
     } catch (e) {
-      this.ctx.log(`[os] files: delete ${path} FAILED: ${(e as Error).message}`)
+      this.ctx.log(`[os] files: trash ${path} FAILED: ${(e as Error).message}`)
       this.pages = [`DELETE FAILED:\n${(e as Error).message}`]
     } finally {
       this.opBusy = false
     }
     this.actionPath = null
+    this.actionIsCwd = false
+    this.actionIsDir = false
+    this.offset = 0
     this.page = 0
     this.level = 'opResult'
     this.requestRender()
   }
 
-  /** Move/copy actionPath into [destDir]. No overwrites — a name collision
-   *  loud-fails (pick a different folder). Move falls back to copy+unlink
-   *  across filesystems (EXDEV — /mnt drives are separate FSes). */
+  /** Move/copy actionPath into [destDir]. Handles DIRECTORIES recursively
+   *  (fs.cp / fs.rm — Adam 2026-06-13). No overwrites — a name collision
+   *  loud-fails (pick a different folder). Move falls back to copy+remove
+   *  across filesystems (EXDEV — /mnt drives are separate FSes). A folder may
+   *  never be copied/moved into itself or a descendant. */
   private async doTransfer(destDir: string): Promise<void> {
     const src = this.actionPath
     const verb = this.actionVerb
     if (!src || !verb || this.opBusy) { this.ctx.log('[os] files: transfer with no source/verb / op in flight — ignored (LOUD)'); return }
     this.opBusy = true
+    const wasCwd = this.actionIsCwd
     const dst = join(destDir, this.actionName)
     try {
+      if (this.actionIsDir) {
+        const rsrc = resolvePath(src)
+        const rdst = resolvePath(destDir)
+        if (rdst === rsrc || rdst.startsWith(rsrc + '/')) {
+          throw new Error('cannot move/copy a folder into itself or one of its subfolders')
+        }
+      }
       if (existsSync(dst)) throw new Error(`${dst} already exists (no overwrites — pick another folder or rename first)`)
       if (verb === 'copy') {
-        await copyFile(src, dst, fsConstants.COPYFILE_EXCL)
+        if (this.actionIsDir) await cp(src, dst, { recursive: true, errorOnExist: true, force: false })
+        else await copyFile(src, dst, fsConstants.COPYFILE_EXCL)
       } else {
         try {
           await rename(src, dst)
         } catch (e) {
           if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
-          // Cross-filesystem move: copy then remove the source.
-          await copyFile(src, dst, fsConstants.COPYFILE_EXCL)
-          await unlink(src)
+          // Cross-filesystem move: copy then remove the source (dirs recursively).
+          if (this.actionIsDir) { await cp(src, dst, { recursive: true, errorOnExist: true, force: false }); await rm(src, { recursive: true }) }
+          else { await copyFile(src, dst, fsConstants.COPYFILE_EXCL); await unlink(src) }
         }
       }
-      this.ctx.log(`[os] files: ${verb.toUpperCase()} ${src} → ${dst}`)
+      this.ctx.log(`[os] files: ${verb.toUpperCase()} ${this.actionIsDir ? 'dir ' : ''}${src} → ${dst}`)
       this.pages = [`${verb === 'move' ? 'Moved' : 'Copied'} ${this.actionName}\n→ ${destDir}`]
-      if (verb === 'move') this.actionPath = null
+      if (verb === 'move') {
+        // Moved the dir we were in → follow it to its new home (the old parents
+        // still exist, so Up keeps working); a file/child move just clears the target.
+        if (wasCwd && this.stack.length > 0) this.stack[this.stack.length - 1] = dst
+        this.actionPath = wasCwd ? this.cwd() : null
+      }
     } catch (e) {
       this.ctx.log(`[os] files: ${verb} ${src} → ${dst} FAILED: ${(e as Error).message}`)
       this.pages = [`${verb.toUpperCase()} FAILED:\n${(e as Error).message}`]
@@ -2326,9 +2591,12 @@ class FilesWindow implements OsWindow {
       this.opBusy = false
     }
     this.actionVerb = null
+    this.actionIsCwd = false
+    this.actionIsDir = false
     this.pickTarget = null
     this.destStack = []
     this.destOffset = 0
+    this.offset = 0
     this.page = 0
     this.level = 'opResult'
     this.requestRender()
@@ -2339,11 +2607,11 @@ class FilesWindow implements OsWindow {
   async onBrowseSelect(index: number): Promise<void> {
     this.navSeq++   // any new browse action supersedes an in-flight image render/du
     if (this.level === 'locations') {
-      const { map } = browsePageItems(this.locs.map((l) => l.label), this.locOffset)
+      const { map, prevOffset, nextOffset } = browsePageItems(this.locs.map((l) => l.label), this.locOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[os] files locations: index ${index} out of range`); return }
-      if (m === -1) { this.locOffset = Math.max(0, this.locOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.locOffset += BROWSE_PAGE; this.requestRender(); return }
+      if (m === -1) { this.locOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.locOffset = nextOffset; this.requestRender(); return }
       const loc = this.locs[m]
       if (!loc) { this.ctx.log(`[os] files locations: no location at ${m} — resyncing`); this.requestRender(); return }
       this.stack = [loc.path]
@@ -2357,11 +2625,11 @@ class FilesWindow implements OsWindow {
       const cwd = this.destCwd()
       if (cwd === null) {
         // Stage 1: pick the destination location.
-        const { map } = browsePageItems(this.locs.map((l) => l.label), this.destOffset)
+        const { map, prevOffset, nextOffset } = browsePageItems(this.locs.map((l) => l.label), this.destOffset)
         const m = map[index]
         if (m === undefined) { this.ctx.log(`[os] files pick: index ${index} out of range`); return }
-        if (m === -1) { this.destOffset = Math.max(0, this.destOffset - BROWSE_PAGE); this.requestRender(); return }
-        if (m === -2) { this.destOffset += BROWSE_PAGE; this.requestRender(); return }
+        if (m === -1) { this.destOffset = prevOffset; this.requestRender(); return }
+        if (m === -2) { this.destOffset = nextOffset; this.requestRender(); return }
         const loc = this.locs[m]
         if (!loc) { this.ctx.log(`[os] files pick: no location at ${m} — resyncing`); this.requestRender(); return }
         this.destStack = [loc.path]
@@ -2379,11 +2647,11 @@ class FilesWindow implements OsWindow {
         return
       }
       i -= 1
-      const { map } = browsePageItems(this.destEntries.map((d) => d + '/'), this.destOffset)
+      const { map, prevOffset, nextOffset } = browsePageItems(this.destEntries.map((d) => d + '/'), this.destOffset, browseRowBytes('..'), 1)
       const m = map[i]
       if (m === undefined) { this.ctx.log(`[os] files pick: index ${index} out of range`); return }
-      if (m === -1) { this.destOffset = Math.max(0, this.destOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.destOffset += BROWSE_PAGE; this.requestRender(); return }
+      if (m === -1) { this.destOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.destOffset = nextOffset; this.requestRender(); return }
       const dir = this.destEntries[m]
       if (!dir) { this.ctx.log(`[os] files pick: no dir at ${m} — resyncing`); this.requestRender(); return }
       this.pickTarget = join(cwd, dir)
@@ -2397,11 +2665,11 @@ class FilesWindow implements OsWindow {
     if (index === 0) { this.upOne(); return }
     const i = index - 1
     const labels = this.entries.map((e) => (e.isDir ? e.name + '/' : e.name))
-    const { map } = browsePageItems(labels, this.offset)
+    const { map, prevOffset, nextOffset } = browsePageItems(labels, this.offset, browseRowBytes('..'), 1)
     const m = map[i]
     if (m === undefined) { this.ctx.log(`[os] files: index ${index} out of range`); return }
-    if (m === -1) { this.offset = Math.max(0, this.offset - BROWSE_PAGE); this.requestRender(); return }
-    if (m === -2) { this.offset += BROWSE_PAGE; this.requestRender(); return }
+    if (m === -1) { this.offset = prevOffset; this.requestRender(); return }
+    if (m === -2) { this.offset = nextOffset; this.requestRender(); return }
     const e = this.entries[m]
     const path = join(this.cwd(), e.name)
     if (e.isDir) {
@@ -2416,9 +2684,23 @@ class FilesWindow implements OsWindow {
 
   async onMenuSelect(label: string): Promise<void> {
     if (this.level === 'tree') {
-      if (label === 'Up') { this.upOne(); return }
-      if (label === 'Stats') { this.showStats('dir'); return }
-      this.ctx.log(`[os] files tree: unknown menu label '${label}' — ignored (LOUD)`)
+      // Tree menu (2026-06-13): Up/New/Stats always; Copy/Move/Rename/Del act on
+      // the CURRENT dir, only present (treeMenu) when descended below a root.
+      switch (label) {
+        case 'Up': this.upOne(); return
+        case 'Stats': this.showStats('dir'); return
+        case 'New': this.startNameEntry('mkdir', 'tree'); return
+        case 'Copy': this.beginDirAction('copy'); return
+        case 'Move': this.beginDirAction('move'); return
+        case 'Del': this.beginDirAction('del'); return
+        case 'Rename': {
+          if (this.stack.length <= 1) { this.ctx.log('[os] files: rename at a location root — refused (LOUD)'); return }
+          this.actionIsDir = true; this.actionIsCwd = true
+          this.startNameEntry('rename', 'tree', { path: this.cwd(), name: basename(this.cwd()) })
+          return
+        }
+        default: this.ctx.log(`[os] files tree: unknown menu label '${label}' — ignored (LOUD)`)
+      }
       return
     }
     if (this.level === 'actions') {
@@ -2435,23 +2717,54 @@ class FilesWindow implements OsWindow {
           this.requestRender()
           return
         }
+        case 'Rename': this.startNameEntry('rename', 'actions'); return
         case 'Del': { this.level = 'confirmDel'; this.requestRender(); return }
         case 'Stats': { this.showStats('file'); return }
         default: this.ctx.log(`[os] files actions: unknown menu label '${label}' — ignored (LOUD)`)
       }
       return
     }
+    if (this.level === 'name') {
+      switch (label) {
+        case 'Done':
+          if (!this.listening) { this.ctx.log('[os] files name: Done but not listening — ignored'); return }
+          this.listening = false; this.transcribing = true; this.ctx.audio('stop'); this.requestRender(); return
+        case 'Re-record':
+          this.pendingName = null; this.transcribing = false; this.listening = true; this.ctx.audio('start'); this.requestRender(); return
+        case 'Cancel': {
+          const back = this.nameFrom
+          this.stopNameEntry('cancel')
+          this.actionIsCwd = false; this.actionIsDir = false
+          this.level = back === 'actions' && this.actionPath ? 'actions' : 'tree'
+          this.focus = 'content'
+          this.requestRender(); return
+        }
+        case 'Confirm':
+          if (this.pendingName === null) { this.ctx.log('[os] files name: Confirm with no pending name — ignored (LOUD)'); return }
+          if (this.nameVerb === 'rename') { await this.doRename(); return }
+          if (this.nameVerb === 'mkdir') { await this.doMkdir(); return }
+          this.ctx.log('[os] files name: Confirm with no verb — ignored (LOUD)'); return
+        default: this.ctx.log(`[os] files name: unknown menu label '${label}' — ignored (LOUD)`)
+      }
+      return
+    }
     if (this.level === 'confirmDel') {
       if (label === 'DELETE') { await this.doDelete(); return }
-      if (label === 'Cancel') { this.level = 'actions'; this.requestRender(); return }
+      if (label === 'Cancel') { this.level = this.actionIsCwd ? 'tree' : 'actions'; this.focus = 'content'; this.requestRender(); return }
       this.ctx.log(`[os] files confirmDel: unknown menu label '${label}' — ignored (LOUD)`)
       return
     }
     if (this.level === 'pickDest') {
       if (label === 'Cancel') {
+        const wasCwd = this.actionIsCwd
         this.actionVerb = null
+        this.actionIsCwd = false
+        this.actionIsDir = false
         this.destStack = []
-        this.level = 'actions'
+        this.destOffset = 0
+        // A current-dir op came from the tree menu; a file op from the actions level.
+        this.level = wasCwd ? 'tree' : 'actions'
+        this.focus = 'content'
         this.requestRender()
         return
       }
@@ -2505,16 +2818,31 @@ class FilesWindow implements OsWindow {
    *  (menu-focus flip) → locations; locations → (flip) → Main. */
   async onBack(): Promise<boolean> {
     this.navSeq++   // navigation supersedes an in-flight image render/du
+    if (this.level === 'name') {
+      const back = this.nameFrom
+      this.stopNameEntry('back')
+      this.actionIsCwd = false; this.actionIsDir = false
+      this.level = back === 'actions' && this.actionPath ? 'actions' : 'tree'
+      this.focus = 'content'
+      this.requestRender()
+      return true
+    }
     if (this.level === 'image') { this.level = this.actionPath ? 'actions' : 'tree'; this.img = null; this.focus = 'content'; this.requestRender(); return true }
     if (this.level === 'read') { this.level = this.actionPath ? 'actions' : 'tree'; this.focus = 'content'; this.requestRender(); return true }
     if (this.level === 'actions') { this.actionPath = null; this.level = 'tree'; this.focus = 'content'; this.requestRender(); return true }
-    if (this.level === 'confirmDel') { this.level = 'actions'; this.requestRender(); return true }
+    if (this.level === 'confirmDel') { this.level = this.actionIsCwd ? 'tree' : 'actions'; this.focus = 'content'; this.requestRender(); return true }
     if (this.level === 'stats') { this.level = this.statsFrom === 'actions' && this.actionPath ? 'actions' : 'tree'; this.focus = 'content'; this.requestRender(); return true }
     if (this.level === 'pickAction') { this.pickTarget = null; this.level = 'pickDest'; this.requestRender(); return true }
     if (this.level === 'pickDest') {
+      // First double-tap flips focus to the menu list so the verb ("Move/Copy
+      // here") + Cancel/Reload/Main become tappable — without this they were
+      // dead UI and there was NO way to deposit into a location ROOT (review
+      // 2026-06-13). A second double-tap pops up a dir / out of the picker.
+      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+      this.focus = 'content'
       if (this.destStack.length > 1) { this.destStack.pop(); this.destOffset = 0 }
       else if (this.destStack.length === 1) { this.destStack = []; this.destOffset = 0 }
-      else { this.actionVerb = null; this.level = 'actions' }
+      else { const wasCwd = this.actionIsCwd; this.actionVerb = null; this.actionIsCwd = false; this.actionIsDir = false; this.level = wasCwd ? 'tree' : 'actions' }
       this.requestRender()
       return true
     }
@@ -2533,6 +2861,50 @@ class FilesWindow implements OsWindow {
     if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
     this.focus = 'content'
     return false
+  }
+
+  // ---- name-entry dictation hooks (Adam 2026-06-13: Rename + New folder) ----
+
+  /** A transcript for the name-entry confirm step. Discarded unless we're
+   *  actively transcribing (Cancel / a window pop cleared it) — the confirm
+   *  step stays sacred (no silent name lands). */
+  async onStt(text: string): Promise<void> {
+    if (this.level !== 'name' || !this.transcribing) {
+      this.ctx.log(`[os] files: STT arrived but not awaiting a name (level=${this.level}) — discarded: "${text.slice(0, 60)}"`)
+      return
+    }
+    this.transcribing = false
+    this.pendingName = text.trim()
+    this.requestRender()
+  }
+
+  async onSttError(error: string): Promise<void> {
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    this.listening = false
+    this.transcribing = false
+    this.ctx.log(`[os] files: STT error during name entry — ${error}`)
+    this.pendingName = null
+    // Stay on the name level so the user can Re-record (the menu offers it via
+    // the no-state branch? no — drop to the source level loudly instead).
+    const back = this.nameFrom
+    this.actionIsCwd = false; this.actionIsDir = false
+    this.nameVerb = null
+    this.level = back === 'actions' && this.actionPath ? 'actions' : 'tree'
+    this.requestRender()
+  }
+
+  /** Mic must not outlive focus (the established dictation hygiene rule). */
+  onDeactivate(): void {
+    if (this.listening || this.transcribing || this.pendingName !== null) {
+      this.stopNameEntry('window switch')
+      this.actionIsCwd = false; this.actionIsDir = false
+      this.level = 'tree'
+    }
+  }
+
+  /** A notification overlay must not repaint over the sacred confirm step. */
+  interruptible(): boolean {
+    return !(this.listening || this.transcribing || this.pendingName !== null)
   }
 }
 
@@ -2562,10 +2934,12 @@ class GamesWindow implements OsWindow {
   // --- chess state ---
   private fen: string | null = null
   private legal: string[] = []
-  /** Moves flow (Adam 2026-06-12): board stays in the content window; the
-   *  MENU carries piece groups → that group's SAN moves (paginated under the
-   *  client's 20-item list cap) → a Confirm/Cancel step over a PREVIEW board
-   *  (the move applied, no engine reply) before anything is committed. */
+  /** Moves flow (Adam 2026-06-12, revised 2026-06-13): the MENU carries piece
+   *  groups → that group's SAN moves (paginated under the client's 20-item list
+   *  cap) → a Confirm/Cancel step over a PREVIEW board (the move applied, no
+   *  engine reply) before anything is committed. Selection levels render TEXT,
+   *  not the board (every menu change re-pushed all 4 tiles otherwise — the
+   *  Phase-18 redraw fix); the board shows only on chess + chess-confirm. */
   private moveGroup: string | null = null
   private movesOffset = 0
   private pendingMove: string | null = null
@@ -2777,9 +3151,10 @@ class GamesWindow implements OsWindow {
     this.previewFailed = null
   }
 
-  /** The board view shared by the chess sub-levels (current board for
-   *  pieces/moves, preview board for confirm; text placeholder while a
-   *  render is in flight). */
+  /** The board-tiles view for chess-confirm (the move PREVIEW). Text placeholder
+   *  while the render is in flight. (As of 2026-06-13 the pieces/moves selection
+   *  levels render text, not the board — only confirm + the chess level show
+   *  tiles, so this is the confirm/preview path.) */
   private chessBoardView(title: string, menu: string[], preview: boolean): WinView {
     const img = preview ? this.previewBoard : (this.fen && this.boardFen === this.fen ? this.board : null)
     if (img) return { mode: 'tiles', tilesRect: { w: img.w, h: img.h }, title, menu, tiles: img.tiles }
@@ -2819,13 +3194,23 @@ class GamesWindow implements OsWindow {
       }
     }
     if (this.level === 'chess-pieces') {
+      // Selection is TEXT-ONLY (Adam 2026-06-13): the board was shown here, but
+      // each menu change (pieces→moves) forced an f1=7 layout rebuild that
+      // re-pushed all 4 tiles (~4 s) even though the position was unchanged. The
+      // board now shows only where the position is NEW — the chess level (live)
+      // and chess-confirm (preview). Pick from the menu; the body is context.
       const groups = this.pieceGroups()
       const menu = [...groups.map((g) => `${g.name} (${g.moves.length})`), 'Back', 'Reload', 'Main']
-      return this.chessBoardView(`Chess · pick a piece`, menu, false)
+      return { mode: 'text', title: 'Chess · pick a piece', menu, text: `${this.chessInfo}\n\nPick a piece from the menu.` }
     }
     if (this.level === 'chess-moves') {
       const g = this.pieceGroups().find((x) => x.name === this.moveGroup)
-      return this.chessBoardView(`Chess · ${this.moveGroup ?? '?'} (${g?.moves.length ?? 0})`, this.movesMenuPage(), false)
+      return {
+        mode: 'text',
+        title: `Chess · ${this.moveGroup ?? '?'} (${g?.moves.length ?? 0})`,
+        menu: this.movesMenuPage(),
+        text: `${this.chessInfo}\n\nPick ${this.moveGroup ?? 'a'} move from the menu;\nConfirm then shows a board preview.`,
+      }
     }
     if (this.level === 'chess-confirm') {
       return this.chessBoardView(`Chess · ${this.pendingMove ?? '?'} — confirm?`,
@@ -2833,10 +3218,15 @@ class GamesWindow implements OsWindow {
     }
     if (this.level === 'chess') {
       const thinking = this.moveInFlight ? ' · thinking…' : ''
-      const title = `Chess · ${this.chessTitle}${thinking}`
+      // Skill is a CONSTANT menu label (its value rides the TITLE — a cheap text
+      // update) so cycling it never changes the menu list, never triggers an
+      // f1=7 rebuild, never re-pushes the board (Adam 2026-06-13). Only a
+      // genuinely-new FEN pushes tiles; the per-tile client diff then re-sends
+      // just the squares that changed.
+      const title = `Chess · ${this.chessTitle} · skill ${this.skill}${thinking}`
       const menu = this.fen && !this.gameOver
-        ? ['Moves', 'New game', `Skill: ${this.skill}`, 'Back', 'Reload', 'Main']
-        : ['New game', `Skill: ${this.skill}`, 'Back', 'Reload', 'Main']
+        ? ['Moves', 'New game', 'Skill', 'Back', 'Reload', 'Main']
+        : ['New game', 'Skill', 'Back', 'Reload', 'Main']
       if (this.fen && this.board && this.boardFen === this.fen) {
         return { mode: 'tiles', tilesRect: { w: this.board.w, h: this.board.h }, title, menu, tiles: this.board.tiles }
       }
@@ -2844,7 +3234,7 @@ class GamesWindow implements OsWindow {
       // header above a render FAILURE was a permanent lie (review 2026-06-11b).
       const text = this.fen
         ? (this.boardFailed ? this.chessInfo : `⏳ board rendering…\n\n${this.chessInfo}`)
-        : `Chess vs Stockfish (skill ${this.skill})\n\n${this.chessInfo}`
+        : `Chess vs Stockfish\n\n${this.chessInfo}`
       return { mode: 'text', title, menu, text }
     }
     // games menu
@@ -2872,11 +3262,11 @@ class GamesWindow implements OsWindow {
         ...(this.cwd !== DUNGEON_ROOT ? ['..'] : []),
         ...this.rpgDirs.map((d) => d + '/'),
       ]
-      const { map } = browsePageItems(rows, this.rpgOffset)
+      const { map, prevOffset, nextOffset } = browsePageItems(rows, this.rpgOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[os] games: rpg index ${index} out of range`); return }
-      if (m === -1) { this.rpgOffset = Math.max(0, this.rpgOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.rpgOffset += BROWSE_PAGE; this.requestRender(); return }
+      if (m === -1) { this.rpgOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.rpgOffset = nextOffset; this.requestRender(); return }
       const row = rows[m]
       if (row === undefined) { this.ctx.log(`[os] games: rpg row ${m} resolves to nothing — resyncing`); this.requestRender(); return }
       switch (row) {
@@ -2975,10 +3365,10 @@ class GamesWindow implements OsWindow {
         await this.applyChessMove(null)
         return
       }
-      if (label.startsWith('Skill: ')) {
+      if (label === 'Skill') {
         this.skill = cycleNext(CHESS_SKILLS as unknown as readonly number[], this.skill)
         this.ctx.log(`[os] games: chess skill → ${this.skill} (applies to the next engine move)`)
-        this.requestRender()
+        this.requestRender()   // title updates (text); the board tiles are NOT re-pushed
         return
       }
       this.ctx.log(`[os] games chess: unknown menu label '${label}' — ignored (LOUD)`)
@@ -3055,7 +3445,10 @@ const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
  *  → event read view. Reminders arrive via the Phase-4 layer. */
 class CalendarWindow implements OsWindow {
   readonly id = 'calendar'
-  readonly tab = 'Calendar'
+  // 'Calendr' (Adam 2026-06-12): 'Calendar' is one letter too wide for the
+  // 96 px menu list — we're cool like flickr now. `label` keeps the full
+  // spelling for titles.
+  readonly tab = 'Calendr'
   readonly label = 'Calendar'
   private level: 'agenda' | 'read' = 'agenda'
   private offset = 0
@@ -3118,11 +3511,11 @@ class CalendarWindow implements OsWindow {
 
   async onBrowseSelect(index: number): Promise<void> {
     if (this.level !== 'agenda') { this.ctx.log(`[os] calendar: browse select ${index} outside agenda — ignored`); return }
-    const { map } = browsePageItems(this.rows.map((r) => r.label), this.offset)
+    const { map, prevOffset, nextOffset } = browsePageItems(this.rows.map((r) => r.label), this.offset)
     const m = map[index]
     if (m === undefined) { this.ctx.log(`[os] calendar: index ${index} out of range`); return }
-    if (m === -1) { this.offset = Math.max(0, this.offset - BROWSE_PAGE); this.requestRender(); return }
-    if (m === -2) { this.offset += BROWSE_PAGE; this.requestRender(); return }
+    if (m === -1) { this.offset = prevOffset; this.requestRender(); return }
+    if (m === -2) { this.offset = nextOffset; this.requestRender(); return }
     const row = this.rows[m]
     if (!row) { this.ctx.log(`[os] calendar: no row at ${m} — resyncing`); this.requestRender(); return }
     if (row.kind === 'header') { this.ctx.log('[os] calendar: day-header tapped — no-op'); return }
@@ -3425,11 +3818,11 @@ class ReaderWindow implements OsWindow {
 
   async onBrowseSelect(index: number): Promise<void> {
     if (this.level === 'library') {
-      const { map } = browsePageItems(this.books, this.libOffset)
+      const { map, prevOffset, nextOffset } = browsePageItems(this.books, this.libOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[os] reader: library index ${index} out of range`); return }
-      if (m === -1) { this.libOffset = Math.max(0, this.libOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.libOffset += BROWSE_PAGE; this.requestRender(); return }
+      if (m === -1) { this.libOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.libOffset = nextOffset; this.requestRender(); return }
       const book = this.books[m]
       if (!book) { this.ctx.log(`[os] reader: no book at ${m} — resyncing`); this.requestRender(); return }
       this.bookPath = join(BOOKS_DIR, book)
@@ -3467,11 +3860,11 @@ class ReaderWindow implements OsWindow {
     }
     if (this.level === 'chapters') {
       const labels = this.chapters.map((c) => `${c.idx + 1}. ${oneLine(c.title, 30)}`)
-      const { map } = browsePageItems(labels, this.chapOffset)
+      const { map, prevOffset, nextOffset } = browsePageItems(labels, this.chapOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[os] reader: chapter index ${index} out of range`); return }
-      if (m === -1) { this.chapOffset = Math.max(0, this.chapOffset - BROWSE_PAGE); this.requestRender(); return }
-      if (m === -2) { this.chapOffset += BROWSE_PAGE; this.requestRender(); return }
+      if (m === -1) { this.chapOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.chapOffset = nextOffset; this.requestRender(); return }
       const c = this.chapters[m]
       if (!c) { this.ctx.log(`[os] reader: no chapter at ${m} — resyncing`); this.requestRender(); return }
       await this.openChapter(c.idx, 0)
@@ -3566,6 +3959,17 @@ class TimersWindow implements OsWindow {
     return `⏱ ${fmtRemaining(next.firesAt)}${next.label ? ` · ${oneLine(next.label, 20)}` : ''}`
   }
 
+  /** The list rows — pending timers then the quick-create rows. Shared by
+   *  view() and the tap handler so byte-aware pagination computes IDENTICAL
+   *  page boundaries in both (review 2026-06-13: the tap used to paginate an
+   *  array of empty strings, which packs differently than the real labels). */
+  private listRows(): string[] {
+    return [
+      ...this.pending.map((t) => `⏱ ${fmtRemaining(t.firesAt)}${t.label ? ` · ${oneLine(t.label, 24)}` : ''}`),
+      ...NEW_TIMER_MINUTES.map((m) => `New ${m} min`),
+    ]
+  }
+
   async view(): Promise<WinView> {
     if (this.level === 'detail' && this.detail) {
       const t = this.detail
@@ -3583,11 +3987,7 @@ class TimersWindow implements OsWindow {
       }
     }
     this.pending = await listPending()
-    const rows = [
-      ...this.pending.map((t) => `⏱ ${fmtRemaining(t.firesAt)}${t.label ? ` · ${oneLine(t.label, 24)}` : ''}`),
-      ...NEW_TIMER_MINUTES.map((m) => `New ${m} min`),
-    ]
-    const paged = browsePageItems(rows, this.offset)
+    const paged = browsePageItems(this.listRows(), this.offset)
     return {
       mode: 'browse',
       menuMode: this.focus === 'menu' ? 'capture' : 'passive',
@@ -3599,12 +3999,11 @@ class TimersWindow implements OsWindow {
 
   async onBrowseSelect(index: number): Promise<void> {
     if (this.level !== 'list') { this.ctx.log(`[os] timers: browse select ${index} outside list — ignored`); return }
-    const rowCount = this.pending.length + NEW_TIMER_MINUTES.length
-    const { map } = browsePageItems(new Array<string>(rowCount).fill(''), this.offset)
+    const { map, prevOffset, nextOffset } = browsePageItems(this.listRows(), this.offset)
     const m = map[index]
     if (m === undefined) { this.ctx.log(`[os] timers: index ${index} out of range`); return }
-    if (m === -1) { this.offset = Math.max(0, this.offset - BROWSE_PAGE); this.requestRender(); return }
-    if (m === -2) { this.offset += BROWSE_PAGE; this.requestRender(); return }
+    if (m === -1) { this.offset = prevOffset; this.requestRender(); return }
+    if (m === -2) { this.offset = nextOffset; this.requestRender(); return }
     if (m < this.pending.length) {
       this.detail = this.pending[m]
       this.level = 'detail'
@@ -3946,8 +4345,12 @@ export class WindowManager {
    *  clears it since there's no durable row to track (review 2026-06-11b). */
   private titleFlash: { id: number | null; title: string } | null = null
   private unseen = 0
-  /** Adam's 10 s blanked-popup auto-dismiss (display pacing, blanked case
-   *  only). Cleared on EVERY exit path: tap, double-tap, replacement, dispose. */
+  /** Phase 2: the event whose ONE-LINE flash is currently on the blanked screen
+   *  (null = plain blank). NOT marked seen — the badge nags until read in
+   *  Notices (Adam Q1). Cleared on wake / replacement / timer / dispose. */
+  private blankFlash: NotifyEvent | null = null
+  /** Adam's blanked-flash auto-clear timer (display pacing, blanked case only).
+   *  Cleared on EVERY exit path: tap, double-tap, replacement, dispose. */
   private blankPopupTimer: ReturnType<typeof setTimeout> | null = null
   private readonly onHubNotification = (evt: NotifyEvent): void => this.onNotification(evt)
   private readonly onHubSeen = (): void => this.refreshNotifyChrome()
@@ -4036,26 +4439,49 @@ export class WindowManager {
     })
   }
 
+  /** The one-line blank-flash text (Phase 2): a kind label + the sender (the
+   *  notification title carries it). timer/info titles are already
+   *  self-describing (e.g. "⏱ tea", "📅 standup"), so use them verbatim. */
+  private flashLine(evt: NotifyEvent): string {
+    switch (evt.priority) {
+      case 'call': return `Call from ${evt.title}`
+      case 'sms': return `SMS from ${evt.title}`
+      case 'email': return `E-Mail from ${evt.title}`
+      default: return evt.title
+    }
+  }
+
   private onNotification(evt: NotifyEvent): void {
     this.unseen++   // local fast-path; refreshNotifyChrome reconciles on 'seen'
     if (this.blanked) {
-      // Adam (gate A3.5): while blanked EVERY priority pops for BLANK_POPUP_MS
-      // then auto-returns to blank; the popup display itself marks the event
-      // SEEN (it lands in Notices history, no lingering badge). Newest wins
-      // mid-popup — the replaced one was displayed, so its seen-mark stands.
+      // Phase 2 (Adam 2026-06-12): a blanked screen gets a 5 s ONE-LINE text
+      // flash in the content slot — NOT the full overlay UI ("i don't need the
+      // whole-ass UI hitting me in the face while driving"). NOT marked seen
+      // (Q1): the ⚠ badge keeps nagging until read in Notices. Newest-wins;
+      // double-tap wakes (the user is engaging). blankFlashScene keeps
+      // blankScene's load-bearing wake antenna.
       this.clearPopupTimer()
-      if (this.overlayEvt) this.ctx.log(`[notify] blanked popup replaced by newer (${this.overlayEvt.priority} → ${evt.priority})`)
-      this.setOverlay(evt, true)
-      this.markEvtSeen(evt)
+      if (this.blankFlash) this.ctx.log(`[notify] blank flash replaced by newer (${this.blankFlash.priority} → ${evt.priority})`)
+      this.blankFlash = evt
+      try {
+        this.ctx.send(blankFlashScene(this.flashLine(evt)))
+      } catch (e) {
+        // A line that somehow blows the budget must not strand the screen.
+        this.ctx.log(`[notify] blank flash compose failed (${(e as Error).message}) — staying blank`)
+        this.blankFlash = null
+        this.ctx.send(blankScene())
+        return
+      }
+      // The badge must still nag on wake: unseen++ above + a persistent title
+      // flash for the flash-class priorities (call/timer are transient alerts —
+      // they count toward the badge but don't pin a title via latestUnseenFlash).
+      if (!OVERLAY_PRIORITIES.has(evt.priority)) this.titleFlash = { id: evt.id, title: evt.title }
       this.blankPopupTimer = setTimeout(() => {
         this.blankPopupTimer = null
-        this.ctx.log(`[notify] blanked popup auto-dismissed after ${BLANK_POPUP_MS}ms → back to blank (kept in Notices)`)
-        this.activeOverlay = null
-        this.overlayEvt = null
-        this.overlayFromBlank = false
-        this.ctx.send(blankScene())
+        this.blankFlash = null
+        this.ctx.log(`[notify] blank flash auto-cleared after ${BLANK_POPUP_MS}ms → back to blank (still unseen in Notices)`)
+        if (this.blanked && !this.activeOverlay) this.ctx.send(blankScene())
       }, BLANK_POPUP_MS)
-      this.requestRender()
       return
     }
     if (OVERLAY_PRIORITIES.has(evt.priority)) {
@@ -4116,7 +4542,10 @@ export class WindowManager {
       // Stay dark until the user double-taps back (background events keep
       // updating state; the wake render re-derives everything). A blanked
       // POPUP (activeOverlay set) falls through and composes normally.
-      this.ctx.send(blankScene())
+      // A blank FLASH (Phase 2) owns the screen for its 5 s window — a
+      // background event must not repaint it back to plain blank; the flash
+      // timer re-blanks and wake recomposes everything.
+      if (!this.blankFlash) this.ctx.send(blankScene())
       return
     }
     if (this.rendering) { this.renderQueued = true; return }
@@ -4377,6 +4806,9 @@ export class WindowManager {
       return
     }
     if (this.blanked) {
+      // Wake also clears any in-flight Phase-2 flash + its re-blank timer.
+      this.clearPopupTimer()
+      this.blankFlash = null
       this.blanked = false
       this.ctx.log('[os] screen WAKE (double-tap)')
       this.requestRender()

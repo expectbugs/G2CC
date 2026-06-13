@@ -343,6 +343,30 @@ export function blankScene(): WireScene {
   }
 }
 
+/** The blanked-screen NOTIFICATION FLASH (Phase 2, Adam 2026-06-12: "i use
+ *  blank mode when driving … i don't need the whole-ass UI suddenly hitting me
+ *  in the face"). KEEPS blankScene's load-bearing wake antenna EXACTLY
+ *  (scroll=true — the sole input region; without it the wake double-tap dies,
+ *  bitten twice) and adds ONE px-clamped text line below the title bar. No
+ *  menu, no body, no overlay machinery — a 5 s glance, then re-blank. The
+ *  antenna is the only event-capture region (≤1, §6.1). Estimator-guarded. */
+export function blankFlashScene(line: string): WireScene {
+  const regions: SceneRegion[] = [
+    // blankScene's wake antenna, byte-for-byte (the B2 hardware rule).
+    { id: 50, name: 'wake', x: 0, y: 0, w: 200, h: DE_BAR_H, kind: 'text', content: { kind: 'text', text: ' ', scroll: true } },
+    {
+      id: DE_REGION_IDS.contentText, name: 'flash', x: 0, y: DE_BAR_H, w: SCREEN_WIDTH, h: DE_BAR_H,
+      kind: 'text', style: TITLE_CHROME,
+      content: { kind: 'text', text: ' ' + clampPx(line, SCREEN_WIDTH - 14, 'blankFlash') },
+    },
+  ]
+  const est = estimateLayoutFrameBytes(regions)
+  if (est > LAYOUT_FRAME_BUDGET_BYTES) {
+    throw new Error(`blankFlashScene "${line.slice(0, 40)}" ≈${est} B exceeds the ${LAYOUT_FRAME_BUDGET_BYTES} B budget`)
+  }
+  return { regions }
+}
+
 /** Loud, visible error screen (rasterizer/window failure) — never a silent
  *  blank. Its menu uses ONLY WindowManager-level labels (Retry/Reload/Main),
  *  so the taps work in ANY window state — review 2026-06-10 found per-window

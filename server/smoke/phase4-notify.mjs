@@ -99,33 +99,38 @@ try {
   await wm.onSelect('menu', 1)   // Dismiss
   console.error('  5. dictation queues overlay; flush on idle render ✓')
 
-  // --- 6. blanked popup: pops, auto-re-blanks, marked seen ---
+  // --- 6. blank FLASH (Phase 2, Adam 2026-06-12): a 5 s ONE-LINE text flash —
+  //     NOT the full overlay UI — that auto-re-blanks and is NOT marked seen
+  //     (the ⚠ badge nags until read in Notices, Q1). Keeps the wake antenna. ---
+  const flashOf = (s) => s?.regions.find((r) => r.name === 'flash')?.content?.text ?? ''
   wm.switchTo('main')
-  // main's menu is the switcher list (title may be flash-overridden)
   await waitFor(() => menuOf(last()).includes('Aria') && menuOf(last()).includes('Reload'), 'main view')
   await wm.onBackGesture()            // blank at Main root
   await waitFor(() => isBlank(last()), 'blanked')
-  await notify({ source: 'smoke-blank', priority: 'email', title: 'wake me', body: 'blanked popup test' })
-  await waitFor(() => titleOf(last()).includes('⚠ email · smoke-blank'), 'blanked popup (low prio pops too)')
+  await notify({ source: 'smoke-blank', priority: 'email', title: 'wake me', body: 'blanked flash test' })
+  await waitFor(() => flashOf(last()).includes('E-Mail from wake me'), 'blank flash (one line)')
+  const flashScene = last()
+  assert.equal(menuOf(flashScene).length, 0, 'blank flash has NO menu (text-only — no whole-ass UI)')
+  assert.ok(flashScene.regions.some((r) => r.name === 'wake' && r.content?.scroll === true), 'blank flash keeps the B2 wake antenna')
   await waitFor(() => isBlank(last()), 'auto-re-blank after BLANK_POPUP_MS')
   const seen = await query("SELECT seen_at FROM notifications WHERE source = 'smoke-blank' ORDER BY id DESC LIMIT 1")
-  assert.ok(seen.rows[0].seen_at !== null, 'blanked popup marked SEEN at display')
-  console.error('  6. blanked popup → 250ms → re-blank + seen ✓')
+  assert.ok(seen.rows[0].seen_at === null, 'blank flash NOT marked seen (the badge nags until read — Q1)')
+  console.error('  6. blank flash → one line, no UI → re-blank, NOT seen ✓')
 
   // --- 7. newest-wins while blanked ---
-  await notify({ source: 'smoke-blank', priority: 'info', title: 'first popup', body: 'a' })
-  await waitFor(() => titleOf(last()).includes('⚠ info'), 'first popup up')
-  await notify({ source: 'smoke-blank', priority: 'sms', title: 'second popup', body: 'b' })
-  await waitFor(() => titleOf(last()).includes('⚠ sms'), 'newest replaced the popup')
+  await notify({ source: 'smoke-blank', priority: 'info', title: 'first flash', body: 'a' })
+  await waitFor(() => flashOf(last()).includes('first flash'), 'first flash up')
+  await notify({ source: 'smoke-blank', priority: 'sms', title: 'second flash', body: 'b' })
+  await waitFor(() => flashOf(last()).includes('SMS from second flash'), 'newest replaced the flash')
   await waitFor(() => isBlank(last()), 're-blank after replacement')
   console.error('  7. newest-wins replacement while blanked ✓')
 
-  // --- 8. double-tap during a blanked popup = dismiss + wake ---
+  // --- 8. double-tap during a blank flash = wake to a real window ---
   await notify({ source: 'smoke-blank', priority: 'info', title: 'tap to wake', body: 'c' })
-  await waitFor(() => titleOf(last()).includes('⚠ info'), 'popup up')
-  await wm.onBackGesture()
-  await waitFor(() => !isBlank(last()) && !titleOf(last()).includes('⚠ info · smoke-blank'), 'woke to a real window')
-  console.error('  8. double-tap on popup → dismiss + wake ✓')
+  await waitFor(() => flashOf(last()).includes('tap to wake'), 'flash up')
+  await wm.onBackGesture()            // double-tap wakes
+  await waitFor(() => !isBlank(last()) && flashOf(last()) === '', 'woke to a real window (flash gone)')
+  console.error('  8. double-tap on a blank flash → wake ✓')
 
   // --- image attachment round-trip (Adam 2026-06-12 — MMS pictures) ---
   {

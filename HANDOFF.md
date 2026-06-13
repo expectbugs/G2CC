@@ -1,9 +1,20 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
 Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI contract:
-`docs/DE_DESIGN.md`. The 2026-06-11 build-out is COMPLETE: `upgrades.md` was the work
-queue (now annotated), `UPGRADE_PROGRESS.md` is the per-phase record incl. Adam's decision
-answers, and `CHANGELOG.md` r3–r13 carries the WHY of every phase.
+`docs/DE_DESIGN.md`. The 2026-06-11 build-out is COMPLETE (its annotated queue lives in git at
+`60e6578:upgrades.md`); **`upgrades.md` is now the v2 QUEUE (2026-06-12, extended 2026-06-13)**.
+`UPGRADE_PROGRESS.md` records the v1 phases incl. Adam's gate answers; `CHANGELOG.md` r3–r18
+carries the WHY of everything.
+
+**2026-06-13 batch (server-only, CHANGELOG r18, smoke 12/12 — NO APK):** the two explicit
+asks — **Phase 18 chess tile-redraw fix** (selection levels render text, board only when the
+position is new, constant `Skill` label) and **Phase 19 Files overhaul** (byte-aware pagination
+fixes the "≈970 B" dir-listing wall; recursive dir Copy/Move/Del; Rename + New-folder via
+dictation; **Phase 17 trash** folded in) — plus **Phase 2** (5 s blank flash) and **Phase 10**
+(stats threshold alerts), plus a whole-project review (fixed the Files pickDest navigation +
+the phase10 smoke flake; 4 client findings DEFERRED to Adam with file:line fixes — see the
+session summary). STILL UNIMPLEMENTED from upgrades.md: Phases 3/5/8/11/12/13/14 (server) and
+1/4/6/7/9/15/16 (client) — readiness notes in the session summary.
 
 ---
 
@@ -56,7 +67,7 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   pinned as unit tests; §10 no longer [U]) + MMS images actually extracted
   (MessagingStyle data URIs, not EXTRA_PICTURE) + image-aware notify dedup; server:
   Files delete confirm is Cancel-first.** On-glass batch additions: ring the phone
-  (call popup), send an MMS (image page), check the G battery slot.
+  (call popup), send an MMS (image page), check the G battery slot — **DONE: verified live 2026-06-12 (73→76% on the diag)**.
 - **The TEN windows** (`server/src/os-windows.ts`): **Main** (live dashboard: host/pool/
   battery/unseen/next-timer + one summary line per window; menu = switcher + `Ask`) ·
   **Aria** (CC subprocess @ ~/aria, `server/prompts/aria-g2.md` display prompt; the Ask
@@ -170,13 +181,17 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   `docs/HAT_BRIDGE_SPEC.md` · `docs/SIM_TOOLING.md` · `docs/HOLDS.md` (old deferral
   catalog — superseded by upgrades.md; C3/C4/C5 resolved 2026-06-11) ·
   `docs/CODE_REVIEW_2026-06-11.md` · `docs/CODE_REVIEW_2026-06-11b.md` (review #4 — incl.
-  the OPEN QUESTIONS batch for Adam) · `CHANGELOG.md` (the WHY of every change) ·
+  the OPEN QUESTIONS batch for Adam) · **`docs/CODE_REVIEW_2026-06-13.md` (review #5 —
+  the batch review: fixed items + 4 DEFERRED client findings w/ file:line + fixes)** ·
+  `CHANGELOG.md` (the WHY of every change) ·
   `UPGRADE_PROGRESS.md` (the batch record + Adam's gate answers).
 - **Server (`server/src/`):** `os-windows.ts` (WM + the ten windows + SessionLevel/
-  HistoryLevel — the heart, ~2.9k lines) · `os-compose.ts` (WinView→WireScene; budgets/
-  clamps/estimator) · `os-content.ts` (markdown→blocks, chart/image rendering,
-  `splitGray4Tiles`) · `store.ts` (pg pool + migrations) · `history.ts` · `os-notify.ts`
-  (hub + persistence) · `timers.ts` · `intents.ts` · `reader.ts` · `calendar.ts` ·
+  HistoryLevel — the heart, ~4.7k lines) · `os-compose.ts` (WinView→WireScene; budgets/
+  clamps/estimator; `blankFlashScene`) · `os-content.ts` (markdown→blocks, chart/image
+  rendering, `splitGray4Tiles`) · `store.ts` (pg pool + migrations) · `history.ts` ·
+  `os-notify.ts` (hub + persistence) · `timers.ts` · `intents.ts` · `reader.ts` ·
+  `calendar.ts` · `stats.ts` + `stats-alerts.ts` (Ph10 sampler + threshold alerts) ·
+  `trash.ts` (Ph17 Files trash) ·
   `games.ts` · `ws-handler.ts` (WS routing incl. notify/battery) · `cc-session.ts`/
   `session-pool.ts`/`watchdog.ts` (CC bridge) · `stt.ts` (Parakeet) · `config.ts`
   (quickPrompts, notifications.packageMap; example in `config.example.json`) ·
@@ -231,6 +246,21 @@ session, context is truncating — tell him.
 
 ## What's next
 
+0. **The 2026-06-13 batch is server-only — restart the server (no APK).** On-glass spot-checks
+   for the new server behavior: chess (pick a move — board no longer redraws on every tap;
+   cycling Skill doesn't re-push the board); Files (open a HUGE / long-named directory — it
+   lists now; descend into a folder → tree menu Copy/Move/Del/Rename/New; Del → Trash location);
+   blank the screen, fire a notification → 5 s one-line flash (not the full UI).
+0b. **4 client review findings to apply + verify on glass** (I could not on-glass-verify, so
+   they were NOT shipped — see the session summary for file:line + fixes): NotifyListener
+   decodes MMS images on the MAIN thread (ANR risk → offload); a reconnect dead-end when a lens
+   *disconnects* (not errors) mid-recoverSession; `_connecting` never reset on a successful
+   launch (masked); the `startForeground` fallback catch is itself uncaught.
+0c. **Unimplemented upgrades.md phases** (readiness notes in the summary): server P3 (Suggest —
+   touches SessionLevel's confirm flow), P5 (tmux), P8 (full Mail), P11 (Main categories —
+   premature until the window count grows), P12 (Search), P13 (Deliveries — needs the one-time
+   gmail.readonly re-consent), P14 (memos — needs the PCM buffer plumbed to the intent handler);
+   client P1/P4/P6/P7/P9/P15 (need APK + on-glass) and P16 (OBD — dongle on backorder).
 1. **Adam's on-glass verification batch** for the whole upgrade (his gate-8 choice:
    batched at the end) — the 11-step checklist lives in UPGRADE_PROGRESS.md §RUN COMPLETE
    and the 2026-06-11 session log. Install APK v1.7 + the one-time notification-access

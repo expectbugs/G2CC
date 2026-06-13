@@ -18,6 +18,7 @@
 
 import { execFile } from 'node:child_process'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { evaluateSampleAlerts, evaluateVolumeAlerts, fireStatsAlert } from './stats-alerts.js'
 
 const SAMPLE_MS = 10_000          // pacing cadence
 const RING_MAX = 360              // ~1 h at 10 s
@@ -28,6 +29,7 @@ export interface StatSample {
   ramUsedMb: number | null
   ramTotalMb: number | null
   swapUsedMb: number | null
+  swapTotalMb: number | null
   cpuTempC: number | null
   gpuPct: number | null
   gpuMemMb: number | null
@@ -66,7 +68,7 @@ function sampleCpuPct(): number | null {
 
 // ---- RAM / swap ------------------------------------------------------------
 
-function sampleMem(): { ramUsedMb: number; ramTotalMb: number; swapUsedMb: number } | null {
+function sampleMem(): { ramUsedMb: number; ramTotalMb: number; swapUsedMb: number; swapTotalMb: number } | null {
   try {
     const mi = readFileSync('/proc/meminfo', 'utf8')
     const kb = (key: string): number | null => {
@@ -80,6 +82,7 @@ function sampleMem(): { ramUsedMb: number; ramTotalMb: number; swapUsedMb: numbe
       ramUsedMb: Math.round((total - avail) / 1024),
       ramTotalMb: Math.round(total / 1024),
       swapUsedMb: Math.round((st - sf) / 1024),
+      swapTotalMb: Math.round(st / 1024),
     }
   } catch { return null }
 }
@@ -147,24 +150,38 @@ export function startStatsSampler(): void {
   const tick = async (): Promise<void> => {
     const gpu = await sampleGpu()
     const mem = sampleMem()
-    ring.push({
+    const sample: StatSample = {
       ts: Date.now(),
       cpuPct: sampleCpuPct(),
       ramUsedMb: mem?.ramUsedMb ?? null,
       ramTotalMb: mem?.ramTotalMb ?? null,
       swapUsedMb: mem?.swapUsedMb ?? null,
+      swapTotalMb: mem?.swapTotalMb ?? null,
       cpuTempC: sampleCpuTemp(),
       gpuPct: gpu?.gpuPct ?? null,
       gpuMemMb: gpu?.gpuMemMb ?? null,
       gpuMemTotalMb: gpu?.gpuMemTotalMb ?? null,
       gpuTempC: gpu?.gpuTempC ?? null,
-    })
+    }
+    ring.push(sample)
     if (ring.length > RING_MAX) ring.splice(0, ring.length - RING_MAX)
+    // Phase 10: threshold alerts (sustained crossings fire ONCE via the notify
+    // layer). Never throws — the alert step is pure state + a fire-and-forget.
+    evaluateSampleAlerts(sample, sample.ts, fireStatsAlert)
   }
   void tick().catch((e: unknown) => console.error(`[stats] first sample failed: ${e instanceof Error ? e.message : String(e)}`))
   setInterval(() => {
     void tick().catch((e: unknown) => console.error(`[stats] sample failed: ${e instanceof Error ? e.message : String(e)}`))
   }, SAMPLE_MS)
+  // Volume-fullness alerts on a slower cadence (df is heavier; 5 min is plenty
+  // for a 30-min sustain window). A maintenance cadence, not an I/O timeout.
+  const volTick = (): void => {
+    void readStorage()
+      .then((rows) => evaluateVolumeAlerts(rows, Date.now(), fireStatsAlert))
+      .catch((e: unknown) => console.error(`[stats] volume-alert df failed: ${e instanceof Error ? e.message : String(e)}`))
+  }
+  volTick()
+  setInterval(volTick, 5 * 60_000)
   console.log(`[stats] sampler started (${SAMPLE_MS / 1000}s cadence, ${RING_MAX}-sample ring ≈ 1 h)`)
 }
 
