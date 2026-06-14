@@ -51,6 +51,10 @@ export interface G2CCConfig {
      *  default to 'info'. Values must be call|timer|sms|email|info — invalid
      *  entries log loudly and fall back to 'info'. */
     packageMap: Record<string, string>
+    /** Notification title/body substrings to DROP outright (never reach the
+     *  glasses) — privacy/noise spam like "Device ID accessed" (Adam 2026-06-14).
+     *  Case-insensitive substring match against BOTH title and body. */
+    blockTitles: string[]
   }
 }
 
@@ -110,6 +114,8 @@ function defaultConfig(): G2CCConfig {
         'com.android.messaging': 'sms',
         'com.google.android.gm': 'email',
       },
+      // Drop noisy/privacy notifications outright (Adam 2026-06-14).
+      blockTitles: ['Device ID accessed'],
     },
   }
 }
@@ -163,6 +169,10 @@ export function loadConfig(): G2CCConfig {
   if (typeof merged.notifications.packageMap !== 'object' || merged.notifications.packageMap === null || Array.isArray(merged.notifications.packageMap)) {
     console.error('[config] notifications.packageMap is not an object — using defaults')
     merged.notifications.packageMap = defaults.notifications.packageMap
+  }
+  if (!Array.isArray(merged.notifications.blockTitles) || merged.notifications.blockTitles.some((t) => typeof t !== 'string')) {
+    console.error('[config] notifications.blockTitles is not a string array — using defaults')
+    merged.notifications.blockTitles = defaults.notifications.blockTitles
   }
   return merged
 }

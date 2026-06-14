@@ -18,7 +18,7 @@
 
 import { execFile } from 'node:child_process'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
-import { evaluateSampleAlerts, evaluateVolumeAlerts, fireStatsAlert } from './stats-alerts.js'
+import { evaluateSampleAlerts, fireStatsAlert } from './stats-alerts.js'
 
 const SAMPLE_MS = 10_000          // pacing cadence
 const RING_MAX = 360              // ~1 h at 10 s
@@ -173,16 +173,13 @@ export function startStatsSampler(): void {
   setInterval(() => {
     void tick().catch((e: unknown) => console.error(`[stats] sample failed: ${e instanceof Error ? e.message : String(e)}`))
   }, SAMPLE_MS)
-  // Volume-fullness alerts on a slower cadence (df is heavier; 5 min is plenty
-  // for a 30-min sustain window). A maintenance cadence, not an I/O timeout.
-  const volTick = (): void => {
-    void readStorage()
-      .then((rows) => evaluateVolumeAlerts(rows, Date.now(), fireStatsAlert))
-      .catch((e: unknown) => console.error(`[stats] volume-alert df failed: ${e instanceof Error ? e.message : String(e)}`))
-  }
-  volTick()
-  setInterval(volTick, 5 * 60_000)
-  console.log(`[stats] sampler started (${SAMPLE_MS / 1000}s cadence, ${RING_MAX}-sample ring ≈ 1 h)`)
+  // Disk-full NOTICES REMOVED (Adam 2026-06-14: "remove full filesystems from
+  // notices entirely" — a near-full drive hovering at the 95% threshold plus the
+  // in-memory alert state resetting on every server restart kept re-firing). The
+  // Stats window still SHOWS storage; we just never ALERT on it. The
+  // evaluateVolumeAlerts logic stays in stats-alerts.ts (smoke-tested) but is no
+  // longer wired to fire.
+  console.log(`[stats] sampler started (${SAMPLE_MS / 1000}s cadence, ${RING_MAX}-sample ring ≈ 1 h); disk-full alerts disabled`)
 }
 
 // ---- on-demand pages ---------------------------------------------------------

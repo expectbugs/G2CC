@@ -35,6 +35,16 @@ function run(args: string[], maxBuffer = 4 * 1024 * 1024): Promise<string> {
   })
 }
 
+/** Unambiguous SESSION target: `=<name>:` forces an EXACT session-name match
+ *  (the `=`) AND session interpretation (the trailing `:` → the session's active
+ *  window's active pane). Without it, a bare `-t <name>` can resolve to a WINDOW
+ *  named the same — the `claude` CLI names its window "claude", so `-t claude`
+ *  matched session claude2's window instead of session claude (Adam 2026-06-14:
+ *  "claude and claude2 show the same session"). Verified on tmux 3.5a: `=<name>:`
+ *  resolves capture-pane / send-keys / has-session to the right session, whereas
+ *  a bare `=<name>` (no colon) is rejected for pane targets. */
+function sessionTarget(session: string): string { return `=${session}:` }
+
 export interface TmuxSession { name: string; windows: number; attached: boolean }
 
 /** `tmux ls`. A "no server running" error means zero sessions — NOT a failure
@@ -53,25 +63,32 @@ export async function tmuxList(): Promise<TmuxSession[]> {
 }
 
 export function tmuxHasSession(session: string): Promise<boolean> {
-  return run(['has-session', '-t', session]).then(() => true, () => false)
+  return run(['has-session', '-t', sessionTarget(session)]).then(() => true, () => false)
 }
 
-/** Snapshot the session's active pane (`capture-pane -p -t <session>`). tmux
- *  resolves a bare session target to its active pane (the `=` exact-match prefix
- *  is NOT accepted for pane targets in 3.5a — verified). */
+/** Snapshot the session's active pane. Targets `=<session>:` so it resolves to
+ *  the SESSION's active pane, never a same-named window (sessionTarget header). */
 export function tmuxCapture(session: string): Promise<string> {
-  return run(['capture-pane', '-p', '-t', session])
+  return run(['capture-pane', '-p', '-t', sessionTarget(session)])
+}
+
+/** Capture the pane PLUS up to `lines` of scrollback HISTORY (`capture-pane -p
+ *  -S -<lines>`): the Focus/scroll snapshot the user pages through. `-S -N`
+ *  starts N lines back; tmux clamps to the start of history if shorter. Bigger
+ *  maxBuffer — history can be large. */
+export function tmuxCaptureScrollback(session: string, lines: number): Promise<string> {
+  return run(['capture-pane', '-p', '-S', `-${lines}`, '-t', sessionTarget(session)], 16 * 1024 * 1024)
 }
 
 /** Send tmux KEY NAMES (Enter, C-c, Up, Tab, Escape, q, y, n, …) to the
  *  session's active pane. Keys reach ONE explicitly-focused session only. */
 export function tmuxSendKeys(session: string, keys: string[]): Promise<void> {
-  return run(['send-keys', '-t', session, ...keys]).then(() => undefined)
+  return run(['send-keys', '-t', sessionTarget(session), ...keys]).then(() => undefined)
 }
 
 /** Send LITERAL text (`-l`) — dictated input, no key-name interpretation. */
 export function tmuxSendLiteral(session: string, text: string): Promise<void> {
-  return run(['send-keys', '-t', session, '-l', text]).then(() => undefined)
+  return run(['send-keys', '-t', sessionTarget(session), '-l', text]).then(() => undefined)
 }
 
 /** Create a detached session. Name is validated by the caller (single token). */

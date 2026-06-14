@@ -29,7 +29,7 @@ import {
   type Block, type RenderedImage,
 } from './os-content.js'
 import {
-  composeScene, paginateText, errorView, blankScene, blankFlashScene, fwTextWidth,
+  composeScene, paginateText, wrapLinesPx, errorView, blankScene, blankFlashScene, fwTextWidth,
   DEFAULT_BROWSE_MENU, type WinView,
 } from './os-compose.js'
 import type { SessionPool, PoolEntry } from './session-pool.js'
@@ -50,7 +50,7 @@ import { saveMemo, type MemoAudio } from './memo.js'
 import { searchAll, type SearchHit } from './search.js'
 import { listDeliveries, getDelivery, deliveriesSummary, type DeliveryRow } from './deliveries.js'
 import {
-  tmuxList, tmuxCapture, tmuxSendKeys, tmuxSendLiteral, tmuxNewSession,
+  tmuxList, tmuxCapture, tmuxCaptureScrollback, tmuxSendKeys, tmuxSendLiteral, tmuxNewSession,
   renderTerminalImage, type TmuxSession,
 } from './tmux.js'
 import { savePosition, getPosition, listChapters, readChapter, type EpubChapter } from './reader.js'
@@ -5245,8 +5245,38 @@ class DeliveriesWindow implements OsWindow {
 // ============================================================ Terminal window
 
 const TERM_POLL_MS = 500     // paced capture cadence while watching (tail) — display pacing, NOT an I/O timeout
-const TERM_TAIL_LINES = 13   // visible firmware-text lines in tail mode
-const TERM_TAIL_COLS = 44    // per-line width clamp: an 80-col/dense terminal would blow the 960 B wall (review 2026-06-13) — grid mode shows the full width
+const TERM_TAIL_LINES = 13   // visible firmware-text ROWS in tail/scroll mode
+// Tail/scroll lines now WRAP at the pane width (wrapLinesPx) instead of being
+// HARD-CUT at a fixed column with '›' — an 80-col line was unreadable cut at 44
+// (Adam 2026-06-14). The content region is byte-capped so the wrapped rows keep
+// the frame under the 960 B wall (the 7-item tail menu eats into the budget).
+const TERM_TAIL_MAX_BYTES = 540
+const TERM_SCROLLBACK_LINES = 1000   // Focus/scroll history depth captured once (frozen snapshot)
+const TERM_SCROLL_STEP = 10          // rows per Up/Down (≈ a PgUp/PgDown page)
+
+/** Last rows fitting BOTH a row and a byte budget — the tail bottom-aligns on
+ *  the most-recent output (newest at the bottom). */
+function bottomRows(rows: string[], maxRows: number, maxBytes: number): string[] {
+  const out: string[] = []
+  let bytes = 0
+  for (let i = rows.length - 1; i >= 0 && out.length < maxRows; i--) {
+    const b = Buffer.byteLength(rows[i], 'utf8') + 1
+    if (out.length > 0 && bytes + b > maxBytes) break
+    out.unshift(rows[i]); bytes += b
+  }
+  return out
+}
+
+/** First rows fitting both budgets — a scroll window shows from its top down. */
+function firstRows(rows: string[], maxRows: number, maxBytes: number): string[] {
+  const out: string[] = []
+  let bytes = 0
+  for (const r of rows) {
+    if (out.length >= maxRows || (out.length > 0 && bytes + Buffer.byteLength(r, 'utf8') + 1 > maxBytes)) break
+    out.push(r); bytes += Buffer.byteLength(r, 'utf8') + 1
+  }
+  return out
+}
 const QUICK_KEYS: { label: string; keys: string[] }[] = [
   { label: 'Enter', keys: ['Enter'] },
   { label: 'Ctrl-C', keys: ['C-c'] },
@@ -5288,6 +5318,11 @@ class TerminalWindow implements OsWindow {
   private gridFailed: string | null = null
   private gridSeq = 0
   private focus: 'content' | 'menu' = 'content'
+  // Focus/scroll (tail only): a FROZEN scrollback snapshot the user pages through.
+  // non-null = in scroll mode (the live poll is stopped); offset = lines back
+  // from the buffer's bottom.
+  private scrollLines: string[] | null = null
+  private scrollOffset = 0
   private lastError: string | null = null
   // dictation (send text OR new-session name)
   private dictPurpose: 'send' | 'newSession' | null = null
@@ -5364,20 +5399,36 @@ class TerminalWindow implements OsWindow {
       if (this.gridImg) return { mode: 'tiles', tilesRect: { w: this.gridImg.w, h: this.gridImg.h }, title, menu, tiles: this.gridImg.tiles }
       return { mode: 'text', title, menu, text: this.gridFailed ? `grid render FAILED:\n${this.gridFailed}` : '⏳ rendering 80×22…' }
     }
+    if (this.scrollLines !== null) return this.scrollView()
     this.ensurePoll()   // tail mode — keep the live capture going
-    const lines = this.content.split('\n')
-    while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
-    // Clamp each line's WIDTH (the firmware text region wraps an 80-col line and
-    // a dense 13 lines blows the 960 B wall → errorView instead of output, which
-    // is the whole "watch builds" use case). '›' marks a clamped line; Grid mode
-    // renders the full width.
-    const tail = lines.slice(-TERM_TAIL_LINES)
-      .map((l) => (l.length > TERM_TAIL_COLS ? l.slice(0, TERM_TAIL_COLS) + '›' : l))
-      .join('\n')
+    // WRAP each line at the pane width (readable full lines) then bottom-align on
+    // the most-recent rows under the byte budget. (The old fixed-44-col '›' cut
+    // made wide lines unreadable — Adam 2026-06-14.) Grid shows the 80-col layout.
+    const rows = wrapLinesPx(this.content)
+    while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
+    const tail = bottomRows(rows, TERM_TAIL_LINES, TERM_TAIL_MAX_BYTES).join('\n')
     return {
       mode: 'text', title: `Term · ${this.session} · tail`,
-      menu: ['Keys', 'Dictate', 'Grid', 'Terms', 'Reload', 'Main'],
+      menu: ['Keys', 'Dictate', 'Grid', 'Focus', 'Terms', 'Reload', 'Main'],
       text: tail || '(no output yet)',
+    }
+  }
+
+  /** Focus/scroll view: a frozen scrollback window (TERM_TAIL_LINES lines ending
+   *  `scrollOffset` lines back from the buffer bottom). Up = older, Down = newer,
+   *  Live = back to the live tail. */
+  private scrollView(): WinView {
+    const buf = this.scrollLines ?? []   // already WRAPPED rows (enterScroll wraps the capture)
+    const maxOffset = Math.max(0, buf.length - TERM_TAIL_LINES)
+    if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset
+    const start = Math.max(0, buf.length - TERM_TAIL_LINES - this.scrollOffset)
+    const window = firstRows(buf.slice(start), TERM_TAIL_LINES, TERM_TAIL_MAX_BYTES).join('\n')
+    const atTop = this.scrollOffset >= maxOffset
+    return {
+      mode: 'text',
+      title: `Term · ${this.session} · scroll ↑${this.scrollOffset}${atTop ? ' (top)' : ''}`,
+      menu: ['Up', 'Down', 'Live', 'Reload', 'Main'],
+      text: window || '(no scrollback)',
     }
   }
 
@@ -5459,12 +5510,25 @@ class TerminalWindow implements OsWindow {
   async onMenuSelect(label: string): Promise<void> {
     if (this.dictating()) return this.onDictMenu(label)
     if (this.level === 'view') {
+      if (this.scrollLines !== null) {   // Focus/scroll mode
+        switch (label) {
+          case 'Up': {
+            const maxOffset = Math.max(0, this.scrollLines.length - TERM_TAIL_LINES)
+            this.scrollOffset = Math.min(maxOffset, this.scrollOffset + TERM_SCROLL_STEP); this.requestRender(); return
+          }
+          case 'Down': this.scrollOffset = Math.max(0, this.scrollOffset - TERM_SCROLL_STEP); this.requestRender(); return
+          case 'Live': this.exitScroll(); await this.refreshTail(); return
+          default: this.ctx.log(`[os] term scroll: unknown menu label '${label}' — ignored (LOUD)`)
+        }
+        return
+      }
       switch (label) {
-        case 'Keys': this.stopPoll(); this.level = 'keys'; this.focus = 'content'; this.requestRender(); return
-        case 'Dictate': this.stopPoll(); this.startDictation('send'); return
+        case 'Keys': this.stopPoll(); this.gridSeq++; this.level = 'keys'; this.focus = 'content'; this.requestRender(); return
+        case 'Dictate': this.stopPoll(); this.gridSeq++; this.startDictation('send'); return
         case 'Grid': this.stopPoll(); this.mode = 'grid'; this.requestRender(); void this.renderGrid(); return
+        case 'Focus': await this.enterScroll(); return
         case 'Tail': this.mode = 'tail'; this.gridSeq++; await this.refreshTail(); return
-        case 'Terms': this.stopPoll(); this.session = null; this.level = 'sessions'; this.sessOffset = 0; this.focus = 'content'; this.requestRender(); return
+        case 'Terms': this.stopPoll(); this.gridSeq++; this.session = null; this.level = 'sessions'; this.sessOffset = 0; this.focus = 'content'; this.requestRender(); return
         default: this.ctx.log(`[os] term view: unknown menu label '${label}' — ignored (LOUD)`)
       }
       return
@@ -5477,6 +5541,34 @@ class TerminalWindow implements OsWindow {
     try { this.content = await tmuxCapture(this.session) } catch (e) { this.content = `(capture failed: ${(e as Error).message})` }
     this.ensurePoll()
     this.requestRender()
+  }
+
+  // ---- Focus / scrollback (tail only) ----
+  /** Freeze the live tail + capture a scrollback snapshot the user pages through.
+   *  A FROZEN snapshot (not re-polled) — you're looking at history, not the tail. */
+  private async enterScroll(): Promise<void> {
+    if (!this.session) return
+    this.stopPoll()
+    this.gridSeq++   // cancel any in-flight grid render
+    this.scrollOffset = 0
+    this.scrollLines = ['capturing scrollback…']
+    this.requestRender()
+    try {
+      const out = await tmuxCaptureScrollback(this.session, TERM_SCROLLBACK_LINES)
+      const rows = wrapLinesPx(out)   // wrap to display rows so paging is row-accurate + readable
+      while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
+      this.scrollLines = rows.length ? rows : ['(no scrollback)']
+    } catch (e) {
+      this.ctx.log(`[os] term: scrollback capture failed (${this.session}): ${(e as Error).message}`)
+      this.scrollLines = [`(scrollback capture failed: ${(e as Error).message})`]
+    }
+    this.requestRender()
+  }
+
+  /** Leave Focus/scroll (the caller restores the live tail via refreshTail). */
+  private exitScroll(): void {
+    this.scrollLines = null
+    this.scrollOffset = 0
   }
 
   // ---- dictation ----
@@ -5580,11 +5672,13 @@ class TerminalWindow implements OsWindow {
 
   async onReload(): Promise<void> {
     this.stopDictation('reload')
+    this.exitScroll()
+    this.gridSeq++
     this.lastError = null
     this.focus = 'content'
   }
 
-  onDeactivate(): void { this.stopPoll(); this.stopDictation('window switch') }
+  onDeactivate(): void { this.stopPoll(); this.stopDictation('window switch'); this.exitScroll(); this.gridSeq++ }
   dispose(): void { this.stopPoll() }
 
   interruptible(): boolean { return !this.dictating() }
@@ -5598,8 +5692,9 @@ class TerminalWindow implements OsWindow {
       this.requestRender()
       return true
     }
+    if (this.level === 'view' && this.scrollLines !== null) { this.exitScroll(); await this.refreshTail(); return true }
     if (this.level === 'keys') { this.level = 'view'; this.focus = 'content'; await this.refreshTail(); return true }
-    if (this.level === 'view') { this.stopPoll(); this.session = null; this.level = 'sessions'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'view') { this.stopPoll(); this.gridSeq++; this.session = null; this.level = 'sessions'; this.focus = 'content'; this.requestRender(); return true }
     // sessions level
     if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
     this.focus = 'content'

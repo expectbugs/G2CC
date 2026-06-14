@@ -399,6 +399,16 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         console.warn('[ws] notify from our own package — client filter should have caught this; ignored')
         break
       }
+      // Drop blocklisted noise (Adam 2026-06-14: "Device ID accessed" spam) —
+      // case-insensitive substring match against title OR body.
+      const blocked = config.notifications.blockTitles.find((t) => {
+        const needle = t.toLowerCase()
+        return (msg.title ?? '').toLowerCase().includes(needle) || (msg.text ?? '').toLowerCase().includes(needle)
+      })
+      if (blocked) {
+        console.log(`[ws] notify DROPPED (blocklisted "${blocked}"): ${pkg} "${msg.title}"`)
+        break
+      }
       const mapped = config.notifications.packageMap[pkg]
       const VALID = new Set(['call', 'timer', 'sms', 'email', 'info'])
       let priority: NotifyPriority = 'info'

@@ -450,11 +450,13 @@ export const TEXT_PAGE_ROWS = 6
 export const TEXT_PAGE_PX = 456          // 480 content - 2×6 padding - safety margin
 export const TEXT_PAGE_MAX_BYTES = 560   // page UTF-8 ceiling (rebuild frame headroom)
 
-/** Pre-paginate plain text for text mode: greedy px-measured word-wrap,
- *  TEXT_PAGE_ROWS rows per page with a UTF-8 byte ceiling. Returns at least one
- *  page. NO truncation — every char lands on some page. */
-export function paginateText(text: string): string[] {
-  const fits = (s: string): boolean => fwTextWidth(s) <= TEXT_PAGE_PX
+/** Greedy px-measured word-wrap of multi-line text into display ROWS (each
+ *  ≤ maxPx by fwTextWidth), hard-splitting a single overlong token (URL/base64/
+ *  no-space line) at the px boundary. The wrapping half of paginateText, exported
+ *  so the Terminal tail can wrap WITHOUT paginating (it shows the bottom rows).
+ *  NO truncation — every char lands on some row. */
+export function wrapLinesPx(text: string, maxPx: number = TEXT_PAGE_PX): string[] {
+  const fits = (s: string): boolean => fwTextWidth(s) <= maxPx
   const lines: string[] = []
   for (const raw of text.replace(/\r\n/g, '\n').split('\n')) {
     if (fits(raw)) { lines.push(raw); continue }
@@ -474,6 +476,14 @@ export function paginateText(text: string): string[] {
     }
     lines.push(line)
   }
+  return lines
+}
+
+/** Pre-paginate plain text for text mode: greedy px-measured word-wrap,
+ *  TEXT_PAGE_ROWS rows per page with a UTF-8 byte ceiling. Returns at least one
+ *  page. NO truncation — every char lands on some page. */
+export function paginateText(text: string): string[] {
+  const lines = wrapLinesPx(text)
   const pages: string[] = []
   let page: string[] = []
   let pageBytes = 0

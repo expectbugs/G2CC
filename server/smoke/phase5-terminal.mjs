@@ -38,6 +38,20 @@ try {
   assert.ok((await tmuxList()).some((s) => s.name === 'built'), 'tmuxNewSession creates a session')
   console.error('  1. tmux helpers: list, send-keys round-trip, new-session ✓')
 
+  // === 1b. named-window collision guard (Adam 2026-06-14) ===
+  // A session whose WINDOW is named like ANOTHER session must NOT hijack capture/
+  // send. The `claude` CLI names its window "claude", so `-t claude` matched
+  // session claude2's window instead of session claude. sessionTarget()=`=name:`
+  // fixes it. Reproduce: name 'logs' window "work" (collides with session 'work').
+  TMUX('rename-window', '-t', 'logs', 'work')   // rename-window also disables auto-rename
+  await tmuxSendKeys('logs', ['echo', 'Space', 'IN_LOGS', 'Enter'])
+  await tmuxSendKeys('work', ['echo', 'Space', 'IN_WORK_SESH', 'Enter'])
+  await settleCapture('work', 'IN_WORK_SESH')
+  const capW = await tmuxCapture('work'), capL = await tmuxCapture('logs')
+  assert.ok(capW.includes('IN_WORK_SESH') && !capW.includes('IN_LOGS'), 'capture(work) → the SESSION work, not the window named "work" in logs')
+  assert.ok(capL.includes('IN_LOGS'), 'capture(logs) → the logs session')
+  console.error('  1b. named-window collision: =session: targets the right session ✓')
+
   // === 2. grid render: capture → 80×22 tiles, composes under the wall ===
   const img = await renderTerminalImage(await tmuxCapture('work'), 480, 222)
   assert.equal(img.tiles.length, 4, 'grid → 4 gray4 tiles')
@@ -80,15 +94,16 @@ try {
     await settleCapture('work', 'DICTATED_LINE')
     console.error('  3a. open session, Keys send, Dictate→literal send ✓')
 
-    // tail WIDTH clamp (review fix): a wide/dense capture must compose UNDER the
-    // 960 B wall (an 80-col terminal used to → errorView instead of output)
+    // tail WRAP (Adam 2026-06-14): wide lines WRAP at the pane width (readable)
+    // instead of being hard-cut with '›'; the frame still stays UNDER the wall.
     term.content = Array.from({ length: 30 }, (_, i) => `line${i} ` + 'x'.repeat(90)).join('\n')
     term.level = 'view'; term.mode = 'tail'
     const tv = await term.view()
     const tEst = estimateLayoutFrameBytes(composeScene(tv, [], '● beardos · 1 cc').regions)
     assert.ok(tEst <= LAYOUT_FRAME_BUDGET_BYTES, `tail frame ${tEst}B must be under the wall (${LAYOUT_FRAME_BUDGET_BYTES})`)
-    assert.ok(tv.text.includes('›'), 'over-wide lines are clamped with the › marker')
-    console.error(`  3b. tail width clamp: dense 90-col capture composes at ${tEst}B ≤ ${LAYOUT_FRAME_BUDGET_BYTES} ✓`)
+    assert.ok(!tv.text.includes('›'), 'wide lines WRAP — no more hard-cut › marker')
+    assert.ok(tv.text.includes('x') && tv.text.split('\n').every((l) => l.length <= 60), 'content shown, each row wrapped to the pane width')
+    console.error(`  3b. tail WRAP: dense 90-col capture wraps + composes at ${tEst}B ≤ ${LAYOUT_FRAME_BUDGET_BYTES} ✓`)
 
     // Grid mode
     await term.onMenuSelect('Grid'); assert.equal(term.mode, 'grid')
@@ -96,6 +111,28 @@ try {
     while (Date.now() - t0 < 5000 && term.gridImg === null && term.gridFailed === null) await new Promise((r) => setTimeout(r, 50))
     assert.ok(term.gridImg, 'Grid renders an image page')
     await term.onMenuSelect('Tail'); assert.equal(term.mode, 'tail')
+
+    // Focus / scrollback (new): generate >13 lines, enter scroll, page Up/Down, Live
+    await tmuxSendKeys('work', ['seq', 'Space', '1', 'Space', '80', 'Enter'])
+    await settleCapture('work', '80')
+    term.level = 'view'; term.mode = 'tail'
+    await term.onMenuSelect('Focus')
+    const fs0 = Date.now()
+    while (Date.now() - fs0 < 4000 && (term.scrollLines === null || term.scrollLines[0] === 'capturing scrollback…')) await new Promise((r) => setTimeout(r, 30))
+    assert.ok(term.scrollLines && term.scrollLines.length > 13, `scrollback captured (${term.scrollLines?.length} > 13 lines)`)
+    assert.match((await term.view()).title, /scroll/, 'Focus → scroll view')
+    await term.onMenuSelect('Up')
+    const afterUp = term.scrollOffset
+    assert.ok(afterUp > 0, 'Up scrolls into history')
+    await term.onMenuSelect('Down')
+    assert.ok(term.scrollOffset < afterUp, 'Down scrolls back toward live')
+    // scroll frame stays under the wall
+    const scEst = estimateLayoutFrameBytes(composeScene(await term.view(), [], '● beardos · 1 cc').regions)
+    assert.ok(scEst <= LAYOUT_FRAME_BUDGET_BYTES, `scroll frame ${scEst}B under the wall`)
+    await term.onMenuSelect('Live')
+    assert.equal(term.scrollLines, null, 'Live exits scroll')
+    assert.match((await term.view()).title, /tail/, 'Live → back to live tail')
+    console.error('  3d. Focus/scrollback: capture → Up/Down page → Live ✓')
 
     // New session via dictation
     await term.onMenuSelect('Terms'); assert.equal(term.level, 'sessions')
