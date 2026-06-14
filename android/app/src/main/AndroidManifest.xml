@@ -40,6 +40,11 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Boot auto-start (the all-day bridge must survive a reboot — review 2026-06-11b). -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Phase 4b SMS window: read threads + resolve contact names + send replies.
+         One-time home grants (prime-directive-compatible, like the NLS grant). -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 

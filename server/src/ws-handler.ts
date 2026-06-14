@@ -48,6 +48,7 @@ import { probeScene, gTextScene, gImageScene, ensureRendered, isRate, testKind, 
 import { menuScene, ensureMenuRendered, menuItemLabel, MENU_ITEM_COUNT } from './os-menu.js'
 import { WindowManager } from './os-windows.js'
 import { type MemoAudio } from './memo.js'
+import { segmentUtterances } from './voice.js'
 
 // Hard ceiling on a single in-flight audio buffer (a resource guard, NOT an I/O timeout — allowed):
 // ~6.5 min of 48 kHz/2ch/float32 (~384 KB/s). Bounds memory if audio_end never arrives.
@@ -130,6 +131,9 @@ export interface AudioFormat {
   channels: number
   encoding: 'int16' | 'float32'
   source?: string
+  /** Phase 9: 'handsfree' routes the transcript to the voice grammar (VAD-gated)
+   *  instead of the active window's dictation onStt. Omitted = one-shot dictate. */
+  mode?: 'dictate' | 'handsfree'
 }
 
 export function sendMsg(client: WSClient, msg: ServerMessage): void {
@@ -418,6 +422,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
           targetWindow: 'notices',
           imagePath,
           key: typeof msg.key === 'string' ? msg.key : undefined,   // dismiss sync (Adam 2026-06-13)
+          hasReply: msg.hasReply === true,                          // Phase 4a: inline reply available
         })
       }
       if (typeof msg.imageB64 === 'string' && msg.imageB64.length > 0) {
@@ -454,6 +459,44 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         void markSeenByKey(msg.key).catch((e: unknown) =>
           console.error(`[ws] notification_dismissed markSeenByKey failed: ${e instanceof Error ? e.message : String(e)}`))
       }
+      break
+    }
+
+    case 'notification_reply_result': {
+      // Phase 4a: the phone reported the inline-reply outcome → Notices renders it.
+      if (client.wm) client.wm.onNotificationReplyResult(msg.key, msg.ok === true, typeof msg.error === 'string' ? msg.error : null)
+      else console.log(`[ws] notification_reply_result (no WM): key=${msg.key.slice(0, 40)} ok=${msg.ok}`)
+      break
+    }
+
+    case 'media_state': {
+      // Phase 7: now-playing snapshot pushed by the phone → the Media window.
+      client.lastAppActivityMs = Date.now()
+      if (client.wm) client.wm.onMediaState(msg.state)
+      break
+    }
+
+    case 'sms_threads_reply': {
+      // Phase 4b: the phone (data provider) answered a thread-list query.
+      if (client.wm) client.wm.onSmsThreads(msg.threads, msg.offset, msg.total, typeof msg.error === 'string' ? msg.error : null)
+      break
+    }
+
+    case 'sms_thread_reply': {
+      // Phase 4b: the phone answered a single-thread query.
+      if (client.wm) client.wm.onSmsThread(msg.threadId, msg.name, msg.address, msg.messages, msg.page, msg.totalPages, typeof msg.error === 'string' ? msg.error : null)
+      break
+    }
+
+    case 'nav_update': {
+      // Phase 6: a live Maps nav line → pinned on glass until nav_clear.
+      client.lastAppActivityMs = Date.now()
+      if (client.wm) client.wm.onNavUpdate(msg.text, msg.eta)
+      break
+    }
+
+    case 'nav_clear': {
+      if (client.wm) client.wm.onNavClear()
       break
     }
 
@@ -558,18 +601,28 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // the zero-byte case (back-to-back audio_starts with no binary
       // frames between them) — those still corrupt audioFormat below
       // and deserve the same loud signal.
+      const handsfree = msg.mode === 'handsfree'
       if (client.collectingAudio) {
         const prevBytes = client.audioChunks.reduce((n, c) => n + c.length, 0)
-        console.warn(`[ws] audio_start while already collecting — discarding ${prevBytes} bytes of in-progress audio`)
-        sendMsg(client, { type: 'stt_error', error: `overlapping audio_start; previous ${prevBytes} bytes discarded` })
+        if (handsfree) {
+          // Handsfree re-cuts its own windows (audio_end then audio_start); a
+          // stray overlap just rolls the window — NOT an error to surface.
+          if (prevBytes > 0) console.log(`[ws] handsfree audio_start while collecting — rolling window (${prevBytes} B dropped)`)
+        } else {
+          console.warn(`[ws] audio_start while already collecting — discarding ${prevBytes} bytes of in-progress audio`)
+          sendMsg(client, { type: 'stt_error', error: `overlapping audio_start; previous ${prevBytes} bytes discarded` })
+        }
       }
       // Reject if a previous STT is still in flight. Without this, rapid
       // record/end/record produces an stt_result for the PRIOR audio that
       // the client interprets as the NEW recording's result. R2-CRITICAL:
       // switched from boolean toggle to counter so a near-instant
       // <100-byte handleAudio early-return on a stray audio_end doesn't
-      // clear the flag mid-transcription.
-      if (client.sttInFlightCount > 0) {
+      // clear the flag mid-transcription. HANDSFREE EXEMPT (Phase 9): window
+      // boundaries legitimately overlap a running transcription, and each
+      // handsfree window routes an INDEPENDENT command (no stale-result
+      // misrouting risk — there's no dictation waiting on a specific result).
+      if (client.sttInFlightCount > 0 && !handsfree) {
         sttError(client, 'audio_start rejected: previous transcription still in flight; wait for stt_result before starting again')
         break
       }
@@ -581,8 +634,9 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         channels: ch,
         encoding: msg.encoding ?? 'int16',
         source: msg.source,
+        mode: msg.mode === 'handsfree' ? 'handsfree' : undefined,   // Phase 9
       }
-      console.log(`[ws] audio_start sr=${client.audioFormat.sampleRate} ch=${client.audioFormat.channels} enc=${client.audioFormat.encoding} src=${client.audioFormat.source ?? '?'}`)
+      console.log(`[ws] audio_start sr=${client.audioFormat.sampleRate} ch=${client.audioFormat.channels} enc=${client.audioFormat.encoding} src=${client.audioFormat.source ?? '?'}${client.audioFormat.mode === 'handsfree' ? ' mode=handsfree' : ''}`)
       break
     }
 
@@ -937,7 +991,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
           if (!client.wm) {
             client.wm = new WindowManager({
               send: (scene) => sendMsg(client, { type: 'render', scene }),
-              audio: (action) => sendMsg(client, { type: 'audio_request', action }),
+              audio: (action, mode) => sendMsg(client, { type: 'audio_request', action, mode }),
               displayReload: () => sendMsg(client, { type: 'display_reload' }),
               log: (msg) => console.log(msg),
               pool: client.pool,
@@ -948,6 +1002,12 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
               g2Battery: () => client.g2Battery,
               lastDictationAudio: () => client.lastDictationAudio,
               dismissPhoneNotification: (key) => sendMsg(client, { type: 'notification_cancel', key }),
+              replyToNotification: (key, text) => sendMsg(client, { type: 'notification_reply', key, text }),   // Phase 4a
+              mediaCommand: (cmd) => sendMsg(client, { type: 'media_cmd', cmd }),                                // Phase 7
+              requestSmsThreads: (offset, limit) => sendMsg(client, { type: 'sms_threads_request', offset, limit }),  // Phase 4b
+              requestSmsThread: (threadId, page) => sendMsg(client, { type: 'sms_thread_request', threadId, page }),  // Phase 4b
+              sendSms: (address, text) => sendMsg(client, { type: 'sms_send', address, text }),                  // Phase 4b
+              phoneLocate: (action) => sendMsg(client, { type: 'phone_locate', action }),                       // Phase 15
             })
           }
           client.wm.requestRender()
@@ -1215,7 +1275,9 @@ async function handleAudio(
   format: AudioFormat,
   config: G2CCConfig,
 ): Promise<void> {
+  const isHandsfree = format.mode === 'handsfree'
   if (pcmBuffer.length < 100) {
+    if (isHandsfree) return   // a tiny handsfree flush — ignore quietly (not a dictation)
     // sttError (not raw sendMsg) so an accidental Dictate→Done unwinds the WM's
     // 'transcribing…' state instead of hanging it forever (review 2026-06-11).
     sttError(client, 'Audio too short')
@@ -1248,39 +1310,59 @@ async function handleAudio(
     pcm: pcmBuffer, sampleRate: format.sampleRate, channels: format.channels, encoding: format.encoding,
   }
 
-  if (isDji) {
+  // Phase 9 handsfree VAD gate (int16-mono only): drop silent buffers WITHOUT a
+  // Parakeet call — 8 h of factory silence must not hammer the GPU. No detected
+  // utterance → return quietly (silence is normal in handsfree, not an error).
+  if (isHandsfree && isLegacyShape) {
     try {
-      const text = await transcribeDji(pcmBuffer, format, config)
-      if (!text.trim()) {
-        sttError(client, 'No speech detected')
+      const i16 = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, Math.floor(pcmBuffer.length / 2))
+      if (segmentUtterances(i16, format.sampleRate).length === 0) {
+        console.log('[ws] handsfree: no speech (VAD-gated) — skipped')
         return
       }
-      sttResult(client, text, memoAudio)
-    } catch (err) {
-      sttError(client, `Transcription failed: ${err}`)
+    } catch (e) {
+      console.warn(`[ws] handsfree VAD gate failed (transcribing anyway): ${e instanceof Error ? e.message : String(e)}`)
     }
-    return
   }
 
+  // Deliver a transcript: handsfree → the voice grammar (onVoiceCommand);
+  // dictate → the active window's onStt via sttResult. Empty/failed handsfree is
+  // QUIET (no dictation is waiting on it — an sttError would disrupt the window).
+  const onText = (text: string): void => {
+    if (!text.trim()) {
+      if (isHandsfree) console.log('[ws] handsfree: empty transcript — ignored')
+      else sttError(client, 'No speech detected')
+      return
+    }
+    if (isHandsfree) {
+      if (client.osMode && client.osScreen === 'de' && client.wm) {
+        console.log(`[ws] handsfree voice → "${text}"`)
+        void client.wm.onVoiceCommand(text)
+      } else {
+        console.log(`[ws] handsfree transcript but no DE window manager — dropped: "${text}"`)
+      }
+    } else {
+      sttResult(client, text, memoAudio)
+    }
+  }
+  const onErr = (err: unknown): void => {
+    if (isHandsfree) console.warn(`[ws] handsfree transcribe failed: ${err}`)
+    else sttError(client, `Transcription failed: ${err}`)
+  }
+
+  if (isDji) {
+    try { onText(await transcribeDji(pcmBuffer, format, config)) } catch (err) { onErr(err) }
+    return
+  }
   if (!isLegacyShape) {
     const reason = `Audio format ${format.encoding}/${format.channels}ch/${format.sampleRate}Hz` +
-      ` src=${format.source ?? '?'} not routable. Expected dji-usb (48k/2ch/float32) ` +
-      `or phone-mic (16k/1ch/int16).`
+      ` src=${format.source ?? '?'} not routable. Expected dji-usb (48k/2ch/float32) or phone-mic (16k/1ch/int16).`
     console.warn(`[ws] ${reason}`)
+    if (isHandsfree) return   // a misconfigured handsfree shape — quiet (no dictation to unwind)
     sttError(client, reason)
     return
   }
-
-  try {
-    const text = await transcribe(pcmBuffer, config)
-    if (!text.trim()) {
-      sttError(client, 'No speech detected')
-      return
-    }
-    sttResult(client, text, memoAudio)
-  } catch (err) {
-    sttError(client, `Transcription failed: ${err}`)
-  }
+  try { onText(await transcribe(pcmBuffer, config)) } catch (err) { onErr(err) }
 }
 
 /** Deliver an STT result: in DE mode it routes to the active window (the

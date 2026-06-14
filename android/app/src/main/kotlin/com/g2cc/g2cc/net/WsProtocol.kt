@@ -74,6 +74,41 @@ data class DirectoryEntry(
     val entryCount: Int? = null,
 )
 
+/** One SMS/MMS conversation summary (Phase 4b). Mirrors shared SmsThread. */
+@Serializable
+data class SmsThread(
+    val id: String,
+    val name: String,
+    val address: String,
+    val snippet: String,
+    val unread: Boolean,
+    val tsMs: Long,
+)
+
+/** One message in an SMS/MMS thread (Phase 4b). Mirrors shared SmsMessage. */
+@Serializable
+data class SmsMessage(
+    val id: String,
+    val body: String,
+    val incoming: Boolean,
+    val tsMs: Long,
+    val imageB64: String? = null,
+)
+
+/** Now-playing snapshot (Phase 7). Mirrors shared MediaState (named MediaInfo
+ *  here to avoid colliding with the ClientMessage.MediaState variant). */
+@Serializable
+data class MediaInfo(
+    val playing: Boolean,
+    val title: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    val durationMs: Long? = null,
+    val positionMs: Long? = null,
+    val app: String? = null,
+    val artB64: String? = null,
+)
+
 // ---- Glasses-OS display contract (Phase 1) — mirrors shared/src/protocol.ts.
 // SceneContent is modelled as ONE flat data class (not a sealed hierarchy) so
 // it shares WsJson's `type` classDiscriminator-free: the polymorphism is the
@@ -155,6 +190,9 @@ sealed interface ClientMessage {
         /** Downscaled JPEG (base64) from EXTRA_PICTURE — MMS images on glass
          *  (Adam 2026-06-12, APK v1.9+). Default null = omitted on the wire. */
         val imageB64: String? = null,
+        /** The post carries an inline-reply RemoteInput (Phase 4a) → Notices
+         *  offers Reply. Default null/false; old servers ignore it. */
+        val hasReply: Boolean? = null,
     ) : ClientMessage
 
     /** The phone dismissed a notification WE forwarded → tell the server to mark
@@ -170,6 +208,7 @@ sealed interface ClientMessage {
         val channels: Int = 1,
         val encoding: String = "int16",          // "int16" | "float32"
         val source: String? = null,              // "phone-mic" | "dji-usb" | "dji-bt"
+        val mode: String? = null,                // "dictate" (default) | "handsfree" (Phase 9)
     ) : ClientMessage
 
     @Serializable @SerialName("audio_end")
@@ -258,6 +297,47 @@ sealed interface ClientMessage {
         val region: String? = null,         // focus — the focused region's name
         val value: Int? = null,             // focus — raw f3 (observed 1/2)
     ) : ClientMessage
+
+    /** Result of a Phase-4a inline reply we attempted (loud either way). */
+    @Serializable @SerialName("notification_reply_result")
+    data class NotificationReplyResult(
+        val key: String,
+        val ok: Boolean,
+        val error: String? = null,
+    ) : ClientMessage
+
+    /** Now-playing snapshot pushed on MediaSession change (Phase 7). */
+    @Serializable @SerialName("media_state")
+    data class MediaState(val state: MediaInfo) : ClientMessage
+
+    /** Reply to sms_threads_request (Phase 4b) — the phone is the provider. */
+    @Serializable @SerialName("sms_threads_reply")
+    data class SmsThreadsReply(
+        val threads: List<SmsThread>,
+        val offset: Int,
+        val total: Int,
+        val error: String? = null,
+    ) : ClientMessage
+
+    /** Reply to sms_thread_request — one thread's messages, paginated. */
+    @Serializable @SerialName("sms_thread_reply")
+    data class SmsThreadReply(
+        val threadId: String,
+        val name: String,
+        val address: String,
+        val messages: List<SmsMessage>,
+        val page: Int,
+        val totalPages: Int,
+        val error: String? = null,
+    ) : ClientMessage
+
+    /** Live Maps nav line → pinned top-line on glass (Phase 6). */
+    @Serializable @SerialName("nav_update")
+    data class NavUpdate(val text: String, val eta: String? = null) : ClientMessage
+
+    /** Navigation ended — drop the pinned nav line (Phase 6). */
+    @Serializable @SerialName("nav_clear")
+    data object NavClear : ClientMessage
 }
 
 // ============================================================
@@ -366,7 +446,7 @@ sealed interface ServerMessage {
      *  Drives AudioStreamer; capture failures surface back to the server as a
      *  '[audio-error]'-prefixed diag message (loud, never logcat-only). */
     @Serializable @SerialName("audio_request")
-    data class AudioRequest(val action: String) : ServerMessage   // 'start' | 'stop'
+    data class AudioRequest(val action: String, val mode: String? = null) : ServerMessage   // action: start|stop; mode: dictate(default)|handsfree (Phase 9)
 
     /** Server → client: the DE 'Reload' action — abort any wedged render op and
      *  re-run the COLD_INIT re-takeover with the current scene (the proven
@@ -382,4 +462,30 @@ sealed interface ServerMessage {
 
     @Serializable @SerialName("error")
     data class Error(val message: String) : ServerMessage
+
+    /** Fill + fire a forwarded notification's inline-reply RemoteInput (Phase
+     *  4a). The client reports back via ClientMessage.NotificationReplyResult. */
+    @Serializable @SerialName("notification_reply")
+    data class NotificationReply(val key: String, val text: String) : ServerMessage
+
+    /** A media transport command (Phase 7). 'subscribe'/'unsubscribe' gate the
+     *  MediaController callback; subscribe also pushes the current state. */
+    @Serializable @SerialName("media_cmd")
+    data class MediaCmd(val cmd: String) : ServerMessage   // play_pause|next|prev|shuffle|subscribe|unsubscribe
+
+    /** Query the phone's SMS/MMS thread list (Phase 4b). */
+    @Serializable @SerialName("sms_threads_request")
+    data class SmsThreadsRequest(val offset: Int, val limit: Int) : ServerMessage
+
+    /** Query one SMS/MMS thread's messages, paginated (Phase 4b). */
+    @Serializable @SerialName("sms_thread_request")
+    data class SmsThreadRequest(val threadId: String, val page: Int) : ServerMessage
+
+    /** Send an SMS (Phase 4b — SmsManager.sendTextMessage, needs SEND_SMS). */
+    @Serializable @SerialName("sms_send")
+    data class SmsSend(val address: String, val text: String) : ServerMessage
+
+    /** Ring the phone to find it (Phase 15). */
+    @Serializable @SerialName("phone_locate")
+    data class PhoneLocate(val action: String) : ServerMessage   // 'start' | 'stop'
 }

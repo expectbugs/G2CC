@@ -1830,6 +1830,17 @@ class G2Pipeline(
                 // doesn't run the NotifyListener forwarding, so nothing to cancel.
                 Log.w(TAG, "unexpected notification_cancel in legacy dispatch path — ignoring")
             }
+            // Glasses-OS-only messages (Phases 4a/4b/6/7/15). The parked legacy
+            // dispatch pipeline never opts into os_attach, so these never arrive
+            // here — handled to keep the `when` exhaustive (no else).
+            is ServerMessage.NotificationReply,
+            is ServerMessage.MediaCmd,
+            is ServerMessage.SmsThreadsRequest,
+            is ServerMessage.SmsThreadRequest,
+            is ServerMessage.SmsSend,
+            is ServerMessage.PhoneLocate -> {
+                Log.w(TAG, "unexpected OS-mode message ${msg::class.simpleName} in legacy dispatch path — ignoring")
+            }
         }
     }
 

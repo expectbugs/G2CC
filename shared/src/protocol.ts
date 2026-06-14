@@ -63,6 +63,45 @@ export interface DirectoryEntry {
   entryCount?: number
 }
 
+/** One SMS/MMS conversation summary (Phase 4b). The phone is the data provider
+ *  — the server requests threads on demand and the client replies with these.
+ *  `id` is the Telephony thread_id (string for JSON safety). */
+export interface SmsThread {
+  id: string
+  name: string         // contact name, or the raw address if unresolved
+  address: string      // canonical address (number/short-code)
+  snippet: string      // last message, one line
+  unread: boolean
+  tsMs: number         // last-message epoch ms
+}
+
+/** One message within an SMS/MMS thread (Phase 4b). `incoming` = received
+ *  (vs. sent by Adam). `imageB64` carries an MMS image part (downscaled JPEG,
+ *  the Phase-1 path); absent for text-only messages. */
+export interface SmsMessage {
+  id: string
+  body: string
+  incoming: boolean
+  tsMs: number
+  imageB64?: string
+}
+
+/** Now-playing snapshot pushed by the phone's MediaSessionManager (Phase 7).
+ *  All fields optional past `playing` — a paused/empty session still reports. */
+export interface MediaState {
+  playing: boolean
+  title?: string
+  artist?: string
+  album?: string
+  durationMs?: number
+  positionMs?: number
+  /** The controlling app's package (informational; logged). */
+  app?: string
+  /** Album art — downscaled JPEG base64 (the Phase-1 encode path); pushed once
+   *  per track. Absent when the session exposes no art. */
+  artB64?: string
+}
+
 // ============================================================
 // Glasses-OS display contract (Phase 1 — the remote display loop)
 //
@@ -201,6 +240,10 @@ export interface NotifyMsg {
    *  client-downscaled JPEG, base64. Absent for picture-less notifications
    *  and on v≤1.8 APKs. The server caps the decoded size (loud reject). */
   imageB64?: string
+  /** The notification carries an inline-reply action with a RemoteInput (Phase
+   *  4a) — Notices then offers `Reply`, which dictates a reply the client fills
+   *  into that RemoteInput. Absent/false on older APKs and non-replyable posts. */
+  hasReply?: boolean
 }
 
 /** The phone dismissed a notification it had forwarded (Adam 2026-06-13 dismiss
@@ -229,6 +272,11 @@ export interface AudioStartMsg {
   // paired straight to the phone over Bluetooth (HFP/SCO): same 16k/1ch/int16
   // wire shape as 'phone-mic', so it rides the legacy mono path.
   source?: 'phone-mic' | 'dji-usb' | 'dji-bt'
+  /** Dictation mode (Phase 9). 'dictate' (default/omitted) = one-shot push-to-
+   *  talk → the transcript routes to the active window's onStt. 'handsfree' =
+   *  a continuous-listening utterance → routed to the VOICE-COMMAND grammar
+   *  (Reader next/back, or the "butterscotch"-prefixed OS grammar) instead. */
+  mode?: 'dictate' | 'handsfree'
 }
 export interface AudioEndMsg { type: 'audio_end' }
 // Audio data is sent as raw WebSocket binary frames between audio_start and audio_end.
@@ -357,6 +405,64 @@ export interface InputMsg {
   value?: number
 }
 
+/** Result of a Phase-4a inline reply the client attempted (filled a forwarded
+ *  notification's RemoteInput + fired its PendingIntent). LOUD either way — the
+ *  server renders success/failure so a lost reply is never silent. */
+export interface NotificationReplyResultMsg {
+  type: 'notification_reply_result'
+  key: string
+  ok: boolean
+  error?: string
+}
+
+/** The phone's current now-playing snapshot (Phase 7) — pushed on every
+ *  MediaSession change while the Media window has it subscribed (media_cmd
+ *  subscribe/unsubscribe gate it; old APKs never send it). */
+export interface MediaStateMsg {
+  type: 'media_state'
+  state: MediaState
+}
+
+/** Reply to a server `sms_threads_request` (Phase 4b) — the phone is the data
+ *  provider; the server queried the Telephony provider on its behalf. `error`
+ *  set (with empty threads) when the provider read failed (loud, never silent). */
+export interface SmsThreadsReplyMsg {
+  type: 'sms_threads_reply'
+  threads: SmsThread[]
+  offset: number
+  total: number
+  error?: string
+}
+
+/** Reply to a server `sms_thread_request` — one thread's messages, paginated
+ *  (newest last; image parts ride `imageB64`). `error` set on a provider read
+ *  failure. */
+export interface SmsThreadReplyMsg {
+  type: 'sms_thread_reply'
+  threadId: string
+  name: string
+  address: string
+  messages: SmsMessage[]
+  page: number
+  totalPages: number
+  error?: string
+}
+
+/** Live turn-by-turn from the phone's Maps nav notification (Phase 6). The
+ *  client allow-lists the ongoing Maps nav notification (normally dropped) and
+ *  forwards its maneuver/distance/ETA line; the server pins it as a persistent
+ *  top-line (NOT a 5 s flash) until `nav_clear`. Updates in place. */
+export interface NavUpdateMsg {
+  type: 'nav_update'
+  text: string
+  /** "12 min · 3.4 mi · 14:32" trailing context, if parseable. */
+  eta?: string
+}
+
+/** Navigation ended (the Maps nav notification was removed) — drop the pinned
+ *  nav line (Phase 6). */
+export interface NavClearMsg { type: 'nav_clear' }
+
 export type ClientMessage =
   | AuthMsg
   | ClientHbMsg
@@ -385,6 +491,12 @@ export type ClientMessage =
   | OsAttachMsg
   | InputMsg
   | NotificationDismissedMsg
+  | NotificationReplyResultMsg
+  | MediaStateMsg
+  | SmsThreadsReplyMsg
+  | SmsThreadReplyMsg
+  | NavUpdateMsg
+  | NavClearMsg
 
 // ============================================================
 // Server -> Client messages
@@ -542,6 +654,11 @@ export interface RenderMsg {
 export interface AudioRequestMsg {
   type: 'audio_request'
   action: 'start' | 'stop'
+  /** Capture mode (Phase 9). 'dictate' (default/omitted) = one-shot push-to-talk.
+   *  'handsfree' = continuous listening: the client re-arms after each utterance
+   *  and tags its audio_start mode:'handsfree' so the server routes to the voice
+   *  grammar. Stop ends either. */
+  mode?: 'dictate' | 'handsfree'
 }
 
 /** Server → client: cancel a forwarded notification on the PHONE (Adam
@@ -565,6 +682,59 @@ export interface DisplayReloadMsg {
 export interface ErrorMsg {
   type: 'error'
   message: string
+}
+
+/** Server → client: fill + fire a forwarded notification's inline-reply
+ *  RemoteInput (Phase 4a). The client finds the active notification by key,
+ *  fills the reply action's RemoteInput with `text`, and fires its
+ *  PendingIntent; it reports back via NotificationReplyResultMsg (loud). */
+export interface NotificationReplyMsg {
+  type: 'notification_reply'
+  key: string
+  text: string
+}
+
+/** Server → client: a media transport command for the active MediaSession
+ *  (Phase 7). subscribe/unsubscribe register/release the MediaController
+ *  callback (and subscribe pushes the current state immediately); the rest are
+ *  transport. */
+export interface MediaCmdMsg {
+  type: 'media_cmd'
+  cmd: 'play_pause' | 'next' | 'prev' | 'shuffle' | 'subscribe' | 'unsubscribe'
+}
+
+/** Server → client: query the phone's SMS/MMS thread list (Phase 4b). The
+ *  client reads Telephony.Sms/Mms + resolves contact names and replies with
+ *  SmsThreadsReplyMsg. */
+export interface SmsThreadsRequestMsg {
+  type: 'sms_threads_request'
+  offset: number
+  limit: number
+}
+
+/** Server → client: query one thread's messages, paginated (Phase 4b). */
+export interface SmsThreadRequestMsg {
+  type: 'sms_thread_request'
+  threadId: string
+  page: number
+}
+
+/** Server → client: send an SMS to `address` (Phase 4b — the SMS-window Reply/
+ *  New flow, after the dictation confirm). Uses SmsManager.sendTextMessage
+ *  (needs SEND_SMS). Result returns as a fresh sms_thread_reply on the next
+ *  thread refresh; the send itself is acked via a `[sms]` diag (loud). */
+export interface SmsSendMsg {
+  type: 'sms_send'
+  address: string
+  text: string
+}
+
+/** Server → client: ring the phone to find it (Phase 15). `start` maxes
+ *  STREAM_ALARM + plays a loud tone (~30 s, self-stopping; cancels on any phone
+ *  interaction). `stop` cancels early. Loud diag both ends. */
+export interface PhoneLocateMsg {
+  type: 'phone_locate'
+  action: 'start' | 'stop'
 }
 
 export type ServerMessage =
@@ -594,3 +764,9 @@ export type ServerMessage =
   | DisplayReloadMsg
   | NotificationCancelMsg
   | ErrorMsg
+  | NotificationReplyMsg
+  | MediaCmdMsg
+  | SmsThreadsRequestMsg
+  | SmsThreadRequestMsg
+  | SmsSendMsg
+  | PhoneLocateMsg

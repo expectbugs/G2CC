@@ -19,6 +19,7 @@ export type Intent =
   | { kind: 'timer'; minutes: number; label: string }
   | { kind: 'note'; text: string }
   | { kind: 'memo'; text: string }   // Phase 14: saves audio clip + transcript
+  | { kind: 'findphone' }            // Phase 15: ring the phone to find it
 
 // G2CC_NOTES_FILE override exists for the SMOKE SUITE ONLY (review
 // 2026-06-11b: phase6 used to append to + filter-rewrite Adam's REAL inbox —
@@ -44,9 +45,13 @@ const NOTE_RE = /^note\b[:,]?\s+(.+)$/is
 // Phase 14: `memo: <anything>` / `memo <anything>` — same "that …" exclusion as
 // note ("memo that report" reads conversational → falls through to Aria).
 const MEMO_RE = /^memo\b[:,]?\s+(.+)$/is
+// Phase 15: "find/locate/ring my phone", "where's my phone" → ring the phone.
+const FINDPHONE_RE = /^(?:please\s+)?(?:find|locate|ring|ping|where(?:'?s| is)?)\s+(?:my\s+)?phone\b/i
 
 export function parseIntent(text: string): Intent | null {
   const t = text.trim()
+
+  if (FINDPHONE_RE.test(t)) return { kind: 'findphone' }
 
   const tm = TIMER_RE.exec(t)
   if (tm) {

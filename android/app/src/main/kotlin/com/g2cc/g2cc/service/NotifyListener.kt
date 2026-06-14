@@ -89,6 +89,7 @@ class NotifyListener : NotificationListenerService() {
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         try {
             val key = sbn.key ?: return
+            if (key == navKey) { navKey = null; ConnectionService.forwardNavClear(); return }   // Phase 6: navigation ended
             val wasForwarded = synchronized(seen) { seen.remove(key) != null }
             if (wasForwarded) {
                 imgJobs.remove(key)?.cancel()   // a removed notification's image loop is moot
@@ -112,6 +113,22 @@ class NotifyListener : NotificationListenerService() {
     private fun forward(sbn: StatusBarNotification) {
         val n = sbn.notification ?: return
         if (sbn.packageName == packageName) return                                    // our own FGS notification
+
+        // Phase 6: Google Maps live-navigation notification → a PINNED nav line
+        // (it's ongoing, so the ongoing-drop below would otherwise kill it).
+        // Allow-listed by package; updates in place; nav_clear on removal.
+        if (sbn.packageName == MAPS_PKG && sbn.isOngoing) {
+            val e = n.extras
+            val navTitle = e.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString()?.trim() ?: ""
+            val navText = e.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString()?.trim() ?: ""
+            if (navTitle.isNotEmpty() || navText.isNotEmpty()) {
+                navKey = sbn.key
+                val line = if (navTitle.isNotEmpty()) navTitle else navText
+                val eta = if (navTitle.isNotEmpty() && navText.isNotEmpty()) navText else null
+                ConnectionService.forwardNavUpdate(line, eta)
+            }
+            return
+        }
         // CATEGORY_CALL passes the ongoing/FGS gates (review 2026-06-11b): an
         // INCOMING call's notification is CallStyle = ongoing + posted by the
         // dialer's InCallService FGS — both filters dropped it, so the server's
@@ -143,6 +160,7 @@ class NotifyListener : NotificationListenerService() {
         // row + a ⚠ flash on glass). Content CHANGES still forward; the
         // 64-entry LRU ages suppressed keys out.
         val imgRef = imageRef(n, extras)
+        val hasReply = findReplyAction(n) != null                                     // Phase 4a: inline reply available?
         val stamp = "${(title + "\u0000" + text + "\u0000" + imgRef).hashCode()}"
         synchronized(seen) {
             if (seen[sbn.key] == stamp) return
@@ -157,7 +175,7 @@ class NotifyListener : NotificationListenerService() {
         if (imgRef.isEmpty()) {
             ConnectionService.forwardNotification(
                 pkg = sbn.packageName, title = title, text = text,
-                postedAt = sbn.postTime, key = sbn.key, imageB64 = null,
+                postedAt = sbn.postTime, key = sbn.key, imageB64 = null, hasReply = hasReply,
             )
             return
         }
@@ -192,7 +210,7 @@ class NotifyListener : NotificationListenerService() {
             if (img == null) DiagLog.log("notify", "MMS image NEVER readable after 4 attempts — forwarding imageless (LOUD)")
             ConnectionService.forwardNotification(
                 pkg = sbn.packageName, title = title, text = text,
-                postedAt = sbn.postTime, key = sbn.key, imageB64 = img,
+                postedAt = sbn.postTime, key = sbn.key, imageB64 = img, hasReply = hasReply,
             )
         }
         // Put BEFORE registering completion: if the job finishes before this line,
@@ -319,9 +337,57 @@ class NotifyListener : NotificationListenerService() {
         }
     }
 
+    /** Phase 4a: the notification's first action carrying a free-form-input
+     *  RemoteInput (the inline-reply action). null = not replyable. */
+    private fun findReplyAction(n: android.app.Notification): android.app.Notification.Action? {
+        val actions = n.actions ?: return null
+        return actions.firstOrNull { a -> a.remoteInputs?.any { it.allowFreeFormInput } == true }
+    }
+
+    /** Phase 4a: fill the reply action's RemoteInput with `text` + fire its
+     *  PendingIntent. Reports the outcome to the server (loud either way). Only
+     *  a still-live notification can be replied to. */
+    private fun doReply(key: String, text: String) {
+        try {
+            val sbn = activeNotifications?.firstOrNull { it.key == key }
+            if (sbn == null) { ConnectionService.forwardReplyResult(key, false, "notification no longer posted on the phone"); return }
+            val action = findReplyAction(sbn.notification)
+            // Free-form ONLY — the action was selected for its free-form input; a
+            // fallback to a non-free-form RemoteInput (a choice list) would fill the
+            // wrong key with arbitrary text.
+            val remoteInput = action?.remoteInputs?.firstOrNull { it.allowFreeFormInput }
+            val pi = action?.actionIntent
+            if (action == null || remoteInput == null || pi == null) {
+                ConnectionService.forwardReplyResult(key, false, "no inline-reply action on this notification")
+                return
+            }
+            val intent = android.content.Intent()
+            val results = android.os.Bundle().apply { putCharSequence(remoteInput.resultKey, text) }
+            android.app.RemoteInput.addResultsToIntent(arrayOf(remoteInput), intent, results)
+            pi.send(this, 0, intent)
+            ConnectionService.forwardReplyResult(key, true, null)
+            DiagLog.log("notify", "inline reply sent for $key (${text.length} chars)")
+        } catch (e: Exception) {
+            DiagLog.log("notify", "doReply($key) threw: $e")
+            ConnectionService.forwardReplyResult(key, false, "send failed: ${e.message}")
+        }
+    }
+
     companion object {
         private const val SEEN_CAP = 64
         private val seen = LinkedHashMap<String, String>()
+        private const val MAPS_PKG = "com.google.android.apps.maps"
+        /** Phase 6: the key of the live Maps nav notification (cleared on removal). */
+        @Volatile
+        private var navKey: String? = null
+
+        /** Phase 4a: server → client — fill + fire a forwarded notification's
+         *  inline-reply RemoteInput. Routed to the live listener instance. */
+        fun replyByKey(key: String, text: String) {
+            val inst = live
+            if (inst == null) { ConnectionService.forwardReplyResult(key, false, "no live notification listener — open the app once"); return }
+            inst.doReply(key, text)
+        }
 
         /** Liveness: set in onListenerConnected, cleared on disconnect. */
         @Volatile

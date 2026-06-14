@@ -16,10 +16,12 @@
 
 import { execFile } from 'node:child_process'
 import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync, existsSync, constants as fsConstants } from 'node:fs'
-import { rename, copyFile, unlink, mkdir, rm, cp } from 'node:fs/promises'
+import { rename, copyFile, unlink, mkdir, rm, cp, writeFile } from 'node:fs/promises'
 import { join, basename, dirname, resolve as resolvePath } from 'node:path'
+import { tmpdir } from 'node:os'
 import { DE_CONTENT_W, DE_CONTENT_H, SCREEN_WIDTH } from '@g2cc/shared'
-import type { WireScene } from '@g2cc/shared'
+import type { WireScene, MediaState, SmsThread, SmsMessage } from '@g2cc/shared'
+import { getLyrics, parseLrc, currentLrcIndex, type LrcLine } from './lyrics.js'
 import type { G2CCConfig } from './config.js'
 import { listProjectDirectories } from './directory-picker.js'
 import {
@@ -37,6 +39,7 @@ import {
   type TurnKind,
 } from './history.js'
 import { suggestNextPrompt, SUGGEST_CONTEXT_TURNS } from './suggest.js'
+import { parseVoiceCommand, type VoiceCommand } from './voice.js'
 import {
   notifyHub, markSeen, markAllSeen, unseenCount, latestUnseenFlash, listNotifications,
   getNotification, notify, OVERLAY_PRIORITIES, PRIORITY_RANK, type NotifyEvent,
@@ -119,8 +122,9 @@ const FILE_PREVIEW_BYTES = 256 * 1024
 export interface WmContext {
   /** Send the composed scene to the glasses. */
   send(scene: WireScene): void
-  /** Drive the phone mic (dictation). */
-  audio(action: 'start' | 'stop'): void
+  /** Drive the phone mic. mode 'handsfree' (Phase 9) = continuous listening for
+   *  the voice grammar; omitted/'dictate' = one-shot push-to-talk (the default). */
+  audio(action: 'start' | 'stop', mode?: 'dictate' | 'handsfree'): void
   /** Tell the client to abort + COLD_INIT-relaunch its current scene (the
    *  'Reload' unstick — display_reload on the wire). */
   displayReload(): void
@@ -142,6 +146,20 @@ export interface WmContext {
   /** Tell the phone to cancel a notification it forwarded (Adam 2026-06-13:
    *  reading/MkAll on glass dismisses it on the phone too). */
   dismissPhoneNotification?(key: string): void
+  /** Phase 4a: fill + fire a forwarded notification's inline-reply RemoteInput
+   *  (the client reports the outcome back via onNotificationReplyResult). */
+  replyToNotification?(key: string, text: string): void
+  /** Phase 7: a media transport command for the phone's active MediaSession
+   *  (play_pause/next/prev/shuffle/subscribe/unsubscribe). */
+  mediaCommand?(cmd: 'play_pause' | 'next' | 'prev' | 'shuffle' | 'subscribe' | 'unsubscribe'): void
+  /** Phase 4b: query the phone's SMS/MMS thread list (reply → onSmsThreads). */
+  requestSmsThreads?(offset: number, limit: number): void
+  /** Phase 4b: query one SMS/MMS thread's messages (reply → onSmsThread). */
+  requestSmsThread?(threadId: string, page: number): void
+  /** Phase 4b: send an SMS (after the dictation confirm; needs SEND_SMS). */
+  sendSms?(address: string, text: string): void
+  /** Phase 15: ring the phone to find it (start/stop). */
+  phoneLocate?(action: 'start' | 'stop'): void
 }
 
 /** Main's category-launcher groups (upgrades.md v2 Phase 11, XFCE-style). Each
@@ -947,6 +965,21 @@ class SessionLevel {
     if (this.windowId !== 'aria') return false
     const intent = parseIntent(text)
     if (!intent) return false
+    if (intent.kind === 'findphone') {
+      // Phase 15: ring the phone to find it. Loud both ends; the client maxes
+      // STREAM_ALARM + plays a tone (~30 s, self-stopping; cancels on touch).
+      if (this.ctx.phoneLocate) {
+        this.ctx.phoneLocate('start')
+        this.ctx.log('[intent] FIND PHONE — ring requested')
+        await this.setDoc([
+          { t: 'heading', text: 'Ringing your phone', meta: '🔊' },
+          { t: 'para', text: 'Playing a loud tone for ~30 s. Touch the phone to silence it.' },
+        ])
+      } else {
+        this.showError('Phone-finder unsupported by this client build.', 'Update the app to use it.')
+      }
+      return true
+    }
     if (intent.kind === 'timer') {
       try {
         const t = await createTimer(intent.minutes, intent.label)
@@ -4211,6 +4244,11 @@ class NoticesWindow implements OsWindow {
   private focus: 'content' | 'menu' = 'content'
   /** Stale-swap guard for the async image render (the documented pattern). */
   private readSeq = 0
+  // ---- Phase 4a inline-reply state (active only within the read level) ----
+  private replyKey: string | null = null            // the read post's key, iff replyable
+  private replyStage: 'idle' | 'listening' | 'transcribing' | 'confirm' | 'sending' | 'result' = 'idle'
+  private replyText: string | null = null           // dictated reply awaiting confirm
+  private replyResult: string | null = null         // last send outcome (shown, then Back)
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -4224,9 +4262,13 @@ class NoticesWindow implements OsWindow {
 
   async view(): Promise<WinView> {
     if (this.level === 'read') {
+      if (this.replyStage !== 'idle') return this.replyView()
       const pageSuffix = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
       const title = `Notices · ${this.readTitle}${pageSuffix}`
-      const menu = ['Next', 'Prev', 'Back', 'Reload', 'Main']
+      // Phase 4a: Reply leads the menu when the post carries a live RemoteInput.
+      const menu = this.replyKey
+        ? ['Reply', 'Next', 'Prev', 'Back', 'Reload', 'Main']
+        : ['Next', 'Prev', 'Back', 'Reload', 'Main']
       const cur = this.pages[this.page]
       if (cur !== undefined && typeof cur !== 'string') {
         if (cur.img) return { mode: 'tiles', tilesRect: { w: cur.img.w, h: cur.img.h }, title, menu, tiles: cur.img.tiles }
@@ -4273,6 +4315,11 @@ class NoticesWindow implements OsWindow {
       if (!n) throw new Error(`notification ${sel.id} not found`)
       this.pages = paginateText(`${n.title}\n${n.priority} · ${n.source} · ${fmtStamp(n.ts)}\n\n${n.body}`)
       this.readTitle = oneLine(n.title, 24)
+      // Phase 4a: this post is replyable iff it carried a RemoteInput AND a key
+      // (only a still-live phone post can be replied to — the client reports a
+      // loud failure if the user already dismissed it on the phone).
+      this.replyStage = 'idle'; this.replyText = null; this.replyResult = null
+      this.replyKey = (n.hasReply && n.key) ? n.key : null
       if (n.imagePath) {
         // MMS picture (Adam 2026-06-12): a trailing IMAGE page via the Files
         // image pipeline (fit + dither + 4 tiles). PAGE-2 RULE: text first,
@@ -4301,6 +4348,7 @@ class NoticesWindow implements OsWindow {
       this.ctx.log(`[os] notices: read ${sel.id} failed: ${(e as Error).message}`)
       this.pages = paginateText(`ERROR reading notification:\n\n${(e as Error).message}`)
       this.readTitle = '(error)'
+      this.replyKey = null; this.replyStage = 'idle'
     }
     this.page = 0
     this.level = 'read'
@@ -4323,18 +4371,141 @@ class NoticesWindow implements OsWindow {
       return
     }
     if (this.level !== 'read') { this.ctx.log(`[os] notices: menu '${label}' outside read level — ignored`); return }
+    if (this.replyStage !== 'idle') return this.onReplyMenu(label)
     switch (label) {
+      case 'Reply':
+        if (!this.replyKey) { this.ctx.log('[os] notices: Reply with no replyable key — ignored (LOUD)'); return }
+        this.startReply()
+        break
       case 'Next': if (this.page < this.pages.length - 1) { this.page++; this.requestRender() } break
       case 'Prev': if (this.page > 0) { this.page--; this.requestRender() } break
       default: this.ctx.log(`[os] notices read: unknown menu label '${label}' — ignored (LOUD)`)
     }
   }
 
+  // ---- Phase 4a inline reply (mirrors the Mail compose dictate→confirm→send) ----
+
+  private replyView(): WinView {
+    const t = `Notices · reply`
+    switch (this.replyStage) {
+      case 'listening':
+        return { mode: 'text', title: `${t} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: 'Listening — speak your reply, then Done.' }
+      case 'transcribing':
+        return { mode: 'text', title: `${t} · transcribing…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
+      case 'confirm':
+        return {
+          mode: 'text', title: `${t} · send?`, menu: ['Send', 'Re-record', 'Cancel', 'Reload', 'Main'],
+          text: `Reply to ${this.readTitle}:\n${'─'.repeat(20)}\n${clampConfirmBody(this.replyText ?? '')}\n${'─'.repeat(20)}\nSend · Re-record · Cancel`,
+        }
+      case 'sending':
+        return { mode: 'text', title: `${t} · sending…`, menu: ['Reload', 'Main'], text: 'Sending the reply to the phone…' }
+      case 'result':
+        return { mode: 'text', title: `${t} · done`, menu: ['Back', 'Reload', 'Main'], text: this.replyResult ?? '(no result)' }
+      default:
+        return { mode: 'text', title: t, menu: ['Cancel', 'Reload', 'Main'], text: 'Preparing…' }
+    }
+  }
+
+  private startReply(): void {
+    this.replyStage = 'listening'
+    this.replyText = null
+    this.replyResult = null
+    this.ctx.audio('start')
+    this.requestRender()
+  }
+
+  /** Clear the reply machine (every exit path). Stops the mic if it's live. */
+  private stopReply(why: string): void {
+    if (this.replyStage === 'listening' || this.replyStage === 'transcribing') this.ctx.audio('stop')
+    if (this.replyStage !== 'idle') this.ctx.log(`[os] notices: reply aborted — ${why}`)
+    this.replyStage = 'idle'
+    this.replyText = null
+  }
+
+  private onReplyMenu(label: string): void {
+    switch (label) {
+      case 'Done':
+        if (this.replyStage !== 'listening') { this.ctx.log('[os] notices: reply Done with no live mic — ignored'); return }
+        this.replyStage = 'transcribing'; this.ctx.audio('stop'); this.requestRender()
+        return
+      case 'Cancel':
+        this.stopReply('cancel'); this.requestRender()
+        return
+      case 'Send':
+        if (this.replyStage === 'confirm' && this.replyText) this.doReply()
+        else this.ctx.log(`[os] notices: reply Send at stage '${this.replyStage}' — ignored (LOUD)`)
+        return
+      case 'Re-record':
+        this.startReply()
+        return
+      case 'Back':
+        if (this.replyStage === 'result') { this.replyStage = 'idle'; this.replyResult = null; this.requestRender() }
+        return
+      default: this.ctx.log(`[os] notices reply: unknown menu label '${label}' — ignored (LOUD)`)
+    }
+  }
+
+  /** Hand the dictated reply to the client (fills the RemoteInput, fires the
+   *  PendingIntent). Result returns async via onReplyResult — loud either way. */
+  private doReply(): void {
+    const key = this.replyKey
+    const text = this.replyText
+    if (!key || !text) { this.ctx.log('[os] notices: doReply with no key/text — ignored (LOUD)'); return }
+    if (!this.ctx.replyToNotification) {
+      this.replyStage = 'result'
+      this.replyResult = 'Reply unsupported by this client build — update the app.'
+      this.requestRender()
+      return
+    }
+    this.replyStage = 'sending'
+    this.requestRender()
+    this.ctx.log(`[os] notices: reply → phone (key=${key.slice(0, 40)}): "${text.slice(0, 60)}"`)
+    this.ctx.replyToNotification(key, text)
+  }
+
+  /** The phone reported the reply outcome (Phase 4a). Loud either way. */
+  onReplyResult(key: string, ok: boolean, error: string | null): void {
+    if (this.replyStage !== 'sending') { this.ctx.log(`[os] notices: reply result for ${key.slice(0, 40)} but not awaiting one (stage=${this.replyStage}) — logged`); return }
+    this.replyStage = 'result'
+    this.replyResult = ok
+      ? 'Reply sent ✓'
+      : `Reply FAILED: ${error ?? 'unknown'}\n\nThe phone may have already dismissed this notification — open Messages to reply there.`
+    this.ctx.log(`[os] notices: reply ${ok ? 'OK' : `FAILED (${error})`}`)
+    this.requestRender()
+  }
+
+  async onStt(text: string): Promise<void> {
+    if (this.replyStage !== 'transcribing') {
+      this.ctx.log(`[os] notices: STT arrived but not awaiting a reply (stage=${this.replyStage}) — discarded: "${text.slice(0, 60)}"`)
+      this.requestRender()
+      return
+    }
+    this.replyText = text.trim()
+    this.replyStage = 'confirm'
+    this.requestRender()
+  }
+
+  async onSttError(error: string): Promise<void> {
+    if (this.replyStage === 'idle') { this.ctx.log(`[os] notices: stt error with no reply in flight — ${error}`); return }
+    this.ctx.log(`[os] notices: reply dictation failed — ${error}`)
+    this.stopReply('stt error')
+    this.requestRender()
+  }
+
+  /** No overlay repaint over a live reply mic / confirm / send (B5). */
+  interruptible(): boolean {
+    return this.replyStage === 'idle' || this.replyStage === 'result'
+  }
+
+  onDeactivate(): void { this.stopReply('window switch') }
+
   async onReload(): Promise<void> {
+    this.stopReply('reload')   // unstick a wedged reply (e.g. a result that never arrived)
     this.focus = 'content'
   }
 
   async onBack(): Promise<boolean> {
+    if (this.level === 'read' && this.replyStage !== 'idle') { this.stopReply('back'); this.requestRender(); return true }
     if (this.level === 'read') { this.readSeq++; this.level = 'list'; this.focus = 'content'; this.requestRender(); return true }
     if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
     this.focus = 'content'
@@ -4371,6 +4542,10 @@ class ReaderWindow implements OsWindow {
   private pages: string[] = []
   private page = 0
   private focus: 'content' | 'menu' = 'content'
+  /** Phase 9a: per-session handsfree voice-paging toggle (read level). When on,
+   *  the mic streams continuously (mode:handsfree) and the server accepts a bare
+   *  "next"/"back". The WM reads this to gate the 9a grammar. */
+  voiceOn = false
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -4379,6 +4554,17 @@ class ReaderWindow implements OsWindow {
       return `${oneLine(this.bookTitle, 18)} · ch${this.chapter + 1} p${this.page + 1}`
     }
     return this.books.length ? `${this.books.length} books` : 'library'
+  }
+
+  statusLine(): string | null { return this.voiceOn ? 'voice ▲' : null }
+
+  /** Toggle handsfree voice-paging (Phase 9a). Starts/stops the continuous mic. */
+  private setVoice(on: boolean): void {
+    if (this.voiceOn === on) return
+    this.voiceOn = on
+    if (on) { this.ctx.log('[reader] voice-paging ON (handsfree)'); this.ctx.audio('start', 'handsfree') }
+    else { this.ctx.log('[reader] voice-paging OFF'); this.ctx.audio('stop') }
+    this.requestRender()
   }
 
   private listBooks(): string[] {
@@ -4431,7 +4617,7 @@ class ReaderWindow implements OsWindow {
       return {
         mode: 'text',
         title: `${oneLine(this.bookTitle, 16)} · ${oneLine(this.chapterTitle, 14)}${pageSuffix}`,
-        menu: ['Next', 'Prev', 'Back', 'Reload', 'Main'],
+        menu: ['Next', 'Prev', this.voiceOn ? 'Voice off' : 'Voice on', 'Back', 'Reload', 'Main'],
         text: this.pages[this.page] ?? '',
       }
     }
@@ -4547,16 +4733,25 @@ class ReaderWindow implements OsWindow {
         }
         return
       }
+      case 'Voice on': this.setVoice(true); return
+      case 'Voice off': this.setVoice(false); return
       default: this.ctx.log(`[os] reader read: unknown menu label '${label}' — ignored (LOUD)`)
     }
   }
 
   async onReload(): Promise<void> {
+    this.setVoice(false)   // unstick a wedged handsfree mic
     this.focus = 'content'
+  }
+
+  /** Mic must not outlive focus — stop voice-paging on window switch. */
+  onDeactivate(): void {
+    if (this.voiceOn) { this.voiceOn = false; this.ctx.audio('stop'); this.ctx.log('[reader] voice-paging OFF (window switch)') }
   }
 
   async onBack(): Promise<boolean> {
     if (this.level === 'read') {
+      this.setVoice(false)   // leaving the page → stop the handsfree mic
       // Position already persisted on every change — backing out loses nothing.
       this.level = this.chapters.length ? 'chapters' : 'library'
       this.focus = 'content'
@@ -5716,6 +5911,562 @@ function padStatusRight(left: string, right: string): string {
   return spaces >= 1 ? left + ' '.repeat(spaces) + right : `${left} ${right}`
 }
 
+// ============================================================ Media window
+
+/** m:ss from ms (position bar / clock). */
+function fmtClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
+/** Render a base64 JPEG/PNG to gray4 tiles (Media album art, MMS image parts).
+ *  renderImageFile is path-based, so write a temp file → render → unlink. */
+async function renderImageB64(b64: string): Promise<RenderedImage> {
+  const path = join(tmpdir(), `g2cc-img-${process.pid}-${Math.random().toString(36).slice(2)}.jpg`)
+  await writeFile(path, Buffer.from(b64, 'base64'))
+  try {
+    return await renderImageFile(path, DE_CONTENT_W, DE_CONTENT_H)
+  } finally {
+    void unlink(path).catch(() => {})
+  }
+}
+
+/** Phase 7 — a real media player driven by the phone's MediaSessionManager.
+ *  The client pushes `media_state` on every change WHILE subscribed (the window
+ *  subscribes on entry, unsubscribes on leave); transport commands go back as
+ *  `media_cmd`. Album art + lyrics are PAGE-2-class per the hardware page rule:
+ *  the player is text (instant), art renders as tiles, lyrics are their own
+ *  level. Synced LRC drives a karaoke current-line that advances with position. */
+class MediaWindow implements OsWindow {
+  readonly id = 'media'
+  readonly tab = 'Media'
+  readonly label = 'Media'
+  readonly category = 'Media' as const
+  private state: MediaState | null = null
+  private stateAt = 0                 // Date.now() when `state` arrived (position extrapolation)
+  private subscribed = false
+  private level: 'player' | 'lyrics' | 'art' = 'player'
+  // lyrics
+  private lyricsFor = ''              // trackKey the loaded lyrics belong to
+  private lrc: LrcLine[] | null = null
+  private plainPages: string[] | null = null
+  private lyricsPage = 0
+  private lyricsLoading = false
+  private lyricsSeq = 0
+  // album art (rendered tiles)
+  private artFor = ''
+  private art: RenderedImage | null = null
+  private artFailed: string | null = null
+  private artSeq = 0
+  private pacer: ReturnType<typeof setInterval> | null = null
+
+  constructor(private ctx: WmContext, private requestRender: () => void) {
+    // Position tick (sanctioned pacing cadence, not an I/O timeout): re-render
+    // every 5 s while playing so the bar + synced lyrics advance. requestRender
+    // no-ops unless Media is active, so this is cheap. Cleared in dispose().
+    this.pacer = setInterval(() => {
+      if (this.state?.playing && (this.level === 'player' || (this.level === 'lyrics' && this.lrc))) this.requestRender()
+    }, 5_000)
+  }
+
+  summary(): string {
+    if (!this.state || (!this.state.title && !this.state.artist)) return 'nothing playing'
+    return `${this.state.playing ? '▶' : '❚❚'} ${oneLine(this.state.title ?? '(unknown)', 22)}`
+  }
+
+  statusLine(): string | null { return this.lyricsLoading ? 'lyrics…' : null }
+
+  private trackKey(): string { return `${this.state?.artist ?? ''}|${this.state?.title ?? ''}|${this.state?.album ?? ''}` }
+
+  private ensureSubscribed(): void {
+    if (this.subscribed) return
+    this.subscribed = true
+    this.ctx.mediaCommand?.('subscribe')   // client pushes the current state back
+  }
+
+  /** Current playback position, extrapolated from the last snapshot while playing. */
+  private posMs(): number {
+    const s = this.state
+    if (!s) return 0
+    const pos = (s.positionMs ?? 0) + (s.playing ? Math.max(0, Date.now() - this.stateAt) : 0)
+    return s.durationMs ? Math.min(pos, s.durationMs) : pos
+  }
+
+  async view(): Promise<WinView> {
+    this.ensureSubscribed()
+    if (this.level === 'lyrics') return this.lyricsView()
+    if (this.level === 'art') return this.artView()
+    return this.playerView()
+  }
+
+  private playerView(): WinView {
+    const menu = ['Play/Pause', 'Skip', 'Prev', 'Random', 'Lyrics', 'Art', 'Reload', 'Main']
+    const s = this.state
+    if (!s || (!s.title && !s.artist)) {
+      return { mode: 'text', title: 'Media', menu, text: 'Nothing is playing.\n\nStart a track on the phone — controls appear here.' }
+    }
+    const lines = [s.title ?? '(unknown title)']
+    if (s.artist) lines.push(s.artist)
+    if (s.album) lines.push(s.album)
+    lines.push('', this.posBar())
+    return { mode: 'text', title: `Media · ${s.playing ? 'playing' : 'paused'}`, menu, text: lines.join('\n') }
+  }
+
+  /** ▕████░░░░░░░░░░░░▏ 2:31/4:05 — fixed 16-cell bar, server-extrapolated. */
+  private posBar(): string {
+    const s = this.state!
+    const pos = this.posMs(), dur = s.durationMs ?? 0, cells = 16
+    const filled = dur > 0 ? Math.max(0, Math.min(cells, Math.round((pos / dur) * cells))) : 0
+    return `▕${'█'.repeat(filled)}${'░'.repeat(cells - filled)}▏ ${fmtClock(pos)}${dur ? `/${fmtClock(dur)}` : ''}`
+  }
+
+  private lyricsView(): WinView {
+    const menu = ['Back', 'Reload', 'Main']
+    if (this.lyricsLoading) return { mode: 'text', title: 'Media · lyrics', menu, text: 'Looking up lyrics…' }
+    if (this.lrc && this.lrc.length) {
+      const idx = currentLrcIndex(this.lrc, this.posMs())
+      const WINDOW = 9
+      const start = Math.max(0, Math.min(idx - 3, this.lrc.length - WINDOW))
+      const slice = this.lrc.slice(start, start + WINDOW)
+      const text = slice.map((l, i) => (start + i === idx ? `▶ ${l.text || '♪'}` : `  ${l.text || '♪'}`)).join('\n')
+      return { mode: 'text', title: 'Media · lyrics ♪', menu, text: text || '♪' }
+    }
+    if (this.plainPages && this.plainPages.length) {
+      const suffix = this.plainPages.length > 1 ? ` · ${this.lyricsPage + 1}/${this.plainPages.length}` : ''
+      const m = this.plainPages.length > 1 ? ['Next', 'Prev', 'Back', 'Reload', 'Main'] : menu
+      return { mode: 'text', title: `Media · lyrics${suffix}`, menu: m, text: this.plainPages[this.lyricsPage] ?? '' }
+    }
+    return { mode: 'text', title: 'Media · lyrics', menu, text: 'No lyrics found for this track.' }
+  }
+
+  private artView(): WinView {
+    const menu = ['Back', 'Reload', 'Main']
+    const key = this.trackKey()
+    if (this.artFor === key && this.artFailed) return { mode: 'text', title: 'Media · art', menu, text: `Album art FAILED:\n${this.artFailed}` }
+    if (this.artFor === key && this.art) return { mode: 'tiles', tilesRect: { w: this.art.w, h: this.art.h }, title: 'Media · art', menu, tiles: this.art.tiles }
+    if (this.state?.artB64) return { mode: 'text', title: 'Media · art', menu, text: '⏳ rendering album art…' }
+    return { mode: 'text', title: 'Media · art', menu, text: 'No album art for this track.' }
+  }
+
+  async onMenuSelect(label: string): Promise<void> {
+    if (this.level === 'lyrics' || this.level === 'art') {
+      switch (label) {
+        case 'Back': this.level = 'player'; this.requestRender(); return
+        case 'Next': if (this.plainPages && this.lyricsPage < this.plainPages.length - 1) { this.lyricsPage++; this.requestRender() } return
+        case 'Prev': if (this.plainPages && this.lyricsPage > 0) { this.lyricsPage--; this.requestRender() } return
+        default: this.ctx.log(`[os] media ${this.level}: menu '${label}' — ignored`); return
+      }
+    }
+    switch (label) {
+      case 'Play/Pause': this.ctx.mediaCommand?.('play_pause'); return
+      case 'Skip': this.ctx.mediaCommand?.('next'); return
+      case 'Prev': this.ctx.mediaCommand?.('prev'); return
+      case 'Random': this.ctx.mediaCommand?.('shuffle'); return
+      case 'Lyrics': this.level = 'lyrics'; this.requestRender(); void this.loadLyrics(); return
+      case 'Art': this.level = 'art'; this.requestRender(); void this.renderArt(); return
+      default: this.ctx.log(`[os] media: menu '${label}' — ignored (LOUD)`)
+    }
+  }
+
+  async onBrowseSelect(index: number): Promise<void> {
+    this.ctx.log(`[os] media: browse select ${index} — no browse surface, ignored`)
+  }
+
+  private async loadLyrics(): Promise<void> {
+    const s = this.state
+    if (!s || !s.title || !s.artist) { this.lrc = null; this.plainPages = ['No track metadata for a lyrics lookup.']; this.lyricsLoading = false; this.requestRender(); return }
+    const key = this.trackKey()
+    if (this.lyricsFor === key && (this.lrc || this.plainPages)) return   // already loaded for this track
+    const seq = ++this.lyricsSeq
+    this.lyricsFor = key; this.lrc = null; this.plainPages = null; this.lyricsPage = 0; this.lyricsLoading = true
+    this.requestRender()
+    try {
+      const r = await getLyrics(s.artist, s.title, s.durationMs, s.album)
+      if (seq !== this.lyricsSeq) return
+      this.lyricsLoading = false
+      if (r.synced) this.lrc = parseLrc(r.synced)
+      else if (r.plain) this.plainPages = paginateText(r.plain)
+      else this.plainPages = ['No lyrics found for this track.']
+    } catch (e) {
+      if (seq !== this.lyricsSeq) return
+      this.lyricsLoading = false
+      this.plainPages = paginateText(`Lyrics lookup failed:\n${(e as Error).message}`)
+    }
+    this.requestRender()
+  }
+
+  private async renderArt(): Promise<void> {
+    const s = this.state
+    const key = this.trackKey()
+    if (!s?.artB64) { this.art = null; this.artFailed = null; return }
+    if (this.artFor === key && (this.art || this.artFailed)) return   // already rendered for this track
+    const seq = ++this.artSeq
+    this.artFor = key; this.art = null; this.artFailed = null
+    try {
+      const img = await renderImageB64(s.artB64)
+      if (seq !== this.artSeq) return
+      this.art = img
+    } catch (e) {
+      if (seq !== this.artSeq) return
+      this.artFailed = (e as Error).message
+      this.ctx.log(`[os] media: art render failed: ${(e as Error).message}`)
+    }
+    this.requestRender()
+  }
+
+  /** The phone pushed a now-playing change (Phase 7). A track change drops the
+   *  cached lyrics/art so they re-derive for the new song. */
+  onMediaState(state: MediaState): void {
+    const prevKey = this.trackKey()
+    this.state = state
+    this.stateAt = Date.now()
+    if (this.trackKey() !== prevKey) {
+      this.lyricsFor = ''; this.lrc = null; this.plainPages = null; this.lyricsPage = 0
+      this.artFor = ''; this.art = null; this.artFailed = null; this.artSeq++
+      if (this.level === 'lyrics') void this.loadLyrics()
+      if (this.level === 'art') void this.renderArt()
+    }
+    this.requestRender()
+  }
+
+  async onBack(): Promise<boolean> {
+    if (this.level === 'lyrics' || this.level === 'art') { this.level = 'player'; this.requestRender(); return true }
+    return false
+  }
+
+  async onReload(): Promise<void> {
+    this.level = 'player'
+    this.ctx.mediaCommand?.('subscribe')   // force a fresh state push
+  }
+
+  onDeactivate(): void {
+    if (this.subscribed) { this.subscribed = false; this.ctx.mediaCommand?.('unsubscribe') }
+  }
+
+  dispose(): void {
+    if (this.pacer) { clearInterval(this.pacer); this.pacer = null }
+    // Best-effort unsubscribe on ws close (the socket is usually already gone, so
+    // this no-ops; the phone-side MediaBridge is authoritatively released by the
+    // client's teardown). Keeps the server-side intent explicit.
+    if (this.subscribed) { this.subscribed = false; this.ctx.mediaCommand?.('unsubscribe') }
+  }
+}
+
+// ============================================================ SMS window
+
+interface SmsThreadView { id: string; name: string; address: string; snippet: string; unread: boolean; tsMs: number }
+type SmsPage = string | { kind: 'image'; img: RenderedImage | null; failed: string | null }
+
+/** Phase 4b — a real threaded SMS/MMS window. The PHONE is the data provider:
+ *  the server queries it (sms_threads_request / sms_thread_request) and the
+ *  client replies from the Telephony provider. Reply dictates → confirm →
+ *  sms_send (SmsManager). MMS image parts are page-≥2 tiles. 'New' (compose to
+ *  a fresh contact) is deferred — it needs a contacts-pick round; reply to any
+ *  existing thread covers the daily path. */
+class SmsWindow implements OsWindow {
+  readonly id = 'sms'
+  readonly tab = 'SMS'
+  readonly label = 'SMS'
+  readonly category = 'Comms' as const
+  private level: 'threads' | 'thread' = 'threads'
+  // threads list
+  private threads: SmsThreadView[] = []
+  private threadsTotal = 0
+  private threadsOffset = 0
+  private threadsLoading = false
+  private threadsError: string | null = null
+  private threadsKicked = false   // first-view query guard (reset on leave so re-entry refreshes)
+  // open thread
+  private openId = ''
+  private openName = ''
+  private openAddr = ''
+  private pages: SmsPage[] = []
+  private page = 0
+  private threadPage = 0          // server-side pagination of the thread (client paginates)
+  private threadTotalPages = 1
+  private threadLoading = false
+  private threadError: string | null = null
+  private readSeq = 0
+  private focus: 'content' | 'menu' = 'content'
+  // reply dictation (mirrors Notices reply / Mail compose)
+  private replyStage: 'idle' | 'listening' | 'transcribing' | 'confirm' | 'sending' | 'result' = 'idle'
+  private replyText: string | null = null
+  private replyResult: string | null = null
+
+  constructor(private ctx: WmContext, private requestRender: () => void) {}
+
+  summary(): string {
+    const unread = this.threads.filter((t) => t.unread).length
+    return this.threadsTotal ? (unread ? `${unread} unread` : `${this.threadsTotal} threads`) : 'messages'
+  }
+
+  statusLine(): string | null {
+    if (this.replyStage === 'listening') return 'listening…'
+    if (this.replyStage === 'transcribing') return 'transcribing…'
+    if (this.replyStage === 'sending') return 'sending…'
+    if (this.replyStage === 'confirm') return 'confirm?'
+    if (this.threadsLoading || this.threadLoading) return 'loading…'
+    return null
+  }
+
+  /** Kick a thread-list query (the client replies async via onSmsThreads). */
+  private requestThreads(offset: number): void {
+    if (!this.ctx.requestSmsThreads) { this.threadsError = 'SMS unsupported by this client build — update the app.'; return }
+    this.threadsOffset = offset
+    this.threadsLoading = true
+    this.threadsError = null
+    this.ctx.requestSmsThreads(offset, BROWSE_PAGE)
+  }
+
+  /** First view after (re)entering the threads level kicks one query. */
+  private ensureThreads(): void {
+    if (this.threadsKicked) return
+    this.threadsKicked = true
+    this.requestThreads(0)
+  }
+
+  async view(): Promise<WinView> {
+    if (this.level === 'thread') {
+      if (this.replyStage !== 'idle') return this.replyView()
+      return this.threadView()
+    }
+    // threads list
+    this.ensureThreads()
+    if (this.threadsError) return errorView('SMS · error', this.threadsError)
+    if (this.threadsLoading && !this.threads.length) return { mode: 'text', title: 'SMS', menu: ['Reload', 'Main'], text: 'Loading conversations from the phone…' }
+    const items: string[] = []
+    if (this.threadsOffset > 0) items.push(PREV_ROW)
+    for (const t of this.threads) items.push(`${t.unread ? '● ' : ''}${oneLine(t.name, 16)} — ${oneLine(t.snippet, 22)}`)
+    if (this.threadsOffset + BROWSE_PAGE < this.threadsTotal) items.push(MORE_ROW)
+    const last = Math.min(this.threadsOffset + this.threads.length, this.threadsTotal)
+    return {
+      mode: 'browse',
+      menuMode: this.focus === 'menu' ? 'capture' : 'passive',
+      title: `SMS · ${this.threadsTotal ? `${this.threadsOffset + 1}-${last} of ${this.threadsTotal}` : 'none'}`,
+      menu: ['Reload', 'Main'],
+      items: items.length ? items : ['(no conversations)'],
+    }
+  }
+
+  private threadView(): WinView {
+    const menu = ['Reply', 'Next', 'Prev', 'Back', 'Reload', 'Main']
+    // LOCAL page (text/image pages of this server block) + the server block index.
+    const localPg = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
+    const srvPg = this.threadTotalPages > 1 ? ` [${this.threadPage + 1}/${this.threadTotalPages}]` : ''
+    const title = `SMS · ${oneLine(this.openName, 18)}${localPg}${srvPg}`
+    if (this.threadError) return errorView(`SMS · ${oneLine(this.openName, 16)}`, this.threadError)
+    if (this.threadLoading && !this.pages.length) return { mode: 'text', title, menu, text: 'Loading messages…' }
+    const cur = this.pages[this.page]
+    if (cur !== undefined && typeof cur !== 'string') {
+      if (cur.img) return { mode: 'tiles', tilesRect: { w: cur.img.w, h: cur.img.h }, title, menu, tiles: cur.img.tiles }
+      return { mode: 'text', title, menu, text: cur.failed ? `image FAILED:\n${cur.failed}` : '⏳ image rendering…' }
+    }
+    return { mode: 'text', title, menu, text: (cur as string | undefined) ?? '(no messages)' }
+  }
+
+  private replyView(): WinView {
+    const t = `SMS · ${oneLine(this.openName, 14)} · reply`
+    switch (this.replyStage) {
+      case 'listening': return { mode: 'text', title: `${t} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: 'Listening — speak your text, then Done.' }
+      case 'transcribing': return { mode: 'text', title: `${t} · transcribing…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
+      case 'confirm': return {
+        mode: 'text', title: `${t} · send?`, menu: ['Send', 'Re-record', 'Cancel', 'Reload', 'Main'],
+        text: `To ${this.openName} (${this.openAddr}):\n${'─'.repeat(20)}\n${clampConfirmBody(this.replyText ?? '')}\n${'─'.repeat(20)}\nSend · Re-record · Cancel`,
+      }
+      case 'sending': return { mode: 'text', title: `${t} · sending…`, menu: ['Reload', 'Main'], text: 'Sending…' }
+      case 'result': return { mode: 'text', title: `${t} · done`, menu: ['Back', 'Reload', 'Main'], text: this.replyResult ?? '(no result)' }
+      default: return { mode: 'text', title: t, menu: ['Cancel', 'Reload', 'Main'], text: 'Preparing…' }
+    }
+  }
+
+  async onBrowseSelect(index: number): Promise<void> {
+    if (this.level !== 'threads') { this.ctx.log(`[os] sms: browse select ${index} outside threads — ignored`); return }
+    const items: (SmsThreadView | 'prev' | 'more')[] = []
+    if (this.threadsOffset > 0) items.push('prev')
+    items.push(...this.threads)
+    if (this.threadsOffset + BROWSE_PAGE < this.threadsTotal) items.push('more')
+    const sel = items[index]
+    if (sel === undefined) { this.ctx.log(`[os] sms: index ${index} out of range`); return }
+    if (sel === 'prev') { this.requestThreads(Math.max(0, this.threadsOffset - BROWSE_PAGE)); this.requestRender(); return }
+    if (sel === 'more') { this.requestThreads(this.threadsOffset + BROWSE_PAGE); this.requestRender(); return }
+    this.openThread(sel.id, sel.name, sel.address, 0)
+  }
+
+  private openThread(id: string, name: string, addr: string, page: number): void {
+    if (!this.ctx.requestSmsThread) { this.threadError = 'SMS unsupported by this client build.'; this.level = 'thread'; this.requestRender(); return }
+    this.readSeq++
+    this.openId = id; this.openName = name; this.openAddr = addr
+    this.threadPage = page
+    this.level = 'thread'
+    this.threadLoading = true
+    this.threadError = null
+    this.pages = []
+    this.page = 0
+    this.focus = 'content'
+    this.requestRender()
+    this.ctx.requestSmsThread(id, page)
+  }
+
+  /** The phone replied with the thread list (Phase 4b). */
+  onSmsThreads(threads: SmsThread[], offset: number, total: number, error: string | null): void {
+    this.threadsLoading = false
+    if (error) { this.threadsError = error; this.ctx.log(`[os] sms: threads load error — ${error}`); this.requestRender(); return }
+    this.threadsError = null
+    this.threadsOffset = offset
+    this.threadsTotal = total
+    this.threads = threads.map((t) => ({ ...t }))
+    this.requestRender()
+  }
+
+  /** The phone replied with one thread's messages (Phase 4b). */
+  onSmsThread(threadId: string, name: string, address: string, messages: SmsMessage[], page: number, totalPages: number, error: string | null): void {
+    if (this.level !== 'thread' || threadId !== this.openId) {
+      this.ctx.log(`[os] sms: thread reply for ${threadId} but ${this.openId} is open — ignored`)
+      return
+    }
+    const seq = ++this.readSeq
+    this.threadLoading = false
+    this.openName = name || this.openName
+    this.openAddr = address || this.openAddr
+    this.threadPage = page
+    this.threadTotalPages = Math.max(1, totalPages)
+    if (error) { this.threadError = error; this.ctx.log(`[os] sms: thread ${threadId} error — ${error}`); this.requestRender(); return }
+    this.threadError = null
+    // Build text pages (newest last) + trailing IMAGE pages for MMS parts.
+    const body = messages.map((m) => {
+      const who = m.incoming ? this.openName.split(' ')[0] || 'Them' : 'Me'
+      const img = m.imageB64 ? ' [image — see later page]' : ''
+      return `${who} · ${fmtStamp(new Date(m.tsMs))}\n${m.body || (m.imageB64 ? '(image)' : '')}${img}`
+    }).join('\n\n')
+    const pages: SmsPage[] = paginateText(body || '(no messages)')
+    for (const m of messages) {
+      if (!m.imageB64) continue
+      const pageObj: SmsPage = { kind: 'image', img: null, failed: null }
+      pages.push(pageObj)
+      void renderImageB64(m.imageB64).then((img) => {
+        if (seq !== this.readSeq) return
+        ;(pageObj as Exclude<SmsPage, string>).img = img
+        this.requestRender()
+      }).catch((e: unknown) => {
+        if (seq !== this.readSeq) return
+        ;(pageObj as Exclude<SmsPage, string>).failed = e instanceof Error ? e.message : String(e)
+        this.ctx.log(`[os] sms: image render failed: ${e instanceof Error ? e.message : String(e)}`)
+        this.requestRender()
+      })
+    }
+    this.pages = pages
+    this.page = 0
+    this.requestRender()
+  }
+
+  async onMenuSelect(label: string): Promise<void> {
+    if (this.level === 'threads') { this.ctx.log(`[os] sms threads: menu '${label}' — ignored`); return }
+    if (this.replyStage !== 'idle') return this.onReplyMenu(label)
+    switch (label) {
+      case 'Reply':
+        if (!this.openAddr) { this.ctx.log('[os] sms: Reply with no address — ignored (LOUD)'); return }
+        this.startReply()
+        break
+      // Next = newer, Prev = older. Server pages are newest-block-first
+      // (threadPage 0 = most recent); at a local-page boundary, cross to the
+      // adjacent server block so a long thread's older messages stay reachable.
+      case 'Next':
+        if (this.page < this.pages.length - 1) { this.page++; this.requestRender() }
+        else if (this.threadPage > 0) this.openThread(this.openId, this.openName, this.openAddr, this.threadPage - 1)
+        break
+      case 'Prev':
+        if (this.page > 0) { this.page--; this.requestRender() }
+        else if (this.threadPage + 1 < this.threadTotalPages) this.openThread(this.openId, this.openName, this.openAddr, this.threadPage + 1)
+        break
+      default: this.ctx.log(`[os] sms thread: menu '${label}' — ignored (LOUD)`)
+    }
+  }
+
+  // ---- reply (dictate → confirm → sms_send) ----
+  private startReply(): void {
+    this.replyStage = 'listening'; this.replyText = null; this.replyResult = null
+    this.ctx.audio('start'); this.requestRender()
+  }
+  private stopReply(why: string): void {
+    if (this.replyStage === 'listening' || this.replyStage === 'transcribing') this.ctx.audio('stop')
+    if (this.replyStage !== 'idle') this.ctx.log(`[os] sms: reply aborted — ${why}`)
+    this.replyStage = 'idle'; this.replyText = null
+  }
+  private onReplyMenu(label: string): void {
+    switch (label) {
+      case 'Done':
+        if (this.replyStage !== 'listening') { this.ctx.log('[os] sms: Done with no live mic — ignored'); return }
+        this.replyStage = 'transcribing'; this.ctx.audio('stop'); this.requestRender(); return
+      case 'Cancel': this.stopReply('cancel'); this.requestRender(); return
+      case 'Send':
+        if (this.replyStage === 'confirm' && this.replyText) this.doSend()
+        else this.ctx.log(`[os] sms: Send at stage '${this.replyStage}' — ignored (LOUD)`)
+        return
+      case 'Re-record': this.startReply(); return
+      case 'Back':
+        if (this.replyStage === 'result') { this.replyStage = 'idle'; this.replyResult = null; this.openThread(this.openId, this.openName, this.openAddr, 0) }
+        return
+      default: this.ctx.log(`[os] sms reply: menu '${label}' — ignored (LOUD)`)
+    }
+  }
+  private doSend(): void {
+    const addr = this.openAddr, text = this.replyText
+    if (!addr || !text) { this.ctx.log('[os] sms: doSend with no address/text — ignored (LOUD)'); return }
+    if (!this.ctx.sendSms) { this.replyStage = 'result'; this.replyResult = 'SMS send unsupported by this client build.'; this.requestRender(); return }
+    this.replyStage = 'sending'
+    this.requestRender()
+    this.ctx.log(`[os] sms: send → ${addr}: "${text.slice(0, 60)}"`)
+    this.ctx.sendSms(addr, text)
+    // Fire-and-forget: SmsManager has no per-message ACK we await here. Show a
+    // sent confirmation, then Back re-pulls the thread so the sent message shows.
+    this.replyStage = 'result'
+    this.replyResult = `Sent to ${this.openName}.\n\n"${oneLine(text, 60)}"\n\nBack to see the thread.`
+    this.requestRender()
+  }
+
+  async onStt(text: string): Promise<void> {
+    if (this.replyStage !== 'transcribing') {
+      this.ctx.log(`[os] sms: STT arrived but not awaiting a reply (stage=${this.replyStage}) — discarded: "${text.slice(0, 60)}"`)
+      this.requestRender(); return
+    }
+    this.replyText = text.trim(); this.replyStage = 'confirm'; this.requestRender()
+  }
+  async onSttError(error: string): Promise<void> {
+    if (this.replyStage === 'idle') { this.ctx.log(`[os] sms: stt error with no reply in flight — ${error}`); return }
+    this.ctx.log(`[os] sms: reply dictation failed — ${error}`)
+    this.stopReply('stt error'); this.requestRender()
+  }
+
+  interruptible(): boolean { return this.replyStage === 'idle' || this.replyStage === 'result' }
+
+  onDeactivate(): void {
+    this.stopReply('window switch')
+    // Re-entry lands on a FRESH thread list (ensureThreads only fires at the
+    // threads level — without resetting level, leaving from an open thread would
+    // skip the re-query and resume a stale thread).
+    this.level = 'threads'
+    this.threadsKicked = false
+  }
+
+  async onReload(): Promise<void> {
+    this.stopReply('reload')
+    if (this.level === 'thread' && this.openId) this.openThread(this.openId, this.openName, this.openAddr, this.threadPage)
+    else { this.threadsKicked = false; this.ensureThreads() }
+  }
+
+  /** Re-query the thread list on entry so it's fresh (the WM calls onOpen only
+   *  for Search hand-offs; we use the first view() to kick it instead). */
+  async onOpen(): Promise<void> { /* no cross-window open target */ }
+
+  async onBack(): Promise<boolean> {
+    if (this.level === 'thread' && this.replyStage !== 'idle') { this.stopReply('back'); this.requestRender(); return true }
+    if (this.level === 'thread') { this.readSeq++; this.level = 'threads'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+    this.focus = 'content'
+    return false
+  }
+}
+
 // ============================================================ WindowManager
 
 /** Control-flow signal thrown by windows; caught by the WM. The optional
@@ -5786,6 +6537,9 @@ export class WindowManager {
    *  clears it since there's no durable row to track (review 2026-06-11b). */
   private titleFlash: { id: number | null; title: string } | null = null
   private unseen = 0
+  /** Phase 6: live Maps nav line, pinned until nav_clear. While blanked it owns
+   *  the screen (persistent, NOT a 5 s flash); awake it rides the title bar. */
+  private navLine: string | null = null
   /** Phase 2: the event whose ONE-LINE flash is currently on the blanked screen
    *  (null = plain blank). NOT marked seen — the badge nags until read in
    *  Notices (Adam Q1). Cleared on wake / replacement / timer / dispose. */
@@ -5833,6 +6587,8 @@ export class WindowManager {
       mk((rr) => new SearchWindow(ctx, rr)),
       mk((rr) => new TerminalWindow(ctx, rr)),
       mk((rr) => new DeliveriesWindow(ctx, rr)),
+      mk((rr) => new MediaWindow(ctx, rr)),
+      mk((rr) => new SmsWindow(ctx, rr)),
     ]
     this.active = main
     // Phase 4: subscribe to the global notification hub (dispose() detaches on
@@ -5927,7 +6683,7 @@ export class WindowManager {
         // A line that somehow blows the budget must not strand the screen.
         this.ctx.log(`[notify] blank flash compose failed (${(e as Error).message}) — staying blank`)
         this.blankFlash = null
-        this.ctx.send(blankScene())
+        this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
         return
       }
       // The badge must still nag on wake: unseen++ above + a persistent title
@@ -5938,7 +6694,17 @@ export class WindowManager {
         this.blankPopupTimer = null
         this.blankFlash = null
         this.ctx.log(`[notify] blank flash auto-cleared after ${BLANK_POPUP_MS}ms → back to blank (still unseen in Notices)`)
-        if (this.blanked && !this.activeOverlay) this.ctx.send(blankScene())
+        // Resume the pinned nav line if navigation is live (Phase 6), else blank.
+        // Wrapped (parity with onNotification + requestRender): an uncaught throw
+        // in this timer would crash the process; blankScene() can't throw.
+        if (this.blanked && !this.activeOverlay) {
+          try {
+            this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
+          } catch (e) {
+            this.ctx.log(`[notify] re-blank compose failed (${(e as Error).message}) — plain blank`)
+            this.ctx.send(blankScene())
+          }
+        }
       }, BLANK_POPUP_MS)
       return
     }
@@ -6003,7 +6769,11 @@ export class WindowManager {
       // A blank FLASH (Phase 2) owns the screen for its 5 s window — a
       // background event must not repaint it back to plain blank; the flash
       // timer re-blanks and wake recomposes everything.
-      if (!this.blankFlash) this.ctx.send(blankScene())
+      // Phase 6: a live nav line is the PERSISTENT blanked surface (it updates
+      // in place via onNavUpdate and only clears on nav_clear); a 5 s flash
+      // still takes precedence for its window, then nav resumes.
+      if (this.blankFlash) return
+      this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
       return
     }
     if (this.rendering) { this.renderQueued = true; return }
@@ -6030,6 +6800,9 @@ export class WindowManager {
             // OVERWRITE the window title; the px middle-clamp keeps both the
             // title head and the flash tail visible) until read in Notices.
             if (this.titleFlash) view = { ...view, title: `${view.title} · ! ${this.titleFlash.title}` }
+            // Phase 6: a live nav line rides the awake title bar too (the
+            // px middle-clamp keeps the window title head + the nav tail).
+            if (this.navLine) view = { ...view, title: `${view.title} · ▲ ${this.navLine}` }
           }
           // Tab strip RETIRED (Phase 5, 2026-06-11): the Main dashboard carries
           // the window states now; the status slot takes the full bottom bar.
@@ -6330,6 +7103,123 @@ export class WindowManager {
       else this.ctx.log(`[os] STT error arrived for '${this.active.id}' which takes no dictation — logged only: ${error}`)
     } catch (e) {
       this.ctx.log(`[os] stt-error handler failed (${this.active.id}): ${(e as Error).message}`)
+    }
+  }
+
+  // ---- Phase 9: voice-command routing (handsfree transcripts) ----
+
+  /** A handsfree utterance was transcribed (Phase 9). Tries the "butterscotch"
+   *  wake grammar first (prefix-gated, safe anywhere), then Reader bare next/
+   *  back. A non-matching utterance is the SANCTIONED quiet path (8 h of
+   *  factory audio would be log spam otherwise — the spec's one exception). */
+  async onVoiceCommand(transcript: string): Promise<void> {
+    const text = (transcript ?? '').trim()
+    if (!text) return
+    const w = parseVoiceCommand(text, { wake: true })
+    if (w.cmd) { await this.dispatchVoice(w.cmd); return }
+    if (w.prefixed) { this.ctx.log(`[voice] "butterscotch" heard but no grammar match — ignored (LOUD): "${text.slice(0, 80)}"`); return }
+    const reader = this.windowById('reader')
+    if (this.active.id === 'reader' && reader instanceof ReaderWindow && reader.voiceOn) {
+      const a = parseVoiceCommand(text, { wake: false })
+      if (a.cmd?.kind === 'page') { await this.dispatchVoice(a.cmd); return }
+    }
+    // else: quiet (sanctioned) — a handsfree utterance with no applicable command.
+  }
+
+  private async dispatchVoice(cmd: VoiceCommand): Promise<void> {
+    this.ctx.log(`[voice] command: ${JSON.stringify(cmd)}`)
+    switch (cmd.kind) {
+      case 'window': this.blanked = false; this.switchTo(cmd.id); return
+      case 'blank':
+        if (!this.blanked) { this.blanked = true; this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene()) }
+        return
+      case 'wake':
+        if (this.blanked) { this.clearPopupTimer(); this.blankFlash = null; this.blanked = false; this.requestRender() }
+        return
+      case 'page': await this.invokeMenu(cmd.dir === 'next' ? 'Next' : 'Prev'); return
+      case 'dictate': this.blanked = false; this.switchTo('aria'); await this.invokeMenu('Ask'); return
+      case 'confirm': await this.invokeMenu('Confirm'); return
+      case 'cancel': await this.invokeMenu('Cancel'); return
+      case 'read': {
+        // Navigation-class: route to the obvious window; deeper resolution
+        // ("first email" / "Becky's last text") is a Phase-9 tuning follow-up.
+        const t = cmd.target
+        if (/mail|email/.test(t)) { this.blanked = false; this.switchTo('mail') }
+        else if (/text|sms|message/.test(t)) { this.blanked = false; this.switchTo('sms') }
+        else this.ctx.log(`[voice] read "${t}" — no target window resolved (follow-up)`)
+        return
+      }
+    }
+  }
+
+  /** Invoke a menu label on the active window with the same global-label +
+   *  SwitchTo handling as a real tap (so voice paging/confirm behave identically). */
+  private async invokeMenu(label: string): Promise<void> {
+    switch (label) {
+      case 'Main': this.switchTo('main'); return
+      case 'Reload': this.reload(); return
+      case 'Back': await this.onBackGesture(); return
+    }
+    try {
+      await this.active.onMenuSelect(label)
+    } catch (e) {
+      if (e instanceof SwitchTo) {
+        this.switchTo(e.windowId)
+        if (e.menuLabel) await this.active.onMenuSelect(e.menuLabel).catch((err) => this.ctx.log(`[voice] post-switch '${e.menuLabel}' failed: ${(err as Error).message}`))
+        return
+      }
+      this.ctx.log(`[voice] menu '${label}' failed (${this.active.id}): ${(e as Error).message}`)
+      this.requestRender()
+    }
+  }
+
+  // ---- routed client replies: media / sms / inline-reply / nav ----
+
+  private windowById(id: string): OsWindow | undefined { return this.windows.find((w) => w.id === id) }
+
+  /** Phase 7: the phone pushed a now-playing snapshot. */
+  onMediaState(state: MediaState): void {
+    const w = this.windowById('media')
+    if (w instanceof MediaWindow) w.onMediaState(state)
+  }
+
+  /** Phase 4b: the phone replied with the SMS thread list. */
+  onSmsThreads(threads: SmsThread[], offset: number, total: number, error: string | null): void {
+    const w = this.windowById('sms')
+    if (w instanceof SmsWindow) w.onSmsThreads(threads, offset, total, error)
+  }
+
+  /** Phase 4b: the phone replied with one thread's messages. */
+  onSmsThread(threadId: string, name: string, address: string, messages: SmsMessage[], page: number, totalPages: number, error: string | null): void {
+    const w = this.windowById('sms')
+    if (w instanceof SmsWindow) w.onSmsThread(threadId, name, address, messages, page, totalPages, error)
+  }
+
+  /** Phase 4a: the phone reported a notification-reply outcome. */
+  onNotificationReplyResult(key: string, ok: boolean, error: string | null): void {
+    const w = this.windowById('notices')
+    if (w instanceof NoticesWindow) w.onReplyResult(key, ok, error)
+  }
+
+  /** Phase 6: a live Maps nav line arrived — pin it (persistent while blanked,
+   *  title-bar while awake). Updates in place; cleared by onNavClear. */
+  onNavUpdate(text: string, eta?: string): void {
+    const line = (eta && eta.trim()) ? `${text} · ${eta.trim()}` : text
+    if (line === this.navLine) return
+    this.navLine = line
+    this.ctx.log(`[nav] ${line}`)
+    this.requestRender()   // blanked → persistent line (requestRender blank branch); awake → title suffix
+  }
+
+  /** Phase 6: navigation ended — drop the pinned nav line. */
+  onNavClear(): void {
+    if (this.navLine === null) return
+    this.navLine = null
+    this.ctx.log('[nav] cleared')
+    if (this.blanked && !this.activeOverlay) {
+      this.ctx.send(this.blankFlash ? blankFlashScene(this.flashLine(this.blankFlash)) : blankScene())
+    } else {
+      this.requestRender()
     }
   }
 }

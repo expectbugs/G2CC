@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.bluetooth.BluetoothDevice
 import android.content.Context
+import android.telephony.SmsManager
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Binder
@@ -33,7 +34,10 @@ import com.g2cc.g2cc.harness.HarnessActivity
 import com.g2cc.g2cc.harness.TestHarness
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.ConnectionManager
+import com.g2cc.g2cc.net.MediaInfo
 import com.g2cc.g2cc.net.ServerMessage
+import com.g2cc.g2cc.net.SmsMessage
+import com.g2cc.g2cc.net.SmsThread
 import com.g2cc.g2cc.net.WireScene
 import com.g2cc.g2cc.os.OsLayout
 import com.g2cc.g2cc.os.SceneCodec
@@ -217,14 +221,14 @@ class ConnectionService : Service(), TestHarness {
     /** Phase 9: forward a phone notification (from [com.g2cc.g2cc.service.NotifyListener])
      *  to the server. Loud no-op when the WS isn't up — missed phone
      *  notifications stay on the phone; the server only mirrors live ones. */
-    fun sendNotify(pkg: String, title: String, text: String, postedAt: Long, key: String, imageB64: String? = null) {
+    fun sendNotify(pkg: String, title: String, text: String, postedAt: Long, key: String, imageB64: String? = null, hasReply: Boolean = false) {
         val conn = connection
         if (conn == null) {
             DiagLog.log("notify", "dropped $pkg \"$title\" — no WS connection")
             return
         }
-        val sent = conn.send(ClientMessage.Notify(pkg = pkg, title = title, text = text, postedAt = postedAt, key = key, imageB64 = imageB64))
-        DiagLog.log("notify", "$pkg \"$title\"${if (imageB64 != null) " +img(${imageB64.length})" else ""} → ${if (sent) "sent" else "DROPPED (ws not ready)"}")
+        val sent = conn.send(ClientMessage.Notify(pkg = pkg, title = title, text = text, postedAt = postedAt, key = key, imageB64 = imageB64, hasReply = if (hasReply) true else null))
+        DiagLog.log("notify", "$pkg \"$title\"${if (imageB64 != null) " +img(${imageB64.length})" else ""}${if (hasReply) " +reply" else ""} → ${if (sent) "sent" else "DROPPED (ws not ready)"}")
     }
 
     /** Dismiss sync (Adam 2026-06-13): the phone dismissed a forwarded
@@ -232,6 +236,47 @@ class ConnectionService : Service(), TestHarness {
     fun sendNotificationDismissed(key: String) {
         val sent = connection?.send(ClientMessage.NotificationDismissed(key)) ?: false
         DiagLog.log("notify", "phone dismissed $key → ${if (sent) "told server" else "no WS (server re-syncs on reconnect)"}")
+    }
+
+    /** Phase 4a: report an inline-reply outcome to the server (loud either way). */
+    fun sendNotificationReplyResult(key: String, ok: Boolean, error: String?) {
+        connection?.send(ClientMessage.NotificationReplyResult(key, ok, error))
+        DiagLog.log("notify", "reply result $key ok=$ok${if (error != null) " err=$error" else ""}")
+    }
+
+    /** Phase 7: push a now-playing snapshot. */
+    fun sendMediaState(info: MediaInfo) { connection?.send(ClientMessage.MediaState(info)) }
+
+    /** Phase 6: forward / clear the Maps nav line. */
+    fun sendNavUpdate(text: String, eta: String?) { connection?.send(ClientMessage.NavUpdate(text, eta)) }
+    fun sendNavClear() { connection?.send(ClientMessage.NavClear) }
+
+    /** Phase 4b: answer an SMS thread-list / single-thread query. */
+    fun sendSmsThreadsReply(threads: List<SmsThread>, offset: Int, total: Int, error: String?) {
+        connection?.send(ClientMessage.SmsThreadsReply(threads, offset, total, error))
+        DiagLog.log("sms", "threads reply: ${threads.size} of $total${if (error != null) " err=$error" else ""}")
+    }
+    fun sendSmsThreadReply(threadId: String, name: String, address: String, messages: List<SmsMessage>, page: Int, totalPages: Int, error: String?) {
+        connection?.send(ClientMessage.SmsThreadReply(threadId, name, address, messages, page, totalPages, error))
+        DiagLog.log("sms", "thread $threadId reply: ${messages.size} msgs${if (error != null) " err=$error" else ""}")
+    }
+
+    /** Phase 4b: send an SMS via SmsManager (needs SEND_SMS). Loud diag; the sent
+     *  message shows on the next thread refresh (the provider records it). */
+    private fun sendSms(address: String, text: String) {
+        try {
+            val sm = if (Build.VERSION.SDK_INT >= 31) getSystemService(SmsManager::class.java)
+                     else @Suppress("DEPRECATION") SmsManager.getDefault()
+            if (sm == null) { DiagLog.log("sms", "no SmsManager — send to $address dropped"); return }
+            val parts = sm.divideMessage(text)
+            if (parts.size > 1) sm.sendMultipartTextMessage(address, null, parts, null, null)
+            else sm.sendTextMessage(address, null, text, null, null)
+            DiagLog.log("sms", "sent to $address (${text.length} chars, ${parts.size} part(s))")
+        } catch (e: SecurityException) {
+            DiagLog.log("sms", "send DENIED (SEND_SMS not granted): $e")
+        } catch (e: Exception) {
+            DiagLog.log("sms", "send to $address FAILED: $e")
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -467,12 +512,13 @@ class ConnectionService : Service(), TestHarness {
                         // reconnect creates a new one; a cached streamer would talk to the corpse).
                         // Capture failures go back to the server as an [audio-error] diag —
                         // logcat-only failures left the server waiting forever (review 2026-06-10).
+                        val handsfree = msg.mode == "handsfree"
                         val s = AudioStreamer(MicCapture(applicationContext), conn, onFailure = { reason ->
                             DiagLog.log("os", "audio capture FAILED: $reason")
                             conn.send(ClientMessage.Diag("[audio-error] $reason"))
-                        })
+                        }, handsfree = handsfree)
                         audioStreamer = s
-                        DiagLog.log("os", "audio_request start → mic streaming")
+                        DiagLog.log("os", "audio_request start → mic streaming${if (handsfree) " (handsfree)" else ""}")
                         s.start()
                     }
                     "stop" -> {
@@ -486,6 +532,40 @@ class ConnectionService : Service(), TestHarness {
                 // Read on glass / MkAll'd → dismiss the phone's copy (Adam
                 // 2026-06-13 dismiss sync). cancelByKey is idempotent.
                 NotifyListener.cancelByKey(msg.key)
+            }
+            is ServerMessage.NotificationReply -> {
+                // Phase 4a: fill the forwarded notification's RemoteInput + fire it.
+                NotifyListener.replyByKey(msg.key, msg.text)
+            }
+            is ServerMessage.MediaCmd -> {
+                // Phase 7: transport / subscription for the active MediaSession.
+                when (msg.cmd) {
+                    "subscribe" -> MediaBridge.subscribe(applicationContext) { info -> sendMediaState(info) }
+                    "unsubscribe" -> MediaBridge.unsubscribe()
+                    else -> MediaBridge.command(msg.cmd)
+                }
+            }
+            is ServerMessage.SmsThreadsRequest -> {
+                // Phase 4b: query the SMS provider OFF the main thread; reply async.
+                scope.launch(Dispatchers.IO) {
+                    val r = SmsProvider.queryThreads(applicationContext, msg.offset, msg.limit)
+                    sendSmsThreadsReply(r.threads, msg.offset, r.total, r.error)
+                }
+            }
+            is ServerMessage.SmsThreadRequest -> {
+                scope.launch(Dispatchers.IO) {
+                    val r = SmsProvider.queryThread(applicationContext, msg.threadId, msg.page)
+                    sendSmsThreadReply(r.threadId, r.name, r.address, r.messages, r.page, r.totalPages, r.error)
+                }
+            }
+            is ServerMessage.SmsSend -> {
+                // Phase 4b: send via SmsManager (needs SEND_SMS). Off the main thread.
+                scope.launch(Dispatchers.IO) { sendSms(msg.address, msg.text) }
+            }
+            is ServerMessage.PhoneLocate -> {
+                // Phase 15: ring / silence the phone.
+                if (msg.action == "stop") PhoneLocator.stop(applicationContext)
+                else PhoneLocator.start(applicationContext)
             }
             is ServerMessage.Error -> {
                 // The MESSAGE TEXT must surface (review 2026-06-11b): the old
@@ -910,6 +990,8 @@ class ConnectionService : Service(), TestHarness {
         sessionGen++   // invalidate any in-flight cold-launch/test coroutine that completes after this
         stateJobs.forEach { it.cancel() }; stateJobs.clear()
         audioStreamer?.stop(); audioStreamer = null   // mic OFF with the session (never left running)
+        MediaBridge.unsubscribe()                     // release the MediaController callback (don't outlive the session)
+        PhoneLocator.stop(applicationContext)         // silence any in-progress find-my-phone ring
         connection?.shutdown(); connection = null
         _serverMode.value = false
         _testing.value = false
@@ -1101,13 +1183,13 @@ class ConnectionService : Service(), TestHarness {
         private var instance: ConnectionService? = null
 
         /** NotifyListener → server forwarding entry point. */
-        fun forwardNotification(pkg: String, title: String, text: String, postedAt: Long, key: String, imageB64: String? = null) {
+        fun forwardNotification(pkg: String, title: String, text: String, postedAt: Long, key: String, imageB64: String? = null, hasReply: Boolean = false) {
             val svc = instance
             if (svc == null) {
                 DiagLog.log("notify", "dropped $pkg \"$title\" — ConnectionService not running")
                 return
             }
-            svc.sendNotify(pkg, title, text, postedAt, key, imageB64)
+            svc.sendNotify(pkg, title, text, postedAt, key, imageB64, hasReply)
         }
 
         /** NotifyListener → server: a forwarded notification was dismissed on the
@@ -1115,6 +1197,16 @@ class ConnectionService : Service(), TestHarness {
         fun notificationDismissed(key: String) {
             instance?.sendNotificationDismissed(key)
         }
+
+        /** NotifyListener → server: a Phase-4a inline-reply outcome. */
+        fun forwardReplyResult(key: String, ok: Boolean, error: String?) {
+            instance?.sendNotificationReplyResult(key, ok, error)
+                ?: DiagLog.log("notify", "reply result dropped ($key ok=$ok) — service down")
+        }
+
+        /** NotifyListener → server: the Maps nav line (Phase 6). */
+        fun forwardNavUpdate(text: String, eta: String?) { instance?.sendNavUpdate(text, eta) }
+        fun forwardNavClear() { instance?.sendNavClear() }
 
         /** Start the FG service and tell it to connect. Survives Activity unbind / background. */
         fun startAndConnect(context: Context) {

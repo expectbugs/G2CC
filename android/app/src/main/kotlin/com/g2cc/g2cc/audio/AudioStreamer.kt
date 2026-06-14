@@ -31,6 +31,12 @@ class AudioStreamer(
      *  without it the server's dictation state machine waits forever for audio
      *  that will never come. */
     private val onFailure: (String) -> Unit = {},
+    /** Phase 9: handsfree continuous-listening. The mic stays open and the WS
+     *  framing is RE-CUT into ~WINDOW_MS chunks (audio_end + a fresh
+     *  audio_start(mode=handsfree)) so the server VAD-gates + transcribes each
+     *  window live and routes it to the voice grammar. dictate (default) is the
+     *  proven one-shot path, unchanged. */
+    private val handsfree: Boolean = false,
 ) {
     @get:Synchronized @set:Synchronized
     var isStreaming: Boolean = false
@@ -40,6 +46,16 @@ class AudioStreamer(
     // audio_end must be gated on this to keep the server's start→end invariant. @Volatile: set on
     // the MicCapture callback thread, read under the streamer lock.
     @Volatile private var startSent = false
+
+    // Handsfree windowing state (touched only under the streamer lock): the
+    // announced format to re-emit audio_start, and a running byte count toward
+    // the next window flush.
+    private var fmtSampleRate = 0
+    private var fmtChannels = 0
+    private var fmtEnc = "int16"
+    private var fmtSource: String? = null
+    private var winBytes = 0
+    private var winLimit = 0   // bytes per ~WINDOW_MS window; 0 until Started
 
     fun start() {
         synchronized(this) {
@@ -67,12 +83,18 @@ class AudioStreamer(
                             MicCapture.Source.DjiBluetooth -> "dji-bt"
                             MicCapture.Source.PhoneMic -> "phone-mic"
                         }
+                        // Stash the format so handsfree windowing can re-emit audio_start.
+                        fmtSampleRate = event.sampleRate; fmtChannels = event.channels
+                        fmtEnc = encName; fmtSource = sourceName; winBytes = 0
+                        val bytesPerSample = when (encName) { "float32" -> 4; "int8" -> 1; else -> 2 }
+                        winLimit = event.sampleRate * event.channels * bytesPerSample * WINDOW_MS / 1000
                         connection.send(
                             ClientMessage.AudioStart(
                                 sampleRate = event.sampleRate,
                                 channels = event.channels,
                                 encoding = encName,
                                 source = sourceName,
+                                mode = if (handsfree) "handsfree" else null,
                             ),
                         )
                         startSent = true
@@ -85,6 +107,22 @@ class AudioStreamer(
                         synchronized(this@AudioStreamer) {
                             if (!isStreaming) return@synchronized
                             connection.sendBinary(event.pcm)
+                            // Handsfree: re-cut the WS framing every ~WINDOW_MS so the server
+                            // gets discrete buffers to VAD-gate + transcribe live. The mic
+                            // never stops — only the audio_end/audio_start markers move.
+                            if (handsfree && winLimit > 0) {
+                                winBytes += event.pcm.size
+                                if (winBytes >= winLimit) {
+                                    connection.send(ClientMessage.AudioEnd)
+                                    connection.send(
+                                        ClientMessage.AudioStart(
+                                            sampleRate = fmtSampleRate, channels = fmtChannels,
+                                            encoding = fmtEnc, source = fmtSource, mode = "handsfree",
+                                        ),
+                                    )
+                                    winBytes = 0
+                                }
+                            }
                         }
                     }
                     is MicCapture.Event.Failure -> {
@@ -139,5 +177,9 @@ class AudioStreamer(
 
     companion object {
         const val TAG = "G2CCAudioStreamer"
+        /** Handsfree WS-window length (Phase 9). ~3 s balances command latency
+         *  vs. Parakeet cost; the server VAD-gates silence so quiet windows are
+         *  free. [U] — tune on real on-glass usage. */
+        const val WINDOW_MS = 3000
     }
 }

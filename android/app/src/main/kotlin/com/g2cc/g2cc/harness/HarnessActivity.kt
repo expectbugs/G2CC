@@ -321,6 +321,12 @@ class HarnessActivity : AppCompatActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             l += Manifest.permission.RECORD_AUDIO
         }
+        // Phase 4b SMS window (best-effort, non-gating — denied just means the SMS
+        // window loud-fails server-side until granted). Requested with the rest at
+        // first launch; Adam can deny without affecting the bridge.
+        for (p in listOf(Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.SEND_SMS)) {
+            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) l += p
+        }
         return l
     }
 }

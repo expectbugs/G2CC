@@ -42,6 +42,14 @@ registerMigration('notify-v3', `
   CREATE INDEX IF NOT EXISTS notifications_notif_key ON notifications (notif_key) WHERE notif_key IS NOT NULL;
 `)
 
+// has_reply = the phone post carried an inline-reply RemoteInput (Phase 4a:
+// reply from glasses). Notices offers `Reply` for such notifications, dictating
+// a reply the client fills back into that RemoteInput (only while the phone
+// still holds the post live — else a loud failure). Default false.
+registerMigration('notify-v4', `
+  ALTER TABLE notifications ADD COLUMN IF NOT EXISTS has_reply boolean NOT NULL DEFAULT false;
+`)
+
 export type NotifyPriority = 'call' | 'timer' | 'sms' | 'email' | 'info'
 export const PRIORITY_RANK: Record<NotifyPriority, number> = { call: 0, timer: 1, sms: 2, email: 3, info: 4 }
 /** Priorities that surface as a full overlay when the screen is awake; the
@@ -83,12 +91,15 @@ export function notify(evt: {
   /** The phone's notification key (Adam 2026-06-13: dismiss sync). Null for
    *  server-originated sources (timers/calendar/stats). */
   key?: string | null
+  /** The phone post carried an inline-reply RemoteInput (Phase 4a). Notices
+   *  offers Reply for it. Default false. */
+  hasReply?: boolean
 }): Promise<void> {
   const ts = new Date()
   return query<{ id: string }>(
-    `INSERT INTO notifications (source, priority, title, body, ts, seen_at, image_path, notif_key)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-    [evt.source, evt.priority, evt.title, evt.body, ts, evt.quiet ? ts : null, evt.imagePath ?? null, evt.key ?? null])
+    `INSERT INTO notifications (source, priority, title, body, ts, seen_at, image_path, notif_key, has_reply)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+    [evt.source, evt.priority, evt.title, evt.body, ts, evt.quiet ? ts : null, evt.imagePath ?? null, evt.key ?? null, evt.hasReply ?? false])
     .then((r) => Number(r.rows[0].id))
     .catch((e: unknown) => {
       console.error(`[notify] persist FAILED (${evt.priority} "${evt.title}"): ${e instanceof Error ? e.message : String(e)} — ${evt.quiet ? 'quiet ack lost' : 'surfacing live without a durable record'}`)
@@ -182,6 +193,10 @@ export interface NotificationRow {
   ts: Date
   seen: boolean
   imagePath: string | null
+  /** Phase 4a: this post can be replied to (RemoteInput), and the phone key the
+   *  reply targets. `key` is null for server-originated sources. */
+  hasReply: boolean
+  key: string | null
 }
 
 export async function listNotifications(
@@ -189,28 +204,34 @@ export async function listNotifications(
 ): Promise<{ total: number; unseen: number; rows: NotificationRow[] }> {
   const totals = await query<{ n: string; u: string }>(
     'SELECT count(*) AS n, count(*) FILTER (WHERE seen_at IS NULL) AS u FROM notifications')
-  const rows = await query<{ id: string; source: string; priority: NotifyPriority; title: string; body: string; ts: Date; seen_at: Date | null; image_path: string | null }>(
-    `SELECT id, source, priority, title, body, ts, seen_at, image_path FROM notifications
+  const rows = await query<NotifSelectRow>(
+    `SELECT id, source, priority, title, body, ts, seen_at, image_path, notif_key, has_reply FROM notifications
      ORDER BY ts DESC, id DESC LIMIT $1 OFFSET $2`, [limit, offset])
   return {
     total: Number(totals.rows[0].n),
     unseen: Number(totals.rows[0].u),
-    rows: rows.rows.map((r) => ({
-      id: Number(r.id), source: r.source, priority: r.priority,
-      title: r.title, body: r.body, ts: r.ts, seen: r.seen_at !== null,
-      imagePath: r.image_path,
-    })),
+    rows: rows.rows.map(mapNotifRow),
+  }
+}
+
+/** Raw SELECT shape + the row mapper, shared by list/get so the column set
+ *  stays in one place (Phase 4a added notif_key + has_reply). */
+interface NotifSelectRow {
+  id: string; source: string; priority: NotifyPriority; title: string; body: string
+  ts: Date; seen_at: Date | null; image_path: string | null
+  notif_key: string | null; has_reply: boolean
+}
+function mapNotifRow(r: NotifSelectRow): NotificationRow {
+  return {
+    id: Number(r.id), source: r.source, priority: r.priority,
+    title: r.title, body: r.body, ts: r.ts, seen: r.seen_at !== null,
+    imagePath: r.image_path, hasReply: r.has_reply === true, key: r.notif_key,
   }
 }
 
 export async function getNotification(id: number): Promise<NotificationRow | null> {
-  const r = await query<{ id: string; source: string; priority: NotifyPriority; title: string; body: string; ts: Date; seen_at: Date | null; image_path: string | null }>(
-    'SELECT id, source, priority, title, body, ts, seen_at, image_path FROM notifications WHERE id = $1', [id])
+  const r = await query<NotifSelectRow>(
+    'SELECT id, source, priority, title, body, ts, seen_at, image_path, notif_key, has_reply FROM notifications WHERE id = $1', [id])
   if (!r.rowCount) return null
-  const row = r.rows[0]
-  return {
-    id: Number(row.id), source: row.source, priority: row.priority,
-    title: row.title, body: row.body, ts: row.ts, seen: row.seen_at !== null,
-    imagePath: row.image_path,
-  }
+  return mapNotifRow(r.rows[0])
 }
