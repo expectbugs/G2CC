@@ -33,6 +33,15 @@ registerMigration('notify-v2', `
   ALTER TABLE notifications ADD COLUMN IF NOT EXISTS image_path text;
 `)
 
+// notif_key = the PHONE's StatusBarNotification key (Adam 2026-06-13: dismiss
+// sync). Lets a phone-dismiss mark the glasses copy seen (markSeenByKey) and a
+// glasses-read dismiss the phone copy (the 'dismissPhone' hub event → the WM →
+// notification_cancel). Null for non-phone sources (timers/calendar/stats).
+registerMigration('notify-v3', `
+  ALTER TABLE notifications ADD COLUMN IF NOT EXISTS notif_key text;
+  CREATE INDEX IF NOT EXISTS notifications_notif_key ON notifications (notif_key) WHERE notif_key IS NOT NULL;
+`)
+
 export type NotifyPriority = 'call' | 'timer' | 'sms' | 'email' | 'info'
 export const PRIORITY_RANK: Record<NotifyPriority, number> = { call: 0, timer: 1, sms: 2, email: 3, info: 4 }
 /** Priorities that surface as a full overlay when the screen is awake; the
@@ -71,12 +80,15 @@ export function notify(evt: {
   quiet?: boolean
   /** Path of an already-saved attached image (MMS — Adam 2026-06-12). */
   imagePath?: string | null
+  /** The phone's notification key (Adam 2026-06-13: dismiss sync). Null for
+   *  server-originated sources (timers/calendar/stats). */
+  key?: string | null
 }): Promise<void> {
   const ts = new Date()
   return query<{ id: string }>(
-    `INSERT INTO notifications (source, priority, title, body, ts, seen_at, image_path)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-    [evt.source, evt.priority, evt.title, evt.body, ts, evt.quiet ? ts : null, evt.imagePath ?? null])
+    `INSERT INTO notifications (source, priority, title, body, ts, seen_at, image_path, notif_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+    [evt.source, evt.priority, evt.title, evt.body, ts, evt.quiet ? ts : null, evt.imagePath ?? null, evt.key ?? null])
     .then((r) => Number(r.rows[0].id))
     .catch((e: unknown) => {
       console.error(`[notify] persist FAILED (${evt.priority} "${evt.title}"): ${e instanceof Error ? e.message : String(e)} — ${evt.quiet ? 'quiet ack lost' : 'surfacing live without a durable record'}`)
@@ -102,18 +114,49 @@ export function notify(evt: {
     })
 }
 
-/** Mark read/displayed. Emits 'seen' so every WM refreshes its chrome
- *  (unseen badge + title flash). null ids (unpersisted) are a loud no-op. */
+/** Emit a hub event with the notify() never-rejects contract (a listener throw
+ *  must not masquerade as a markSeen failure in the caller's catch). */
+function emitHub(event: 'seen' | 'dismissPhone', arg: unknown): void {
+  try { notifyHub.emit(event, arg) } catch (e) {
+    console.error(`[notify] a '${event}' hub listener THREW — listener bug, fix it: ${e instanceof Error ? e.stack ?? e.message : String(e)}`)
+  }
+}
+
+/** Mark read/displayed on the GLASSES. Emits 'seen' (chrome refresh) and, if the
+ *  notification carries a phone key AND was actually unseen, 'dismissPhone' so
+ *  the WM tells the phone to cancel its copy too (Adam 2026-06-13). */
 export async function markSeen(id: number | null): Promise<void> {
   if (id === null) { console.log('[notify] markSeen skipped — event was never persisted'); return }
-  await query('UPDATE notifications SET seen_at = now() WHERE id = $1 AND seen_at IS NULL', [id])
-  try {
-    notifyHub.emit('seen', id)
-  } catch (e) {
-    // Same contract as notify(): a listener throw must not masquerade as a
-    // markSeen failure in the caller's catch (review 2026-06-11b).
-    console.error(`[notify] a 'seen' hub listener THREW (id=${id}) — listener bug, fix it: ${e instanceof Error ? e.stack ?? e.message : String(e)}`)
+  const r = await query<{ notif_key: string | null }>(
+    'UPDATE notifications SET seen_at = now() WHERE id = $1 AND seen_at IS NULL RETURNING notif_key', [id])
+  emitHub('seen', id)
+  const key = r.rows[0]?.notif_key   // present only when a row was ACTUALLY marked (was unseen)
+  if (key) emitHub('dismissPhone', key)
+}
+
+/** Mark seen by the PHONE's key (a phone-side dismiss → glasses seen, Adam
+ *  2026-06-13). NO 'dismissPhone' (the phone already cleared it — that's the
+ *  loop terminator). */
+export async function markSeenByKey(key: string): Promise<void> {
+  const r = await query('UPDATE notifications SET seen_at = now() WHERE notif_key = $1 AND seen_at IS NULL', [key])
+  if (r.rowCount) {
+    console.log(`[notify] phone dismissed → marked ${r.rowCount} seen (key=${key.slice(0, 40)})`)
+    emitHub('seen', null)
   }
+}
+
+/** Mark EVERY unseen notification seen (the Notices 'MkAll' action, Adam
+ *  2026-06-13). Dismisses each phone-keyed one on the phone too. Returns the
+ *  count marked. */
+export async function markAllSeen(): Promise<number> {
+  const r = await query<{ notif_key: string | null }>(
+    'UPDATE notifications SET seen_at = now() WHERE seen_at IS NULL RETURNING notif_key')
+  if (r.rowCount) {
+    console.log(`[notify] MkAll — marked ${r.rowCount} notification(s) seen`)
+    emitHub('seen', null)
+    for (const row of r.rows) if (row.notif_key) emitHub('dismissPhone', row.notif_key)
+  }
+  return r.rowCount ?? 0
 }
 
 export async function unseenCount(): Promise<number> {

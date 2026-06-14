@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 export type Intent =
   | { kind: 'timer'; minutes: number; label: string }
   | { kind: 'note'; text: string }
+  | { kind: 'memo'; text: string }   // Phase 14: saves audio clip + transcript
 
 // G2CC_NOTES_FILE override exists for the SMOKE SUITE ONLY (review
 // 2026-06-11b: phase6 used to append to + filter-rewrite Adam's REAL inbox —
@@ -25,6 +26,10 @@ export type Intent =
 // sets it.
 const NOTES_FILE = process.env.G2CC_NOTES_FILE ?? join(homedir(), 'notes', 'glasses-inbox.md')
 const NOTES_DIR = dirname(NOTES_FILE)
+
+/** The notes-inbox path (honors the smoke override) — for the Phase-12 Search
+ *  notes source, which reads it directly. */
+export function notesFile(): string { return NOTES_FILE }
 
 /** Small spoken-number map — Parakeet sometimes emits words, not digits.
  *  Unknown words simply fail the parse (→ normal Aria prompt; safe). */
@@ -36,6 +41,9 @@ const WORDNUM: Record<string, number> = {
 
 const TIMER_RE = /^(?:please\s+)?(?:set\s+)?(?:a\s+)?(?:timer|remind\s+me)\b(?:\s+(?:in|for))?\s+(\d+(?:\.\d+)?|[a-z-]+)\s*(minutes?|mins?|m|hours?|hrs?|h)\b\s*(.*)$/i
 const NOTE_RE = /^note\b[:,]?\s+(.+)$/is
+// Phase 14: `memo: <anything>` / `memo <anything>` — same "that …" exclusion as
+// note ("memo that report" reads conversational → falls through to Aria).
+const MEMO_RE = /^memo\b[:,]?\s+(.+)$/is
 
 export function parseIntent(text: string): Intent | null {
   const t = text.trim()
@@ -50,6 +58,11 @@ export function parseIntent(text: string): Intent | null {
       return { kind: 'timer', minutes, label }
     }
     // unresolvable number word — fall through to Aria (never guess)
+  }
+
+  const mm = MEMO_RE.exec(t)
+  if (mm && !/^that\b/i.test(mm[1])) {
+    return { kind: 'memo', text: mm[1].trim() }
   }
 
   const nm = NOTE_RE.exec(t)

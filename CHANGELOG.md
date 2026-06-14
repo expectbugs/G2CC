@@ -4,6 +4,303 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-13 r21 — **Adam's 7 fixes: the wall NEVER throws again, notification dismiss-sync, Main fits, + 4 smaller (server + APK v1.12)**
+
+Seven issues from on-glass use, each smoke-verified + a 2-change adversarial review
+(no HIGH/MEDIUM; 3 LOW polish applied).
+
+**#4+#2 — THE 960 B WALL NEVER ERRORS AGAIN (the big one).** Mail + tmux kept
+throwing "layout frame exceeds 960 B" — a long notification-flash title + a full
+page + a big menu summed past the wall, and `composeScene` THREW → errorView
+instead of the screen. Now it CLAMPS to fit: `fitFrameToBudget` trims only the
+NON-TAPPABLE regions (content text → title → status — NEVER the menu or browse
+rows, which must stay byte-for-byte in sync with the WM's index-based tap
+resolution), code-point-safe, with a '…' marker + a loud log. Verified: a 1964 B
+frame → 952 B, no throw. (tmux's tail also now clamps each line to 44 cols — a
+dense 80-col terminal used to blow it.)
+
+**#1 — notifications.** (a) The ⚠ triangle doesn't render on the G2 → replaced
+with `!` everywhere on-glass (flash/badge/overlay/alerts). (b) DISMISS SYNC
+(server + client, additive wire): dismissing on the phone marks the glasses copy
+seen (`onNotificationRemoved` → `notification_dismissed` → `markSeenByKey`), and
+reading on glass / MkAll dismisses the phone copy (`markSeen` → a `dismissPhone`
+hub event → `notification_cancel` → `cancelNotification`). The loop terminates in
+both directions on the `seen_at IS NULL` guard (the phone-dismiss path emits no
+echo). A `notif_key` column (notify-v3) carries the phone key. (c) A **MkAll**
+menu item in Notices marks every unseen seen at once (and dismisses each on the
+phone). [U] on-glass.
+
+**#5 — Main fits on screen.** Folded the AI category (Aria, CC) into Tools,
+moved Dictate into Tools as an action, dropped Reload from Main. The Main menu is
+now just Comms/Media/Tools/Info/Games (5 — fits).
+
+**#6 — Deliveries newest-first** (was grouped by delivered-state, so a fresh
+"delivered" sank below an old "on the way"). Now `ORDER BY last_update DESC`.
+
+**#7 — disk-full alerts ONCE per drive** (was every 2 h while full). The volume
+rule's re-arm is now Infinity — fires once after the sustain, then never until it
+drops below the threshold and re-fills.
+
+**#3 — menu wrap-around: NOT POSSIBLE server-side** (investigated). The DE menu is
+a native FIRMWARE-driven list; the firmware owns the cursor and decides
+wrap-vs-stop, surfacing only the chosen index on tap. Server-side cursor control
+would resurrect the 15-20 s tap-lag the DE redesign fixed. Documented as a
+firmware limitation.
+
+Smoke 18/18 (new: dismiss-sync glass↔phone + MkAll in phase4; the disk-full
+no-repeat/re-fill in phase12-stats-alerts; the new Main menu + Terms in the
+dashboard/terminal smokes). `OS_VERSION` → 1.12; APK staged.
+
+---
+
+## (unstamped) — 2026-06-13 r20 — **Client batch: the C1–C4 review fixes + MMS-retry (Phase 1) — APK v1.11**
+
+The deferred client work from the 2026-06-13 review, now applied + adversarially
+re-reviewed (1 agent, daily-driver-paranoid — verdict: no crash/hang/zombie
+vector). **C1:** the MMS image decode + JPEG-encode moved OFF the NotificationListener
+MAIN thread (a multi-MB photo decoded on the NLS callback is exactly what
+produces the zombie-listener state the file fights) into a service `ioScope`
+(Dispatchers.IO, cancelled in onDestroy). **C2:** `onLensDisconnected`'s
+`else if (recovering)` branch — a lens that reached GattConnected then
+Disconnected mid-recovery — now clears `recovering`/`_connecting` (was log-only →
+recovery could strand, depending solely on autoConnect re-firing Ready), mirroring
+the Error branch. **C3:** `_connecting` now cleared alongside `_launched=true` on a
+successful cold-launch (was a masked stuck flag). **C4:** the connectedDevice-only
+`startForeground` FALLBACK is now wrapped — a second throw (e.g.
+ForegroundServiceStartNotAllowedException on a background start) logs + `stopSelf()`
+instead of crashing the service start. **Phase 1 (MMS retry):** the actual "MMS
+images still broken" fix (root cause #2 — the RCS attachment file isn't servable
+at notification time): the offloaded decode now RETRIES at 0/2/5/10 s (the
+notification stays posted, so the URI grant holds), first success wins, after the
+window forwards imageless + LOUD; split unreadable diagnostics (stream-null vs
+zero-bounds vs exception). Review-fix folded in: **newest-wins per notification
+key** — Google Messages re-posts the same key with evolving TEXT while the image
+URI is constant, which the content-hash dedup let through → a SECOND 10 s loop for
+the SAME image; now a re-post cancels the in-flight loop (one decode per key,
+latest text+image wins, `isActive`-guarded against a double-forward). `connection`
+marked `@Volatile` (read off the ioScope). `OS_VERSION` → 1.11. Gradle
+testDebugUnitTest green; APK built + staged at `~/.g2cc/g2cc-harness.apk`.
+**[U] ON-GLASS PENDING** (the whole point of an APK): the C2 recovery path, the
+MMS image actually appearing, and no listener regression — Adam verifies. STILL
+client-side: Phases 4a (SMS reply), 6 (nav line), 7 (media), 15 (phone finder), 9
+(voice) — bigger features needing wire-contract coordination + on-glass iteration.
+
+---
+
+## (unstamped) — 2026-06-13 r19 — **The autonomous server-batch: upgrades.md v2 Phases 3/14/11/12/8/5 (server-only)**
+
+A continuous autonomous build of the next server-ready slice of the v2 queue
+(suggested order 3 → 14 → 11 → 12 → 8 → 5), each smoke-verified before the
+next, with whole-project review passes folded in. No APK (all server-only); the
+client batch (1/4/6/7/9/15 + the C1–C4 review fixes) is a separate cycle.
+
+**Phase 3 — Suggest-next-prompt.** A new `Suggest` leads the idle session menu
+(CC + Aria) once there's ≥1 completed response to predict from. Tap → a
+STATELESS one-shot `claude --print --model claude-opus-4-8 --effort medium
+--tools "" --system-prompt server/prompts/suggest.md` (Adam's locked choice,
+decision #4) reads the last ~15 turns from the Phase-3 history DB on stdin and
+predicts Adam's next message; the result rides the SAME sacred confirm
+machinery as dictation — a `[Confirm, Regenerate, Cancel]` card. Confirm sends
+it through the normal `prompt()` path (queue/busy rules apply; deliberately
+SKIPS tryIntent — a predicted "note: …" is a message for the model, not an OS
+command); Regenerate re-runs (killing the prior one-shot); Cancel restores.
+Design notes that cost thought: (a) `--tools ""` makes it a pure prediction —
+nothing can block on a permission prompt, so the process ALWAYS self-terminates
+and the no-timeouts rule holds for free (verified: `claude -p` prints and
+exits; an AbortController kills it on Cancel, an explicit abort, not a time
+bound); (b) the "≥1 completed response" gate is a SYNCHRONOUS counter
+(`completedTurns`, bumped in turn_complete) because the DB capture handle
+(`convId`) is set asynchronously and can't gate the menu; reset on a fresh
+session so Suggest hides until that new conversation has a turn; (c) a stale-seq
+guard at every async boundary discards a late one-shot result if Cancel/
+Regenerate/a state-clear fired meanwhile; (d) the in-flight + pending-card
+states join `dictationBusy()` so a notification overlay queues behind them (the
+confirm step stays sacred). New `suggest.ts` + `server/prompts/suggest.md` +
+`history.recentTurns()`. Smoke `phase3b-suggest` (fake CLI via CLAUDE_CLI):
+module format/empty-reject, recentTurns chronology, menu order, confirm→prompt()
+send, Regenerate, stale-discard — 7/7.
+
+**Phase 14 — Audio memos.** `memo: <anything>` at the Ask confirm step (sibling
+of `note:`/`timer`) saves BOTH the raw captured audio clip AND the Parakeet
+transcript. The thinking that mattered: the transcript reaches the intent
+handler (tryIntent, deep in the Aria SessionLevel) but the PCM that produced it
+is a local in ws-handler's handleAudio, long gone by confirm time — so the
+clip is now STASHED on the WSClient at the moment of a successful transcription
+(`lastDictationAudio`, the raw pre-noise-pipeline buffer + its format) and
+exposed to the WM via a new `WmContext.lastDictationAudio()`; the `memo:` branch
+reads it, writes a wav under `~/g2cc-memos/` (`pcmToWav`, int16 OR DJI float32),
+inserts a `memos` row, and appends a notes-inbox pointer line. Robustness:
+the wav is BEST-EFFORT inside saveMemo (a frame-misaligned buffer / disk error
+sets a loud `wavError` and the transcript STILL saves — never a silent drop;
+the ack card says "AUDIO FAILED: …" honestly), and a missing buffer saves the
+transcript alone, logged. Retention UNLIMITED (no purge — unlike Files trash).
+New `memo.ts` + the `memos-v1` migration + the `memo` intent. Smoke
+`phase14-memos`: intent disambiguation, saveMemo (wav+row+note+duration,
+missing-buffer, misaligned-buffer), and the REAL Aria flow onStt('memo: …')→
+Confirm→tryIntent→saveMemo with the PCM plumbed through a faked ctx — 3/3.
+
+**Phase 12 — Universal Search.** A new `Search` window: dictate a query (the
+sacred confirm flow, mirroring the Files name-entry dictation) → ONE results
+list across FOUR sources, each run in PARALLEL and ISOLATED (Promise.allSettled
+— a source that throws becomes a loud `error` row, never a blanked list):
+✉ mail (a new `read_maildir.py search` — From+Subject for every message,
+body for the most-recent 300, bounded), 📄 files (a bounded `find` under
+/home/user: maxdepth 6, node_modules/.git/.cache/venv pruned, glob-metachars
+stripped from the dictated query), 🗨 history (Postgres `turns` ILIKE with the
+LIKE metacharacters escaped), 📝 notes (grep the glasses-inbox). Tapping a hit:
+mail/file HAND OFF to their own windows; history/note (which have no dedicated
+window) open INLINE as a read view. The hand-off is a new generic mechanism —
+`OsWindow.onOpen(WindowOpen)` + a `SwitchTo.open` payload the WM delivers
+post-switch (exactly like `menuLabel`); `MailWindow.onOpen` reuses an extracted
+`openMessage()` + marks read; `FilesWindow.onOpen` navigates to the file's
+parent dir, building the FULL stack chain from the most-specific matching
+location down (a single-element stack would make `..` jump to locations, since
+`upOne` pops the stack — caught before shipping). The query dictation carries
+the full state machine (listening→Done→transcribing→confirm→search) with a
+stale-seq guard (Cancel/new-Dictate supersedes an in-flight search) and the
+mic-hygiene rules (stop on deactivate/back/reload; interruptible() false during
+the confirm step). New `search.ts` + `history.searchTurns()` + the
+`read_maildir search` subcommand + `intents.notesFile()`. [U] the source emoji
+(✉📄🗨📝) render on glass — Adam-specified; ⏱/📅 already render in notify
+titles, so likely fine. Smoke `phase12-search`: searchAll over sandbox sources
+(all 4 return + per-source isolation), searchTurns metachar-escaping, the
+SearchWindow state machine (confirm, results, inline read, mail/file hand-off),
+and the onOpen handlers — 5/5.
+
+**Phase 8 — Mail becomes a full mail program.** Three halves. READ: `read_maildir
+read` now extracts inline + attached image parts to a per-key cache (sha1 dir,
+wiped per read) and returns threading headers (Message-ID/References/Reply-To/
+Cc); the Mail read view appends them as trailing IMAGE pages (the Notices/MMS
+pipeline — PAGE-2 RULE, ~4 s tile push only on flip-to). REMOTE images stay
+unfetched (privacy). MANAGE: `Del` → the sibling Trash maildir (mbsync
+propagates; Cancel-FIRST confirm per r17), `Unread` → S-flag removal (mark_read's
+inverse). WRITE: a new `send_mail.py` builds proper RFC822 and sends via
+`msmtp -t` (the SAME ~/.msmtprc migadu account mbsync uses — credentials live
+ONLY there, never logged) then files a copy into Sent for mbsync to upload.
+Reply (quoted original + In-Reply-To/References threading; recipient is the
+known sender — no address dictation), Forward (original inline-quoted), Compose
+(fresh) — the recipient for Forward/Compose is PICKED from a `read_maildir
+senders` list (dictating an email address through Parakeet is unreliable; the
+common case is "reply to someone who mailed you"); the body is dictated through
+the sacred confirm flow. The From address is read from ~/.msmtprc's non-secret
+`from` line. THE GATE: nothing sends until Adam reads + Confirms on glass; the
+smoke + send_mail's `--dry-run` build RFC822 and file to a SANDBOX Sent WITHOUT
+ever invoking msmtp (no outbound side effect in tests). [U] the live msmtp send
+is on-glass-unverified — Adam should reply-to-himself first. Worst-case read
+frame with the new 9-item menu = 628 B, well under the 960 B wall. Smoke
+`phase8b-mail`: read_maildir (images/senders/mark_unread/del→Trash), send_mail
+dry-run (reply threading/forward/compose/bad-recipient-reject), and the
+MailWindow state machine (image pages, Reply/Forward/Compose send routing, Del
+Cancel-first, Unread) with subprocesses STUBBED — 3/3.
+
+**Phase 5 — The tmux window.** The glasses become a viewer/controller of Adam's
+REAL tmux sessions. DELIBERATE simplification of the spec's `tmux -C` control-
+mode attach: that needs a terminal emulator (pyte) to turn `%output` escape
+sequences into a grid — heavy + on-glass-unverifiable. Instead the new
+`Terminal` window drives tmux via DISCRETE commands (`tmux.ts`: list / capture-
+pane / send-keys / new-session) — tmux IS the emulator, `capture-pane` reads its
+rendered grid, and the durable session means a WS drop loses nothing (exactly
+the Phase-5 safety goal, achieved without an attach to lose). Entry = a session
+MENU (`tmux ls` + `New session`). View = TAIL (paced firmware text, last 13
+lines, a 500 ms capture poll while active — display pacing, NOT an I/O timeout,
+gen-guarded + torn down on every exit incl. a new `OsWindow.dispose()` the WM
+calls on ws-close) or GRID (an 80×22 IMAGE page via a new `render_terminal.py`
+monospace renderer — PAGE-2, htop/vim legible; splitGray4Tiles auto-guards the
+all-black tiles a sparse terminal makes). Input: the quick-keys list (Enter ·
+Ctrl-C · q · y · n · ↑ ↓ Tab Esc — one tap each, send-and-stay for sequences) +
+dictation → `send-keys -l` LITERAL (no auto-Enter by design — tap Keys→Enter to
+run, so a partial line is possible) through the sacred confirm flow; keys reach
+ONE focused session. `New session` dictates a name (sanitized to
+[A-Za-z0-9_-]) → `new-session -d` → jumps in. Socket: production = the default
+tmux server (same uid as Adam's sessions); the smoke sets `G2CC_TMUX_SOCKET` to
+a throwaway `-L` server so it never touches real sessions. Smoke
+`phase5-terminal` (hermetic tmux): helpers (list/send round-trip/new), the 80×22
+grid render under the wall, and the window state machine (open/Keys/Dictate-
+literal/Grid/New-session) — 4/4.
+
+**Phase 11 — Main becomes a category launcher.** The flat switcher menu hit ~14
+items with the new windows; Main is now XFCE-style. Every `OsWindow` declares a
+`category` (AI/Comms/Media/Tools/Info/Games) — windows SELF-PLACE, so future
+windows need only set the field. The categories menu = `Dictate` (the renamed
+Ask — switches to Aria + runs its verb) + the present categories (canonical
+order) + `Reload`; tapping a category swaps the MENU to its programs (+ `Stats`
+under Info, which is a Main level not a window) and the CONTENT to their
+summaries; Back returns to the launcher. The launcher's content is an MRU
+DASHBOARD — the most-recently-used windows, one page (the WM tracks a monotonic
+use counter in switchTo; `mruWindows()` orders by it, never-used trailing in
+registration order). Never paginates. Assignments: AI=Aria/CC, Comms=Mail/
+Notices, Media=Reader, Tools=Files/Terminal/Search/Timers, Info=Calendar(+Stats),
+Games=Games. Also added `OsWindow.dispose()` (the WM calls it for every window on
+ws-close — the Terminal poll's clean teardown). Smoke `phase5-dashboard`
+rewritten: the category-launcher menu, AI-category nav round-trip, Info→Stats,
+and MRU ordering (using Search then Games puts Games ahead) — and phase4-notify's
+"Main rendered" check updated to the new menu.
+
+**Phase 13 — Deliveries (Gmail-driven).** Turned out to be UNBLOCKED, not gated:
+aria's OAuth token already carries `gmail.modify` (verified 2026-06-13), so no
+re-consent was needed. `read_gmail.py` (aria's venv + client, read-only by
+discipline — the read_gcal pattern) queries carrier senders (usps/ups/fedex/dhl/
+amazon, newer_than 30d). The PARSER's job is discipline: carrier senders also
+blast marketing (Prime Day, gift cards, Informed-Delivery digests), so a message
+is a DELIVERY only if it carries a shipment SIGNAL (a tracking number OR a
+delivery-status phrase) — pure marketing is SKIPPED, not stored; a shipment-shaped
+message whose tracking won't parse is kept LOUDLY as `(unparsed)`, never a silent
+miss. Rows key by tracking# (so shipped→out→delivered fold into ONE row, newest
+status wins) or the message id. A 15-min sync upserts a `deliveries` table; a new
+`Deliveries` window (Info category — it self-placed via the Phase-11 `category`
+field) lists active-first → detail; a `deliveriesSummary()` dashboard line ("2 in
+transit · 1 out today"). PROOF + TUNING ON REAL MAIL (the final review caught the parser, and Adam's
+actual inbox tuned it): the live sync settled at 8 real deliveries (5 Amazon
+delivered + 3 UPS, 0 unparsed) from 70 carrier messages — across three iterations
+(9 → a buggy MARKETING-first check SILENTLY DROPPED real shipments that carried a
+marketing word like "rate your courier"; → 30 → over-corrected, keeping USPS
+"Daily Digest" Informed-Delivery summaries that merely MENTION "arriving" + an
+Amazon PAYMENT email matched by the over-broad order-number regex; → 8 → a DIGEST
+subject is skipped unconditionally [a summary, never a single shipment], the
+Amazon order# dropped from the tracking shapes [it rides every Amazon email],
+and a tracking#/status is definitive over marketing words). Also fixed:
+"could not be delivered" no longer reads as `delivered=true` (failure rule runs
+first); `carrierFromAddr` anchors on the DOMAIN (startups.com ≠ UPS); a malformed
+Date falls back to 0 (loses conflicts, not now() which won them); `(unparsed)`
+rows excluded from the in-transit count; the detail-view subject clamped under
+the wall. New `deliveries.ts` + `read_gmail.py` +
+the `deliveries-v1` migration. Smoke `phase13-deliveries`: the parser (shipments
+vs marketing vs unparsed), reduce-newest-wins, sync→upsert→list/detail/summary,
+and the window — 4/4 on synthetic carrier mail (the live path stays out of the
+smoke to keep it deterministic + not read Adam's mail every run).
+
+**Two adversarial review rounds (4 parallel agents each), every finding
+double-checked against the code before acting.** Round 1 (after 3/14/12) fixed:
+Suggest reading the DB before the fire-and-forget capture drained (now awaits
+`captureChain`); suggest stderr truncated with no full log; memo's notes-append
+unwrapped (a notes failure after the row+wav commit reported total failure →
+duplicate on retry — now best-effort with a `noteError`); Search `onBack`
+stranding a completed in-flight search (now bumps the seq); Mail.onOpen's
+unconditional unread-decrement; a maildir-search snippet offset bug. Round 2
+(after 8/5/11) fixed SIX confirmed issues: **(1) send_mail sent via msmtp BEFORE
+filing to Sent — a Sent-filing failure reported "nothing sent" → DUPLICATE real
+email on retry; now best-effort filing after a confirmed send.** **(2) The Mail
+body confirm card was unpaginated raw text → a normal-length dictated email blew
+the 960 B wall → errorView with no Confirm → the body was lost + unsendable; now
+paginated (Next/Prev), the full body always sends.** **(3) tmux TAIL mode didn't
+width-clamp lines → a standard 80-col/dense terminal blew the wall → errorView
+instead of output (the whole "watch builds" use case); now each line clamps to
+44 cols with a › marker, grid mode shows full width (dense 90-col frame: 902 B).**
+(4) `mark_read`/`mark_unread` `os.rename` with no clobber guard (mail loss) —
+now refuses to overwrite. (5) compose-mode send left a stale `readKey` (Reply/Del
+would act on a phantom message) — now → list. (6) Main didn't reset to the
+launcher root on re-entry + 'Main'-on-Stats was a dead no-op — now a `resetToRoot`
+in switchTo. Plus the grid renderer auto-sizes to the capture (no silent >80-col
+clip), `composeBusy`/`interruptible` hygiene, a Search/Terminal confirm-card
+clamp, a degenerate-session-name reject, and a verb-case permission guard.
+Verified-NOT-real / accepted (not changed): the msmtp-stderr "leak" (msmtp never
+echoes the password); the dashboard `summarize` HANG case (pre-existing, not a
+Phase-11 regression, and the no-timeout rule forbids the obvious fix); the
+session-name "injection" (execFile, no shell — safe). Smoke 17/17 throughout,
+with new assertions pinning each fix.
+
+---
+
 ## (unstamped) — 2026-06-13 r18 — **Chess tile-redraw fix + Files file-manager overhaul (the "970 B" wall) + 3 upgrades phases + a whole-project review (server-only)**
 
 Adam's two explicit asks, plus a batch of the upgrades.md v2 queue, plus the

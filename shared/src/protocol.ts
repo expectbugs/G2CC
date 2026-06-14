@@ -203,6 +203,15 @@ export interface NotifyMsg {
   imageB64?: string
 }
 
+/** The phone dismissed a notification it had forwarded (Adam 2026-06-13 dismiss
+ *  sync) → the server marks the glasses copy seen. Additive-optional (B6): old
+ *  servers ignore it. The client sends it only for keys it actually forwarded. */
+export interface NotificationDismissedMsg {
+  type: 'notification_dismissed'
+  /** StatusBarNotification.key. */
+  key: string
+}
+
 /** Audio format the phone is about to stream. The server routes on
  *  encoding/channels/rate (NOT on `source`) to the appropriate pipeline:
  *    - `int16` mono 16 kHz → legacy path (preprocess + faster-whisper / Parakeet)
@@ -375,6 +384,7 @@ export type ClientMessage =
   | DiagMsg
   | OsAttachMsg
   | InputMsg
+  | NotificationDismissedMsg
 
 // ============================================================
 // Server -> Client messages
@@ -534,6 +544,15 @@ export interface AudioRequestMsg {
   action: 'start' | 'stop'
 }
 
+/** Server → client: cancel a forwarded notification on the PHONE (Adam
+ *  2026-06-13 dismiss sync) — fired when it's read on glass / MkAll'd. The
+ *  client calls NotificationListenerService.cancelNotification(key); a key it
+ *  no longer holds is a harmless no-op. Additive-optional (old clients ignore). */
+export interface NotificationCancelMsg {
+  type: 'notification_cancel'
+  key: string
+}
+
 /** Server → client: the DE 'Reload' action — recover a possibly-stuck display.
  *  The client ABORTS any in-flight/queued render ops (releasing a wedged image
  *  ack-wait), then re-runs the COLD_INIT re-takeover with its current scene
@@ -573,4 +592,5 @@ export type ServerMessage =
   | RenderMsg
   | AudioRequestMsg
   | DisplayReloadMsg
+  | NotificationCancelMsg
   | ErrorMsg

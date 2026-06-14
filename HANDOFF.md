@@ -6,15 +6,47 @@ Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI
 `UPGRADE_PROGRESS.md` records the v1 phases incl. Adam's gate answers; `CHANGELOG.md` r3–r18
 carries the WHY of everything.
 
-**2026-06-13 batch (server-only, CHANGELOG r18, smoke 12/12 — NO APK):** the two explicit
-asks — **Phase 18 chess tile-redraw fix** (selection levels render text, board only when the
-position is new, constant `Skill` label) and **Phase 19 Files overhaul** (byte-aware pagination
-fixes the "≈970 B" dir-listing wall; recursive dir Copy/Move/Del; Rename + New-folder via
-dictation; **Phase 17 trash** folded in) — plus **Phase 2** (5 s blank flash) and **Phase 10**
-(stats threshold alerts), plus a whole-project review (fixed the Files pickDest navigation +
-the phase10 smoke flake; 4 client findings DEFERRED to Adam with file:line fixes — see the
-session summary). STILL UNIMPLEMENTED from upgrades.md: Phases 3/5/8/11/12/13/14 (server) and
-1/4/6/7/9/15/16 (client) — readiness notes in the session summary.
+**2026-06-13 batch r18 (server-only, smoke 12/12 — NO APK):** Phase 18 chess tile-redraw fix,
+Phase 19 Files overhaul (the "970 B" wall), Phase 17 trash, Phase 2 (5 s blank flash), Phase 10
+(stats alerts) + a whole-project review.
+
+**2026-06-13 batch r19 — THE SERVER-READY QUEUE, DONE (server-only, smoke 17/17 — NO APK):**
+the rest of the server phases, each smoke-verified + TWO adversarial review rounds (every
+finding double-checked against code before acting): **Phase 3 Suggest** (one-shot
+`claude --print` predicts the next prompt → confirm card), **Phase 14 Audio memos**
+(`memo: …` saves the PCM clip + transcript — the buffer is plumbed from ws-handler to the
+intent handler), **Phase 12 Universal Search** (a Search window: dictate → mail/files/history/
+notes in parallel → tap hands off to Mail/Files or reads inline; the generic `OsWindow.onOpen`
++ `SwitchTo.open` mechanism), **Phase 8 full Mail** (image pages, Del→Trash, Mark-unread, and
+Reply/Forward/Compose via `send_mail.py`+msmtp through the confirm flow — **[U] the LIVE send
+is on-glass-unverified; reply-to-yourself first**), **Phase 5 tmux** (a Terminal window: tail/
+grid views of real tmux sessions via discrete commands, quick-keys + dictation), **Phase 11
+Main = category launcher** (windows self-place by a `category` field; MRU dashboard). NEW
+windows: **Search**, **Terminal**.
+
+**2026-06-13 client batch r20 — APK v1.11:** the 4 deferred client review fixes (**C1** MMS
+decode off the NLS main thread, **C2** reconnect dead-end, **C3** `_connecting` reset, **C4**
+startForeground fallback wrapped) + **Phase 1** (MMS-retry 0/2/5/10 s; newest-wins per key).
+
+**2026-06-13 r21 — Adam's 7 on-glass fixes — APK v1.12 BUILT + STAGED (`~/.g2cc/g2cc-harness.apk`):**
+**(1)** the 960 B wall NEVER throws again — `composeScene` now `fitFrameToBudget`-clamps the
+non-tappable regions to fit (Mail/tmux title+page overflow GONE); **(2)** notifications —
+⚠→`!` (the triangle doesn't render), **dismiss-sync** both ways (phone-dismiss↔glass-seen,
+loop-safe via `seen_at IS NULL`), a **MkAll** Notices item; **(3)** Main folded to fit
+(AI+Dictate→Tools, no Reload); **(4)** Deliveries newest-first; **(5)** disk-full alerts once
+per drive (Infinity re-arm); **(6)** menu wrap = firmware-limited, can't do server-side. **[U]
+ON-GLASS PENDING** — install from `/setup`; verify the dismiss-sync + that the wall errors are gone.
+
+**Phase 13 Deliveries DONE too (r-add, server-only, smoke 18/18):** turned out UNBLOCKED —
+aria's token already has `gmail.modify`, no re-consent needed. Carrier mail → a tracked
+`Deliveries` window (Info category); the parser skips marketing/keeps real shipments
+(`(unparsed)` loud); 15-min Gmail sync. Live-proven: 9 real deliveries from 70 carrier msgs.
+NEW window: **Deliveries**.
+
+STILL UNIMPLEMENTED: Phases 4a/4b (SMS), 6 (nav line), 7 (media), 15 (phone finder), 9 (voice)
+client — bigger features needing wire-contract coordination + on-glass iteration; Phase 16
+(OBD — dongle backorder). NOTE: upgrades.md says the wake word is now **"butterscotch"** (ideal
+for STT), superseding the earlier "G2" — for Phase 9.
 
 ---
 
@@ -35,19 +67,22 @@ zero state). The phone is the BLE/WiFi bridge — and per **the prime directive*
 it stays in Adam's pocket, untouched, always. A small hat device (ESP32, on backorder) replaces
 the phone eventually; the DE is hat-ready by construction.
 
-## Where we are (2026-06-11, post-upgrades-batch)
+## Where we are (2026-06-13, post r19–r21 server queue + APK v1.12)
 
 The BLE wire format is fully decoded (`docs/G2_BLE_PROTOCOL.md`, authoritative); the
-window-manager DE is in daily use; and the **entire upgrades batch (Phases 1–11) is
-implemented and smoke-verified** (11/11 in `server/smoke/run-all.mjs`): Postgres
-foundation, durable session history (+2,927-turn backfill), the notification layer,
-the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
-```chart image pages, APK v1.7, Google Calendar, and rpg-cli + chess.
+window-manager DE is in daily use; and the **entire server-side queue is implemented
+and smoke-verified** (18/18 in `server/smoke/run-all.mjs`) across **THIRTEEN windows**:
+the v1 foundation (Postgres, durable history +2,927-turn backfill, the notification
+layer, dashboard Main, timers + dictation intents, the EPUB Reader, ```chart pages,
+Google Calendar, rpg-cli + chess) PLUS the v2 server queue (Phase 3 Suggest, 5 tmux
+Terminal, 8 full Mail, 11 Main category-launcher, 12 Search, 13 Deliveries, 14 audio
+memos). The Android client is **APK v1.12**. Everything that remains is client-side
+(needs an APK + on-glass iteration) or hardware-gated — see What's next.
 
 - **Server**: the DE — window manager, compositor, content pipeline, CC-subprocess
   bridge, Postgres store (`g2cc` DB, unix-socket peer auth), notification hub, timers,
   calendar sync, games glue. Running on `:7300` (restart procedure below).
-- **Android client: APK v1.10 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
+- **Android client: APK v1.12 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
   /tmp is wiped every boot; a legacy /tmp copy also exists) — check
   `os/OsLayout.OS_VERSION` on the connect splash for what's actually installed; Adam
   installs from `http://100.107.139.121:7300/setup`. **The on-glass verification batch
@@ -68,7 +103,15 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   (MessagingStyle data URIs, not EXTRA_PICTURE) + image-aware notify dedup; server:
   Files delete confirm is Cancel-first.** On-glass batch additions: ring the phone
   (call popup), send an MMS (image page), check the G battery slot — **DONE: verified live 2026-06-12 (73→76% on the diag)**.
-- **The TEN windows** (`server/src/os-windows.ts`): **Main** (live dashboard: host/pool/
+  **v1.11 (2026-06-13, CHANGELOG r20): the 4 deferred client review fixes** — C1 MMS decode
+  off the NotificationListener main thread, C2 reconnect dead-end on a *clean* lens disconnect,
+  C3 `_connecting` never reset on a good launch, C4 startForeground-fallback catch — **+ Phase 1
+  MMS-retry (0/2/5/10 s, newest-wins per key).** **v1.12 (2026-06-13, CHANGELOG r21): Adam's
+  7-fix batch** — the notification **dismiss-sync** wire (`notification_dismissed` ↔
+  `notification_cancel`), `!` in place of the un-rendering ⚠, the **MkAll** Notices item.
+  **[U] ON-GLASS PENDING: install v1.12 from `/setup`; verify dismiss-sync both ways + that the
+  960 B wall errors are gone in Mail/tmux** (the wall now clamps instead of throwing).
+- **The THIRTEEN windows** (`server/src/os-windows.ts`): **Main** (live dashboard: host/pool/
   battery/unseen/next-timer + one summary line per window; menu = switcher + `Ask`) ·
   **Aria** (CC subprocess @ ~/aria, `server/prompts/aria-g2.md` display prompt; the Ask
   flow runs confirmed-dictation INTENTS: `timer/remind me N min…` → instant timer,
@@ -77,13 +120,20 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   prompts) · **Mail** (Maildir) · **Files** (locations → tree → preview/image viewer) ·
   **Reader** (EPUBs in ~/books; resume-position) · **Timers** · **Calendar** (READ-ONLY
   agenda) · **Games** (rpg-cli dungeon @ /home/user + chess vs Stockfish) · **Notices**
-  (notification history; reading marks seen). Session windows share SessionLevel
+  (notification history; reading marks seen; **MkAll** marks all + phone-dismisses) ·
+  **Search** (dictate → mail/files/history/notes in parallel → tap hands off to Mail/Files
+  or reads inline) · **Terminal** (`Terms` — tail/grid of real tmux sessions via discrete
+  commands; quick-keys + dictation) · **Deliveries** (carrier mail → tracked shipments,
+  newest-first, Info category). Session windows share SessionLevel
   (firmware-text pages + chart image pages) + HistoryLevel + the options/prompts levels.
 - **Notifications** (the Phase-4 layer, WM-owned): persist-then-surface via a hub;
-  info/sms/email = ⚠ title flash + status badge until read in Notices; timer/call =
+  info/sms/email = `!` title flash + status badge until read in Notices (the `!`
+  replaced ⚠, which the firmware doesn't render — Adam 2026-06-13); timer/call =
   overlay (`Open/Dismiss/Main`) that QUEUES behind dictation/confirm/permission states;
-  **blanked screen: EVERY priority pops for 10 s then auto-re-blanks** (Adam's rule —
-  the one sanctioned auto-dismiss; marked seen at display; newest-wins).
+  **blanked screen: EVERY priority pops a 5 s ONE-LINE flash then auto-re-blanks**
+  (Phase 2, Adam 2026-06-12 — NOT the full UI, and deliberately NOT marked seen: the
+  badge nags until read in Notices; newest-wins). **Dismiss-sync** (r21): reading on
+  glass cancels the phone notification and vice-versa, loop-safe via `seen_at IS NULL`.
 - **Tab strip retired** (Phase 5): the status slot spans the full bottom bar; region id 5
   stays reserved, never reused.
 
@@ -191,13 +241,17 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   rendering, `splitGray4Tiles`) · `store.ts` (pg pool + migrations) · `history.ts` ·
   `os-notify.ts` (hub + persistence) · `timers.ts` · `intents.ts` · `reader.ts` ·
   `calendar.ts` · `stats.ts` + `stats-alerts.ts` (Ph10 sampler + threshold alerts) ·
-  `trash.ts` (Ph17 Files trash) ·
-  `games.ts` · `ws-handler.ts` (WS routing incl. notify/battery) · `cc-session.ts`/
+  `trash.ts` (Ph17 Files trash) · `suggest.ts` (Ph3 next-prompt) · `memo.ts` (Ph14
+  audio memos) · `search.ts` (Ph12 universal search) · `tmux.ts` (Ph5 Terminal glue) ·
+  `deliveries.ts` (Ph13 carrier-mail parser + 15-min Gmail sync) ·
+  `games.ts` · `ws-handler.ts` (WS routing incl. notify/battery/dismiss-sync) · `cc-session.ts`/
   `session-pool.ts`/`watchdog.ts` (CC bridge) · `stt.ts` (Parakeet) · `config.ts`
   (quickPrompts, notifications.packageMap; example in `config.example.json`) ·
   `shared/src/protocol.ts` + `constants.ts` (both ends' contract).
-- **Scripts (`scripts/`):** `read_maildir.py` · `read_epub.py` · `read_gcal.py` (runs
-  under ARIA's venv — reuses aria's OAuth read-only) · `render_image.py` ·
+- **Scripts (`scripts/`):** `read_maildir.py` · `send_mail.py` (Ph8 msmtp Reply/Forward/
+  Compose) · `read_gmail.py` (Ph13 carrier-mail sync) · `read_epub.py` · `read_gcal.py`
+  (the last three run under ARIA's venv — reuse aria's OAuth token; scopes incl. calendar
+  + gmail.modify) · `render_image.py` · `render_terminal.py` (Ph5 tmux→png) ·
   `render_chart.py` · `render_board.py` · `chess_move.py` · `import_cc_history.mjs`
   (one-shot backfill, idempotent) · `scene_to_png.py` (offline client-rule check incl.
   the wall). Python helpers run under `audio/venv` EXCEPT read_gcal.py (aria venv).
@@ -210,7 +264,7 @@ the dashboard Main, timers + dictation intents + quick prompts, the EPUB Reader,
   access row; Test/Server buttons retired) · `intents/IntentReceiver.kt` + `INTENTS.md`
   (PING live; rest deprecated-with-log). Parked, not in manifest: ProbeActivity,
   G2Pipeline, G2CCService, hud/*.
-- **Verification:** `server/smoke/run-all.mjs` — 11 scripts, THE regression suite; run it
+- **Verification:** `server/smoke/run-all.mjs` — 18 scripts, THE regression suite; run it
   after every server change. **ISOLATED since review #4: everything store-backed runs in
   the `g2cc_smoke` DB + a temp notes file (`server/smoke/_env.mjs` preamble — never the
   production g2cc DB, which the suite used to pollute/consume timers from); phase9-wire
@@ -246,31 +300,36 @@ session, context is truncating — tell him.
 
 ## What's next
 
-0. **The 2026-06-13 batch is server-only — restart the server (no APK).** On-glass spot-checks
-   for the new server behavior: chess (pick a move — board no longer redraws on every tap;
-   cycling Skill doesn't re-push the board); Files (open a HUGE / long-named directory — it
-   lists now; descend into a folder → tree menu Copy/Move/Del/Rename/New; Del → Trash location);
-   blank the screen, fire a notification → 5 s one-line flash (not the full UI).
-0b. **4 client review findings to apply + verify on glass** (I could not on-glass-verify, so
-   they were NOT shipped — see the session summary for file:line + fixes): NotifyListener
-   decodes MMS images on the MAIN thread (ANR risk → offload); a reconnect dead-end when a lens
-   *disconnects* (not errors) mid-recoverSession; `_connecting` never reset on a successful
-   launch (masked); the `startForeground` fallback catch is itself uncaught.
-0c. **Unimplemented upgrades.md phases** (readiness notes in the summary): server P3 (Suggest —
-   touches SessionLevel's confirm flow), P5 (tmux), P8 (full Mail), P11 (Main categories —
-   premature until the window count grows), P12 (Search), P13 (Deliveries — needs the one-time
-   gmail.readonly re-consent), P14 (memos — needs the PCM buffer plumbed to the intent handler);
-   client P1/P4/P6/P7/P9/P15 (need APK + on-glass) and P16 (OBD — dongle on backorder).
-1. **Adam's on-glass verification batch** for the whole upgrade (his gate-8 choice:
-   batched at the end) — the 11-step checklist lives in UPGRADE_PROGRESS.md §RUN COMPLETE
-   and the 2026-06-11 session log. Install APK v1.7 + the one-time notification-access
-   grant first.
-2. **Lichess** (deferred by Adam at gate A3.2): after the batch tests clean, he mints a
+The ENTIRE server-side queue is done (r18–r21, smoke 18/18, server restarted). Everything
+left is client-side (needs an APK build + on-glass iteration — which only Adam can run, per
+the prime directive) or hardware-gated:
+
+1. **On-glass verification — the open `[U]` items** (Adam runs every hardware test himself):
+   - **Install APK v1.12** from `http://100.107.139.121:7300/setup` (the connect splash shows
+     the installed `OS x.y` — confirm it reads `1.12`).
+   - **Notification dismiss-sync** (r21) — read one on glass, confirm it clears on the phone;
+     dismiss one on the phone, confirm the glass `!` badge clears. *Adam flagged this "needs
+     more testing" (2026-06-13) — it is the least-proven of the batch.*
+   - **The 960 B wall is gone** (r21) — open Mail with a long notification in the title bar,
+     and a busy tmux Terminal; neither should ever surface the old "exceeds 960 B" error (it
+     now clamps the non-tappable regions instead of throwing).
+   - **Mail LIVE send** (r19, Phase 8) — Reply/Forward/Compose go out via `send_mail.py` +
+     msmtp; **reply to yourself FIRST** to confirm the wire before any real recipient.
+   - Server-only spot-checks (no APK, already live): Main fits one screen (AI+Dictate folded
+     into Tools, Reload gone); Deliveries newest-first; disk-full alerts fire once per drive;
+     Search + Terminal windows render; chess board doesn't redraw every tap; Files lists huge
+     dirs + tree menu (Copy/Move/Del→Trash/Rename/New); blank-screen notification = 5 s flash.
+2. **Unimplemented CLIENT phases** (each needs an APK + on-glass + an additive wire contract):
+   **4a/4b** SMS (send + richer receive), **6** persistent nav line, **7** media transport
+   controls, **15** phone finder, **9** voice / always-listening — **the wake word is now
+   "butterscotch"** (ideal for STT; supersedes the earlier "G2"). **16** OBD car telemetry is
+   blocked on the dongle (backorder).
+3. **Lichess** (deferred by Adam at gate A3.2): after the on-glass batch is clean, he mints a
    `board:play` token → wire the Board API per upgrades.md Phase 11's spec block.
-3. **Phase 12 stretch** (upgrades.md): streaming STT + the layer-3 `display` MCP tool —
+4. **Phase 12 stretch** (upgrades.md): streaming STT + the layer-3 `display` MCP tool —
    requires Adam's explicit go-ahead; the display tool needs a design doc first.
-4. **upgrades.md Section D** stays OUT (calls await the root-vs-SIP decision; hat-gated
+5. **upgrades.md Section D** stays OUT (calls await the root-vs-SIP decision; hat-gated
    and swarm-gated items wait for their hardware/software).
-5. Android 15 note: OTP-bearing notifications may arrive REDACTED for untrusted listeners;
+6. Android 15 note: OTP-bearing notifications may arrive REDACTED for untrusted listeners;
    the clean fix when it matters is a CDM `DEVICE_PROFILE_GLASSES` association (researched,
    documented in CHANGELOG r11).

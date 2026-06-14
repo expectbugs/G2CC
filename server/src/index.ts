@@ -26,6 +26,7 @@ import { warmParakeet } from './stt.js'
 import { warmStore } from './store.js'
 import { armTimersFromDb } from './timers.js'
 import { startCalendarSync } from './calendar.js'
+import { startDeliveriesSync } from './deliveries.js'
 import { startStatsSampler } from './stats.js'
 import { startTrashPurge } from './trash.js'
 
@@ -182,6 +183,8 @@ try {
   startStatsSampler()
   // Files trash daily purge (Phase 17) — drops entries older than 30 days.
   startTrashPurge((m) => console.log(m))
+  // Deliveries: carrier-mail → tracked list, 15-min Gmail sync (Phase 13).
+  startDeliveriesSync()
 } catch (err) {
   console.error('[g2cc-server] Failed to start:', err)
   process.exit(1)

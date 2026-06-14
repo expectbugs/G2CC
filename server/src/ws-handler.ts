@@ -43,10 +43,11 @@ import { markdownToPlaintext, formatToolUse } from './output-parser.js'
 import { listProjectDirectories, validateProjectPath } from './directory-picker.js'
 import { CCDispatcher, DISPATCH_TARGETS, type Dispatcher, getDispatchTarget } from './dispatch.js'
 import { ChannelRouter } from './channel-router.js'
-import { notify, type NotifyPriority } from './os-notify.js'
+import { notify, markSeenByKey, type NotifyPriority } from './os-notify.js'
 import { probeScene, gTextScene, gImageScene, ensureRendered, isRate, testKind, testLabel, errorScene } from './os-display.js'
 import { menuScene, ensureMenuRendered, menuItemLabel, MENU_ITEM_COUNT } from './os-menu.js'
 import { WindowManager } from './os-windows.js'
+import { type MemoAudio } from './memo.js'
 
 // Hard ceiling on a single in-flight audio buffer (a resource guard, NOT an I/O timeout — allowed):
 // ~6.5 min of 48 kHz/2ch/float32 (~384 KB/s). Bounds memory if audio_end never arrives.
@@ -118,6 +119,10 @@ export interface WSClient {
   phoneBattery: number | null
   /** Latest GLASSES battery % from client_hb (Adam 2026-06-12; [U]). */
   g2Battery: number | null
+  /** The raw PCM (+ format) of the most recent SUCCESSFUL dictation — kept so a
+   *  `memo:` intent (Phase 14) can save the clip at confirm time. Overwritten
+   *  each dictation; only the last is held. null until the first one. */
+  lastDictationAudio: MemoAudio | null
 }
 
 export interface AudioFormat {
@@ -188,6 +193,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     wm: null,
     phoneBattery: null,
     g2Battery: null,
+    lastDictationAudio: null,
   }
 
   pool.on('background_alert', (alert: { sessionId: string; alertType: string; details?: string }) => {
@@ -411,6 +417,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
           // which does NOT contain the phone-gmail message that triggered it.
           targetWindow: 'notices',
           imagePath,
+          key: typeof msg.key === 'string' ? msg.key : undefined,   // dismiss sync (Adam 2026-06-13)
         })
       }
       if (typeof msg.imageB64 === 'string' && msg.imageB64.length > 0) {
@@ -436,6 +443,16 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         }
       } else {
         fire(null)
+      }
+      break
+    }
+    case 'notification_dismissed': {
+      // The phone dismissed a notification it forwarded → mark the glasses copy
+      // seen (Adam 2026-06-13 dismiss sync). markSeenByKey is idempotent +
+      // emits NO dismissPhone (the phone already cleared it — loop terminator).
+      if (typeof msg.key === 'string' && msg.key) {
+        void markSeenByKey(msg.key).catch((e: unknown) =>
+          console.error(`[ws] notification_dismissed markSeenByKey failed: ${e instanceof Error ? e.message : String(e)}`))
       }
       break
     }
@@ -929,6 +946,8 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
               unregisterWatchdog: (entryId) => watchdog?.unregister(entryId),
               phoneBattery: () => client.phoneBattery,
               g2Battery: () => client.g2Battery,
+              lastDictationAudio: () => client.lastDictationAudio,
+              dismissPhoneNotification: (key) => sendMsg(client, { type: 'notification_cancel', key }),
             })
           }
           client.wm.requestRender()
@@ -1225,6 +1244,10 @@ async function handleAudio(
     format.channels === 1 &&
     format.sampleRate === 16_000
 
+  const memoAudio: MemoAudio = {
+    pcm: pcmBuffer, sampleRate: format.sampleRate, channels: format.channels, encoding: format.encoding,
+  }
+
   if (isDji) {
     try {
       const text = await transcribeDji(pcmBuffer, format, config)
@@ -1232,7 +1255,7 @@ async function handleAudio(
         sttError(client, 'No speech detected')
         return
       }
-      sttResult(client, text)
+      sttResult(client, text, memoAudio)
     } catch (err) {
       sttError(client, `Transcription failed: ${err}`)
     }
@@ -1254,7 +1277,7 @@ async function handleAudio(
       sttError(client, 'No speech detected')
       return
     }
-    sttResult(client, text)
+    sttResult(client, text, memoAudio)
   } catch (err) {
     sttError(client, `Transcription failed: ${err}`)
   }
@@ -1263,7 +1286,12 @@ async function handleAudio(
 /** Deliver an STT result: in DE mode it routes to the active window (the
  *  dictation prompt path — docs/DE_DESIGN.md §2); the legacy phone UI gets the
  *  stt_result message either way (harmless in OS mode; useful as diag). */
-function sttResult(client: WSClient, text: string): void {
+function sttResult(client: WSClient, text: string, audio?: MemoAudio): void {
+  // Phase 14: stash the raw PCM that produced THIS transcript so a `memo:`
+  // intent can save the clip at confirm time. Only on a real result (a failed
+  // transcription routes through sttError and never sets pendingStt, so a stale
+  // buffer here is unreachable anyway).
+  if (audio) client.lastDictationAudio = audio
   sendMsg(client, { type: 'stt_result', text })
   if (client.osMode && client.osScreen === 'de' && client.wm) {
     console.log(`[ws] DE stt → active window: "${text}"`)

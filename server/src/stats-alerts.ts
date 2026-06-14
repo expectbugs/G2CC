@@ -85,13 +85,17 @@ export function evaluateSampleAlerts(s: SampleLike, now: number, fire: (label: s
   }
 }
 
-/** Evaluate the volume-fullness rule (df rows) on a slower cadence. */
+/** Evaluate the volume-fullness rule (df rows) on a slower cadence. Re-arm is
+ *  INFINITE (Adam 2026-06-13: "once, ever, per hard drive, unless it drops below
+ *  and gets full again") — a full disk doesn't fluctuate like RAM, so a repeat
+ *  every 2 h is just nagging; the drop-below reset (stepRule) still re-fires a
+ *  genuine new fill. */
 export function evaluateVolumeAlerts(rows: { target: string; sizeB: number; availB: number }[], now: number, fire: (label: string) => void): void {
   for (const row of rows) {
     if (!(row.sizeB > 0)) continue
     const pct = ((row.sizeB - row.availB) / row.sizeB) * 100
-    if (stepRule(`vol:${row.target}`, pct > VOL_PCT, now, VOL_SUSTAIN_MS)) {
-      fire(`${row.target} ${Math.round(pct)}% full (sustained 30m)`)
+    if (stepRule(`vol:${row.target}`, pct > VOL_PCT, now, VOL_SUSTAIN_MS, Infinity)) {
+      fire(`${row.target} ${Math.round(pct)}% full`)
     }
   }
 }
@@ -103,7 +107,7 @@ export function fireStatsAlert(label: string): void {
   void notify({
     source: 'stats',
     priority: 'info',
-    title: `⚠ ${label}`,
+    title: `! ${label}`,
     body: `${label}\n\nCheck the machine — the Stats window has the trend.`,
   })
 }

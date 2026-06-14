@@ -72,6 +72,15 @@ assert.equal(volFired.length, 0, 'not yet sustained 30m')
 evaluateVolumeAlerts(full, 30 * MIN, (l) => volFired.push(l))
 assert.equal(volFired.length, 1, 'fires once at 30m')
 assert.match(volFired[0], /turtle.*full/)
-console.error('  7. evaluateVolumeAlerts: >95% full sustained 30m fires ✓')
+// #7 (Adam 2026-06-13): a still-full disk does NOT re-fire — once, ever (Infinity re-arm)…
+evaluateVolumeAlerts(full, 5 * 60 * MIN, (l) => volFired.push(l))   // 5h later, still full
+assert.equal(volFired.length, 1, 'still full 5h later → NO repeat (once per drive)')
+// …UNLESS it drops below the threshold and gets full again
+evaluateVolumeAlerts([{ target: '/mnt/turtle', sizeB: 1000, availB: 500 }], 6 * 60 * MIN, (l) => volFired.push(l))   // 50% — dropped (resets the clock + stamp)
+evaluateVolumeAlerts(full, 6 * 60 * MIN + 30 * MIN, (l) => volFired.push(l))   // full again — starts a fresh sustain clock
+assert.equal(volFired.length, 1, 'a fresh fill is not yet sustained')
+evaluateVolumeAlerts(full, 7 * 60 * MIN + 30 * MIN, (l) => volFired.push(l))   // sustained 30m → re-fires
+assert.equal(volFired.length, 2, 'a drop-below then sustained re-fill DOES re-fire')
+console.error('  7. evaluateVolumeAlerts: fires once, no repeat while full, re-fires after a drop+refill ✓')
 
 console.log('phase12-stats-alerts: ALL OK')

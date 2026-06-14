@@ -12,6 +12,13 @@ import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import com.g2cc.g2cc.harness.DiagLog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
  * Phone-notification mirror (upgrades.md Phase 9, READ-ONLY v1 — no inline
@@ -40,19 +47,55 @@ import com.g2cc.g2cc.harness.DiagLog
  */
 class NotifyListener : NotificationListenerService() {
 
+    /** C1 (review 2026-06-13): background scope for the MMS image decode/encode —
+     *  a multi-MB photo must NOT be decoded on the NLS callback (main) thread (a
+     *  slow/throwing callback is exactly what produces the zombie-listener state). */
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** NEWEST-WINS per notification key (review 2026-06-13): Google Messages
+     *  re-posts the same key with evolving TEXT while the RCS image URI stays
+     *  constant — the content stamp differs each time, so without superseding,
+     *  every re-post spawned ANOTHER 10 s decode loop for the SAME image
+     *  (redundant multi-MB decodes + duplicate sends). One loop per key. */
+    private val imgJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+
+    override fun onDestroy() {
+        super.onDestroy()
+        ioScope.cancel()
+        if (live === this) live = null
+    }
+
     override fun onListenerConnected() {
         connected = true
+        live = this   // for cancelByKey (dismiss sync, Adam 2026-06-13)
         DiagLog.log("notify", "listener CONNECTED")
     }
 
     override fun onListenerDisconnected() {
         connected = false
+        if (live === this) live = null
         DiagLog.log("notify", "listener DISCONNECTED")
         // First-line recovery; only valid call in this state. No-op unless granted.
         try {
             if (isAccessGranted(this)) requestRebind(componentName(this))
         } catch (e: Exception) {
             DiagLog.log("notify", "requestRebind failed: $e")
+        }
+    }
+
+    /** Dismiss-sync (Adam 2026-06-13): the user dismissed a notification WE
+     *  forwarded → tell the server to mark the glasses copy seen, and drop it
+     *  from the dedup map so a genuine re-post forwards fresh. */
+    override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        try {
+            val key = sbn.key ?: return
+            val wasForwarded = synchronized(seen) { seen.remove(key) != null }
+            if (wasForwarded) {
+                imgJobs.remove(key)?.cancel()   // a removed notification's image loop is moot
+                ConnectionService.notificationDismissed(key)
+            }
+        } catch (e: Exception) {
+            DiagLog.log("notify", "onNotificationRemoved threw: $e")
         }
     }
 
@@ -110,14 +153,53 @@ class NotifyListener : NotificationListenerService() {
             }
         }
 
-        ConnectionService.forwardNotification(
-            pkg = sbn.packageName,
-            title = title,
-            text = text,
-            postedAt = sbn.postTime,
-            key = sbn.key,
-            imageB64 = if (imgRef.isNotEmpty()) loadPicture(n, extras)?.let { encodeJpegB64(it) } else null,
-        )
+        // No image → forward immediately (cheap, stays on the main thread).
+        if (imgRef.isEmpty()) {
+            ConnectionService.forwardNotification(
+                pkg = sbn.packageName, title = title, text = text,
+                postedAt = sbn.postTime, key = sbn.key, imageB64 = null,
+            )
+            return
+        }
+        // C1 (review 2026-06-13): an image rides this notification — decode +
+        // JPEG-encode it OFF the main thread (a multi-MB MMS photo blocked the NLS
+        // callback → zombie-listener risk), then forward text+image together. The
+        // dedup stamp above already ran on the main thread, so only the FIRST
+        // occurrence per image reaches this expensive path.
+        imgJobs[sbn.key]?.cancel()   // newest-wins: supersede an in-flight loop for this key
+        val job = ioScope.launch {
+            // Phase 1 (MMS retry, review 2026-06-12 evidence): Google Messages
+            // posts the conversation notification, but the RCS attachment file
+            // often isn't fully written/servable at notification time — the URI
+            // exists yet openInputStream yields nothing. The notification stays
+            // posted (the listener URI grant holds), so RETRY the decode at
+            // 0/2/5/10 s; first success wins, after the window forward imageless
+            // + LOUD. Bounded supervision retries (a resource cap), NOT a timeout.
+            var img: String? = null
+            for ((i, wait) in listOf(0L, 2000L, 5000L, 10000L).withIndex()) {
+                if (wait > 0L) delay(wait)
+                val bmp = try {
+                    loadPicture(n, extras)
+                } catch (e: Exception) {
+                    DiagLog.log("notify", "image decode attempt ${i + 1} threw: $e"); null
+                }
+                if (bmp != null) {
+                    img = try { encodeJpegB64(bmp) } catch (e: Exception) { DiagLog.log("notify", "jpeg encode threw: $e"); null }
+                    if (img != null) { if (i > 0) DiagLog.log("notify", "MMS image readable on retry ${i + 1}"); break }
+                }
+            }
+            if (!isActive) return@launch   // superseded by a newer re-post — don't double-forward
+            if (img == null) DiagLog.log("notify", "MMS image NEVER readable after 4 attempts — forwarding imageless (LOUD)")
+            ConnectionService.forwardNotification(
+                pkg = sbn.packageName, title = title, text = text,
+                postedAt = sbn.postTime, key = sbn.key, imageB64 = img,
+            )
+        }
+        // Put BEFORE registering completion: if the job finishes before this line,
+        // invokeOnCompletion runs immediately and remove(key, job) must find it
+        // mapped (else a dead job leaks until the next post for that key).
+        imgJobs[sbn.key] = job
+        job.invokeOnCompletion { imgJobs.remove(sbn.key, job) }
     }
 
     /** CHEAP image identity for the dedup stamp (no decode): the MessagingStyle
@@ -184,10 +266,14 @@ class NotifyListener : NotificationListenerService() {
     private fun loadBitmapSampled(uri: android.net.Uri): android.graphics.Bitmap? {
         return try {
             val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            contentResolver.openInputStream(uri)?.use {
-                android.graphics.BitmapFactory.decodeStream(it, null, bounds)
-            } ?: return null
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            // Phase 1: split the unreadable diagnostics so the next failure
+            // self-identifies (stream-null vs zero-bounds vs the catch's exception).
+            val s = contentResolver.openInputStream(uri)
+            if (s == null) { DiagLog.log("notify", "image uri stream NULL — not yet servable: $uri"); return null }
+            s.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                DiagLog.log("notify", "image uri zero-bounds (${bounds.outWidth}x${bounds.outHeight}) — partial write?: $uri"); return null
+            }
             var sample = 1
             while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 960) sample *= 2
             val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
@@ -241,6 +327,21 @@ class NotifyListener : NotificationListenerService() {
         @Volatile
         var connected: Boolean = false
             private set
+
+        /** The bound listener instance (for cancelByKey — dismiss sync). */
+        @Volatile
+        private var live: NotifyListener? = null
+
+        /** Dismiss a notification on the PHONE by key (server → client, read on
+         *  glass / MkAll). A key we no longer hold is a harmless no-op. */
+        fun cancelByKey(key: String) {
+            try {
+                live?.cancelNotification(key)
+                    ?: DiagLog.log("notify", "cancelByKey($key) — no live listener")
+            } catch (e: Exception) {
+                DiagLog.log("notify", "cancelNotification($key) failed: $e")
+            }
+        }
 
         private fun componentName(ctx: Context) = ComponentName(ctx, NotifyListener::class.java)
 

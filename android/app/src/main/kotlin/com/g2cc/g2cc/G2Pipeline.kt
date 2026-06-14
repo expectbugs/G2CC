@@ -1825,6 +1825,11 @@ class G2Pipeline(
                 // Glasses-OS (os_attach) feature — the legacy path never attaches.
                 Log.w(TAG, "unexpected display_reload in legacy dispatch path — ignoring")
             }
+            is ServerMessage.NotificationCancel -> {
+                // Glasses-OS (os_attach) dismiss-sync feature — the legacy pipeline
+                // doesn't run the NotifyListener forwarding, so nothing to cancel.
+                Log.w(TAG, "unexpected notification_cancel in legacy dispatch path — ignoring")
+            }
         }
     }
 

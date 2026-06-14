@@ -159,6 +159,51 @@ export async function listTurns(
   }
 }
 
+export interface RecentTurn {
+  kind: TurnKind
+  text: string
+  toolCalls: string[]
+}
+
+/** The last `limit` turns of a conversation, returned oldest→newest — the
+ *  Suggest (v2 Phase 3) prediction context. FULL text, no truncation: the
+ *  transcript feeds a one-shot subprocess over stdin where size is fine, so
+ *  the no-truncation rule holds (the bound is a turn COUNT, not a text cut). */
+export async function recentTurns(conversationId: number, limit: number): Promise<RecentTurn[]> {
+  const r = await query<{ kind: TurnKind; text: string; tool_calls: string[] | null }>(
+    `SELECT kind, text, tool_calls FROM turns
+     WHERE conversation_id = $1
+     ORDER BY created_at DESC, id DESC
+     LIMIT $2`,
+    [conversationId, limit])
+  // newest-first from the DB (so LIMIT keeps the most recent) → reverse to chronological
+  return r.rows.reverse().map((row) => ({
+    kind: row.kind,
+    text: row.text,
+    toolCalls: Array.isArray(row.tool_calls) ? row.tool_calls : [],
+  }))
+}
+
+export interface TurnHit {
+  turnId: number
+  preview: string
+  createdAt: Date
+}
+
+/** Search turn text (the Phase-12 universal Search history source). ILIKE with
+ *  the LIKE metacharacters in `query` escaped so a literal `%`/`_`/`\` matches
+ *  itself. Newest-first, capped. */
+export async function searchTurns(queryText: string, limit: number): Promise<TurnHit[]> {
+  const pattern = '%' + queryText.replace(/[\\%_]/g, (ch) => '\\' + ch) + '%'
+  const r = await query<{ id: string; preview: string; created_at: Date }>(
+    `SELECT id, left(text, 200) AS preview, created_at
+     FROM turns WHERE text ILIKE $1
+     ORDER BY created_at DESC, id DESC
+     LIMIT $2`,
+    [pattern, limit])
+  return r.rows.map((row) => ({ turnId: Number(row.id), preview: row.preview, createdAt: row.created_at }))
+}
+
 export interface TurnDetail {
   kind: TurnKind
   text: string

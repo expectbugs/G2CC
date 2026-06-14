@@ -157,6 +157,11 @@ sealed interface ClientMessage {
         val imageB64: String? = null,
     ) : ClientMessage
 
+    /** The phone dismissed a notification WE forwarded → tell the server to mark
+     *  the glasses copy seen (Adam 2026-06-13 dismiss sync). */
+    @Serializable @SerialName("notification_dismissed")
+    data class NotificationDismissed(val key: String) : ClientMessage
+
     /** Audio format announcement. Defaults match the legacy 16 kHz mono int16
      *  path so older callers don't need to set anything. */
     @Serializable @SerialName("audio_start")
@@ -368,6 +373,12 @@ sealed interface ServerMessage {
      *  renewal path), re-pushing the whole display. */
     @Serializable @SerialName("display_reload")
     data object DisplayReload : ServerMessage
+
+    /** Server → client: cancel a forwarded notification on the PHONE (Adam
+     *  2026-06-13 dismiss sync) — read on glass / MkAll'd. The client calls
+     *  cancelNotification(key); a key it no longer holds is a no-op. */
+    @Serializable @SerialName("notification_cancel")
+    data class NotificationCancel(val key: String) : ServerMessage
 
     @Serializable @SerialName("error")
     data class Error(val message: String) : ServerMessage

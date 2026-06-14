@@ -316,16 +316,62 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
     })
   }
 
-  // THE WALL GUARD (review 2026-06-11): nothing above may compose a layout frame
-  // the firmware would silently eat / the client would reject — that left the
-  // glasses on a stale screen while the WM's lastView moved on (tap misroutes).
-  // Throwing here lands in the WM's errorView fallback, which is itself bounded.
-  const est = estimateLayoutFrameBytes(regions)
-  if (est > LAYOUT_FRAME_BUDGET_BYTES) {
-    throw new Error(`compose: '${title}' layout frame ≈${est} B exceeds the ${LAYOUT_FRAME_BUDGET_BYTES} B budget (firmware multi-packet wall) — trim rows/text`)
-  }
-
+  // THE WALL FIT (Adam 2026-06-13: "a solution for ALL those errors so it never
+  // bothers us again"). The old guard THREW when title+content+menu summed past
+  // the wall (a long notification-flash title + a full page + a big menu) → an
+  // errorView instead of the screen. Now we CLAMP to fit, trimming only the
+  // NON-TAPPABLE regions (content text / title / status — never the menu or
+  // browse rows, which must stay byte-for-byte in sync with the WM's lastView
+  // tap resolution). Fits every text-mode frame; for a browse frame it can only
+  // trim title/status (the rows are byte-paged upstream — the real safety net),
+  // and logs LOUDLY in the can't-happen case that a paged list alone overflows.
+  fitFrameToBudget(regions, title)
   return { regions }
+}
+
+/** Trim a TEXT region's content by ~`bytesToCut`, code-point-safe, with a '…'
+ *  marker. (Text bodies/chrome are not tap-resolved, so trimming is safe; menu/
+ *  browse lists are NEVER trimmed here.) */
+function trimTextRegionBy(r: SceneRegion, bytesToCut: number): void {
+  if (r.content?.kind !== 'text' || bytesToCut <= 0) return
+  const text = r.content.text
+  const target = Math.max(1, Buffer.byteLength(text, 'utf8') - bytesToCut - 3)   // -3 for '…'
+  let out = ''
+  let acc = 0
+  for (const ch of text) {
+    const cb = Buffer.byteLength(ch, 'utf8')
+    if (acc + cb > target) break
+    out += ch
+    acc += cb
+  }
+  r.content.text = out.replace(/[\s─]+$/u, '') + '…'
+}
+
+/** Shrink an over-the-wall frame to fit by trimming the non-tappable content
+ *  text + chrome, biggest-effect first. NEVER trims the menu or browse rows
+ *  (taps resolve against them via the WM's lastView). */
+function fitFrameToBudget(regions: SceneRegion[], title: string): void {
+  let over = estimateLayoutFrameBytes(regions) - LAYOUT_FRAME_BUDGET_BYTES
+  if (over <= 0) return
+  console.warn(`[os-compose] '${title.slice(0, 40)}' ≈${over}B over the ${LAYOUT_FRAME_BUDGET_BYTES}B wall — trimming text/chrome to fit (was the errorView throw)`)
+  // content body first (the variable bulk), then the title, then the status.
+  // (browse views have no 'content' region, so only title/status are trimmable
+  // there — their rows are byte-paged upstream, the real safety net.)
+  for (const name of ['content', 'content2', 'title', 'status']) {
+    if (over <= 0) break
+    const r = regions.find((x) => x.name === name)
+    if (r?.content?.kind === 'text') {
+      trimTextRegionBy(r, over + 8)
+      over = estimateLayoutFrameBytes(regions) - LAYOUT_FRAME_BUDGET_BYTES
+    }
+  }
+  if (over > 0) {
+    // Only a pathological browse/menu LIST (its rows are byte-paged upstream, so
+    // this shouldn't happen) can still exceed alone — loud, not a crash. The
+    // client rejects an over-wall frame, but that beats the old errorView, which
+    // also couldn't shrink a list.
+    console.error(`[os-compose] '${title.slice(0, 40)}' STILL ${over}B over after trimming text/chrome — a list region exceeds the wall alone (browse paging budget?); composing anyway`)
+  }
 }
 
 /** The blanked screen (double-tap at Main root — Adam 2026-06-10): visually

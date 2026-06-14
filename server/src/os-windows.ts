@@ -33,15 +33,23 @@ import {
 import type { SessionPool, PoolEntry } from './session-pool.js'
 import type { CCUsage } from './cc-session.js'
 import {
-  ensureConversation, recordTurn, listConversations, listTurns, getTurn,
+  ensureConversation, recordTurn, listConversations, listTurns, getTurn, recentTurns,
   type TurnKind,
 } from './history.js'
+import { suggestNextPrompt, SUGGEST_CONTEXT_TURNS } from './suggest.js'
 import {
-  notifyHub, markSeen, unseenCount, latestUnseenFlash, listNotifications,
+  notifyHub, markSeen, markAllSeen, unseenCount, latestUnseenFlash, listNotifications,
   getNotification, notify, OVERLAY_PRIORITIES, PRIORITY_RANK, type NotifyEvent,
 } from './os-notify.js'
 import { createTimer, cancelTimer, listPending, nextPending, fmtRemaining, type TimerRow } from './timers.js'
 import { parseIntent, appendNote } from './intents.js'
+import { saveMemo, type MemoAudio } from './memo.js'
+import { searchAll, type SearchHit } from './search.js'
+import { listDeliveries, getDelivery, deliveriesSummary, type DeliveryRow } from './deliveries.js'
+import {
+  tmuxList, tmuxCapture, tmuxSendKeys, tmuxSendLiteral, tmuxNewSession,
+  renderTerminalImage, type TmuxSession,
+} from './tmux.js'
 import { savePosition, getPosition, listChapters, readChapter, type EpubChapter } from './reader.js'
 import { listUpcoming, getEvent } from './calendar.js'
 import { rpgRun, chessMove, chessPreview, renderBoard, DUNGEON_ROOT, type ChessState } from './games.js'
@@ -60,7 +68,10 @@ export function setBlankPopupMsForSmoke(ms: number): void { BLANK_POPUP_MS = ms 
 
 const PY = '/home/user/G2CC/audio/venv/bin/python'
 const MAILDIR_SCRIPT = '/home/user/G2CC/scripts/read_maildir.py'
+const SEND_MAIL_SCRIPT = '/home/user/G2CC/scripts/send_mail.py'
 const MAILDIR_PATH = '/home/user/Mail/marzello.net/INBOX'
+const MAIL_SENT_DIR = '/home/user/Mail/marzello.net/Sent'   // dirname(INBOX)/Sent — mbsync uploads it
+const MSMTPRC_PATH = '/home/user/.msmtprc'
 const ARIA_CWD = '/home/user/aria'
 const ARIA_PROMPT_PATH = '/home/user/G2CC/server/prompts/aria-g2.md'
 const FILES_ROOT = '/home/user'
@@ -123,12 +134,28 @@ export interface WmContext {
   /** Latest GLASSES battery % from client_hb (Adam 2026-06-12; null until the
    *  client decodes a 09-00/09-01 device-info frame — [U] on-glass pending). */
   g2Battery?(): number | null
+  /** The raw PCM (+ format) of the dictation that produced the CURRENT confirmed
+   *  transcript — plumbed from ws-handler so a `memo:` intent (Phase 14) saves
+   *  the clip. null when no audio is in hand (a typed/test path, or the buffer
+   *  was cleared). */
+  lastDictationAudio?(): MemoAudio | null
+  /** Tell the phone to cancel a notification it forwarded (Adam 2026-06-13:
+   *  reading/MkAll on glass dismisses it on the phone too). */
+  dismissPhoneNotification?(key: string): void
 }
+
+/** Main's category-launcher groups (upgrades.md v2 Phase 11, XFCE-style). Each
+ *  window self-places by declaring its category; new windows need only set it. */
+export type WindowCategory = 'AI' | 'Comms' | 'Media' | 'Tools' | 'Info' | 'Games'
+export const CATEGORY_ORDER: WindowCategory[] = ['AI', 'Comms', 'Media', 'Tools', 'Info', 'Games']
 
 export interface OsWindow {
   readonly id: string
   readonly tab: string
   readonly label: string
+  /** Which Main category this window lives under (Phase 11). Main (the
+   *  launcher itself) is excluded from grouping; its value is unused. */
+  readonly category: WindowCategory
   /** One-line live status for the Main switcher row. May be async — windows
    *  whose state lives in the DB (Timers/Calendar) query it fresh, so the
    *  dashboard can't contradict itself on a cold connection (it showed
@@ -164,13 +191,37 @@ export interface OsWindow {
   interruptible?(): boolean
   onStt?(text: string): Promise<void>
   onSttError?(error: string): Promise<void>
+  /** Release any window-held resource (timers, pollers) on ws-close. The WM
+   *  calls it for every window in dispose(). Absent = nothing to release. */
+  dispose?(): void
+  /** Open a SPECIFIC item after the WM switches to this window (Phase 12 Search
+   *  hand-off): a window-specific payload it knows how to act on. The WM calls
+   *  it post-switch, exactly like menuLabel. Absent = the window has no
+   *  open-by-id entry point (Search routes those inline instead). */
+  onOpen?(open: WindowOpen): Promise<void>
 }
+
+/** Cross-window open payloads (Phase 12). Mail opens a message by maildir key;
+ *  Files navigates to a path's parent dir. History/notes have no window, so
+ *  Search reads them inline rather than handing off. */
+export type WindowOpen =
+  | { kind: 'mail'; key: string }
+  | { kind: 'file'; path: string }
 
 // ============================================================ helpers
 
 /** A browse row's worst-case wire cost: compose clamps it to ≤40 B then the
  *  estimator adds 3 B framing. */
 function browseRowBytes(s: string): number { return 3 + Math.min(Buffer.byteLength(s, 'utf8'), 40) }
+
+/** Bound a single-region confirm-card body so a pathologically long dictation
+ *  can't blow the 960 B multi-packet wall (→ errorView, which loses the input).
+ *  The FULL value still drives the action; this clamps only the DISPLAY, loudly
+ *  marked. (Mail paginates instead — its bodies are long by nature.) */
+function clampConfirmBody(body: string, max = 600): string {
+  if (Buffer.byteLength(body, 'utf8') <= max) return body
+  return body.slice(0, max) + `\n… (+${body.length - max} more chars — the full text is used)`
+}
 
 /** Page-START indices for `all` under a byte + row-count budget, computed from 0
  *  so view() and the tap handler agree given the same `all`. Always ≥1 row per
@@ -323,6 +374,25 @@ class SessionLevel {
    *  in the DB without ever awaiting store calls in render/turn paths (B4).
    *  Every link .catches loudly, so the chain never rejects unhandled. */
   private captureChain: Promise<void> = Promise.resolve()
+  /** Suggest (v2 Phase 3) — predict-Adam's-next-prompt state.
+   *  `suggesting`: the one-shot subprocess is in flight (status 'suggesting…',
+   *  the conversation doc stays on screen). `pendingSuggestion`: the predicted
+   *  text awaiting Confirm/Regenerate/Cancel (its own confirm card, like the
+   *  STT confirm). They are mutually exclusive with each other AND with the
+   *  dictation/busy states (Suggest is offered only when idle). */
+  private suggesting = false
+  pendingSuggestion: string | null = null
+  /** SYNCHRONOUS "≥1 completed response" gate for the Suggest menu item —
+   *  incremented in turn_complete for a non-error turn. (convId, the DB
+   *  capture handle, is set ASYNchronously, so it can't gate the menu.) */
+  private completedTurns = 0
+  /** Stale-seq guard: every Cancel / Regenerate / new Suggest / state-clear
+   *  bumps this, so an in-flight one-shot's async return is discarded if
+   *  anything changed while it ran. */
+  private suggestSeq = 0
+  /** Kills the in-flight one-shot on Cancel (so a canceled prediction doesn't
+   *  keep burning tokens / leak the process). Not a timeout — an explicit abort. */
+  private suggestAbort: AbortController | null = null
 
   constructor(
     private ctx: WmContext,
@@ -436,6 +506,9 @@ class SessionLevel {
       // before this) renders as an explicit error card with the recovery hint,
       // not as a response (Adam got a bare "CC error_during_execution" doc).
       const isErrorTurn = this.lastError !== null && info.text === this.lastError
+      // Suggest (v2 Phase 3) gate: a real response landed → Suggest now has
+      // something to predict from. Synchronous (unlike the async DB capture).
+      if (!isErrorTurn) this.completedTurns++
       // History capture (Phase 3): the turn's terminal record. 'Interrupted'
       // is the calm name interrupt() gives an aborted turn (cc-session).
       this.capture(
@@ -592,6 +665,8 @@ class SessionLevel {
     if (this.listening) return 'listening…'
     if (this.transcribing) return 'transcribing…'
     if (this.pendingStt) return 'confirm?'
+    if (this.suggesting) return 'suggesting…'
+    if (this.pendingSuggestion) return 'suggestion?'
     if (this.busy) {
       const base = this.toolLine ? `tool ${this.toolLine.split(' ')[0]}` : (this.turnPhase ?? 'thinking') + '…'
       return this.pendingPrompt ? `${base} +queued` : base
@@ -676,8 +751,16 @@ class SessionLevel {
     // NOT 'Retry' — that's a WM-level label (errorView) and the WM would eat
     // the tap before it reached us (hardware 2026-06-11: Re-record ignored).
     if (this.pendingStt) return ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main']
+    // Suggest (v2 Phase 3): the one-shot in flight (Cancel only), then its
+    // confirm card (Confirm/Regenerate/Cancel — robot text gets the sacred
+    // confirm step, like STT).
+    if (this.suggesting) return ['Cancel', 'Reload', 'Main']
+    if (this.pendingSuggestion) return ['Confirm', 'Regenerate', 'Cancel', 'Reload', 'Main']
     if (this.busy) return ['Interrupt', 'Next', 'Prev', 'Reload', 'Main']
-    return [this.verb, 'Next', 'Prev', 'Prompts', 'Options', 'Reload', 'Main']
+    const idle = [this.verb, 'Next', 'Prev', 'Prompts', 'Options', 'Reload', 'Main']
+    // Suggest leads the idle menu once there's a completed response to predict
+    // from (Adam taps it to skip dictating the obvious next prompt).
+    return this.completedTurns >= 1 ? ['Suggest', ...idle] : idle
   }
 
   /** Handle a window-level menu tap by label (WM already took Retry/Reload/
@@ -693,6 +776,15 @@ class SessionLevel {
         return null
       }
       case this.verb: {
+        // Refuse to open the mic over a pending permission (Phase 11: Main's
+        // Dictate launcher bypasses the menu-gating that normally hides the
+        // verb, so an Approve/Deny menu could end up over a hot mic with no
+        // Done/Cancel). Permission flow is dormant under bypassPermissions, but
+        // defend it. busy is fine — menu() shows Done/Cancel over the busy menu.
+        if (this.pendingPermissionId) {
+          this.ctx.log(`[os] ${this.who}: ${this.verb} refused — answer the pending permission first`)
+          return null
+        }
         this.listening = true
         this.transcribing = false   // anything still in flight is now stale (discarded in onStt)
         this.ctx.audio('start')
@@ -707,6 +799,14 @@ class SessionLevel {
         return null
       }
       case 'Cancel': {
+        // Suggest (v2 Phase 3): Cancel an in-flight one-shot or a pending
+        // suggestion card before it reaches the dictation branch below.
+        if (this.suggesting || this.pendingSuggestion !== null) {
+          this.ctx.log(`[os] ${this.who}: suggestion canceled`)
+          this.clearSuggestion()
+          this.requestRender()
+          return null
+        }
         // From listening, transcribing, OR the confirm step: discard everything
         // pending. stopDictation (not a local copy) so the transcribing case
         // also sends the belt-and-braces audio('stop') — the rejected-start
@@ -718,6 +818,18 @@ class SessionLevel {
         return null
       }
       case 'Confirm': {
+        // Suggest (v2 Phase 3): Confirm sends the PREDICTED prompt straight
+        // through the normal prompt() path (queue/busy rules apply). It is a
+        // predicted message for the model, NOT dictation, so it deliberately
+        // skips tryIntent — a predicted "note: …" should reach the model, not
+        // silently become a note.
+        if (this.pendingSuggestion !== null) {
+          const s = this.pendingSuggestion
+          this.pendingSuggestion = null
+          this.suggestSeq++   // any late one-shot return is now stale
+          await this.prompt(s)   // prompt() setDoc replaces the confirm card
+          return null
+        }
         const t = this.pendingStt
         this.pendingStt = null
         this.restorePages()
@@ -795,6 +907,29 @@ class SessionLevel {
         }
         return null
       }
+      case 'Suggest': {
+        // Idle-only (menu() hides it otherwise); double-guard the race where a
+        // tap lands as the menu rebuilds.
+        if (this.busy || this.listening || this.transcribing
+            || this.pendingStt !== null || this.pendingPermissionId !== null) {
+          this.ctx.log(`[os] ${this.who}: Suggest ignored — not idle`)
+          return null
+        }
+        if (this.completedTurns < 1) {
+          this.ctx.log(`[os] ${this.who}: Suggest ignored — no completed response to predict from`)
+          return null
+        }
+        void this.requestSuggestion()   // fire-and-forget; it owns its errors
+        return null
+      }
+      case 'Regenerate': {
+        if (this.pendingSuggestion === null && !this.suggesting) {
+          this.ctx.log(`[os] ${this.who}: Regenerate ignored — nothing to regenerate`)
+          return null
+        }
+        void this.requestSuggestion()   // supersedes the current suggestion (bumps seq)
+        return null
+      }
       case 'Prompts': return 'prompts'
       case 'Options': return 'options'
       default:
@@ -823,6 +958,30 @@ class SessionLevel {
         ])
       } catch (e) {
         this.showError(`Timer create failed: ${(e as Error).message}`, 'Say it again, or use the Timers window.')
+      }
+      return true
+    }
+    if (intent.kind === 'memo') {
+      // Phase 14: save the buffered audio clip AND the transcript. The PCM is
+      // the dictation that produced THIS confirmed transcript (plumbed from
+      // ws-handler); a missing buffer saves the transcript only, loudly.
+      try {
+        const audio = this.ctx.lastDictationAudio?.() ?? null
+        const res = await saveMemo(intent.text, audio)
+        this.ctx.log(`[intent] MEMO #${res.id} from confirmed dictation (wav=${res.wavPath ?? 'NONE'})`)
+        void notify({ source: 'note', priority: 'info', title: 'Memo saved', body: intent.text, quiet: true })
+        await this.setDoc([
+          { t: 'heading', text: 'Memo saved', meta: `#${res.id}` },
+          { t: 'para', text: intent.text },
+          { t: 'para', text: res.wavPath
+            ? `Audio + transcript saved${res.durationMs != null ? ` · ${(res.durationMs / 1000).toFixed(1)} s clip` : ''}.`
+            : res.wavError
+              ? `Transcript saved. AUDIO FAILED: ${res.wavError}`
+              : 'Transcript saved (no audio clip was in hand — logged).' },
+          ...(res.noteError ? [{ t: 'para', text: `(notes-inbox pointer failed: ${res.noteError})` } as Block] : []),
+        ])
+      } catch (e) {
+        this.showError(`Memo save failed: ${(e as Error).message}`, 'Dictate again, or tell Aria normally.')
       }
       return true
     }
@@ -898,6 +1057,73 @@ class SessionLevel {
       this.listening = false
       this.transcribing = false
       if (this.pendingStt) { this.pendingStt = null; this.restorePages() }
+    }
+    // Suggest (v2 Phase 3): a pending/in-flight suggestion is the same class of
+    // transient confirm state — abandon it on every dictation-stop exit (window
+    // switch, level pop, reload, close, respawn) so it never lingers (B5).
+    if (this.suggesting || this.pendingSuggestion !== null) {
+      this.ctx.log(`[os] ${this.who}: suggestion dropped (${why})`)
+      this.clearSuggestion()
+    }
+  }
+
+  /** Drop the Suggest state (in-flight OR pending) and invalidate any
+   *  async one-shot still running. restorePages only when a confirm card was
+   *  actually on screen. */
+  private clearSuggestion(): void {
+    this.suggestSeq++
+    this.suggestAbort?.abort()   // kill the one-shot if it's still running
+    this.suggestAbort = null
+    const hadCard = this.pendingSuggestion !== null
+    this.suggesting = false
+    this.pendingSuggestion = null
+    if (hadCard) this.restorePages()
+  }
+
+  /** Run the one-shot prediction (v2 Phase 3). Fire-and-forget from onMenu;
+   *  owns ALL its errors (never rejects), and a stale-seq check at every async
+   *  boundary discards the result if Cancel/Regenerate/a state-clear fired
+   *  while it ran. A failure renders the error card and never blocks Dictate. */
+  private async requestSuggestion(): Promise<void> {
+    const seq = ++this.suggestSeq
+    this.suggestAbort?.abort()   // supersede any prior in-flight one-shot (Regenerate)
+    const ac = new AbortController()
+    this.suggestAbort = ac
+    this.suggesting = true
+    this.pendingSuggestion = null
+    this.lastError = null
+    this.requestRender()   // status flips to 'suggesting…'; the conversation doc stays
+    try {
+      // Drain pending history captures FIRST: capture() is fire-and-forget and
+      // unordered vs this read, so the just-finished turn (and even convId
+      // itself) may not be in the DB yet (review 2026-06-13). Awaiting the
+      // serialized chain guarantees the latest turn is persisted before we read.
+      await this.captureChain
+      if (seq !== this.suggestSeq) return
+      if (this.convId === null) {
+        throw new Error('no captured conversation yet (history may be lagging) — try again')
+      }
+      const turns = await recentTurns(this.convId, SUGGEST_CONTEXT_TURNS)
+      if (seq !== this.suggestSeq) return   // canceled/superseded while fetching
+      const text = await suggestNextPrompt(turns, this.projectPath, ac.signal)
+      if (seq !== this.suggestSeq) {
+        this.ctx.log(`[os] ${this.who}: discarding stale suggestion (seq ${seq} ≠ ${this.suggestSeq})`)
+        return
+      }
+      this.suggesting = false
+      this.pendingSuggestion = text
+      this.pages = paginateText(blocksToText([
+        { t: 'heading', text: 'Suggested', meta: 'confirm?' },
+        { t: 'para', text },
+        { t: 'rule' },
+        { t: 'para', text: 'Confirm to send · Regenerate · Cancel' },
+      ]))
+      this.page = 0
+      this.requestRender()
+    } catch (e) {
+      if (seq !== this.suggestSeq) return   // canceled — don't repaint over the new state
+      this.suggesting = false
+      this.showError(`Suggest failed: ${(e as Error).message}`, `${this.verb} as normal, or Suggest to retry.`)
     }
   }
 
@@ -1033,7 +1259,7 @@ class SessionLevel {
     const ccSessionId = !fresh ? old?.session.ccSessionId ?? null : null
     // A FRESH session is a NEW conversation (history Phase 3); resume keeps
     // appending to the same one (same cc_session_id → same row).
-    if (fresh) this.convId = null
+    if (fresh) { this.convId = null; this.completedTurns = 0 }   // no completed responses in a fresh convo (Suggest hides until the first turn)
     if (old) {
       this.ctx.unregisterWatchdog(old.id)
       old.session.kill()                 // its late 'close' event is ignored via the stale() guard
@@ -1105,7 +1331,9 @@ class SessionLevel {
   /** True while ANY dictation/permission state is live — the states a
    *  notification overlay must never repaint over (Phase 4 precedence, B5). */
   dictationBusy(): boolean {
-    return this.listening || this.transcribing || this.pendingStt !== null || this.pendingPermissionId !== null
+    return this.listening || this.transcribing || this.pendingStt !== null
+      || this.suggesting || this.pendingSuggestion !== null   // Phase 3: the confirm card is sacred too
+      || this.pendingPermissionId !== null
   }
 }
 
@@ -1321,6 +1549,7 @@ class CcWindow implements OsWindow {
   readonly id = 'cc'
   readonly tab = 'CC'
   readonly label = 'Claude Code'
+  readonly category = 'Tools' as const   // folded into Tools (Adam 2026-06-13)
   private level: 'picker' | 'session' | 'options' | 'history' | 'prompts' = 'picker'
   private dirs: { name: string; path: string }[] = []
   private pickerOffset = 0
@@ -1561,6 +1790,7 @@ class AriaWindow implements OsWindow {
   readonly id = 'aria'
   readonly tab = 'Aria'
   readonly label = 'Aria'
+  readonly category = 'Tools' as const   // folded into Tools (Adam 2026-06-13)
   private level: 'session' | 'options' | 'history' | 'prompts' = 'session'
   private session: SessionLevel
   private options: SessionOptions
@@ -1754,24 +1984,69 @@ class AriaWindow implements OsWindow {
 
 interface MailRow { key: string; from: string; subject: string; unread: boolean }
 
+type MailPage = string | { kind: 'image'; img: RenderedImage | null; failed: string | null }
+interface MailSender { name: string; address: string }
+
+/** The migadu From address — read once from ~/.msmtprc's non-secret `from`
+ *  line (the SAME account mbsync/msmtp use), so a config change doesn't need a
+ *  code edit. Loud fallback to the known address; the password is NEVER read. */
+function mailFromAddr(log: (m: string) => void): string {
+  try {
+    const m = readFileSync(MSMTPRC_PATH, 'utf8').match(/^\s*from\s+(\S+)/mi)
+    if (m) return m[1]
+    log('[os] mail: ~/.msmtprc has no `from` line — using the default address')
+  } catch (e) {
+    log(`[os] mail: cannot read ~/.msmtprc (${(e as Error).message}) — using the default From`)
+  }
+  return 'adam@marzello.net'
+}
+
 class MailWindow implements OsWindow {
   readonly id = 'mail'
   readonly tab = 'Mail'
   readonly label = 'Mail'
-  private level: 'list' | 'read' = 'list'
+  readonly category = 'Comms' as const
+  private level: 'list' | 'read' | 'confirmDel' | 'compose' = 'list'
   private rows: MailRow[] = []
   private total = 0
   private unreadTotal = 0
   private offset = 0
-  private pages: string[] = []
+  private pages: MailPage[] = []
   private page = 0
   private readSubject = ''
+  private readKey = ''            // the key of the message on screen (for Reply/Forward/Del/Unread)
   private lastError: string | null = null
+  private readSeq = 0             // stale-swap guard for async image renders
+  private focus: 'content' | 'menu' = 'content'
+  private fromAddr: string
 
-  constructor(private ctx: WmContext, private requestRender: () => void) {}
+  // ---- Phase 8 compose state ----
+  private composeMode: 'reply' | 'forward' | 'compose' | null = null
+  private composeStage: 'pickRecipient' | 'body' | 'confirm' | null = null
+  private composeTo = ''         // chosen recipient (forward/compose)
+  private senders: MailSender[] = []
+  private senderOffset = 0
+  private composeBusy = false     // a send is in flight
+  // body dictation (mirrors the Files/Search name-entry machine)
+  private listening = false
+  private transcribing = false
+  private pendingText: string | null = null   // dictated body awaiting confirm
+  private composePage = 0                      // paginated body-confirm card (long emails)
+
+  constructor(private ctx: WmContext, private requestRender: () => void) {
+    this.fromAddr = mailFromAddr(ctx.log)
+  }
 
   summary(): string {
     return this.total ? `${this.unreadTotal} unread of ${this.total}` : 'inbox'
+  }
+
+  statusLine(): string | null {
+    if (this.composeBusy) return 'sending…'
+    if (this.listening) return 'listening…'
+    if (this.transcribing) return 'transcribing…'
+    if (this.pendingText !== null) return 'confirm?'
+    return null
   }
 
   private runMaildir(args: string[]): Promise<string> {
@@ -1780,6 +2055,18 @@ class MailWindow implements OsWindow {
         if (err) reject(new Error(`read_maildir failed: ${err.message}${stderr ? ' :: ' + stderr : ''}`))
         else resolve(stdout)
       })
+    })
+  }
+
+  /** Pipe a JSON request to send_mail.py (the chess/board stdin pattern). */
+  private runSend(req: Record<string, unknown>): Promise<{ to: string; sent: boolean; sent_path: string | null }> {
+    return new Promise((resolve, reject) => {
+      const child = execFile(PY, [SEND_MAIL_SCRIPT], { maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) { reject(new Error(`send_mail failed: ${err.message}${stderr ? ' :: ' + String(stderr).slice(0, 300) : ''}`)); return }
+        try { resolve(JSON.parse(stdout)) } catch (e) { reject(new Error(`send_mail output unparseable: ${(e as Error).message}`)) }
+      })
+      child.stdin?.on('error', (e: Error) => console.error(`[os] mail send stdin: ${e.message}`))
+      child.stdin?.end(JSON.stringify({ from_addr: this.fromAddr, sent_maildir: MAIL_SENT_DIR, ...req }))
     })
   }
 
@@ -1792,18 +2079,28 @@ class MailWindow implements OsWindow {
     this.lastError = null
   }
 
-  /** list-level focus: content rows (default) ⇄ the menu list (double-tap). */
-  private focus: 'content' | 'menu' = 'content'
+  private readMenu(): string[] {
+    return ['Reply', 'Forward', 'Del', 'Unread', 'Next', 'Prev', 'Back', 'Reload', 'Main']
+  }
 
   async view(): Promise<WinView> {
+    if (this.level === 'compose') return this.composeView()
+    if (this.level === 'confirmDel') {
+      return {
+        mode: 'text', title: 'Mail · delete?',
+        menu: ['Cancel', 'Delete', 'Reload', 'Main'],   // Cancel-FIRST (r17)
+        text: `Delete this message?\n\n${this.readSubject}\n\nIt moves to Trash (recoverable until mbsync expunges).`,
+      }
+    }
     if (this.level === 'read') {
       const pageSuffix = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
-      return {
-        mode: 'text',
-        title: `Mail · ${this.readSubject}${pageSuffix}`,
-        menu: ['Next', 'Prev', 'Back', 'Reload', 'Main'],
-        text: this.pages[this.page] ?? '',
+      const title = `Mail · ${this.readSubject}${pageSuffix}`
+      const cur = this.pages[this.page]
+      if (cur !== undefined && typeof cur !== 'string') {
+        if (cur.img) return { mode: 'tiles', tilesRect: { w: cur.img.w, h: cur.img.h }, title, menu: this.readMenu(), tiles: cur.img.tiles }
+        return { mode: 'text', title, menu: this.readMenu(), text: cur.failed ? `image render FAILED:\n${cur.failed}` : '⏳ image rendering…' }
       }
+      return { mode: 'text', title, menu: this.readMenu(), text: (cur as string | undefined) ?? '' }
     }
     try {
       await this.refresh()   // header-only scan, ~40 ms — fine per render
@@ -1820,12 +2117,57 @@ class MailWindow implements OsWindow {
       mode: 'browse',
       menuMode: this.focus === 'menu' ? 'capture' : 'passive',
       title: `Mail · ${this.offset + 1}-${last} of ${this.total}`,
-      menu: ['Reload', 'Main'],
+      menu: ['Compose', 'Reload', 'Main'],
       items,
     }
   }
 
+  private composeView(): WinView {
+    const verb = this.composeMode === 'reply' ? 'Reply' : this.composeMode === 'forward' ? 'Forward' : 'Compose'
+    if (this.composeBusy) return { mode: 'text', title: `Mail · ${verb} · sending…`, menu: ['Reload', 'Main'], text: 'Sending…' }
+    if (this.composeStage === 'pickRecipient') {
+      const rows = this.senders.length ? this.senders.map((s) => `${s.name} <${s.address}>`) : ['(no recent senders — reply to a message instead)']
+      const { items } = browsePageItems(rows, this.senderOffset)
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Mail · ${verb} · pick recipient`, menu: ['Cancel', 'Reload', 'Main'], items }
+    }
+    if (this.composeStage === 'confirm') {
+      return { mode: 'text', title: `Mail · ${verb} · confirm?`, menu: ['Confirm', 'Cancel', 'Reload', 'Main'], text: `${verb} "${this.readSubject}"\n\nTo: ${this.composeTo}\n${'─'.repeat(20)}\nConfirm to send · Cancel` }
+    }
+    // body stage
+    if (this.listening) return { mode: 'text', title: `Mail · ${verb} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: 'Listening — speak the message, then Done.' }
+    if (this.transcribing) return { mode: 'text', title: `Mail · ${verb} · transcribing…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
+    if (this.pendingText !== null) {
+      const to = this.composeMode === 'reply' ? '(the sender)' : this.composeTo
+      // PAGINATE the body (review 2026-06-13): an unpaginated email body blew
+      // the 960 B wall → composeScene throws → errorView with no Confirm → the
+      // body was lost + unsendable. Now it pages; the full text always sends.
+      const pages = paginateText(`To: ${to}\n${'─'.repeat(20)}\n${this.pendingText}\n${'─'.repeat(20)}\nConfirm · Re-record · Cancel`)
+      if (this.composePage >= pages.length) this.composePage = Math.max(0, pages.length - 1)
+      const suffix = pages.length > 1 ? ` · ${this.composePage + 1}/${pages.length}` : ''
+      const menu = pages.length > 1
+        ? ['Confirm', 'Re-record', 'Cancel', 'Next', 'Prev', 'Reload', 'Main']
+        : ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main']
+      return { mode: 'text', title: `Mail · ${verb} · confirm?${suffix}`, menu, text: pages[this.composePage] ?? '' }
+    }
+    return { mode: 'text', title: `Mail · ${verb}`, menu: ['Cancel', 'Reload', 'Main'], text: 'Preparing…' }
+  }
+
   async onBrowseSelect(index: number): Promise<void> {
+    if (this.level === 'compose' && this.composeStage === 'pickRecipient') {
+      const rows = this.senders.map((s) => `${s.name} <${s.address}>`)
+      const { map, prevOffset, nextOffset } = browsePageItems(rows, this.senderOffset)
+      const m = map[index]
+      if (m === undefined) { this.ctx.log(`[os] mail pick: index ${index} out of range`); return }
+      if (m === -1) { this.senderOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.senderOffset = nextOffset; this.requestRender(); return }
+      const s = this.senders[m]
+      if (!s) { this.ctx.log(`[os] mail pick: no sender at ${m} — resyncing`); this.requestRender(); return }
+      this.composeTo = s.address
+      if (this.composeMode === 'forward') { this.composeStage = 'confirm'; this.focus = 'content'; this.requestRender() }
+      else this.startBodyDictation()   // compose: recipient picked → dictate the body
+      return
+    }
+    if (this.level !== 'list') { this.ctx.log(`[os] mail: browse select ${index} outside list — ignored`); return }
     const items: (MailRow | 'prev' | 'more')[] = []
     if (this.offset > 0) items.push('prev')
     for (const r of this.rows) items.push(r)
@@ -1834,54 +2176,301 @@ class MailWindow implements OsWindow {
     if (sel === undefined) { this.ctx.log(`[os] mail: index ${index} out of range`); return }
     if (sel === 'prev') { this.offset = Math.max(0, this.offset - BROWSE_PAGE); this.requestRender(); return }
     if (sel === 'more') { this.offset += BROWSE_PAGE; this.requestRender(); return }
+    const ok = await this.openMessage(sel.key)
+    if (ok && sel.unread) {
+      sel.unread = false
+      this.unreadTotal = Math.max(0, this.unreadTotal - 1)
+      this.markRead(sel.key)
+    }
+  }
+
+  /** Read + show a message by key (the list tap, the Search hand-off, the post-
+   *  action re-render). Builds text pages + trailing IMAGE pages (PAGE-2 RULE,
+   *  the Notices pattern). Returns true on success. */
+  private async openMessage(key: string): Promise<boolean> {
+    const seq = ++this.readSeq
     try {
-      const out = await this.runMaildir(['read', MAILDIR_PATH, sel.key])
-      const m = JSON.parse(out) as { from: string; subject: string; date: string; body: string }
-      this.pages = paginateText(`From: ${m.from}\nDate: ${m.date}\nSubject: ${m.subject}\n\n${m.body}`)
-      this.page = 0
-      this.readSubject = m.subject.length > 24 ? m.subject.slice(0, 24) + '…' : m.subject   // title only; body is complete
-      this.level = 'read'
-      // Mark READ at open (Adam 2026-06-12: "reading an E-Mail does not mark
-      // it as read") — Maildir S-flag rename (new/→cur/), fire-and-forget +
-      // loud catch; mbsync propagates the flag to the IMAP server on its next
-      // sync. The local row updates immediately so the list/summary agree.
-      if (sel.unread) {
-        sel.unread = false
-        this.unreadTotal = Math.max(0, this.unreadTotal - 1)
-        void this.runMaildir(['mark_read', MAILDIR_PATH, sel.key]).catch((e: unknown) =>
-          this.ctx.log(`[os] mail: mark_read ${sel.key} FAILED (stays unread on disk): ${e instanceof Error ? e.message : String(e)}`))
+      const out = await this.runMaildir(['read', MAILDIR_PATH, key])
+      const m = JSON.parse(out) as { from: string; subject: string; date: string; body: string; images?: { path: string; name: string }[] }
+      if (seq !== this.readSeq) return true   // superseded by a newer open
+      const imgs = m.images ?? []
+      const imgNote = imgs.length ? `\n[${imgs.length} image${imgs.length === 1 ? '' : 's'} — see later page${imgs.length === 1 ? '' : 's'}]` : ''
+      const pages: MailPage[] = paginateText(`From: ${m.from}\nDate: ${m.date}\nSubject: ${m.subject}${imgNote}\n\n${m.body}`)
+      for (const img of imgs) {
+        const pageObj: MailPage = { kind: 'image', img: null, failed: null }
+        pages.push(pageObj)
+        void renderImageFile(img.path, DE_CONTENT_W, DE_CONTENT_H).then((rendered) => {
+          if (seq !== this.readSeq) return
+          ;(pageObj as Exclude<MailPage, string>).img = rendered
+          this.requestRender()
+        }).catch((e: unknown) => {
+          if (seq !== this.readSeq) return
+          const msg2 = e instanceof Error ? e.message : String(e)
+          this.ctx.log(`[os] mail: image render failed (${img.path}): ${msg2}`)
+          ;(pageObj as Exclude<MailPage, string>).failed = msg2
+          this.requestRender()
+        })
       }
+      this.pages = pages
+      this.page = 0
+      this.readSubject = m.subject.length > 24 ? m.subject.slice(0, 24) + '…' : m.subject
+      this.readKey = key
+      this.level = 'read'
+      this.focus = 'content'
       this.requestRender()
+      return true
     } catch (e) {
-      // Render the failure as a READ-level page. Parking it in lastError was a
-      // silent failure: the re-render's refresh() succeeded and nulled lastError
-      // before the list view ever checked it, so the tap just "did nothing"
-      // (review 2026-06-11). The read level has no refresh to eat the error.
-      this.ctx.log(`[os] mail: read ${sel.key} failed: ${(e as Error).message}`)
+      if (seq !== this.readSeq) return false
+      this.ctx.log(`[os] mail: read ${key} failed: ${(e as Error).message}`)
       this.pages = paginateText(`ERROR reading message:\n\n${(e as Error).message}`)
       this.page = 0
       this.readSubject = '(error)'
+      this.readKey = key
       this.level = 'read'
+      this.requestRender()
+      return false
+    }
+  }
+
+  private markRead(key: string): void {
+    void this.runMaildir(['mark_read', MAILDIR_PATH, key]).catch((e: unknown) =>
+      this.ctx.log(`[os] mail: mark_read ${key} FAILED (stays unread on disk): ${e instanceof Error ? e.message : String(e)}`))
+  }
+
+  async onOpen(open: WindowOpen): Promise<void> {
+    if (open.kind !== 'mail') { this.ctx.log(`[os] mail: ignoring onOpen kind '${open.kind}'`); return }
+    const ok = await this.openMessage(open.key)
+    if (ok) this.markRead(open.key)   // idempotent; next list refresh recomputes the count
+  }
+
+  // ---- compose flow ----
+
+  private startBodyDictation(): void {
+    this.composeStage = 'body'
+    this.pendingText = null
+    this.transcribing = false
+    this.listening = true
+    this.level = 'compose'
+    this.ctx.audio('start')
+    this.requestRender()
+  }
+
+  private stopCompose(why: string): void {
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    if (this.composeMode) this.ctx.log(`[os] mail: compose (${this.composeMode}) aborted — ${why}`)
+    this.composeMode = null
+    this.composeStage = null
+    this.composeTo = ''
+    this.listening = false
+    this.transcribing = false
+    this.pendingText = null
+    this.composePage = 0
+    this.composeBusy = false   // B5: clears on every exit (doSend already clears it on its own paths)
+  }
+
+  private async startRecipientPick(mode: 'forward' | 'compose'): Promise<void> {
+    this.composeMode = mode
+    this.composeStage = 'pickRecipient'
+    this.composeTo = ''
+    this.senderOffset = 0
+    this.focus = 'content'
+    this.level = 'compose'
+    this.requestRender()
+    try {
+      const out = await this.runMaildir(['senders', MAILDIR_PATH, '30'])
+      this.senders = (JSON.parse(out).senders ?? []) as MailSender[]
+    } catch (e) {
+      this.senders = []
+      this.ctx.log(`[os] mail: senders load failed: ${(e as Error).message}`)
+    }
+    this.requestRender()
+  }
+
+  /** Build the send request from the gathered fields + fire send_mail.py. */
+  private async doSend(): Promise<void> {
+    if (this.composeBusy) return
+    const mode = this.composeMode
+    if (!mode) { this.ctx.log('[os] mail: doSend with no compose mode — ignored (LOUD)'); return }
+    const req: Record<string, unknown> =
+      mode === 'reply' ? { mode, maildir: MAILDIR_PATH, key: this.readKey, body: this.pendingText ?? '' }
+      : mode === 'forward' ? { mode, maildir: MAILDIR_PATH, key: this.readKey, to: this.composeTo }
+      : { mode, to: this.composeTo, body: this.pendingText ?? '' }
+    this.composeBusy = true
+    this.listening = false
+    this.transcribing = false
+    this.requestRender()
+    try {
+      const r = await this.runSend(req)
+      this.ctx.log(`[os] mail: ${mode} SENT to ${r.to}${r.sent_path ? ` (filed ${r.sent_path})` : ''}`)
+      this.composeBusy = false
+      this.stopCompose('sent')
+      // reply/forward return to the ORIGINAL message (readKey still valid — you
+      // may want to Del it after replying); COMPOSE has no message, so → list
+      // (NOT a stale readKey, which would let Reply/Del act on a phantom message).
+      this.level = (mode === 'compose' || !this.readKey) ? 'list' : 'read'
+      this.pages = paginateText(`✓ ${mode === 'reply' ? 'Reply' : mode === 'forward' ? 'Forward' : 'Message'} sent to ${r.to}.`)
+      this.page = 0
+      this.readSubject = 'sent'
+      this.requestRender()
+    } catch (e) {
+      this.composeBusy = false
+      this.ctx.log(`[os] mail: ${mode} send FAILED: ${(e as Error).message}`)
+      // Keep the compose context? No — the message is gone (could be half-sent).
+      // Surface loudly; the user re-composes. (msmtp is atomic per RCPT; a
+      // failure here means it did NOT hand off to the server.)
+      this.stopCompose('send failed')
+      this.level = this.readKey ? 'read' : 'list'
+      this.pages = paginateText(`SEND FAILED:\n\n${(e as Error).message}\n\nNothing was sent — try again.`)
+      this.page = 0
+      this.readSubject = '(send failed)'
       this.requestRender()
     }
   }
 
   async onMenuSelect(label: string): Promise<void> {
+    if (this.level === 'compose') return this.onComposeMenu(label)
+    if (this.level === 'list') {
+      if (label === 'Compose') { await this.startRecipientPick('compose'); return }
+      this.ctx.log(`[os] mail list: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
+    if (this.level === 'confirmDel') {
+      if (label === 'Cancel') { this.level = 'read'; this.focus = 'content'; this.requestRender(); return }
+      if (label === 'Delete') {
+        try {
+          await this.runMaildir(['del', MAILDIR_PATH, this.readKey])
+          this.ctx.log(`[os] mail: deleted ${this.readKey} → Trash`)
+          this.readSeq++   // drop any in-flight image render for the now-gone message
+          this.level = 'list'; this.focus = 'content'; this.offset = 0
+        } catch (e) {
+          this.ctx.log(`[os] mail: delete ${this.readKey} FAILED: ${(e as Error).message}`)
+          this.pages = paginateText(`DELETE FAILED:\n\n${(e as Error).message}`)
+          this.page = 0; this.readSubject = '(delete failed)'; this.level = 'read'
+        }
+        this.requestRender()
+        return
+      }
+      this.ctx.log(`[os] mail confirmDel: unknown menu label '${label}' — ignored (LOUD)`)
+      return
+    }
     if (this.level !== 'read') { this.ctx.log(`[os] mail: menu '${label}' outside read level — ignored`); return }
     switch (label) {
       case 'Next': if (this.page < this.pages.length - 1) { this.page++; this.requestRender() } break
       case 'Prev': if (this.page > 0) { this.page--; this.requestRender() } break
+      case 'Reply':
+        if (!this.readKey) { this.ctx.log('[os] mail: Reply with no message — ignored'); return }
+        this.composeMode = 'reply'
+        this.startBodyDictation()   // recipient is the known sender — straight to the body
+        break
+      case 'Forward':
+        if (!this.readKey) { this.ctx.log('[os] mail: Forward with no message — ignored'); return }
+        await this.startRecipientPick('forward')
+        break
+      case 'Del':
+        if (!this.readKey) { this.ctx.log('[os] mail: Del with no message — ignored'); return }
+        this.level = 'confirmDel'; this.focus = 'content'; this.requestRender()
+        break
+      case 'Unread':
+        if (!this.readKey) { this.ctx.log('[os] mail: Unread with no message — ignored'); return }
+        try {
+          await this.runMaildir(['mark_unread', MAILDIR_PATH, this.readKey])
+          this.ctx.log(`[os] mail: marked ${this.readKey} unread`)
+          this.readSeq++; this.level = 'list'; this.focus = 'content'
+        } catch (e) {
+          this.ctx.log(`[os] mail: mark_unread ${this.readKey} FAILED: ${(e as Error).message}`)
+        }
+        this.requestRender()
+        break
       default: this.ctx.log(`[os] mail read: unknown menu label '${label}' — ignored (LOUD)`)
     }
   }
 
+  private async onComposeMenu(label: string): Promise<void> {
+    switch (label) {
+      case 'Done':
+        if (!this.listening) { this.ctx.log('[os] mail: Done with no live mic — ignored'); return }
+        this.listening = false; this.transcribing = true; this.ctx.audio('stop'); this.requestRender()
+        return
+      case 'Cancel':
+        this.stopCompose('cancel')
+        this.level = this.readKey ? 'read' : 'list'
+        this.focus = 'content'
+        this.requestRender()
+        return
+      case 'Confirm':
+        // forward = recipient confirm; reply/compose = body confirm — both send.
+        if (this.composeStage === 'confirm' || (this.composeStage === 'body' && this.pendingText !== null)) {
+          await this.doSend()
+        } else {
+          this.ctx.log(`[os] mail compose: Confirm at stage '${this.composeStage}' — ignored (LOUD)`)
+        }
+        return
+      case 'Re-record':
+        this.pendingText = null
+        this.composePage = 0
+        this.startBodyDictation()
+        return
+      case 'Next':
+        if (this.pendingText !== null) { this.composePage++; this.requestRender() }   // view() clamps to the last page
+        return
+      case 'Prev':
+        if (this.pendingText !== null && this.composePage > 0) { this.composePage--; this.requestRender() }
+        return
+      default: this.ctx.log(`[os] mail compose: unknown menu label '${label}' — ignored (LOUD)`)
+    }
+  }
+
+  async onStt(text: string): Promise<void> {
+    if (this.level !== 'compose' || this.composeStage !== 'body' || !this.transcribing) {
+      this.ctx.log(`[os] mail: STT arrived but not awaiting a body (level=${this.level}, stage=${this.composeStage}) — discarded: "${text.slice(0, 60)}"`)
+      this.requestRender()
+      return
+    }
+    this.transcribing = false
+    this.pendingText = text.trim()
+    this.composePage = 0
+    this.requestRender()
+  }
+
+  async onSttError(error: string): Promise<void> {
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    const had = this.listening || this.transcribing || this.pendingText !== null
+    this.listening = false
+    this.transcribing = false
+    this.pendingText = null
+    if (!had) { this.ctx.log(`[os] mail: stt error with no dictation in flight — ${error}`); this.requestRender(); return }
+    this.ctx.log(`[os] mail: dictation failed — ${error}`)
+    // back to the message/list; the user re-taps Reply/Compose to retry
+    this.stopCompose('stt error')
+    this.level = this.readKey ? 'read' : 'list'
+    this.requestRender()
+  }
+
   async onReload(): Promise<void> {
-    this.lastError = null        // view() refetches the list / re-renders the page
-    this.focus = 'content'       // a menu action hands focus back to the rows
+    this.stopCompose('reload')
+    this.lastError = null
+    this.focus = 'content'
+  }
+
+  onDeactivate(): void { this.stopCompose('window switch') }
+
+  /** No overlay repaint over a live mic, the sacred send-confirm step, or an
+   *  in-flight send. */
+  interruptible(): boolean {
+    return !(this.listening || this.transcribing || this.pendingText !== null || this.composeStage === 'confirm' || this.composeBusy)
   }
 
   async onBack(): Promise<boolean> {
-    if (this.level === 'read') { this.level = 'list'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'compose') {
+      // any in-flight compose: Back cancels it (mic must not outlive focus)
+      this.stopCompose('back')
+      this.level = this.readKey ? 'read' : 'list'
+      this.focus = 'content'
+      this.requestRender()
+      return true
+    }
+    if (this.level === 'confirmDel') { this.level = 'read'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'read') { this.readSeq++; this.level = 'list'; this.focus = 'content'; this.requestRender(); return true }
     if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }   // content → the menu list
     this.focus = 'content'       // leaving via Main: reset for re-entry
     return false
@@ -1917,6 +2506,7 @@ class FilesWindow implements OsWindow {
   readonly id = 'files'
   readonly tab = 'Files'
   readonly label = 'Files'
+  readonly category = 'Tools' as const
   /** The REAL-file-manager rework (Adam 2026-06-12): `..` is ALWAYS row 0 at
    *  the tree level (at a location root it pops to locations — "trapped in DL
    *  forever" is dead), the tree menu carries Up/Stats, tapping a FILE opens
@@ -2893,6 +3483,44 @@ class FilesWindow implements OsWindow {
     this.requestRender()
   }
 
+  /** Phase 12: open a search-hit FILE — navigate to its parent directory at the
+   *  tree level so Adam can act on it (Copy/Move/Del/preview). The stack is
+   *  built as the FULL chain from a matching location root down to the parent,
+   *  so `..` ascends correctly (upOne pops the stack — a single-element stack
+   *  would jump straight to locations). */
+  async onOpen(open: WindowOpen): Promise<void> {
+    if (open.kind !== 'file') { this.ctx.log(`[os] files: ignoring onOpen kind '${open.kind}'`); return }
+    this.stopNameEntry('search open')
+    this.navSeq++
+    this.actionPath = null; this.actionIsCwd = false; this.actionIsDir = false
+    const parent = dirname(open.path)
+    if (!existsSync(parent)) {
+      this.ctx.log(`[os] files: onOpen parent '${parent}' missing — landing at locations`)
+      this.level = 'locations'; this.locOffset = 0; this.focus = 'content'; this.requestRender()
+      return
+    }
+    this.refreshLocations()
+    // longest matching location root (Home beats Root for /home/user/… paths)
+    const root = this.locs
+      .map((l) => l.path)
+      .filter((lp) => parent === lp || parent.startsWith(lp.endsWith('/') ? lp : lp + '/'))
+      .sort((a, b) => b.length - a.length)[0]
+    if (!root) {
+      this.ctx.log(`[os] files: onOpen '${parent}' under no known location — landing at locations`)
+      this.level = 'locations'; this.locOffset = 0; this.focus = 'content'; this.requestRender()
+      return
+    }
+    const rel = parent.slice(root.length).split('/').filter(Boolean)
+    const stack = [root]
+    let cur = root
+    for (const seg of rel) { cur = join(cur, seg); stack.push(cur) }
+    this.stack = stack
+    this.offset = 0
+    this.focus = 'content'
+    this.level = 'tree'
+    this.requestRender()
+  }
+
   /** Mic must not outlive focus (the established dictation hygiene rule). */
   onDeactivate(): void {
     if (this.listening || this.transcribing || this.pendingName !== null) {
@@ -2922,6 +3550,7 @@ class GamesWindow implements OsWindow {
   readonly id = 'games'
   readonly tab = 'Games'
   readonly label = 'Games'
+  readonly category = 'Games' as const
   private level: 'menu' | 'rpg' | 'rpg-out' | 'chess' | 'chess-pieces' | 'chess-moves' | 'chess-confirm' = 'menu'
   private focus: 'content' | 'menu' = 'content'
   // --- rpg state ---
@@ -3450,6 +4079,7 @@ class CalendarWindow implements OsWindow {
   // spelling for titles.
   readonly tab = 'Calendr'
   readonly label = 'Calendar'
+  readonly category = 'Info' as const
   private level: 'agenda' | 'read' = 'agenda'
   private offset = 0
   private rows: ({ kind: 'header'; label: string } | { kind: 'event'; uid: string; label: string })[] = []
@@ -3568,6 +4198,7 @@ class NoticesWindow implements OsWindow {
   readonly id = 'notices'
   readonly tab = 'Notices'
   readonly label = 'Notices'
+  readonly category = 'Comms' as const
   private level: 'list' | 'read' = 'list'
   private offset = 0
   private rows: { id: number; label: string }[] = []
@@ -3622,7 +4253,7 @@ class NoticesWindow implements OsWindow {
       mode: 'browse',
       menuMode: this.focus === 'menu' ? 'capture' : 'passive',
       title: `Notices · ${total ? `${this.offset + 1}-${last} of ${total}` : 'none yet'}${unseen ? ` · ${unseen} unseen` : ''}`,
-      menu: ['Reload', 'Main'],
+      menu: unseen ? ['MkAll', 'Reload', 'Main'] : ['Reload', 'Main'],   // MkAll only when there's something to mark
       items: items.length ? items : ['(no notifications yet)'],
     }
   }
@@ -3677,6 +4308,20 @@ class NoticesWindow implements OsWindow {
   }
 
   async onMenuSelect(label: string): Promise<void> {
+    if (this.level === 'list') {
+      if (label === 'MkAll') {
+        try {
+          const n = await markAllSeen()   // marks all seen on glass + dismisses each on the phone
+          this.ctx.log(`[os] notices: MkAll marked ${n} seen`)
+        } catch (e) {
+          this.ctx.log(`[os] notices: MkAll FAILED: ${(e as Error).message}`)
+        }
+        this.requestRender()   // the 'seen' hub event already refreshed chrome; re-list to drop the ● dots
+        return
+      }
+      this.ctx.log(`[os] notices list: menu '${label}' — ignored`)
+      return
+    }
     if (this.level !== 'read') { this.ctx.log(`[os] notices: menu '${label}' outside read level — ignored`); return }
     switch (label) {
       case 'Next': if (this.page < this.pages.length - 1) { this.page++; this.requestRender() } break
@@ -3711,6 +4356,7 @@ class ReaderWindow implements OsWindow {
   readonly id = 'reader'
   readonly tab = 'Reader'
   readonly label = 'Reader'
+  readonly category = 'Media' as const
   private level: 'library' | 'chapters' | 'read' = 'library'
   private libOffset = 0
   private books: string[] = []
@@ -3941,6 +4587,7 @@ class TimersWindow implements OsWindow {
   readonly id = 'timers'
   readonly tab = 'Timers'
   readonly label = 'Timers'
+  readonly category = 'Tools' as const
   private level: 'list' | 'detail' = 'list'
   private offset = 0
   private pending: TimerRow[] = []
@@ -4070,11 +4717,15 @@ class MainWindow implements OsWindow {
   readonly id = 'main'
   readonly tab = 'Main'
   readonly label = 'Main'
+  readonly category = 'Info' as const   // unused — Main is excluded from grouping
   private others: () => OsWindow[]
-  /** dash = the one-page two-column dashboard; stats = the deep-stats pages
-   *  (Adam 2026-06-12: "Main should just surface active things; Stats is
-   *  where extra stuff goes, many pages of deep stats"). */
-  private level: 'dash' | 'stats' = 'dash'
+  private mru: () => OsWindow[]
+  /** categories = the launcher (category menu + MRU dashboard); category = one
+   *  category's programs (menu + their summaries); stats = the deep-stats pages.
+   *  (Phase 11 XFCE-style launcher — the flat switcher didn't scale past ~12
+   *  windows; Adam 2026-06-12.) */
+  private level: 'categories' | 'category' | 'stats' = 'categories'
+  private selectedCategory: WindowCategory | null = null
   private statsPages: StatsPage[] = []
   private statsPage = 0
   /** Bumped per stats build — async chart/df/ps completions check it so a
@@ -4084,14 +4735,37 @@ class MainWindow implements OsWindow {
   constructor(
     private ctx: WmContext,
     others: () => OsWindow[],
+    /** Non-Main windows ordered most-recently-used first (the dashboard). */
+    mru: () => OsWindow[],
     /** WM-cached unseen-notification count (the same number as the badge). */
     private unseen: () => number,
     private requestRender: () => void,
   ) {
     this.others = others
+    this.mru = mru
   }
 
   summary(): string { return 'dashboard' }
+
+  /** Reset to the launcher root whenever the WM switches TO Main (incl. the
+   *  'Main' tap on a sub-level, which would otherwise be a dead no-op) — a
+   *  launcher returns to its top. Bumps statsSeq so a stale in-flight chart
+   *  render can't paint after you've left the Stats level (review 2026-06-13). */
+  resetToRoot(): void {
+    this.level = 'categories'
+    this.selectedCategory = null
+    this.statsSeq++
+  }
+
+  /** Categories present = those with ≥1 window, in the canonical order. */
+  private presentCategories(): WindowCategory[] {
+    const have = new Set(this.others().map((w) => w.category))
+    return CATEGORY_ORDER.filter((c) => have.has(c))
+  }
+
+  private categoryWindows(cat: WindowCategory): OsWindow[] {
+    return this.others().filter((w) => w.category === cat)
+  }
 
   /** Column-width clamp for the two-column dashboard (~23 ASCII chars per
    *  237 px column; compose px-clamps each line as the logged backstop). */
@@ -4099,9 +4773,30 @@ class MainWindow implements OsWindow {
 
   async view(): Promise<WinView> {
     if (this.level === 'stats') return this.statsView()
+
+    if (this.level === 'category' && this.selectedCategory) {
+      // content = THIS category's programs' summaries; menu = its programs
+      // (+ Stats under Info) + Back. Never paginates (a category is small).
+      const wins = this.categoryWindows(this.selectedCategory)
+      const summaries = await this.summarize(wins)
+      const lines = summaries.map((l) => this.colLine(l))
+      const half = Math.ceil(lines.length / 2)
+      const menu = [
+        ...wins.map((w) => w.tab),
+        ...(this.selectedCategory === 'Tools' ? ['Dictate'] : []),   // Dictate folded into Tools (Adam 2026-06-13)
+        ...(this.selectedCategory === 'Info' ? ['Stats'] : []),
+        'Back', 'Reload',
+      ]
+      return {
+        mode: 'twocol', title: `Main · ${this.selectedCategory}`, menu,
+        textLeft: lines.slice(0, half).join('\n'),
+        textRight: lines.slice(half).join('\n'),
+      }
+    }
+
+    // categories level: menu = Dictate + the categories + Reload; content =
+    // the MRU dashboard (most-recently-used windows, one page).
     const unseen = this.unseen()
-    // Next-timer line (Phase 6) — minute granularity only (per-second is
-    // hat-gated; do not fake it). A down DB renders a loud placeholder.
     let timerLine: string | null = null
     try {
       const nt = await nextPending()
@@ -4110,33 +4805,34 @@ class MainWindow implements OsWindow {
       this.ctx.log(`[os] main: next-timer query failed: ${(e as Error).message}`)
       timerLine = '⏱ (timers down — log)'
     }
-    // Summaries may be async (DB-backed) — gather concurrently, isolate
-    // failures per row so one down subsystem can't blank the dashboard.
-    const summaries = await Promise.all(this.others().map(async (w) => {
-      try {
-        return `${w.tab}: ${await w.summary()}`
-      } catch (e) {
-        this.ctx.log(`[os] main: ${w.id} summary failed: ${(e as Error).message}`)
-        return `${w.tab}: (down — log)`
-      }
-    }))
-    // ONE page, TWO columns (Adam 2026-06-12): active things first (the timer
-    // line leads the left column), then one short line per window, split
-    // across the columns. Host/pool/battery live in the status bar now.
+    // MRU dashboard — as many recent windows as fit ONE page (~12 across two
+    // columns; minus the lead timer/unseen lines). Never paginates.
+    const lead = (timerLine ? 1 : 0) + (unseen ? 1 : 0)
+    const recent = this.mru().slice(0, Math.max(2, 12 - lead))
+    const summaries = await this.summarize(recent)
     const lines = [
       ...(timerLine ? [timerLine] : []),
-      ...(unseen ? [`⚠ ${unseen} unseen`] : []),
+      ...(unseen ? [`! ${unseen} unseen`] : []),
       ...summaries,
     ].map((l) => this.colLine(l))
     const half = Math.ceil(lines.length / 2)
-    const menu = ['Stats', ...this.others().map((w) => w.tab), 'Ask', 'Reload']
+    // Categories only — Dictate folded into Tools, Reload dropped (Adam
+    // 2026-06-13: the whole Main menu now fits on screen at once).
+    const menu = [...this.presentCategories()]
     return {
-      mode: 'twocol',
-      title: 'Main',
-      menu,
+      mode: 'twocol', title: 'Main', menu,
       textLeft: lines.slice(0, half).join('\n'),
       textRight: lines.slice(half).join('\n'),
     }
+  }
+
+  /** Summaries (possibly async/DB-backed) gathered concurrently with per-row
+   *  failure isolation — one down subsystem can't blank the dashboard. */
+  private async summarize(wins: OsWindow[]): Promise<string[]> {
+    return Promise.all(wins.map(async (w) => {
+      try { return `${w.tab}: ${await w.summary()}` }
+      catch (e) { this.ctx.log(`[os] main: ${w.id} summary failed: ${(e as Error).message}`); return `${w.tab}: (down — log)` }
+    }))
   }
 
   // ---------------------------------------------------- Stats (Adam 2026-06-12)
@@ -4219,33 +4915,28 @@ class MainWindow implements OsWindow {
   }
 
   async onMenuSelect(label: string): Promise<void> {
-    if (label === 'Stats') {
-      this.level = 'stats'
-      this.buildStats()
-      this.requestRender()
-      return
-    }
     if (this.level === 'stats') {
-      if (label === 'Next') {
-        if (this.statsPage < this.statsPages.length - 1) { this.statsPage++; this.requestRender() }
-        return
-      }
-      if (label === 'Prev') {
-        if (this.statsPage > 0) { this.statsPage--; this.requestRender() }
-        return
-      }
+      if (label === 'Next') { if (this.statsPage < this.statsPages.length - 1) { this.statsPage++; this.requestRender() } return }
+      if (label === 'Prev') { if (this.statsPage > 0) { this.statsPage--; this.requestRender() } return }
       this.ctx.log(`[os] main stats: unknown menu label '${label}' — ignored (LOUD)`)
       return
     }
-    if (label === 'Ask') {
-      // Phase 6: switch to Aria AND run its existing dictation verb — the WM
-      // invokes onMenuSelect('Ask') on the target after the switch. One
-      // pipeline, the real one.
-      throw new SwitchTo('aria', 'Ask')
+    // 'Dictate' (renamed from Ask, Phase 11) — switch to Aria AND run its verb.
+    if (label === 'Dictate') throw new SwitchTo('aria', 'Ask')
+    if (this.level === 'category') {
+      if (label === 'Stats') { this.level = 'stats'; this.buildStats(); this.requestRender(); return }
+      const w = this.others().find((x) => x.tab === label)
+      if (!w) { this.ctx.log(`[os] main category: unknown menu label '${label}' — ignored (LOUD)`); return }
+      throw new SwitchTo(w.id)
     }
-    const w = this.others().find((x) => x.tab === label)
-    if (!w) { this.ctx.log(`[os] main: unknown menu label '${label}' — ignored (LOUD)`); return }
-    throw new SwitchTo(w.id)
+    // categories level: a category name → swap to its programs.
+    if ((CATEGORY_ORDER as string[]).includes(label)) {
+      this.selectedCategory = label as WindowCategory
+      this.level = 'category'
+      this.requestRender()
+      return
+    }
+    this.ctx.log(`[os] main: unknown menu label '${label}' — ignored (LOUD)`)
   }
 
   async onBrowseSelect(index: number): Promise<void> {
@@ -4256,16 +4947,760 @@ class MainWindow implements OsWindow {
     if (this.level === 'stats') this.buildStats()   // fresh samples + re-render charts
   }
 
-  // dash root: false → the WM blanks the screen (double-tap toggles it back —
-  // Adam 2026-06-10). The stats level pops back to the dashboard first.
+  // categories root: false → the WM blanks the screen (double-tap toggles it
+  // back — Adam 2026-06-10). category/stats pop back to the categories launcher.
   async onBack(): Promise<boolean> {
     if (this.level === 'stats') {
-      this.level = 'dash'
+      this.level = this.selectedCategory ? 'category' : 'categories'   // Stats came from Info
       this.statsSeq++   // supersede in-flight chart/df/ps completions
       this.requestRender()
       return true
     }
+    if (this.level === 'category') {
+      this.level = 'categories'
+      this.selectedCategory = null
+      this.requestRender()
+      return true
+    }
     return false
+  }
+}
+
+// ============================================================ Deliveries window
+
+/** Deliveries (upgrades.md v2 Phase 13): carrier/shipping mail → a tracked list
+ *  (Info category). Data syncs from Gmail every 15 min (deliveries.ts); this is
+ *  a read-only list → detail browser. `(unparsed)` rows surface loudly. */
+class DeliveriesWindow implements OsWindow {
+  readonly id = 'deliveries'
+  readonly tab = 'Deliv'
+  readonly label = 'Deliveries'
+  readonly category = 'Info' as const
+  private level: 'list' | 'read' = 'list'
+  private rows: DeliveryRow[] = []
+  private offset = 0
+  private focus: 'content' | 'menu' = 'content'
+  private readKey: string | null = null
+  private lastError: string | null = null
+
+  constructor(private ctx: WmContext, private requestRender: () => void) {}
+
+  async summary(): Promise<string> {
+    try { return await deliveriesSummary() } catch (e) { this.ctx.log(`[os] deliveries: summary failed: ${(e as Error).message}`); return '(down — log)' }
+  }
+
+  private label1(d: DeliveryRow): string {
+    return `${d.delivered ? '✓ ' : ''}${d.carrier} · ${d.status} · ${oneLine(d.subject ?? '', 26)}`
+  }
+
+  async view(): Promise<WinView> {
+    if (this.level === 'read' && this.readKey) {
+      let d: DeliveryRow | null
+      try { d = await getDelivery(this.readKey) } catch (e) { return errorView('Deliveries · error', (e as Error).message) }
+      if (!d) { this.level = 'list'; this.readKey = null; return this.view() }
+      const text = [
+        `${d.carrier} — ${d.status}`,
+        '─'.repeat(20),
+        d.tracking ? `Tracking: ${d.tracking}` : '(no tracking number parsed)',
+        '',
+        clampConfirmBody(d.subject ?? '', 400),   // a long Gmail subject would blow the wall otherwise
+        '',
+        `Updated ${fmtStamp(d.lastUpdate)}`,
+      ].join('\n')
+      return { mode: 'text', title: `Deliveries · ${d.carrier}`, menu: ['Back', 'Reload', 'Main'], text }
+    }
+    try { this.rows = await listDeliveries(BROWSE_PAGE * 3); this.lastError = null } catch (e) { this.lastError = (e as Error).message }
+    if (this.lastError) return errorView('Deliveries · error', this.lastError)
+    if (this.rows.length === 0) {
+      return { mode: 'text', title: 'Deliveries', menu: ['Reload', 'Main'], text: 'No tracked deliveries.\n\n(syncs from carrier mail every 15 min)' }
+    }
+    const { items } = browsePageItems(this.rows.map((d) => this.label1(d)), this.offset)
+    return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Deliveries · ${this.rows.length}`, menu: ['Reload', 'Main'], items }
+  }
+
+  async onBrowseSelect(index: number): Promise<void> {
+    if (this.level !== 'list') { this.ctx.log(`[os] deliveries: browse select outside list — ignored`); return }
+    const { map, prevOffset, nextOffset } = browsePageItems(this.rows.map((d) => this.label1(d)), this.offset)
+    const m = map[index]
+    if (m === undefined) { this.ctx.log(`[os] deliveries: index ${index} out of range`); return }
+    if (m === -1) { this.offset = prevOffset; this.requestRender(); return }
+    if (m === -2) { this.offset = nextOffset; this.requestRender(); return }
+    const d = this.rows[m]
+    if (!d) { this.requestRender(); return }
+    this.readKey = d.dkey
+    this.level = 'read'
+    this.focus = 'content'
+    this.requestRender()
+  }
+
+  async onMenuSelect(label: string): Promise<void> {
+    this.ctx.log(`[os] deliveries: menu '${label}' — Reload/Main/Back are WM-level; ignored`)
+  }
+
+  async onReload(): Promise<void> { this.lastError = null; this.focus = 'content' }
+
+  async onBack(): Promise<boolean> {
+    if (this.level === 'read') { this.level = 'list'; this.readKey = null; this.focus = 'content'; this.requestRender(); return true }
+    if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+    this.focus = 'content'
+    return false
+  }
+}
+
+// ============================================================ Terminal window
+
+const TERM_POLL_MS = 500     // paced capture cadence while watching (tail) — display pacing, NOT an I/O timeout
+const TERM_TAIL_LINES = 13   // visible firmware-text lines in tail mode
+const TERM_TAIL_COLS = 44    // per-line width clamp: an 80-col/dense terminal would blow the 960 B wall (review 2026-06-13) — grid mode shows the full width
+const QUICK_KEYS: { label: string; keys: string[] }[] = [
+  { label: 'Enter', keys: ['Enter'] },
+  { label: 'Ctrl-C', keys: ['C-c'] },
+  { label: 'q', keys: ['q'] },
+  { label: 'y', keys: ['y'] },
+  { label: 'n', keys: ['n'] },
+  { label: '↑ Up', keys: ['Up'] },
+  { label: '↓ Down', keys: ['Down'] },
+  { label: 'Tab', keys: ['Tab'] },
+  { label: 'Esc', keys: ['Escape'] },
+]
+
+function cleanSessionName(raw: string): { name: string } | { error: string } {
+  const name = raw.trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9_-]/g, '')
+  // require a letter/digit (reject '', '--', '__' — degenerate, even if execFile
+  // makes a leading-dash name harmless as a -s value)
+  if (!name || !/[A-Za-z0-9]/.test(name)) return { error: 'name needs a letter or digit (letters, digits, - and _ only)' }
+  return { name }
+}
+
+/** Terminal (upgrades.md v2 Phase 5): view + drive Adam's REAL tmux sessions
+ *  via DISCRETE commands (no -C attach + terminal emulator — capture-pane reads
+ *  tmux's rendered grid, and the durable session means a WS drop loses nothing,
+ *  the Phase-5 safety goal). Tail = paced firmware text (watch builds); grid =
+ *  an 80×22 IMAGE page (PAGE-2, htop/vim legible). Input: quick-keys + dictation
+ *  (send-keys -l) through the sacred confirm flow; keys reach ONE focused session. */
+class TerminalWindow implements OsWindow {
+  readonly id = 'term'
+  readonly tab = 'Term'
+  readonly label = 'Terminal'
+  readonly category = 'Tools' as const
+  private level: 'sessions' | 'view' | 'keys' = 'sessions'
+  private sessions: TmuxSession[] = []
+  private sessOffset = 0
+  private session: string | null = null
+  private mode: 'tail' | 'grid' = 'tail'
+  private content = ''
+  private gridImg: RenderedImage | null = null
+  private gridFailed: string | null = null
+  private gridSeq = 0
+  private focus: 'content' | 'menu' = 'content'
+  private lastError: string | null = null
+  // dictation (send text OR new-session name)
+  private dictPurpose: 'send' | 'newSession' | null = null
+  private listening = false
+  private transcribing = false
+  private pendingText: string | null = null
+  // paced capture poll (tail, active only) — a gen-guarded setTimeout chain
+  private pollGen = 0
+  private pollTimer: ReturnType<typeof setTimeout> | null = null
+
+  constructor(private ctx: WmContext, private requestRender: () => void) {}
+
+  summary(): string {
+    if (this.session) return `${this.session} · ${this.mode}`
+    return this.sessions.length ? `${this.sessions.length} session(s)` : 'tmux'
+  }
+
+  statusLine(): string | null {
+    if (this.listening) return 'listening…'
+    if (this.transcribing) return 'transcribing…'
+    if (this.pendingText !== null) return 'confirm?'
+    return this.session
+  }
+
+  private dictating(): boolean { return this.listening || this.transcribing || this.pendingText !== null }
+
+  // ---- paced capture poll (tail mode) ----
+  private ensurePoll(): void {
+    if (this.pollTimer || this.level !== 'view' || this.mode !== 'tail' || this.dictating()) return
+    const gen = ++this.pollGen
+    const tick = async (): Promise<void> => {
+      this.pollTimer = null
+      if (gen !== this.pollGen || !this.session || this.level !== 'view' || this.mode !== 'tail' || this.dictating()) return
+      try {
+        const content = await tmuxCapture(this.session)
+        if (gen !== this.pollGen) return
+        if (content !== this.content) { this.content = content; this.requestRender() }
+      } catch (e) {
+        if (gen !== this.pollGen) return
+        this.ctx.log(`[os] term: capture failed (${this.session}): ${(e as Error).message}`)
+        this.content = `(capture failed — the session may have ended)\n${(e as Error).message}`
+        this.requestRender()
+        return   // stop polling a dead session; Sessions re-picks
+      }
+      if (gen === this.pollGen) this.pollTimer = setTimeout(() => void tick(), TERM_POLL_MS)
+    }
+    this.pollTimer = setTimeout(() => void tick(), TERM_POLL_MS)
+  }
+
+  private stopPoll(): void {
+    this.pollGen++
+    if (this.pollTimer) { clearTimeout(this.pollTimer); this.pollTimer = null }
+  }
+
+  // ---- view ----
+  async view(): Promise<WinView> {
+    if (this.level === 'sessions') {
+      if (this.dictating()) return this.dictView()
+      try { this.sessions = await tmuxList(); this.lastError = null } catch (e) { this.lastError = (e as Error).message }
+      if (this.lastError) return errorView('Term · error', this.lastError)
+      const rows = this.sessions.map((s) => `${s.attached ? '● ' : ''}${s.name} (${s.windows}w)`)
+      rows.push('+ New session')
+      const { items } = browsePageItems(rows, this.sessOffset)
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: 'Term · sessions', menu: ['Reload', 'Main'], items }
+    }
+    if (this.level === 'keys') {
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Term · ${this.session} · keys`, menu: ['Back', 'Reload', 'Main'], items: QUICK_KEYS.map((k) => k.label) }
+    }
+    // view level
+    if (this.dictating()) return this.dictView()
+    if (this.mode === 'grid') {
+      const title = `Term · ${this.session} · grid`
+      const menu = ['Keys', 'Dictate', 'Tail', 'Terms', 'Reload', 'Main']
+      if (this.gridImg) return { mode: 'tiles', tilesRect: { w: this.gridImg.w, h: this.gridImg.h }, title, menu, tiles: this.gridImg.tiles }
+      return { mode: 'text', title, menu, text: this.gridFailed ? `grid render FAILED:\n${this.gridFailed}` : '⏳ rendering 80×22…' }
+    }
+    this.ensurePoll()   // tail mode — keep the live capture going
+    const lines = this.content.split('\n')
+    while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+    // Clamp each line's WIDTH (the firmware text region wraps an 80-col line and
+    // a dense 13 lines blows the 960 B wall → errorView instead of output, which
+    // is the whole "watch builds" use case). '›' marks a clamped line; Grid mode
+    // renders the full width.
+    const tail = lines.slice(-TERM_TAIL_LINES)
+      .map((l) => (l.length > TERM_TAIL_COLS ? l.slice(0, TERM_TAIL_COLS) + '›' : l))
+      .join('\n')
+    return {
+      mode: 'text', title: `Term · ${this.session} · tail`,
+      menu: ['Keys', 'Dictate', 'Grid', 'Terms', 'Reload', 'Main'],
+      text: tail || '(no output yet)',
+    }
+  }
+
+  private dictView(): WinView {
+    const ses = this.dictPurpose === 'newSession' ? 'new session' : `→ ${this.session}`
+    if (this.listening) return { mode: 'text', title: `Term · ${ses} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: `Listening — speak the ${this.dictPurpose === 'newSession' ? 'session name' : 'text to type'}, then Done.` }
+    if (this.transcribing) return { mode: 'text', title: `Term · ${ses} · transcribing…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
+    const verb = this.dictPurpose === 'newSession' ? 'New session' : 'Type (literal — tap Keys→Enter to run)'
+    return { mode: 'text', title: `Term · ${ses} · confirm?`, menu: ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main'], text: `${verb}:\n${'─'.repeat(20)}\n${clampConfirmBody(this.pendingText ?? '')}\n${'─'.repeat(20)}\nConfirm · Re-record · Cancel` }
+  }
+
+  // ---- input ----
+  async onBrowseSelect(index: number): Promise<void> {
+    if (this.level === 'sessions') {
+      const rows = this.sessions.map((s) => `${s.attached ? '● ' : ''}${s.name} (${s.windows}w)`)
+      rows.push('+ New session')
+      const { map, prevOffset, nextOffset } = browsePageItems(rows, this.sessOffset)
+      const m = map[index]
+      if (m === undefined) { this.ctx.log(`[os] term sessions: index ${index} out of range`); return }
+      if (m === -1) { this.sessOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.sessOffset = nextOffset; this.requestRender(); return }
+      if (m === this.sessions.length) { this.startDictation('newSession'); return }   // the '+ New session' row
+      const s = this.sessions[m]
+      if (!s) { this.ctx.log(`[os] term sessions: no session at ${m} — resyncing`); this.requestRender(); return }
+      await this.openSession(s.name)
+      return
+    }
+    if (this.level === 'keys') {
+      const k = QUICK_KEYS[index]
+      if (!k || !this.session) { this.ctx.log(`[os] term keys: index ${index} / no session — ignored`); return }
+      try {
+        await tmuxSendKeys(this.session, k.keys)
+        this.ctx.log(`[os] term: sent ${k.label} → ${this.session}`)
+      } catch (e) {
+        this.ctx.log(`[os] term: send ${k.label} FAILED: ${(e as Error).message}`)
+      }
+      this.requestRender()   // stay in keys for rapid sequences; Back to see the result
+      return
+    }
+    this.ctx.log(`[os] term: browse select ${index} at level ${this.level} — ignored`)
+  }
+
+  private async openSession(name: string): Promise<void> {
+    this.session = name
+    this.level = 'view'
+    this.mode = 'tail'
+    this.focus = 'content'
+    this.content = ''
+    this.requestRender()
+    try {
+      this.content = await tmuxCapture(name)
+    } catch (e) {
+      this.content = `(capture failed: ${(e as Error).message})`
+    }
+    this.ensurePoll()
+    this.requestRender()
+  }
+
+  private async renderGrid(): Promise<void> {
+    if (!this.session) return
+    const seq = ++this.gridSeq
+    this.gridImg = null
+    this.gridFailed = null
+    try {
+      const text = await tmuxCapture(this.session)
+      if (seq !== this.gridSeq) return
+      const img = await renderTerminalImage(text, DE_CONTENT_W, DE_CONTENT_H)
+      if (seq !== this.gridSeq) return
+      this.gridImg = img
+      this.requestRender()
+    } catch (e) {
+      if (seq !== this.gridSeq) return
+      this.gridFailed = (e as Error).message
+      this.ctx.log(`[os] term: grid render failed: ${this.gridFailed}`)
+      this.requestRender()
+    }
+  }
+
+  async onMenuSelect(label: string): Promise<void> {
+    if (this.dictating()) return this.onDictMenu(label)
+    if (this.level === 'view') {
+      switch (label) {
+        case 'Keys': this.stopPoll(); this.level = 'keys'; this.focus = 'content'; this.requestRender(); return
+        case 'Dictate': this.stopPoll(); this.startDictation('send'); return
+        case 'Grid': this.stopPoll(); this.mode = 'grid'; this.requestRender(); void this.renderGrid(); return
+        case 'Tail': this.mode = 'tail'; this.gridSeq++; await this.refreshTail(); return
+        case 'Terms': this.stopPoll(); this.session = null; this.level = 'sessions'; this.sessOffset = 0; this.focus = 'content'; this.requestRender(); return
+        default: this.ctx.log(`[os] term view: unknown menu label '${label}' — ignored (LOUD)`)
+      }
+      return
+    }
+    this.ctx.log(`[os] term: menu '${label}' at level ${this.level} — ignored`)
+  }
+
+  private async refreshTail(): Promise<void> {
+    if (!this.session) return
+    try { this.content = await tmuxCapture(this.session) } catch (e) { this.content = `(capture failed: ${(e as Error).message})` }
+    this.ensurePoll()
+    this.requestRender()
+  }
+
+  // ---- dictation ----
+  private startDictation(purpose: 'send' | 'newSession'): void {
+    this.dictPurpose = purpose
+    this.pendingText = null
+    this.transcribing = false
+    this.listening = true
+    if (purpose === 'send') this.level = 'view'
+    this.ctx.audio('start')
+    this.requestRender()
+  }
+
+  private stopDictation(why: string): void {
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    if (this.dictating()) this.ctx.log(`[os] term: dictation stopped (${why})`)
+    this.listening = false
+    this.transcribing = false
+    this.pendingText = null
+    this.dictPurpose = null
+  }
+
+  private async onDictMenu(label: string): Promise<void> {
+    switch (label) {
+      case 'Done':
+        if (!this.listening) { this.ctx.log('[os] term: Done with no mic — ignored'); return }
+        this.listening = false; this.transcribing = true; this.ctx.audio('stop'); this.requestRender()
+        return
+      case 'Cancel': {
+        const back = this.dictPurpose
+        this.stopDictation('cancel')
+        this.level = back === 'newSession' ? 'sessions' : 'view'
+        if (this.level === 'view') this.ensurePoll()
+        this.requestRender()
+        return
+      }
+      case 'Re-record': {
+        const p = this.dictPurpose ?? 'send'
+        this.pendingText = null
+        this.startDictation(p)
+        return
+      }
+      case 'Confirm': {
+        const text = this.pendingText
+        const purpose = this.dictPurpose
+        if (text === null || !purpose) { this.ctx.log('[os] term: Confirm with no pending text — ignored (LOUD)'); return }
+        this.stopDictation('confirm')
+        if (purpose === 'newSession') {
+          const c = cleanSessionName(text)
+          if ('error' in c) {
+            this.ctx.log(`[os] term: new session rejected: ${c.error}`)
+            this.level = 'sessions'; this.lastError = `New session rejected: ${c.error}`; this.requestRender(); return
+          }
+          try {
+            await tmuxNewSession(c.name)
+            this.ctx.log(`[os] term: created session ${c.name}`)
+            await this.openSession(c.name)   // jump straight into it
+          } catch (e) {
+            this.ctx.log(`[os] term: new session FAILED: ${(e as Error).message}`)
+            this.level = 'sessions'; this.lastError = `New session failed: ${(e as Error).message}`; this.requestRender()
+          }
+        } else {
+          if (!this.session) { this.ctx.log('[os] term: send with no session — ignored'); this.level = 'sessions'; this.requestRender(); return }
+          try {
+            await tmuxSendLiteral(this.session, text)
+            this.ctx.log(`[os] term: sent literal (${text.length} chars) → ${this.session}`)
+          } catch (e) {
+            this.ctx.log(`[os] term: send literal FAILED: ${(e as Error).message}`)
+          }
+          this.level = 'view'
+          await this.refreshTail()
+        }
+        return
+      }
+      default: this.ctx.log(`[os] term dict: unknown menu label '${label}' — ignored (LOUD)`)
+    }
+  }
+
+  async onStt(text: string): Promise<void> {
+    if (!this.transcribing) {
+      this.ctx.log(`[os] term: STT arrived but not transcribing — discarded: "${text.slice(0, 60)}"`)
+      this.requestRender()
+      return
+    }
+    this.transcribing = false
+    this.pendingText = text.trim()
+    this.requestRender()
+  }
+
+  async onSttError(error: string): Promise<void> {
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    const had = this.dictating()
+    const back = this.dictPurpose
+    this.listening = false; this.transcribing = false; this.pendingText = null; this.dictPurpose = null
+    if (!had) { this.ctx.log(`[os] term: stt error with no dictation — ${error}`); this.requestRender(); return }
+    this.ctx.log(`[os] term: dictation failed — ${error}`)
+    this.level = back === 'newSession' ? 'sessions' : 'view'
+    if (this.level === 'view') this.ensurePoll()
+    this.requestRender()
+  }
+
+  async onReload(): Promise<void> {
+    this.stopDictation('reload')
+    this.lastError = null
+    this.focus = 'content'
+  }
+
+  onDeactivate(): void { this.stopPoll(); this.stopDictation('window switch') }
+  dispose(): void { this.stopPoll() }
+
+  interruptible(): boolean { return !this.dictating() }
+
+  async onBack(): Promise<boolean> {
+    if (this.dictating()) {
+      const back = this.dictPurpose
+      this.stopDictation('back')
+      this.level = back === 'newSession' ? 'sessions' : 'view'
+      if (this.level === 'view') this.ensurePoll()
+      this.requestRender()
+      return true
+    }
+    if (this.level === 'keys') { this.level = 'view'; this.focus = 'content'; await this.refreshTail(); return true }
+    if (this.level === 'view') { this.stopPoll(); this.session = null; this.level = 'sessions'; this.focus = 'content'; this.requestRender(); return true }
+    // sessions level
+    if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+    this.focus = 'content'
+    return false
+  }
+}
+
+// ============================================================ Search window
+
+/** Universal Search (upgrades.md v2 Phase 12): dictate a query → ONE results
+ *  list across mail/files/history/notes (search.ts, per-source isolated). A
+ *  mail/file hit HANDS OFF to its own window (SwitchTo + onOpen); a history/
+ *  note hit (no dedicated window) opens INLINE here as a read view. The query
+ *  dictation mirrors the Files name-entry confirm flow (Parakeet mangles —
+ *  nothing searches until Adam confirms the query). */
+class SearchWindow implements OsWindow {
+  readonly id = 'search'
+  readonly tab = 'Search'
+  readonly label = 'Search'
+  readonly category = 'Tools' as const
+  private level: 'query' | 'results' | 'read' = 'query'
+  // query dictation (mirrors FilesWindow name-entry)
+  private listening = false
+  private transcribing = false
+  private pendingQuery: string | null = null
+  private searching = false
+  /** Supersedes an in-flight search/dictation (Cancel / new Dictate / switch). */
+  private seq = 0
+  private query = ''
+  private hits: SearchHit[] = []
+  private offset = 0
+  private focus: 'content' | 'menu' = 'content'
+  private lastError: string | null = null
+  // inline read level (history turn / note line)
+  private pages: string[] = []
+  private page = 0
+  private readTitle = ''
+
+  constructor(private ctx: WmContext, private requestRender: () => void) {}
+
+  summary(): string {
+    if (this.searching) return 'searching…'
+    if (this.level === 'results') return `${this.hits.length} hit${this.hits.length === 1 ? '' : 's'} · "${this.query}"`
+    return 'dictate a query'
+  }
+
+  statusLine(): string | null {
+    if (this.listening) return 'listening…'
+    if (this.transcribing) return 'transcribing…'
+    if (this.pendingQuery !== null) return 'confirm?'
+    if (this.searching) return 'searching…'
+    return null
+  }
+
+  private emoji(s: SearchHit['source']): string {
+    return s === 'mail' ? '✉' : s === 'file' ? '📄' : s === 'history' ? '🗨' : s === 'note' ? '📝' : '!'
+  }
+
+  private rowLabels(): string[] {
+    return this.hits.map((h) => `${this.emoji(h.source)} ${h.preview}`)
+  }
+
+  async view(): Promise<WinView> {
+    if (this.pendingQuery !== null) {
+      return {
+        mode: 'text', title: 'Search · confirm?',
+        menu: ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main'],
+        text: `Search for:\n\n${clampConfirmBody(this.pendingQuery)}\n${'─'.repeat(20)}\nConfirm to search · Re-record · Cancel`,
+      }
+    }
+    if (this.listening) {
+      return { mode: 'text', title: 'Search · listening…', menu: ['Done', 'Cancel', 'Reload', 'Main'], text: 'Listening — say your search query, then Done.' }
+    }
+    if (this.transcribing) {
+      return { mode: 'text', title: 'Search · transcribing…', menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
+    }
+    if (this.searching) {
+      return { mode: 'text', title: `Search · "${this.query}" · searching…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Searching mail · files · history · notes…' }
+    }
+    if (this.level === 'read') {
+      const pageSuffix = this.pages.length > 1 ? ` · ${this.page + 1}/${this.pages.length}` : ''
+      return { mode: 'text', title: `Search · ${this.readTitle}${pageSuffix}`, menu: ['Next', 'Prev', 'Back', 'Reload', 'Main'], text: this.pages[this.page] ?? '' }
+    }
+    if (this.level === 'results') {
+      const rows = this.rowLabels()
+      if (rows.length === 0) {
+        return { mode: 'text', title: `Search · "${this.query}"`, menu: ['Dictate', 'Reload', 'Main'], text: `No results for "${this.query}".\n\nDictate to search again.` }
+      }
+      const { items } = browsePageItems(rows, this.offset)
+      return {
+        mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive',
+        title: `Search · "${this.query}" · ${this.hits.length} hit${this.hits.length === 1 ? '' : 's'}`,
+        menu: ['Dictate', 'Reload', 'Main'], items,
+      }
+    }
+    // query idle (or a dictation/search error)
+    if (this.lastError) {
+      return { mode: 'text', title: 'Search · error', menu: ['Dictate', 'Reload', 'Main'], text: `${this.lastError}\n\nDictate to try again.` }
+    }
+    return { mode: 'text', title: 'Search', menu: ['Dictate', 'Reload', 'Main'], text: 'Universal search.\n\nDictate to search mail, files, conversation history, and notes.' }
+  }
+
+  private startDictation(): void {
+    this.seq++   // supersede any in-flight search
+    this.searching = false
+    this.pendingQuery = null
+    this.transcribing = false
+    this.listening = true
+    this.level = 'query'
+    this.lastError = null
+    this.ctx.audio('start')
+    this.requestRender()
+  }
+
+  private stopDictation(why: string): void {
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    if (this.listening || this.transcribing || this.pendingQuery !== null || this.searching) {
+      this.ctx.log(`[os] search: dictation/search stopped (${why})`)
+    }
+    this.seq++   // discard any in-flight search result
+    this.listening = false
+    this.transcribing = false
+    this.pendingQuery = null
+    this.searching = false
+  }
+
+  /** Kick the 4-source search (fire-and-forget; a stale-seq guard discards a
+   *  superseded result). searchAll never rejects (per-source isolation), so the
+   *  catch is a defensive backstop only. */
+  private beginSearch(q: string): void {
+    const seq = ++this.seq
+    this.query = q
+    this.hits = []
+    this.searching = true
+    this.lastError = null
+    this.level = 'results'
+    this.offset = 0
+    this.focus = 'content'
+    this.requestRender()
+    void searchAll(q).then((hits) => {
+      if (seq !== this.seq) { this.ctx.log(`[os] search: discarding stale results (seq ${seq} ≠ ${this.seq})`); return }
+      this.hits = hits
+      this.searching = false
+      this.requestRender()
+    }).catch((e: unknown) => {
+      if (seq !== this.seq) return
+      this.searching = false
+      this.lastError = `Search failed: ${e instanceof Error ? e.message : String(e)}`
+      this.level = 'query'
+      this.requestRender()
+    })
+  }
+
+  async onMenuSelect(label: string): Promise<void> {
+    switch (label) {
+      case 'Dictate':
+        if (this.searching) { this.ctx.log('[os] search: Dictate while searching — superseding'); }
+        this.startDictation()
+        return
+      case 'Done':
+        if (!this.listening) { this.ctx.log('[os] search: Done with no live mic — ignored'); return }
+        this.listening = false; this.transcribing = true; this.ctx.audio('stop'); this.requestRender()
+        return
+      case 'Cancel':
+        this.stopDictation('cancel')
+        this.requestRender()
+        return
+      case 'Confirm': {
+        const q = this.pendingQuery
+        this.pendingQuery = null
+        if (!q) { this.ctx.log('[os] search: Confirm with no pending query — ignored (LOUD)'); this.requestRender(); return }
+        this.beginSearch(q)
+        return
+      }
+      case 'Re-record':
+        this.pendingQuery = null
+        this.startDictation()
+        return
+      case 'Next':
+        if (this.level === 'read' && this.page < this.pages.length - 1) { this.page++; this.requestRender() }
+        return
+      case 'Prev':
+        if (this.level === 'read' && this.page > 0) { this.page--; this.requestRender() }
+        return
+      default:
+        this.ctx.log(`[os] search: unknown menu label '${label}' — ignored (LOUD)`)
+    }
+  }
+
+  async onBrowseSelect(index: number): Promise<void> {
+    if (this.level !== 'results') { this.ctx.log(`[os] search: browse select ${index} outside results — ignored`); return }
+    const { map, prevOffset, nextOffset } = browsePageItems(this.rowLabels(), this.offset)
+    const m = map[index]
+    if (m === undefined) { this.ctx.log(`[os] search: index ${index} out of range`); return }
+    if (m === -1) { this.offset = prevOffset; this.requestRender(); return }
+    if (m === -2) { this.offset = nextOffset; this.requestRender(); return }
+    const hit = this.hits[m]
+    if (!hit) { this.ctx.log(`[os] search: no hit at ${m} — resyncing`); this.requestRender(); return }
+    await this.openHit(hit)
+  }
+
+  /** mail/file → hand off to the owning window; history/note/error → inline. */
+  private async openHit(hit: SearchHit): Promise<void> {
+    switch (hit.source) {
+      case 'mail': throw new SwitchTo('mail', undefined, { kind: 'mail', key: hit.key })
+      case 'file': throw new SwitchTo('files', undefined, { kind: 'file', path: hit.path })
+      case 'history': {
+        try {
+          const turn = await getTurn(hit.turnId)
+          if (!turn) { this.showRead('(history)', 'turn not found (it may have been pruned)'); return }
+          const tools = turn.toolCalls.length ? `[tools: ${turn.toolCalls.join(', ')}]\n\n` : ''
+          this.pages = paginateText(`${turn.kind.toUpperCase()}\n\n${tools}${turn.text}`)
+          this.page = 0; this.readTitle = 'history'; this.level = 'read'; this.requestRender()
+        } catch (e) {
+          this.showRead('(history error)', `read failed: ${(e as Error).message}`)
+        }
+        return
+      }
+      case 'note':
+        this.showRead('note', hit.text)
+        return
+      case 'error':
+        this.showRead('source error', hit.preview)
+        return
+    }
+  }
+
+  private showRead(title: string, body: string): void {
+    this.pages = paginateText(body)
+    this.page = 0
+    this.readTitle = title
+    this.level = 'read'
+    this.requestRender()
+  }
+
+  async onBack(): Promise<boolean> {
+    if (this.level === 'read') { this.level = 'results'; this.focus = 'content'; this.requestRender(); return true }
+    if (this.level === 'results') {
+      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+      this.focus = 'content'
+      // Backing out of results ABANDONS any in-flight search: bump the seq so a
+      // late result is discarded (it would otherwise land hits while level is
+      // 'query' and strand them — never shown; review 2026-06-13).
+      this.seq++
+      this.searching = false
+      this.level = 'query'
+      this.requestRender()
+      return true
+    }
+    // query level — cancel an in-flight dictation first, else out to Main
+    if (this.listening || this.transcribing || this.pendingQuery !== null || this.searching) {
+      this.stopDictation('back')
+      this.requestRender()
+      return true
+    }
+    return false
+  }
+
+  async onReload(): Promise<void> {
+    this.stopDictation('reload')
+    this.lastError = null
+    this.focus = 'content'
+  }
+
+  onDeactivate(): void { this.stopDictation('window switch') }
+
+  /** No overlay repaint over the sacred query-confirm step (mirrors Files). */
+  interruptible(): boolean {
+    return !(this.listening || this.transcribing || this.pendingQuery !== null)
+  }
+
+  async onStt(text: string): Promise<void> {
+    if (this.level !== 'query' || !this.transcribing) {
+      this.ctx.log(`[os] search: STT arrived but not awaiting a query (level=${this.level}, transcribing=${this.transcribing}) — discarded: "${text.slice(0, 60)}"`)
+      this.requestRender()
+      return
+    }
+    this.transcribing = false
+    this.pendingQuery = text.trim()
+    this.requestRender()
+  }
+
+  async onSttError(error: string): Promise<void> {
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    const had = this.listening || this.transcribing || this.pendingQuery !== null
+    this.listening = false
+    this.transcribing = false
+    this.pendingQuery = null
+    if (!had) {
+      this.ctx.log(`[os] search: stt error with no dictation in flight — ${error}`)
+      this.requestRender()
+      return
+    }
+    this.lastError = `Dictation failed: ${error}`
+    this.level = 'query'
+    this.requestRender()
   }
 }
 
@@ -4288,7 +5723,13 @@ function padStatusRight(left: string, right: string): string {
  *  `Ask` reuses Aria's existing dictation verb path verbatim (Phase 6: never
  *  a parallel dictation pipeline). */
 class SwitchTo extends Error {
-  constructor(readonly windowId: string, readonly menuLabel?: string) { super(`switch-to-${windowId}`) }
+  constructor(
+    readonly windowId: string,
+    readonly menuLabel?: string,
+    /** Phase 12: open a specific item on the target after the switch (Search
+     *  hand-off). Mutually exclusive with menuLabel in practice. */
+    readonly open?: WindowOpen,
+  ) { super(`switch-to-${windowId}`) }
 }
 
 /** Full-page notification view (Phase 4) — composed exactly like errorView:
@@ -4305,7 +5746,7 @@ function notificationView(evt: NotifyEvent): WinView {
   }
   return {
     mode: 'text',
-    title: `⚠ ${evt.priority} · ${evt.source}`,
+    title: `! ${evt.priority} · ${evt.source}`,
     menu: ['Open', 'Dismiss', 'Main'],
     text,
   }
@@ -4354,8 +5795,16 @@ export class WindowManager {
   private blankPopupTimer: ReturnType<typeof setTimeout> | null = null
   private readonly onHubNotification = (evt: NotifyEvent): void => this.onNotification(evt)
   private readonly onHubSeen = (): void => this.refreshNotifyChrome()
+  /** A notification was read on glass (or MkAll'd) — tell the phone to cancel
+   *  its copy too (Adam 2026-06-13). Every connected WM forwards it; the phone's
+   *  cancel is idempotent, so duplicates across clients are harmless. */
+  private readonly onHubDismissPhone = (key: string): void => { this.ctx.dismissPhoneNotification?.(key) }
   /** Phase 5: 30 s dashboard refresh while Main is active (pacing). */
   private dashboardPacer: ReturnType<typeof setInterval> | null = null
+  /** Phase 11 MRU: monotonic use counter + per-window last-use stamp (Main's
+   *  dashboard orders by it). Counter (not Date.now) → always-distinct stamps. */
+  private useCounter = 0
+  private lastUsed = new Map<string, number>()
 
   constructor(private ctx: WmContext) {
     // Each window's requestRender only fires while it IS the active window — a
@@ -4369,7 +5818,7 @@ export class WindowManager {
       return w
     }
     const main = mk((rr) => new MainWindow(
-      ctx, () => this.windows.filter((w) => w.id !== 'main'), () => this.unseen, rr))
+      ctx, () => this.windows.filter((w) => w.id !== 'main'), () => this.mruWindows(), () => this.unseen, rr))
     this.windows = [
       main,
       mk((rr) => new AriaWindow(ctx, rr)),
@@ -4381,12 +5830,16 @@ export class WindowManager {
       mk((rr) => new CalendarWindow(ctx, rr)),
       mk((rr) => new GamesWindow(ctx, rr)),
       mk((rr) => new NoticesWindow(ctx, rr)),
+      mk((rr) => new SearchWindow(ctx, rr)),
+      mk((rr) => new TerminalWindow(ctx, rr)),
+      mk((rr) => new DeliveriesWindow(ctx, rr)),
     ]
     this.active = main
     // Phase 4: subscribe to the global notification hub (dispose() detaches on
     // ws close) and load the durable unseen/flash chrome state.
     notifyHub.on('notification', this.onHubNotification)
     notifyHub.on('seen', this.onHubSeen)
+    notifyHub.on('dismissPhone', this.onHubDismissPhone)
     this.refreshNotifyChrome()
     // Phase 5: the dashboard re-render pacer — ONLY while Main is on screen
     // (a pacing cadence, not an event bus; B3-sanctioned category).
@@ -4400,8 +5853,13 @@ export class WindowManager {
   dispose(): void {
     notifyHub.off('notification', this.onHubNotification)
     notifyHub.off('seen', this.onHubSeen)
+    notifyHub.off('dismissPhone', this.onHubDismissPhone)
     this.clearPopupTimer()
     if (this.dashboardPacer) { clearInterval(this.dashboardPacer); this.dashboardPacer = null }
+    // Release any window-held resource (e.g. the Terminal capture poll).
+    for (const w of this.windows) {
+      try { w.dispose?.() } catch (e) { this.ctx.log(`[os] ${w.id} dispose failed: ${(e as Error).message}`) }
+    }
   }
 
   // ---- Phase 4 notification machinery ----
@@ -4571,7 +6029,7 @@ export class WindowManager {
             // the title bar with a separator (Adam 2026-06-12 — it used to
             // OVERWRITE the window title; the px middle-clamp keeps both the
             // title head and the flash tail visible) until read in Notices.
-            if (this.titleFlash) view = { ...view, title: `${view.title} · ⚠ ${this.titleFlash.title}` }
+            if (this.titleFlash) view = { ...view, title: `${view.title} · ! ${this.titleFlash.title}` }
           }
           // Tab strip RETIRED (Phase 5, 2026-06-11): the Main dashboard carries
           // the window states now; the status slot takes the full bottom bar.
@@ -4642,7 +6100,7 @@ export class WindowManager {
     // The active window's live phase takes the slot while something is
     // happening (the g2aria status-bar feel); idle shows the host + pool.
     // Phase 4: the unseen-notification badge rides along in both forms.
-    const badge = this.unseen > 0 ? ` · ⚠${this.unseen}` : ''
+    const badge = this.unseen > 0 ? ` · !${this.unseen}` : ''
     const phase = this.active.statusLine?.()
     const left = phase ? `● ${phase}${badge}` : `● ${hostname()} · ${this.ctx.pool.count} cc${badge}`
     return padStatusRight(left, bat)
@@ -4659,7 +6117,19 @@ export class WindowManager {
       }
     }
     this.active = w
+    if (id !== 'main') this.lastUsed.set(id, ++this.useCounter)   // Phase 11 MRU (monotonic, distinct)
+    else (w as MainWindow).resetToRoot()                          // Phase 11: Main returns to its launcher root
     this.requestRender()
+  }
+
+  /** Non-Main windows ordered most-recently-used first (Phase 11 Main dashboard).
+   *  Never-used windows trail in registration order (a stable, sensible default). */
+  private mruWindows(): OsWindow[] {
+    const others = this.windows.filter((w) => w.id !== 'main')
+    return others
+      .map((w, i) => ({ w, i }))
+      .sort((a, b) => (this.lastUsed.get(b.w.id) ?? 0) - (this.lastUsed.get(a.w.id) ?? 0) || a.i - b.i)
+      .map((x) => x.w)
   }
 
   /** The Reload action (any window, any state): tell the client to abort +
@@ -4752,6 +6222,15 @@ export class WindowManager {
             await this.active.onMenuSelect(e.menuLabel)
           } catch (err) {
             this.ctx.log(`[os] post-switch menu '${e.menuLabel}' failed (${this.active.id}): ${(err as Error).message}`)
+            this.requestRender()
+          }
+        }
+        if (e.open) {
+          // Phase 12: Search hands a specific item to the target window.
+          try {
+            await this.active.onOpen?.(e.open)
+          } catch (err) {
+            this.ctx.log(`[os] post-switch open '${e.open.kind}' failed (${this.active.id}): ${(err as Error).message}`)
             this.requestRender()
           }
         }

@@ -122,7 +122,7 @@ class ConnectionService : Service(), TestHarness {
     @Volatile private var lastNotifyMs = 0L   // last notify (incl e0-00 ack) from R lens
     private var syncSeq = 0x10
     private var syncMsgId = 0x20
-    private var connection: ConnectionManager? = null
+    @Volatile private var connection: ConnectionManager? = null   // read off the NLS ioScope (C1) — publish writes
     private var audioStreamer: AudioStreamer? = null      // server-driven dictation (audio_request)
     // Did startForeground succeed WITH the microphone FGS type? When the mic-typed start
     // is denied (background START_STICKY restart on Android 12+/14) we fall back to
@@ -225,6 +225,13 @@ class ConnectionService : Service(), TestHarness {
         }
         val sent = conn.send(ClientMessage.Notify(pkg = pkg, title = title, text = text, postedAt = postedAt, key = key, imageB64 = imageB64))
         DiagLog.log("notify", "$pkg \"$title\"${if (imageB64 != null) " +img(${imageB64.length})" else ""} → ${if (sent) "sent" else "DROPPED (ws not ready)"}")
+    }
+
+    /** Dismiss sync (Adam 2026-06-13): the phone dismissed a forwarded
+     *  notification → tell the server to mark the glasses copy seen. */
+    fun sendNotificationDismissed(key: String) {
+        val sent = connection?.send(ClientMessage.NotificationDismissed(key)) ?: false
+        DiagLog.log("notify", "phone dismissed $key → ${if (sent) "told server" else "no WS (server re-syncs on reconnect)"}")
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -475,6 +482,11 @@ class ConnectionService : Service(), TestHarness {
                     else -> DiagLog.log("os", "audio_request unknown action '${msg.action}' — ignored (LOUD)")
                 }
             }
+            is ServerMessage.NotificationCancel -> {
+                // Read on glass / MkAll'd → dismiss the phone's copy (Adam
+                // 2026-06-13 dismiss sync). cancelByKey is idempotent.
+                NotifyListener.cancelByKey(msg.key)
+            }
             is ServerMessage.Error -> {
                 // The MESSAGE TEXT must surface (review 2026-06-11b): the old
                 // catch-all logged only the class name, discarding the server's
@@ -636,7 +648,15 @@ class ConnectionService : Service(), TestHarness {
             needsRelaunch = true
             DiagLog.log("recover", "$side dropped ($reason) while live — re-launch Hub when the link returns")
         } else if (recovering) {
-            DiagLog.log("recover", "$side dropped ($reason) during recovery")
+            // C2 (review 2026-06-13): a lens that reached GattConnected then
+            // Disconnected mid-recovery would STRAND `recovering` (teardown
+            // already cancelled the watchdog/sync/clock jobs), leaving recovery
+            // dependent solely on autoConnect re-firing Ready. Mirror the Error
+            // branch: clear `recovering`/`_connecting` so the watchdog or the
+            // next drop can re-trigger a fresh recoverSession().
+            DiagLog.log("recover", "$side dropped ($reason) during recovery — clearing `recovering` so the next drop/watchdog can retry")
+            recovering = false
+            if (_connecting.value) _connecting.value = false
         }
     }
 
@@ -661,6 +681,7 @@ class ConnectionService : Service(), TestHarness {
         val r = right ?: return
         if (l.state.value !is ConnectionState.Ready || r.state.value !is ConnectionState.Ready) return
         _launched.value = true
+        _connecting.value = false   // C3 (review 2026-06-13): connecting → launched; clear the (masked) stuck flag
         DiagLog.log("conn", "both lenses Ready — R link mtu=${r.lastMtu} phy=${r.lastPhy} conn=${r.lastConnParams}")
         val rend = G2Renderer(BleDisplaySink(r), diag = { msg -> DiagLog.log("render", msg) })
         renderer = rend
@@ -985,7 +1006,16 @@ class ConnectionService : Service(), TestHarness {
         } catch (e: Exception) {
             DiagLog.log("svc", "startForeground with mic type FAILED (${e.message}) — retrying connectedDevice-only (dictation unavailable this run)")
             micFgsGranted = false
-            startForeground(NOTIF_ID, buildNotification(_status.value), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            // C4 (review 2026-06-13): the fallback start can ALSO throw (e.g.
+            // ForegroundServiceStartNotAllowedException on a background-initiated
+            // start) — an uncaught second throw crashes the service start. Stop
+            // cleanly instead; the service revives on the next foreground trigger.
+            try {
+                startForeground(NOTIF_ID, buildNotification(_status.value), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            } catch (e2: Exception) {
+                DiagLog.log("svc", "startForeground connectedDevice-only ALSO failed (${e2.message}) — stopping service cleanly (no crash)")
+                stopSelf()
+            }
         }
     }
 
@@ -1078,6 +1108,12 @@ class ConnectionService : Service(), TestHarness {
                 return
             }
             svc.sendNotify(pkg, title, text, postedAt, key, imageB64)
+        }
+
+        /** NotifyListener → server: a forwarded notification was dismissed on the
+         *  phone (Adam 2026-06-13 dismiss sync). No-op if the service is down. */
+        fun notificationDismissed(key: String) {
+            instance?.sendNotificationDismissed(key)
         }
 
         /** Start the FG service and tell it to connect. Survives Activity unbind / background. */
