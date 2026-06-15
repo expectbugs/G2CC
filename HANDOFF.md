@@ -61,6 +61,16 @@ nav + ConcurrentHashMap, free-form-only RemoteInput, 2 stray NUL bytes. Part B a
 audited (already complete; DFN intentionally skipped on the numpy-2 pin). **[U] ON-GLASS PENDING
 for the whole batch** — install v1.13 from `/setup`.
 
+**2026-06-15 r23 — on-glass tweaks (server-only, APK stays v1.13, smoke 23/23):** Terminal —
+a **Focus** scrollback (freeze the tail → capture 1000 lines → Up/Down/Live); the **claude/
+claude2 same-session bug** fixed (the `claude` CLI names its window "claude", so `-t claude`
+matched session claude2's window — every tmux target is now `=<name>:`); tail lines **WRAP** at
+the pane width instead of hard-cutting at 44 cols with `›`; grid-exit cancels any in-flight grid
+render. Notices — **disk-full alerts REMOVED entirely** (Adam: turtle hovers at 98% + in-memory
+state re-fired on every restart; supersedes r21's "once per drive"; backlog cleared) + a
+**`notifications.blockTitles`** config dropping noise like "Device ID accessed". **[U] verify the
+Terminal tweaks on glass** (scrollback, claude/claude2 distinct, readable wrapped tail).
+
 STILL UNIMPLEMENTED / FOLLOW-UPS: **Phase 16** (OBD — dongle on backorder); **Phase 9b** global
 always-on "butterscotch" stream + wake-word/VAD accuracy tuning (on real factory audio);
 **Phase 4b** MMS-read + New-to-a-fresh-contact; the DJI-handsfree VAD gate (int16-mono only today).
@@ -85,7 +95,7 @@ zero state). The phone is the BLE/WiFi bridge — and per **the prime directive*
 it stays in Adam's pocket, untouched, always. A small hat device (ESP32, on backorder) replaces
 the phone eventually; the DE is hat-ready by construction.
 
-## Where we are (2026-06-14, post r22 client-feature batch + APK v1.13)
+## Where we are (2026-06-15, post r22 client-feature batch + r23 tweaks; APK v1.13)
 
 The BLE wire format is fully decoded (`docs/G2_BLE_PROTOCOL.md`, authoritative); the
 window-manager DE is in daily use; and **the entire upgrades.md queue — server AND the five
@@ -260,8 +270,8 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
   the batch review: fixed items + 4 DEFERRED client findings w/ file:line + fixes)** ·
   `CHANGELOG.md` (the WHY of every change) ·
   `UPGRADE_PROGRESS.md` (the batch record + Adam's gate answers).
-- **Server (`server/src/`):** `os-windows.ts` (WM + the ten windows + SessionLevel/
-  HistoryLevel — the heart, ~4.7k lines) · `os-compose.ts` (WinView→WireScene; budgets/
+- **Server (`server/src/`):** `os-windows.ts` (WM + the fifteen windows + SessionLevel/
+  HistoryLevel — the heart, ~6.4k lines) · `os-compose.ts` (WinView→WireScene; budgets/
   clamps/estimator; `blankFlashScene`) · `os-content.ts` (markdown→blocks, chart/image
   rendering, `splitGray4Tiles`) · `store.ts` (pg pool + migrations) · `history.ts` ·
   `os-notify.ts` (hub + persistence) · `timers.ts` · `intents.ts` · `reader.ts` ·
@@ -329,11 +339,11 @@ session, context is truncating — tell him.
 ## What's next
 
 The ENTIRE upgrades.md queue — server AND the five client features — is implemented (through
-r22, smoke 23/23, APK v1.13, server restarted). What's left is on-glass verification, a few
+r23, smoke 23/23, APK v1.13, server restarted). What's left is on-glass verification, a few
 [U]-tuning follow-ups, and the hardware-gated OBD phase:
 
 1. **On-glass verification — install APK v1.13** from `http://100.107.139.121:7300/setup` (the
-   splash shows `OS 1.13`), then run the whole r22 batch (Adam runs every hardware test himself):
+   splash shows `OS 1.13`), then run the r22 batch + the r23 tweaks (Adam runs every test himself):
    - **Media** (Phase 7) — open Media while music plays: track/artist + position bar + Play/Pause
      (TOP, safe), Skip/Prev, album-art page, Lyrics (synced = karaoke current-line). Grant nothing
      new (uses the NLS grant).
@@ -346,6 +356,9 @@ r22, smoke 23/23, APK v1.13, server restarted). What's left is on-glass verifica
    - **Phone finder** (Phase 15) — say "find my phone" to Aria → the phone rings ~30 s.
    - **Voice** (Phase 9a) — in Reader, tap **Voice on** → say "next"/"back" to page; "butterscotch
      mail" to jump windows. (9b global always-on + accuracy is the tuning follow-up.)
+   - **Terminal tweaks** (r23, server-only — already live, no install needed) — tail lines WRAP
+     (readable, no `›`); **Focus** → Up/Down pages scrollback → Live; **claude vs claude2 now show
+     DISTINCT content**. (Grid shows the true 80-col layout.)
    - Carry-overs still [U]: **dismiss-sync** both ways (r21, "needs more testing"), the **960 B
      wall** gone in Mail/tmux (r21), the **Mail LIVE send** (r19 — reply-to-self first).
 2. **[U]-tuning + follow-ups (need real on-glass/audio iteration, not a fresh build):**

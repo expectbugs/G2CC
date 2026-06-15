@@ -117,7 +117,10 @@ twocol mode — Adam 2026-06-12, Main's one-page dashboard).
   content where instant paging beats typography). Server pre-paginates (~9.0 px/char avg,
   34 px rows — measured `docs/SIM_TOOLING.md`); region scroll stays false.
 
-## 4. v1 window set (decided)
+## 4. Window set (v1 decided + v2 additions)
+
+The first ten rows are the v1 set; the last five (`search`/`term`/`deliveries`/`media`/`sms`)
+were added by the upgrades.md v2 queue (r19/r22) — **FIFTEEN windows total**.
 
 | id | tab | modes | notes |
 |---|---|---|---|
@@ -130,7 +133,12 @@ twocol mode — Adam 2026-06-12, Main's one-page dashboard).
 | `timers` | Timers | browse→text | pending timers (tap → detail → `Cancel timer`) + `New 5/10/20/30/60 min` rows (Ph6). DB-backed (`timers`), re-armed at boot (missed fires fire late, marked); fires arrive as 'timer'-priority notifications. Voice creation via the Aria Ask intent pre-parse. |
 | `calendar` | Calendr (menu) | browse→text | 14-day day-grouped agenda → event read view (Ph10, READ-ONLY). Synced from Google every 15 min via aria's OAuth (`read_gcal.py`); 10-min-lead reminders for timed events ride the notification layer. |
 | `games` | Games | browse→text/tiles | rpg-cli (filesystem dungeon rooted at /home/user; action rows + dir descent; output paginated) and chess vs Stockfish (Ph11): board = IMAGE page (render_board.py → tiles, placeholder-swapped). **Moves flow (Adam 2026-06-12, revised 2026-06-13 — the tile-redraw fix): the board shows ONLY on the `chess` level (live position) + `chess-confirm` (preview); piece/move SELECTION renders TEXT (no tiles) because every menu change forced an f1=7 that re-pushed all 4 tiles. The MENU carries piece groups (`Pawn (12)`, `Knight (4)`, …) → that group's SAN moves (≤12 + » prev/» more) → tap a move → PREVIEW board + Confirm/Cancel; only Confirm commits. Double-tap = Cancel. `Skill` is a CONSTANT menu label (value in the title) so cycling it doesn't re-push the board.** Skill 1/5/10/20. Lichess deferred (gate A3.2). |
-| `notices` | Notices | browse→text | the persisted notification history, newest-first → read view (Ph4). Reading marks SEEN (clears the ⚠ title flash + badge). |
+| `notices` | Notices | browse→text | the persisted notification history, newest-first → read view (Ph4). Reading marks SEEN (clears the `!` title flash + badge; the `!` replaced ⚠ which the firmware doesn't render — r21). **MkAll** marks all + phone-dismisses; a `hasReply` post offers **Reply** (dictate → fills the RemoteInput, Ph4a). |
+| `search` | Search | browse→text | **(v2 Ph12)** dictate a query → ONE results list across mail/files/history/notes (`search.ts`, per-source isolated); a mail/file hit HANDS OFF to its window (SwitchTo + onOpen), a history/note hit opens INLINE here. |
+| `term` | Term | browse→text/tiles | **(v2 Ph5)** a viewer/controller of Adam's REAL tmux via DISCRETE commands (`tmux.ts`): session menu → **tail** (firmware text, lines WRAP at the pane width, ~500 ms poll) / **grid** (80×22 PIL→tiles, page-2) / **Focus** scrollback (Up/Down/Live over a frozen 1000-line snapshot) / quick-keys + dictation. Targets `=<session>:` (exact session, never a same-named window — r23). |
+| `deliveries` | Deliv | browse→text | **(v2 Ph13)** carrier mail → tracked shipments (Info category), newest-first; the parser keeps real shipments + drops marketing (`(unparsed)` loud); 15-min Gmail sync via aria's token. |
+| `media` | Media | text/tiles | **(v2 Ph7)** the phone's MediaSessionManager (via the existing NLS grant — no new permission): track/artist/album + a text position bar, **Play/Pause-on-top** (safety), Skip/Prev/Random, album art (page-2 tile), and an LRCLIB **Lyrics** level (synced LRC = karaoke current-line). Transport via `media_cmd`; state pushed via `media_state` while subscribed. |
+| `sms` | SMS | browse→text/tiles | **(v2 Ph4b)** the phone is the data provider (`Telephony.Sms` queried over the WS): threads → thread (paginated, newest block first; MMS image parts = page-2 tiles) → **Reply** (dictate → confirm → `SmsManager`). Needs READ_SMS/READ_CONTACTS/SEND_SMS. SMS-only (MMS-read + New-to-a-fresh-contact are follow-ups). |
 
 Notification surfacing (Ph4, WM-owned): info/sms/email = ⚠ title-bar override (until read
 in Notices) + unseen badge in the status slot; timer/call = full-page overlay

@@ -18,25 +18,35 @@
 > multi-packet wall, B2 blank-wake, B4 subprocess-everything, B5 state hygiene, the
 > Three Absolute Rules, additive-optional wire changes, prime directive.
 
-## Implementation status (2026-06-13)
+## Implementation status (2026-06-15)
 
-**DONE + smoke-verified (server-only; CHANGELOG r18; NO APK):** Phase 18 (chess
-tile-redraw), Phase 19 (Files overhaul incl. the "970 B" wall, dir ops,
-rename/mkdir), Phase 17 (trash — folded into 19), Phase 2 (blank flash),
-Phase 10 (stats alerts). Whole-project review done → `docs/CODE_REVIEW_2026-06-13.md`
-(fixed the Files pickDest navigation + the phase10 smoke flake; 4 client findings
-deferred there).
+**ALL 19 phases are implemented except the hardware-gated OBD.** The server queue (r18–r19) +
+the client-feature batch (r20–r22, APK **v1.13**) + the on-glass tweaks (r23) landed everything
+else. Smoke **23/23**. Per-phase WHY → CHANGELOG r18–r23; the LIVE state + on-glass checklist →
+HANDOFF.md "What's next".
 
-**NOT yet implemented:**
-- Server, ready to build: **3** (Suggest — touches SessionLevel's confirm flow),
-  **5** (tmux), **8** (full Mail), **11** (Main categories — premature; gated on a
-  window count we haven't reached), **12** (Search), **14** (memos — needs the PCM
-  buffer plumbed from ws-handler to the intent handler).
-- Server, gated: **13** (Deliveries — needs the one-time `gmail.readonly`
-  re-consent at home).
-- Client (need an APK + Adam's on-glass verify): **1** (MMS retry), **4a/4b**
-  (SMS), **6** (nav line), **7** (media), **9** (voice), **15** (phone finder).
-- Hardware-gated: **16** (OBD — vGate dongle on backorder).
+**DONE + smoke-verified:**
+- Server (r18): **18** chess tile-redraw, **19** Files overhaul (incl. **17** trash), **2** blank
+  flash, **10** stats alerts. Review → `docs/CODE_REVIEW_2026-06-13.md`.
+- Server queue (r19): **3** Suggest, **5** tmux Terminal, **8** full Mail, **11** Main category
+  launcher, **12** Search, **14** audio memos; **13** Deliveries (turned out UNBLOCKED — aria's
+  token already had gmail.modify, no re-consent).
+- Client batch (r20–r22, APK v1.11→v1.13): **1** MMS retry, **4a** notification reply, **4b** SMS
+  (SMS-only), **6** nav line, **7** Media (+ LRCLIB lyrics), **9** voice PLUMBING (9a live), **15**
+  phone finder. NEW windows since v1: Search, Terminal, Deliveries, **Media**, **SMS** (15 total).
+- r23 tweaks (server-only): Terminal scrollback (Focus) + claude/claude2 capture fix + tail-wrap;
+  **disk-full notices REMOVED** (Phase 10 narrowed — turtle re-fired forever) + a Device-ID blocklist.
+
+**NOT implemented / follow-ups:**
+- **16** OBD — hardware-gated (vGate dongle on backorder); Car window/parser unbuilt.
+- **9b** the global always-on "butterscotch" stream + wake-word/VAD accuracy tuning (on real
+  factory audio — the grammar + VAD are built/tested; 9a is live).
+- **4b** MMS-read (image parts) + New-to-a-fresh-contact (a contacts-pick round). **MMS sending
+  stays OUT** (§D).
+- The §D deferrals (Lichess token, the Ph12 streaming-STT/`display`-MCP stretch, Section D)
+  are unchanged — gated on Adam's go-ahead / a token / hardware.
+- **[U] On-glass verification of the r19–r23 work is the biggest open bucket** (the server ships
+  ahead of Adam's testing — the prime directive: he runs every hardware test).
 
 ---
 
