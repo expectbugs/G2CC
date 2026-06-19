@@ -101,7 +101,7 @@ object SmsProvider {
     // Dispatchers.IO coroutines and both call resolveName → concurrent map
     // mutation (matches NotifyListener's imgJobs fix).
     private val nameCache = java.util.concurrent.ConcurrentHashMap<String, String>()
-    private fun resolveName(ctx: Context, address: String): String {
+    fun resolveName(ctx: Context, address: String): String {   // also used by NotifyListener for the RemoteInput-reply match
         if (address.isBlank()) return address
         nameCache[address]?.let { return it }
         val resolved = try {

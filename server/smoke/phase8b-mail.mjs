@@ -62,6 +62,18 @@ try {
   assert.ok(repRaw.includes('Subject: Re: status update') && repRaw.includes('In-Reply-To: <m1@y.com>') &&
             repRaw.includes('References: <t0@y.com> <m1@y.com>') && repRaw.includes('> the body text'),
     'reply: Re: subject, threading headers, quoted original')
+  // reply-all (Phase 8 gap, Adam 2026-06-18): To = sender, Cc = the OTHER recipients
+  // minus me and minus the sender, deduped. msmtp -t sends To + Cc from the headers.
+  writeFileSync(join(INBOX, 'cur', '9002.all:2,S'),
+    `From: Bob <bob@y.com>\r\nTo: adam@marzello.net, Carol <carol@z.com>\r\nCc: dave@w.com, bob@y.com\r\n` +
+    `Subject: team sync\r\nMessage-ID: <m2@y.com>\r\nDate: Mon, 02 Jun 2026 10:00:00 -0500\r\n\r\nplan?\r\n`)
+  const repAll = sm({ mode: 'reply-all', maildir: INBOX, key: '9002.all', body: 'sounds good', from_addr: FROM, sent_maildir: SENT, dry_run: true })
+  const repAllRaw = readFileSync(repAll.sent_path, 'utf8')
+  assert.ok(/^To: .*bob@y\.com/m.test(repAllRaw), 'reply-all: To = the sender')
+  assert.ok(/^Cc: .*carol@z\.com/m.test(repAllRaw) && /^Cc: .*dave@w\.com/m.test(repAllRaw), 'reply-all: Cc = the other recipients')
+  assert.ok(!/^(To|Cc):.*adam@marzello\.net/m.test(repAllRaw), 'reply-all: drops ME (from_addr)')
+  assert.ok(!/^Cc:.*bob@y\.com/m.test(repAllRaw), 'reply-all: sender not duplicated into Cc')
+  assert.ok(repAllRaw.includes('Subject: Re: team sync') && repAllRaw.includes('In-Reply-To: <m2@y.com>'), 'reply-all: Re: + threading')
   const fwd = sm({ mode: 'forward', maildir: INBOX, key: '9001.bob', to: 'carol@z.com', from_addr: FROM, sent_maildir: SENT, dry_run: true })
   assert.ok(readFileSync(fwd.sent_path, 'utf8').includes('Subject: Fwd: status update'), 'forward: Fwd: subject + inline original')
   const cmp = sm({ mode: 'compose', to: 'dave@w.com', body: 'meeting at 3', from_addr: FROM, sent_maildir: SENT, dry_run: true })
@@ -107,6 +119,13 @@ try {
     await mail.onStt('on it, shipping today'); assert.equal(mail.pendingText, 'on it, shipping today')
     await mail.onMenuSelect('Confirm')
     assert.deepEqual({ m: sends.at(-1).mode, k: sends.at(-1).key, b: sends.at(-1).body }, { m: 'reply', k: 'K1', b: 'on it, shipping today' }, 'Reply send request')
+
+    // Reply all: same body flow, send req mode 'reply-all' (send_mail re-reads To/Cc)
+    mail.level = 'read'; mail.readKey = 'K1'
+    await mail.onMenuSelect('Reply all'); assert.equal(mail.listening, true, 'Reply all starts body dictation')
+    await mail.onMenuSelect('Done'); await mail.onStt('+1 from me')
+    await mail.onMenuSelect('Confirm')
+    assert.deepEqual({ m: sends.at(-1).mode, k: sends.at(-1).key, b: sends.at(-1).body }, { m: 'reply-all', k: 'K1', b: '+1 from me' }, 'Reply all send request')
 
     // Forward: pick recipient → confirm → send
     mail.level = 'read'; mail.readKey = 'K1'

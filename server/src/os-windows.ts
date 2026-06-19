@@ -223,8 +223,9 @@ export interface OsWindow {
  *  Files navigates to a path's parent dir. History/notes have no window, so
  *  Search reads them inline rather than handing off. */
 export type WindowOpen =
-  | { kind: 'mail'; key: string }
+  | { kind: 'mail'; key?: string; first?: boolean }   // key = a specific message (Search); first = the newest (voice "read first email")
   | { kind: 'file'; path: string }
+  | { kind: 'sms'; name: string }                     // voice "read <name>'s last text" → open that contact's thread
 
 // ============================================================ helpers
 
@@ -2054,7 +2055,7 @@ class MailWindow implements OsWindow {
   private fromAddr: string
 
   // ---- Phase 8 compose state ----
-  private composeMode: 'reply' | 'forward' | 'compose' | null = null
+  private composeMode: 'reply' | 'reply-all' | 'forward' | 'compose' | null = null
   private composeStage: 'pickRecipient' | 'body' | 'confirm' | null = null
   private composeTo = ''         // chosen recipient (forward/compose)
   private senders: MailSender[] = []
@@ -2113,7 +2114,7 @@ class MailWindow implements OsWindow {
   }
 
   private readMenu(): string[] {
-    return ['Reply', 'Forward', 'Del', 'Unread', 'Next', 'Prev', 'Back', 'Reload', 'Main']
+    return ['Reply', 'Reply all', 'Forward', 'Del', 'Unread', 'Next', 'Prev', 'Back', 'Reload', 'Main']
   }
 
   async view(): Promise<WinView> {
@@ -2156,7 +2157,7 @@ class MailWindow implements OsWindow {
   }
 
   private composeView(): WinView {
-    const verb = this.composeMode === 'reply' ? 'Reply' : this.composeMode === 'forward' ? 'Forward' : 'Compose'
+    const verb = this.composeMode === 'reply' ? 'Reply' : this.composeMode === 'reply-all' ? 'Reply all' : this.composeMode === 'forward' ? 'Forward' : 'Compose'
     if (this.composeBusy) return { mode: 'text', title: `Mail · ${verb} · sending…`, menu: ['Reload', 'Main'], text: 'Sending…' }
     if (this.composeStage === 'pickRecipient') {
       const rows = this.senders.length ? this.senders.map((s) => `${s.name} <${s.address}>`) : ['(no recent senders — reply to a message instead)']
@@ -2170,7 +2171,7 @@ class MailWindow implements OsWindow {
     if (this.listening) return { mode: 'text', title: `Mail · ${verb} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: 'Listening — speak the message, then Done.' }
     if (this.transcribing) return { mode: 'text', title: `Mail · ${verb} · transcribing…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
     if (this.pendingText !== null) {
-      const to = this.composeMode === 'reply' ? '(the sender)' : this.composeTo
+      const to = this.composeMode === 'reply' ? '(the sender)' : this.composeMode === 'reply-all' ? '(sender + all recipients)' : this.composeTo
       // PAGINATE the body (review 2026-06-13): an unpaginated email body blew
       // the 960 B wall → composeScene throws → errorView with no Confirm → the
       // body was lost + unsendable. Now it pages; the full text always sends.
@@ -2272,8 +2273,16 @@ class MailWindow implements OsWindow {
 
   async onOpen(open: WindowOpen): Promise<void> {
     if (open.kind !== 'mail') { this.ctx.log(`[os] mail: ignoring onOpen kind '${open.kind}'`); return }
-    const ok = await this.openMessage(open.key)
-    if (ok) this.markRead(open.key)   // idempotent; next list refresh recomputes the count
+    let key = open.key
+    if (open.first) {   // voice "read first email" → the NEWEST inbox message
+      this.offset = 0
+      await this.refresh()
+      key = this.rows[0]?.key
+      if (!key) { this.ctx.log('[os] mail: read-first but the inbox is empty'); this.level = 'list'; this.focus = 'content'; this.requestRender(); return }
+    }
+    if (!key) { this.ctx.log('[os] mail: onOpen with no key — ignored'); return }
+    const ok = await this.openMessage(key)
+    if (ok) this.markRead(key)   // idempotent; next list refresh recomputes the count
   }
 
   // ---- compose flow ----
@@ -2325,7 +2334,7 @@ class MailWindow implements OsWindow {
     const mode = this.composeMode
     if (!mode) { this.ctx.log('[os] mail: doSend with no compose mode — ignored (LOUD)'); return }
     const req: Record<string, unknown> =
-      mode === 'reply' ? { mode, maildir: MAILDIR_PATH, key: this.readKey, body: this.pendingText ?? '' }
+      (mode === 'reply' || mode === 'reply-all') ? { mode, maildir: MAILDIR_PATH, key: this.readKey, body: this.pendingText ?? '' }
       : mode === 'forward' ? { mode, maildir: MAILDIR_PATH, key: this.readKey, to: this.composeTo }
       : { mode, to: this.composeTo, body: this.pendingText ?? '' }
     this.composeBusy = true
@@ -2341,7 +2350,7 @@ class MailWindow implements OsWindow {
       // may want to Del it after replying); COMPOSE has no message, so → list
       // (NOT a stale readKey, which would let Reply/Del act on a phantom message).
       this.level = (mode === 'compose' || !this.readKey) ? 'list' : 'read'
-      this.pages = paginateText(`✓ ${mode === 'reply' ? 'Reply' : mode === 'forward' ? 'Forward' : 'Message'} sent to ${r.to}.`)
+      this.pages = paginateText(`✓ ${mode === 'reply' ? 'Reply' : mode === 'reply-all' ? 'Reply all' : mode === 'forward' ? 'Forward' : 'Message'} sent to ${r.to}.`)
       this.page = 0
       this.readSubject = 'sent'
       this.requestRender()
@@ -2394,6 +2403,11 @@ class MailWindow implements OsWindow {
         if (!this.readKey) { this.ctx.log('[os] mail: Reply with no message — ignored'); return }
         this.composeMode = 'reply'
         this.startBodyDictation()   // recipient is the known sender — straight to the body
+        break
+      case 'Reply all':
+        if (!this.readKey) { this.ctx.log('[os] mail: Reply all with no message — ignored'); return }
+        this.composeMode = 'reply-all'
+        this.startBodyDictation()   // To = sender, Cc = the rest (send_mail re-reads the headers)
         break
       case 'Forward':
         if (!this.readKey) { this.ctx.log('[os] mail: Forward with no message — ignored'); return }
@@ -5245,14 +5259,39 @@ class DeliveriesWindow implements OsWindow {
 // ============================================================ Terminal window
 
 const TERM_POLL_MS = 500     // paced capture cadence while watching (tail) — display pacing, NOT an I/O timeout
-const TERM_TAIL_LINES = 13   // visible firmware-text ROWS in tail/scroll mode
-// Tail/scroll lines now WRAP at the pane width (wrapLinesPx) instead of being
-// HARD-CUT at a fixed column with '›' — an 80-col line was unreadable cut at 44
-// (Adam 2026-06-14). The content region is byte-capped so the wrapped rows keep
-// the frame under the 960 B wall (the 7-item tail menu eats into the budget).
+// Rows that FIT the firmware content pane (480×222) without tripping the firmware
+// overflow scrollbar. The MENU holds the event-capture in tail/scroll, not the
+// content, so the user can't scroll the overflow — the page MUST pre-fit. 13→8→7
+// each still showed a sliver on glass (Adam); 7's residual was box-drawing lines
+// firmware-wrapping (see termTextWidth) past what the wrap model knew. 6 = one row
+// of headroom over the ~7-row capacity, absorbing any single residual wrap. TUNABLE
+// back UP to 7 now that the wrap is box-aware. Kept Terminal-local by Adam's scope.
+const TERM_PAGE_ROWS = 6
+// fwTextWidth prices a box-drawing glyph at the lowercase 9.6 px, but the G2 firmware
+// renders '─' (U+2500) at ~21 px — TWO consistent on-glass cals (Adam 2026-06-16): a
+// 47-col bar = 2.2 content rows, a 28-col bar = 1.25 (both ⇒ ~21–22 cols/row). So
+// box-drawing-dense lines (claude's '─' separators + tree chars │├└┌┼) under-measure
+// and the firmware silently re-wraps them → an occasional un-scrollable scrollbar.
+// termTextWidth corrects the box-drawing block (21 px) and over-prices the adjacent
+// shapes/technical/dingbat ranges claude uses (⎿⏵❯✔ → a safe 14 px) so the Terminal
+// wrap matches the firmware. Terminal-LOCAL (a global fwTextWidth bump would also
+// shift CC/Aria divider pagination — out of Adam's scope).
+function termTextWidth(s: string): number {
+  let extra = 0
+  for (const ch of s) {
+    const c = ch.codePointAt(0) ?? 0
+    if (c >= 0x2500 && c <= 0x257f) extra += 11.4        // box-drawing → ~21 px (9.6 + 11.4; cal'd)
+    else if (c >= 0x2300 && c <= 0x27bf) extra += 4.4    // misc-technical / dingbats (⎿⏵❯✔) → ~14 px (conservative)
+    else if (c >= 0x2580 && c <= 0x25ff) extra += 4.4    // block + geometric shapes (█░●○▕) → ~14 px (conservative)
+  }
+  return fwTextWidth(s) + Math.ceil(extra)
+}
+// Tail/scroll lines WRAP at the pane width (wrapLinesPx) instead of being HARD-CUT
+// at a fixed column with '›' — an 80-col line was unreadable cut at 44 (Adam
+// 2026-06-14). The content region is byte-capped so a page stays under the 960 B
+// wall (the 7-item tail menu eats into the budget).
 const TERM_TAIL_MAX_BYTES = 540
 const TERM_SCROLLBACK_LINES = 1000   // Focus/scroll history depth captured once (frozen snapshot)
-const TERM_SCROLL_STEP = 10          // rows per Up/Down (≈ a PgUp/PgDown page)
 
 /** Last rows fitting BOTH a row and a byte budget — the tail bottom-aligns on
  *  the most-recent output (newest at the bottom). */
@@ -5267,15 +5306,66 @@ function bottomRows(rows: string[], maxRows: number, maxBytes: number): string[]
   return out
 }
 
-/** First rows fitting both budgets — a scroll window shows from its top down. */
-function firstRows(rows: string[], maxRows: number, maxBytes: number): string[] {
-  const out: string[] = []
+/** Pack already-wrapped display rows into whole PAGES, each ≤maxRows rows AND
+ *  ≤maxBytes — so every page fills the pane WITHOUT the firmware overflow
+ *  scrollbar AND stays under the multi-packet wall. Newest rows are last, so the
+ *  LAST page is the live edge (where the tail left off). No row is ever dropped:
+ *  a byte-dense stretch just makes more pages (the NO-TRUNCATION rule). */
+function paginateRows(rows: string[], maxRows: number, maxBytes: number): string[] {
+  const pages: string[] = []
+  let page: string[] = []
   let bytes = 0
   for (const r of rows) {
-    if (out.length >= maxRows || (out.length > 0 && bytes + Buffer.byteLength(r, 'utf8') + 1 > maxBytes)) break
-    out.push(r); bytes += Buffer.byteLength(r, 'utf8') + 1
+    const b = Buffer.byteLength(r, 'utf8') + 1
+    if (page.length >= maxRows || (page.length > 0 && bytes + b > maxBytes)) { pages.push(page.join('\n')); page = []; bytes = 0 }
+    page.push(r); bytes += b
   }
-  return out
+  if (page.length) pages.push(page.join('\n'))
+  return pages.length ? pages : ['']
+}
+
+// Claude Code (and many TUIs) draw a full-width horizontal RULE — a run of
+// box-drawing '─' (or '═━', or ASCII '----'/'====') — to separate the live output
+// from the bottom status/input box. At ~74 cols that is ~711 px, so wrapLinesPx
+// splits it across 2+ display rows and it eats most of a tiny page (Adam
+// 2026-06-15: "that bar takes up an entire page all by itself"). Collapse any
+// all-rule line to a SINGLE page-row-wide rule so it costs one row, not a page.
+const RULE_CHARS = new Set([
+  '─', '━', '═', '╌', '╍', '┄', '┅', '┈', '┉',   // box-drawing horizontals (Claude Code uses U+2500 '─')
+  '╭', '╮', '╰', '╯', '┌', '┐', '└', '┘',          // rounded/square corners (a box top/bottom border IS a horizontal bar)
+  '├', '┤', '┬', '┴', '┼', '╞', '╡', '╪',          // T/cross junctions on a border
+  '-', '=', '_', '~',                               // ASCII rules
+])
+const RULE_HORIZONTAL = new Set(['─', '━', '═', '-', '=', '_', '~'])
+/** The dominant horizontal glyph IF `line` is a horizontal rule, else null. A
+ *  rule is (trimmed) ≥8 chars, EVERY char a rule glyph, and ≥1 a horizontal one
+ *  — so it never fires on prose (spaces/letters) or a progress bar (█/░ not in
+ *  the set), only on real separator/border bars. */
+function ruleChar(line: string): string | null {
+  const t = line.trim()
+  if (t.length < 8) return null
+  let horiz = ''
+  for (const ch of t) {
+    if (!RULE_CHARS.has(ch)) return null
+    if (!horiz && RULE_HORIZONTAL.has(ch)) horiz = ch
+  }
+  return horiz || null
+}
+// Collapsed rule width, in COLUMNS. The firmware fits only ~21–22 box-drawing cols
+// per content row (cal: Adam on-glass 2026-06-16 — 47 cols = 2.2 rows, 28 cols =
+// 1.25 rows ⇒ '─' ≈ 21 px, ~22 cols/row). 28 still wrapped; 18 cols (≈0.82 of a row)
+// sits one row with ~4 cols of margin against the cal's slop. A short rule is still
+// unmistakably a separator. (Column-clamped, not px — see termTextWidth.)
+const TERM_RULE_COLS = 18
+/** Collapse every full-width rule line in `text` to ONE firmware row of its
+ *  dominant glyph (clamped to TERM_RULE_COLS — never EXPANDED past the original).
+ *  Non-rule lines pass through untouched, ready for wrapLinesPx. */
+function collapseRules(text: string): string {
+  return text.split('\n').map((line) => {
+    const ch = ruleChar(line)
+    if (ch === null) return line
+    return ch.repeat(Math.min(line.trim().length, TERM_RULE_COLS))
+  }).join('\n')
 }
 const QUICK_KEYS: { label: string; keys: string[] }[] = [
   { label: 'Enter', keys: ['Enter'] },
@@ -5289,6 +5379,36 @@ const QUICK_KEYS: { label: string; keys: string[] }[] = [
   { label: 'Esc', keys: ['Escape'] },
 ]
 
+// The on-screen KEYBOARD (upgrades.md Phase 5, "slow-ass by design, the fallback")
+// — the only way to type an exact string (a slash command, a path, a flag) when
+// dictation can't (ASR won't emit '/'). Char GROUPS in a native browse list →
+// tap a group → tap a char → it appends to a buffer; Run sends the buffer literal
+// + Enter. Each group's char-view is ≤16 rows (one page); 9 groups + 6 action rows
+// = 15 ≤ BROWSE_ROW_CAP so the group view is one page too. '⇧ Shift' upper-cases
+// the letter groups. (i-soxi: plain send-keys -l, no special wire — the slow path.)
+const KBD_GROUPS: { label: string; chars: string }[] = [
+  { label: 'a b c d e f g', chars: 'abcdefg' },
+  { label: 'h i j k l m n', chars: 'hijklmn' },
+  { label: 'o p q r s t u', chars: 'opqrstu' },
+  { label: 'v w x y z', chars: 'vwxyz' },
+  { label: '0 1 2 3 … 9', chars: '0123456789' },
+  { label: '/ . , - _ : ; =', chars: '/.,-_:;=' },     // '/' leads — slash commands
+  { label: '( ) [ ] { } < >', chars: '()[]{}<>' },
+  { label: '! ? @ # $ % & *', chars: '!?@#$%&*' },
+  { label: '+ | \\ ~ ^ " \' `', chars: '+|\\~^"\'`' },
+]
+
+// One-tap common Claude Code slash commands (Adam: he couldn't type a slash command
+// at all). Sent literal + Enter (runs immediately). Editable here; if Adam wants it
+// config-driven later it mirrors quickPrompts. (These are the interactive-REPL slash
+// commands — relevant in the claude/claude2 sessions; harmless typed elsewhere.)
+const TERM_SLASH_COMMANDS: string[] = [
+  '/clear', '/compact', '/resume', '/cost', '/model', '/status', '/config', '/agents', '/review', '/help', '/exit',
+]
+
+type KbdAction = 'space' | 'bksp' | 'shift' | 'clear' | 'run' | 'done' | 'groups'
+type KbdCell = { t: 'group'; chars: string } | { t: 'char'; ch: string } | { t: 'act'; a: KbdAction }
+
 function cleanSessionName(raw: string): { name: string } | { error: string } {
   const name = raw.trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9_-]/g, '')
   // require a letter/digit (reject '', '--', '__' — degenerate, even if execFile
@@ -5301,14 +5421,16 @@ function cleanSessionName(raw: string): { name: string } | { error: string } {
  *  via DISCRETE commands (no -C attach + terminal emulator — capture-pane reads
  *  tmux's rendered grid, and the durable session means a WS drop loses nothing,
  *  the Phase-5 safety goal). Tail = paced firmware text (watch builds); grid =
- *  an 80×22 IMAGE page (PAGE-2, htop/vim legible). Input: quick-keys + dictation
- *  (send-keys -l) through the sacred confirm flow; keys reach ONE focused session. */
+ *  an 80×22 IMAGE page (PAGE-2, htop/vim legible). Input (Keys = an input hub):
+ *  quick-keys, a full on-screen keyboard (group→char→buffer→Run), a one-tap slash-
+ *  command list, and dictation — all send-and-RUN (literal + Enter) on confirm;
+ *  keys reach ONE focused session. */
 class TerminalWindow implements OsWindow {
   readonly id = 'term'
   readonly tab = 'Term'
   readonly label = 'Terminal'
   readonly category = 'Tools' as const
-  private level: 'sessions' | 'view' | 'keys' = 'sessions'
+  private level: 'sessions' | 'view' | 'keys' | 'kbd' | 'slash' = 'sessions'
   private sessions: TmuxSession[] = []
   private sessOffset = 0
   private session: string | null = null
@@ -5318,11 +5440,18 @@ class TerminalWindow implements OsWindow {
   private gridFailed: string | null = null
   private gridSeq = 0
   private focus: 'content' | 'menu' = 'content'
-  // Focus/scroll (tail only): a FROZEN scrollback snapshot the user pages through.
-  // non-null = in scroll mode (the live poll is stopped); offset = lines back
-  // from the buffer's bottom.
-  private scrollLines: string[] | null = null
-  private scrollOffset = 0
+  // On-screen keyboard (level 'kbd'): the composed buffer, which group's chars are
+  // showing (null = the group list), the Shift toggle, and the browse offset.
+  private kbdBuf = ''
+  private kbdGroup: string | null = null
+  private kbdShift = false
+  private kbdOffset = 0
+  // Focus/scroll (tail only): a FROZEN scrollback snapshot pre-split into whole
+  // PAGES the user steps through. non-null = in scroll mode (the live poll is
+  // stopped); scrollPage indexes scrollPages (0 = oldest, last = the live edge).
+  private scrollPages: string[] | null = null
+  private scrollPage = 0
+  private scrollSeq = 0   // invalidates an in-flight scrollback capture if the user leaves scroll mid-fetch
   private lastError: string | null = null
   // dictation (send text OR new-session name)
   private dictPurpose: 'send' | 'newSession' | null = null
@@ -5389,7 +5518,18 @@ class TerminalWindow implements OsWindow {
       return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: 'Term · sessions', menu: ['Reload', 'Main'], items }
     }
     if (this.level === 'keys') {
-      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Term · ${this.session} · keys`, menu: ['Back', 'Reload', 'Main'], items: QUICK_KEYS.map((k) => k.label) }
+      // The input hub: full keyboard + slash-commands lead, then the quick keys.
+      const items = ['⌨ Keyboard', '/ Slash cmd', ...QUICK_KEYS.map((k) => k.label)]
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Term · ${this.session} · keys`, menu: ['Back', 'Reload', 'Main'], items }
+    }
+    if (this.level === 'kbd') {
+      const { items } = browsePageItems(this.kbdModel().items, this.kbdOffset)
+      const buf = this.kbdBuf || ' '
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Term · ⌨ ${buf}▏`, menu: ['Back', 'Reload', 'Main'], items }
+    }
+    if (this.level === 'slash') {
+      const { items } = browsePageItems([...TERM_SLASH_COMMANDS, '‹ Done'], this.kbdOffset)
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Term · ${this.session} · slash`, menu: ['Back', 'Reload', 'Main'], items }
     }
     // view level
     if (this.dictating()) return this.dictView()
@@ -5399,14 +5539,16 @@ class TerminalWindow implements OsWindow {
       if (this.gridImg) return { mode: 'tiles', tilesRect: { w: this.gridImg.w, h: this.gridImg.h }, title, menu, tiles: this.gridImg.tiles }
       return { mode: 'text', title, menu, text: this.gridFailed ? `grid render FAILED:\n${this.gridFailed}` : '⏳ rendering 80×22…' }
     }
-    if (this.scrollLines !== null) return this.scrollView()
+    if (this.scrollPages !== null) return this.scrollView()
     this.ensurePoll()   // tail mode — keep the live capture going
-    // WRAP each line at the pane width (readable full lines) then bottom-align on
-    // the most-recent rows under the byte budget. (The old fixed-44-col '›' cut
-    // made wide lines unreadable — Adam 2026-06-14.) Grid shows the 80-col layout.
-    const rows = wrapLinesPx(this.content)
+    // Collapse full-width rule bars to one row, WRAP each line at the pane width
+    // (readable full lines), then bottom-align on the most-recent rows that FIT
+    // the pane (TERM_PAGE_ROWS) under the byte budget — no overflow scrollbar.
+    // (The old fixed-44-col '›' cut made wide lines unreadable — Adam 2026-06-14;
+    // the old 13-row tail overflowed — Adam 2026-06-15.) Grid shows the 80 cols.
+    const rows = wrapLinesPx(collapseRules(this.content), undefined, termTextWidth)
     while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
-    const tail = bottomRows(rows, TERM_TAIL_LINES, TERM_TAIL_MAX_BYTES).join('\n')
+    const tail = bottomRows(rows, TERM_PAGE_ROWS, TERM_TAIL_MAX_BYTES).join('\n')
     return {
       mode: 'text', title: `Term · ${this.session} · tail`,
       menu: ['Keys', 'Dictate', 'Grid', 'Focus', 'Terms', 'Reload', 'Main'],
@@ -5414,21 +5556,20 @@ class TerminalWindow implements OsWindow {
     }
   }
 
-  /** Focus/scroll view: a frozen scrollback window (TERM_TAIL_LINES lines ending
-   *  `scrollOffset` lines back from the buffer bottom). Up = older, Down = newer,
-   *  Live = back to the live tail. */
+  /** Focus/scroll view: one whole PAGE of the frozen scrollback. scrollPage
+   *  0 = oldest (top), last = the live edge. Up = older, Down = newer, Live =
+   *  back to the live tail. Each page already fits the pane (paginateRows), so
+   *  there is no overflow scrollbar. */
   private scrollView(): WinView {
-    const buf = this.scrollLines ?? []   // already WRAPPED rows (enterScroll wraps the capture)
-    const maxOffset = Math.max(0, buf.length - TERM_TAIL_LINES)
-    if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset
-    const start = Math.max(0, buf.length - TERM_TAIL_LINES - this.scrollOffset)
-    const window = firstRows(buf.slice(start), TERM_TAIL_LINES, TERM_TAIL_MAX_BYTES).join('\n')
-    const atTop = this.scrollOffset >= maxOffset
+    const pages = this.scrollPages ?? []
+    const total = pages.length
+    if (this.scrollPage >= total) this.scrollPage = Math.max(0, total - 1)
+    const at = total <= 1 ? '' : this.scrollPage === 0 ? ' (top)' : this.scrollPage >= total - 1 ? ' (live)' : ''
     return {
       mode: 'text',
-      title: `Term · ${this.session} · scroll ↑${this.scrollOffset}${atTop ? ' (top)' : ''}`,
+      title: `Term · ${this.session} · scroll ${this.scrollPage + 1}/${total}${at}`,
       menu: ['Up', 'Down', 'Live', 'Reload', 'Main'],
-      text: window || '(no scrollback)',
+      text: pages[this.scrollPage] || '(no scrollback)',
     }
   }
 
@@ -5436,7 +5577,7 @@ class TerminalWindow implements OsWindow {
     const ses = this.dictPurpose === 'newSession' ? 'new session' : `→ ${this.session}`
     if (this.listening) return { mode: 'text', title: `Term · ${ses} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: `Listening — speak the ${this.dictPurpose === 'newSession' ? 'session name' : 'text to type'}, then Done.` }
     if (this.transcribing) return { mode: 'text', title: `Term · ${ses} · transcribing…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
-    const verb = this.dictPurpose === 'newSession' ? 'New session' : 'Type (literal — tap Keys→Enter to run)'
+    const verb = this.dictPurpose === 'newSession' ? 'New session' : 'Type (sent + RUN on Confirm)'
     return { mode: 'text', title: `Term · ${ses} · confirm?`, menu: ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main'], text: `${verb}:\n${'─'.repeat(20)}\n${clampConfirmBody(this.pendingText ?? '')}\n${'─'.repeat(20)}\nConfirm · Re-record · Cancel` }
   }
 
@@ -5457,7 +5598,9 @@ class TerminalWindow implements OsWindow {
       return
     }
     if (this.level === 'keys') {
-      const k = QUICK_KEYS[index]
+      if (index === 0) { this.kbdBuf = ''; this.kbdGroup = null; this.kbdShift = false; this.kbdOffset = 0; this.level = 'kbd'; this.focus = 'content'; this.requestRender(); return }   // ⌨ Keyboard
+      if (index === 1) { this.kbdOffset = 0; this.level = 'slash'; this.focus = 'content'; this.requestRender(); return }   // / Slash cmd
+      const k = QUICK_KEYS[index - 2]
       if (!k || !this.session) { this.ctx.log(`[os] term keys: index ${index} / no session — ignored`); return }
       try {
         await tmuxSendKeys(this.session, k.keys)
@@ -5466,6 +5609,49 @@ class TerminalWindow implements OsWindow {
         this.ctx.log(`[os] term: send ${k.label} FAILED: ${(e as Error).message}`)
       }
       this.requestRender()   // stay in keys for rapid sequences; Back to see the result
+      return
+    }
+    if (this.level === 'kbd') {
+      const { items, cells } = this.kbdModel()
+      const { map, prevOffset, nextOffset } = browsePageItems(items, this.kbdOffset)
+      const m = map[index]
+      if (m === undefined) { this.ctx.log(`[os] term kbd: index ${index} out of range`); return }
+      if (m === -1) { this.kbdOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.kbdOffset = nextOffset; this.requestRender(); return }
+      const cell = cells[m]
+      if (cell.t === 'group') { this.kbdGroup = cell.chars; this.kbdOffset = 0; this.requestRender(); return }
+      if (cell.t === 'char') { this.kbdBuf += cell.ch; this.kbdGroup = null; this.kbdOffset = 0; this.requestRender(); return }   // append, back to groups
+      switch (cell.a) {
+        case 'space': this.kbdBuf += ' '; break
+        case 'bksp': this.kbdBuf = [...this.kbdBuf].slice(0, -1).join(''); break   // code-point-safe delete
+        case 'shift': this.kbdShift = !this.kbdShift; break
+        case 'clear': this.kbdBuf = ''; break
+        case 'groups': this.kbdGroup = null; this.kbdOffset = 0; break
+        case 'run': await this.kbdRun(); return
+        case 'done': this.kbdBuf = ''; this.kbdGroup = null; this.kbdShift = false; this.kbdOffset = 0; this.level = 'view'; await this.refreshTail(); return
+      }
+      this.requestRender()
+      return
+    }
+    if (this.level === 'slash') {
+      const rows = [...TERM_SLASH_COMMANDS, '‹ Done']
+      const { map, prevOffset, nextOffset } = browsePageItems(rows, this.kbdOffset)
+      const m = map[index]
+      if (m === undefined) { this.ctx.log(`[os] term slash: index ${index} out of range`); return }
+      if (m === -1) { this.kbdOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.kbdOffset = nextOffset; this.requestRender(); return }
+      this.kbdOffset = 0; this.level = 'view'
+      if (m < TERM_SLASH_COMMANDS.length && this.session) {
+        const cmd = TERM_SLASH_COMMANDS[m]
+        try {
+          await tmuxSendLiteral(this.session, cmd)
+          await tmuxSendKeys(this.session, ['Enter'])   // runs immediately
+          this.ctx.log(`[os] term: slash ${cmd} → ${this.session}`)
+        } catch (e) {
+          this.ctx.log(`[os] term: slash ${cmd} FAILED: ${(e as Error).message}`)
+        }
+      }
+      await this.refreshTail()
       return
     }
     this.ctx.log(`[os] term: browse select ${index} at level ${this.level} — ignored`)
@@ -5510,13 +5696,11 @@ class TerminalWindow implements OsWindow {
   async onMenuSelect(label: string): Promise<void> {
     if (this.dictating()) return this.onDictMenu(label)
     if (this.level === 'view') {
-      if (this.scrollLines !== null) {   // Focus/scroll mode
+      if (this.scrollPages !== null) {   // Focus/scroll mode — step whole pages
+        const last = Math.max(0, this.scrollPages.length - 1)
         switch (label) {
-          case 'Up': {
-            const maxOffset = Math.max(0, this.scrollLines.length - TERM_TAIL_LINES)
-            this.scrollOffset = Math.min(maxOffset, this.scrollOffset + TERM_SCROLL_STEP); this.requestRender(); return
-          }
-          case 'Down': this.scrollOffset = Math.max(0, this.scrollOffset - TERM_SCROLL_STEP); this.requestRender(); return
+          case 'Up': this.scrollPage = Math.max(0, this.scrollPage - 1); this.requestRender(); return        // older
+          case 'Down': this.scrollPage = Math.min(last, this.scrollPage + 1); this.requestRender(); return   // newer
           case 'Live': this.exitScroll(); await this.refreshTail(); return
           default: this.ctx.log(`[os] term scroll: unknown menu label '${label}' — ignored (LOUD)`)
         }
@@ -5550,25 +5734,73 @@ class TerminalWindow implements OsWindow {
     if (!this.session) return
     this.stopPoll()
     this.gridSeq++   // cancel any in-flight grid render
-    this.scrollOffset = 0
-    this.scrollLines = ['capturing scrollback…']
+    const seq = ++this.scrollSeq
+    this.scrollPage = 0
+    this.scrollPages = ['capturing scrollback…']
     this.requestRender()
     try {
       const out = await tmuxCaptureScrollback(this.session, TERM_SCROLLBACK_LINES)
-      const rows = wrapLinesPx(out)   // wrap to display rows so paging is row-accurate + readable
+      if (seq !== this.scrollSeq) return   // Live/Back/switch fired mid-capture — don't resurrect scroll mode
+      const rows = wrapLinesPx(collapseRules(out), undefined, termTextWidth)   // rule-collapse + box-aware wrap so paging is row-accurate + readable
       while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
-      this.scrollLines = rows.length ? rows : ['(no scrollback)']
+      this.scrollPages = rows.length ? paginateRows(rows, TERM_PAGE_ROWS, TERM_TAIL_MAX_BYTES) : ['(no scrollback)']
+      this.scrollPage = this.scrollPages.length - 1   // start at the live edge (newest page — where the tail left off)
     } catch (e) {
+      if (seq !== this.scrollSeq) return
       this.ctx.log(`[os] term: scrollback capture failed (${this.session}): ${(e as Error).message}`)
-      this.scrollLines = [`(scrollback capture failed: ${(e as Error).message})`]
+      this.scrollPages = [`(scrollback capture failed: ${(e as Error).message})`]
+      this.scrollPage = 0
     }
     this.requestRender()
   }
 
   /** Leave Focus/scroll (the caller restores the live tail via refreshTail). */
   private exitScroll(): void {
-    this.scrollLines = null
-    this.scrollOffset = 0
+    this.scrollPages = null
+    this.scrollPage = 0
+    this.scrollSeq++   // invalidate any scrollback capture still in flight
+  }
+
+  // ---- on-screen keyboard ----
+  /** The current keyboard rows (the group list, or one group's chars) + a parallel
+   *  cell map, so view() and onBrowseSelect resolve the SAME indices (the
+   *  browsePageItems pattern). */
+  private kbdModel(): { items: string[]; cells: KbdCell[] } {
+    const items: string[] = []
+    const cells: KbdCell[] = []
+    if (this.kbdGroup === null) {
+      for (const g of KBD_GROUPS) {
+        items.push(this.kbdShift ? g.label.toUpperCase() : g.label)
+        cells.push({ t: 'group', chars: this.kbdShift ? g.chars.toUpperCase() : g.chars })
+      }
+      const acts: [string, KbdAction][] = [
+        ['␣ Space', 'space'], ['⌫ Bksp', 'bksp'],
+        [`⇧ Shift: ${this.kbdShift ? 'ON' : 'off'}`, 'shift'],
+        ['✕ Clear', 'clear'], ['⏎ Run', 'run'], ['‹ Done', 'done'],
+      ]
+      for (const [label, a] of acts) { items.push(label); cells.push({ t: 'act', a }) }
+    } else {
+      for (const ch of this.kbdGroup) { items.push(ch); cells.push({ t: 'char', ch }) }
+      items.push('‹ groups'); cells.push({ t: 'act', a: 'groups' })
+    }
+    return { items, cells }
+  }
+
+  /** Run the composed buffer: send it literal + Enter (always-run on send — Adam
+   *  2026-06-18), clear, and drop back to the live tail to watch it execute. */
+  private async kbdRun(): Promise<void> {
+    const buf = this.kbdBuf
+    this.kbdBuf = ''; this.kbdGroup = null; this.kbdShift = false; this.kbdOffset = 0; this.level = 'view'
+    if (!this.session) { this.ctx.log('[os] term: keyboard Run with no session — ignored'); this.requestRender(); return }
+    if (!buf) { this.ctx.log('[os] term: keyboard Run with empty buffer — nothing sent'); await this.refreshTail(); return }
+    try {
+      await tmuxSendLiteral(this.session, buf)
+      await tmuxSendKeys(this.session, ['Enter'])
+      this.ctx.log(`[os] term: keyboard ran "${buf.slice(0, 60)}" (${buf.length} chars) → ${this.session}`)
+    } catch (e) {
+      this.ctx.log(`[os] term: keyboard send FAILED: ${(e as Error).message}`)
+    }
+    await this.refreshTail()
   }
 
   // ---- dictation ----
@@ -5634,9 +5866,10 @@ class TerminalWindow implements OsWindow {
           if (!this.session) { this.ctx.log('[os] term: send with no session — ignored'); this.level = 'sessions'; this.requestRender(); return }
           try {
             await tmuxSendLiteral(this.session, text)
-            this.ctx.log(`[os] term: sent literal (${text.length} chars) → ${this.session}`)
+            await tmuxSendKeys(this.session, ['Enter'])   // run on confirm (Adam 2026-06-18: always-run on send)
+            this.ctx.log(`[os] term: dictated + ran "${text.slice(0, 60)}" (${text.length} chars) → ${this.session}`)
           } catch (e) {
-            this.ctx.log(`[os] term: send literal FAILED: ${(e as Error).message}`)
+            this.ctx.log(`[os] term: dictation send FAILED: ${(e as Error).message}`)
           }
           this.level = 'view'
           await this.refreshTail()
@@ -5673,12 +5906,15 @@ class TerminalWindow implements OsWindow {
   async onReload(): Promise<void> {
     this.stopDictation('reload')
     this.exitScroll()
+    this.resetKbd()
     this.gridSeq++
     this.lastError = null
     this.focus = 'content'
   }
 
-  onDeactivate(): void { this.stopPoll(); this.stopDictation('window switch'); this.exitScroll(); this.gridSeq++ }
+  private resetKbd(): void { this.kbdBuf = ''; this.kbdGroup = null; this.kbdShift = false; this.kbdOffset = 0 }
+
+  onDeactivate(): void { this.stopPoll(); this.stopDictation('window switch'); this.exitScroll(); this.resetKbd(); this.gridSeq++ }
   dispose(): void { this.stopPoll() }
 
   interruptible(): boolean { return !this.dictating() }
@@ -5692,7 +5928,12 @@ class TerminalWindow implements OsWindow {
       this.requestRender()
       return true
     }
-    if (this.level === 'view' && this.scrollLines !== null) { this.exitScroll(); await this.refreshTail(); return true }
+    if (this.level === 'view' && this.scrollPages !== null) { this.exitScroll(); await this.refreshTail(); return true }
+    if (this.level === 'kbd') {
+      if (this.kbdGroup !== null) { this.kbdGroup = null; this.kbdOffset = 0; this.requestRender(); return true }   // chars → groups
+      this.level = 'keys'; this.resetKbd(); this.focus = 'content'; this.requestRender(); return true               // groups → keys
+    }
+    if (this.level === 'slash') { this.level = 'keys'; this.kbdOffset = 0; this.focus = 'content'; this.requestRender(); return true }
     if (this.level === 'keys') { this.level = 'view'; this.focus = 'content'; await this.refreshTail(); return true }
     if (this.level === 'view') { this.stopPoll(); this.gridSeq++; this.session = null; this.level = 'sessions'; this.focus = 'content'; this.requestRender(); return true }
     // sessions level
@@ -6271,6 +6512,7 @@ class SmsWindow implements OsWindow {
   private threadsLoading = false
   private threadsError: string | null = null
   private threadsKicked = false   // first-view query guard (reset on leave so re-entry refreshes)
+  private pendingOpenName: string | null = null   // voice "read <name>'s text" → auto-open when the thread list arrives
   // open thread
   private openId = ''
   private openName = ''
@@ -6410,6 +6652,13 @@ class SmsWindow implements OsWindow {
     this.threadsOffset = offset
     this.threadsTotal = total
     this.threads = threads.map((t) => ({ ...t }))
+    if (this.pendingOpenName) {   // voice "read <name>'s text" → auto-open the best match
+      const want = this.pendingOpenName
+      this.pendingOpenName = null
+      const m = this.threads.find((t) => t.name.toLowerCase().includes(want)) ?? this.threads.find((t) => t.address.toLowerCase().includes(want))
+      if (m) { this.ctx.log(`[os] sms: voice-open "${want}" → ${m.name}`); this.openThread(m.id, m.name, m.address, 0); return }
+      this.ctx.log(`[os] sms: voice "read ${want}'s text" — no matching thread; showing the list`)
+    }
     this.requestRender()
   }
 
@@ -6541,6 +6790,7 @@ class SmsWindow implements OsWindow {
     // skip the re-query and resume a stale thread).
     this.level = 'threads'
     this.threadsKicked = false
+    this.pendingOpenName = null
   }
 
   async onReload(): Promise<void> {
@@ -6549,9 +6799,17 @@ class SmsWindow implements OsWindow {
     else { this.threadsKicked = false; this.ensureThreads() }
   }
 
-  /** Re-query the thread list on entry so it's fresh (the WM calls onOpen only
-   *  for Search hand-offs; we use the first view() to kick it instead). */
-  async onOpen(): Promise<void> { /* no cross-window open target */ }
+  /** Voice "read <name>'s last text" (Phase 9): (re)load threads, then auto-open
+   *  the best name match when they arrive (onSmsThreads). Entry without a target
+   *  uses view()'s ensureThreads() instead — this only fires for the voice handoff. */
+  async onOpen(open: WindowOpen): Promise<void> {
+    if (open.kind !== 'sms') { this.ctx.log(`[os] sms: ignoring onOpen kind '${open.kind}'`); return }
+    this.pendingOpenName = open.name.trim().toLowerCase()
+    this.level = 'threads'
+    this.threadsKicked = true   // we kick the query here; don't let view()'s ensureThreads double-kick
+    this.requestThreads(0)
+    this.requestRender()
+  }
 
   async onBack(): Promise<boolean> {
     if (this.level === 'thread' && this.replyStage !== 'idle') { this.stopReply('back'); this.requestRender(); return true }
@@ -7236,12 +7494,20 @@ export class WindowManager {
       case 'confirm': await this.invokeMenu('Confirm'); return
       case 'cancel': await this.invokeMenu('Cancel'); return
       case 'read': {
-        // Navigation-class: route to the obvious window; deeper resolution
-        // ("first email" / "Becky's last text") is a Phase-9 tuning follow-up.
+        // Switch to the window AND open the item (Phase 9, Adam 2026-06-18 —
+        // previously only switched). Mail → the newest message; SMS → the named
+        // contact's thread. (Reachable once the 9b always-on stream ships; 9a is live.)
         const t = cmd.target
-        if (/mail|email/.test(t)) { this.blanked = false; this.switchTo('mail') }
-        else if (/text|sms|message/.test(t)) { this.blanked = false; this.switchTo('sms') }
-        else this.ctx.log(`[voice] read "${t}" — no target window resolved (follow-up)`)
+        if (/mail|email/.test(t)) {
+          this.blanked = false; this.switchTo('mail')
+          await this.active.onOpen?.({ kind: 'mail', first: true })
+        } else if (/text|sms|message/.test(t)) {
+          // strip the trailing "'s last text"/"last message"/… to leave the contact name
+          const name = t.replace(/['’]s\b.*$/i, '').replace(/\b(last|latest|recent|text|texts|message|messages|sms|msg)\b.*$/i, '').trim()
+          this.blanked = false; this.switchTo('sms')
+          if (name) await this.active.onOpen?.({ kind: 'sms', name })
+          else this.ctx.log(`[voice] read "${t}" → SMS list (no contact name parsed)`)
+        } else this.ctx.log(`[voice] read "${t}" — no target window resolved`)
         return
       }
     }

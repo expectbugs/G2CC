@@ -79,9 +79,18 @@ object MediaBridge {
                 "play_pause" -> if (controller?.playbackState?.state == PlaybackState.STATE_PLAYING) tc.pause() else tc.play()
                 "next" -> tc.skipToNext()
                 "prev" -> tc.skipToPrevious()
-                // No generic "toggle shuffle" transport; best-effort skip (a real
-                // shuffle toggle is app-specific — a follow-up).
-                "shuffle" -> tc.skipToNext()
+                "shuffle" -> {
+                    // The FRAMEWORK media-session API (android.media.session, what we use via
+                    // MediaSessionManager) has NO shuffle setter — that's androidx
+                    // MediaControllerCompat only. Players that support shuffle expose it as a
+                    // CUSTOM ACTION in PlaybackState; send that. Loud fallback when absent
+                    // (Adam 2026-06-18; was wrongly skipToNext).
+                    val act = controller?.playbackState?.customActions?.firstOrNull {
+                        it.action.contains("shuffle", true) || it.name?.toString()?.contains("shuffle", true) == true
+                    }
+                    if (act != null) { tc.sendCustomAction(act, null); DiagLog.log("media", "shuffle via custom action '${act.action}'") }
+                    else DiagLog.log("media", "no shuffle custom action exposed by this player — ignored (open the app to toggle)")
+                }
                 else -> DiagLog.log("media", "unknown command $cmd")
             }
         } catch (e: Exception) { DiagLog.log("media", "command $cmd failed: $e") }

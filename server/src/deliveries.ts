@@ -13,6 +13,7 @@
 
 import { execFile } from 'node:child_process'
 import { query, registerMigration } from './store.js'
+import { notify } from './os-notify.js'
 
 const ARIA_PY = '/home/user/aria/venv/bin/python'   // read_gmail runs under aria's venv (its OAuth)
 const READ_GMAIL = '/home/user/G2CC/scripts/read_gmail.py'
@@ -29,6 +30,15 @@ registerMigration('deliveries-v1', `
     synced_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS deliveries_active ON deliveries (delivered, last_update DESC);
+`)
+
+// out_notified: a one-shot latch so the out-for-delivery FLASH (Phase 13, Adam
+// 2026-06-18) fires ONCE per shipment, never re-firing on the 15-min sync. The
+// backfill marks EXISTING out/delivered rows already-notified so the first sync
+// after deploy doesn't burst-flash stale shipments (the disk-full re-fire lesson).
+registerMigration('deliveries-v2', `
+  ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS out_notified boolean NOT NULL DEFAULT false;
+  UPDATE deliveries SET out_notified = true WHERE status = 'out for delivery' OR delivered;
 `)
 
 export interface GmailMsg { id: string; from: string; subject: string; date: string; snippet: string }
@@ -149,13 +159,13 @@ export function reduceDeliveries(parsed: Delivery[]): Map<string, Delivery> {
 /** One sync pass: fetch carrier mail → parse → upsert. Returns the count
  *  upserted + skipped (for the live log). Loud per-stage; never throws into a
  *  render path (the caller fires it fire-and-forget on a 15-min cadence). */
-export async function syncDeliveries(days = 30): Promise<{ upserted: number; unparsed: number }> {
+export async function syncDeliveries(days = 30): Promise<{ upserted: number; unparsed: number; outFired: number }> {
   return syncFromMessages(await runReadGmail(days))
 }
 
 /** The parse→reduce→upsert core, split out so the smoke can drive synthetic
  *  carrier messages without touching Adam's real Gmail. */
-export async function syncFromMessages(msgs: GmailMsg[]): Promise<{ upserted: number; unparsed: number }> {
+export async function syncFromMessages(msgs: GmailMsg[]): Promise<{ upserted: number; unparsed: number; outFired: number }> {
   const parsed: Delivery[] = []
   let unparsed = 0
   for (const m of msgs) {
@@ -179,8 +189,27 @@ export async function syncFromMessages(msgs: GmailMsg[]): Promise<{ upserted: nu
        WHERE EXCLUDED.last_update >= deliveries.last_update`,
       [dkey, d.carrier, d.tracking, d.status, d.subject, d.dateMs, d.status === 'delivered'])
   }
-  console.log(`[deliveries] sync: ${reduced.size} upserted (${unparsed} unparsed) from ${msgs.length} carrier message(s)`)
-  return { upserted: reduced.size, unparsed }
+  // Out-for-delivery FLASH: fire ONCE when a shipment is out for delivery and
+  // hasn't been notified (the latch). Re-arm-safe — out_notified persists across
+  // syncs (ON CONFLICT never resets it), so the same shipment never re-flashes.
+  const outRows = await query<{ dkey: string; carrier: string; tracking: string | null; subject: string | null }>(
+    `SELECT dkey, carrier, tracking, subject FROM deliveries
+     WHERE status = 'out for delivery' AND NOT delivered AND NOT out_notified
+     ORDER BY last_update DESC`)
+  let outFired = 0
+  for (const row of outRows.rows) {
+    const what = (row.subject ?? '').trim() || (row.tracking ? `tracking ${row.tracking}` : 'a package')
+    await notify({
+      source: 'deliveries',
+      priority: 'info',
+      title: `Out for delivery: ${row.carrier}`,
+      body: `${what}\n\nArriving today. The Deliveries window has the detail.`,
+    })
+    await query(`UPDATE deliveries SET out_notified = true WHERE dkey = $1`, [row.dkey])
+    outFired++
+  }
+  console.log(`[deliveries] sync: ${reduced.size} upserted (${unparsed} unparsed) from ${msgs.length} carrier message(s)${outFired ? ` — ${outFired} out-for-delivery flash(es)` : ''}`)
+  return { upserted: reduced.size, unparsed, outFired }
 }
 
 const SYNC_INTERVAL_MS = 15 * 60 * 1000   // 15-min pacing (the calendar precedent)

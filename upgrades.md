@@ -18,12 +18,22 @@
 > multi-packet wall, B2 blank-wake, B4 subprocess-everything, B5 state hygiene, the
 > Three Absolute Rules, additive-optional wire changes, prime directive.
 
-## Implementation status (2026-06-15)
+## Implementation status (2026-06-18)
 
 **ALL 19 phases are implemented except the hardware-gated OBD.** The server queue (r18–r19) +
-the client-feature batch (r20–r22, APK **v1.13**) + the on-glass tweaks (r23) landed everything
-else. Smoke **23/23**. Per-phase WHY → CHANGELOG r18–r23; the LIVE state + on-glass checklist →
-HANDOFF.md "What's next".
+the client-feature batch (r20–r22, APK v1.13) + the on-glass tweaks (r23–r24) + the **r25 audit-gap
+batch (APK v1.14)** landed everything else. Smoke **23/23**. Per-phase WHY → CHANGELOG r18–r25; the
+LIVE state + on-glass checklist → HANDOFF.md "What's next".
+
+**2026-06-18 r25 — the AUDIT correction.** "All implemented" had quietly OVERSTATED it: a
+re-audit of every phase against the code (prompted by Adam noticing the missing Terminal keyboard)
+found SIX specced-but-never-built pieces that no deferred list mentioned — now all built (server +
+APK v1.14): **5** the on-screen keyboard + slash-list (+ dictation-runs-on-send); **8** Mail
+Reply-all; **13** the out-for-delivery flash; **7** real shuffle (custom-action — the framework
+session API has no shuffle setter); **9** voice "read first email"/"read X's last text" actually
+opening the item; **15** ring cancel-on-interaction; **4b** SMS reply via the live RemoteInput
+(RCS-preserving, SmsManager fallback). The lesson: "implemented" must mean *traced to code*, not
+*has a phase entry*.
 
 **DONE + smoke-verified:**
 - Server (r18): **18** chess tile-redraw, **19** Files overhaul (incl. **17** trash), **2** blank

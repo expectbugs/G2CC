@@ -79,23 +79,60 @@ try {
     assert.equal(term.level, 'view'); assert.equal(term.session, 'work'); assert.equal(term.mode, 'tail')
     assert.match((await term.view()).title, /work · tail/, 'tail view of work')
 
-    // Keys → send Enter
+    // Keys hub (Adam 2026-06-18): index 0 = ⌨ Keyboard, 1 = / Slash cmd, then the
+    // quick keys (Enter is now at index 2).
     await term.onMenuSelect('Keys'); assert.equal(term.level, 'keys')
-    await term.onBrowseSelect(0)   // Enter — should not throw
-    assert.equal(term.level, 'keys', 'keys level stays for rapid sequences')
+    const keysItems = (await term.view()).items
+    assert.ok(keysItems[0].includes('Keyboard') && keysItems[1].includes('Slash'), 'Keys leads with Keyboard + Slash, then quick keys')
+    await term.onBrowseSelect(2)   // Enter quick-key — stays in keys for rapid sequences
+    assert.equal(term.level, 'keys', 'quick-key stays in keys')
     await term.onBack(); assert.equal(term.level, 'view', 'Back from keys → view')
 
-    // Dictate → send literal text
+    // On-screen KEYBOARD (Phase 5 fallback — the silent gap): Keys → ⌨ Keyboard →
+    // build a string via group→char taps (incl. a '/') → Run sends it literal + Enter.
+    const kbdType = async (str) => {
+      for (const ch of str) {
+        if (ch === ' ') {
+          const { cells } = term.kbdModel()
+          await term.onBrowseSelect(cells.findIndex((c) => c.t === 'act' && c.a === 'space')); continue
+        }
+        const g = term.kbdModel().cells.findIndex((c) => c.t === 'group' && c.chars.includes(ch))
+        assert.ok(g >= 0, `kbd group for '${ch}'`); await term.onBrowseSelect(g)
+        const i = term.kbdModel().cells.findIndex((c) => c.t === 'char' && c.ch === ch)
+        assert.ok(i >= 0, `kbd char '${ch}'`); await term.onBrowseSelect(i)
+      }
+    }
+    await term.onMenuSelect('Keys'); await term.onBrowseSelect(0)
+    assert.equal(term.level, 'kbd', '⌨ Keyboard → kbd level')
+    await kbdType('echo /tmp')
+    assert.equal(term.kbdBuf, 'echo /tmp', `keyboard built the exact buffer incl '/' (got "${term.kbdBuf}")`)
+    const runIdx = term.kbdModel().cells.findIndex((c) => c.t === 'act' && c.a === 'run')
+    await term.onBrowseSelect(runIdx)
+    assert.equal(term.level, 'view', 'Run → live tail'); assert.equal(term.kbdBuf, '', 'buffer cleared after Run')
+    await settleCapture('work', '/tmp')   // ran (echo printed it)
+    console.error('  3a2. on-screen keyboard: group→char build (incl /), Run sends + runs ✓')
+
+    // Slash-command list: Keys → / Slash cmd → tap /clear → sent + Enter
+    await term.onMenuSelect('Keys'); await term.onBrowseSelect(1)
+    assert.equal(term.level, 'slash', '/ Slash cmd → slash level')
+    const slashItems = (await term.view()).items
+    await term.onBrowseSelect(slashItems.findIndex((i) => i === '/clear'))
+    assert.equal(term.level, 'view', 'slash pick → live tail')
+    await settleCapture('work', '/clear')   // the literal command was sent
+    console.error('  3a3. slash-command list: /clear sent + runs ✓')
+
+    // Dictation now RUNS on Confirm (Adam 2026-06-18: was send-literal-only, no Enter)
     await term.onMenuSelect('Dictate'); assert.equal(term.listening, true)
     await term.onMenuSelect('Done'); assert.equal(term.transcribing, true)
-    await term.onStt('echo DICTATED_LINE'); assert.equal(term.pendingText, 'echo DICTATED_LINE')
-    await term.onMenuSelect('Confirm')
-    await tmuxSendKeys('work', ['Enter'])   // run what was typed (literal doesn't auto-Enter, by design)
-    await settleCapture('work', 'DICTATED_LINE')
-    console.error('  3a. open session, Keys send, Dictate→literal send ✓')
+    await term.onStt('echo r$((40+2))z'); assert.equal(term.pendingText, 'echo r$((40+2))z')
+    await term.onMenuSelect('Confirm')   // sends literal + Enter — no manual Enter needed now
+    await settleCapture('work', 'r42z')   // 'r42z' only appears if the shell RAN it (input had '40+2')
+    console.error('  3a. open session, Dictate→confirm RUNS the command ✓')
 
     // tail WRAP (Adam 2026-06-14): wide lines WRAP at the pane width (readable)
     // instead of being hard-cut with '›'; the frame still stays UNDER the wall.
+    // AND it fits ONE page (≤8 rows) — the old 13-row tail overflowed into an
+    // un-scrollable firmware scrollbar (Adam 2026-06-15).
     term.content = Array.from({ length: 30 }, (_, i) => `line${i} ` + 'x'.repeat(90)).join('\n')
     term.level = 'view'; term.mode = 'tail'
     const tv = await term.view()
@@ -103,7 +140,28 @@ try {
     assert.ok(tEst <= LAYOUT_FRAME_BUDGET_BYTES, `tail frame ${tEst}B must be under the wall (${LAYOUT_FRAME_BUDGET_BYTES})`)
     assert.ok(!tv.text.includes('›'), 'wide lines WRAP — no more hard-cut › marker')
     assert.ok(tv.text.includes('x') && tv.text.split('\n').every((l) => l.length <= 60), 'content shown, each row wrapped to the pane width')
-    console.error(`  3b. tail WRAP: dense 90-col capture wraps + composes at ${tEst}B ≤ ${LAYOUT_FRAME_BUDGET_BYTES} ✓`)
+    assert.ok(tv.text.split('\n').length <= 6, `tail fits one page (≤6 rows), no overflow scrollbar (got ${tv.text.split('\n').length})`)
+    console.error(`  3b. tail WRAP+FIT: dense 90-col capture wraps, ≤6 rows, ${tEst}B ≤ ${LAYOUT_FRAME_BUDGET_BYTES} ✓`)
+
+    // rule-collapse (Adam 2026-06-15/16): Claude Code's full-width '─' separator
+    // bar must collapse to ONE FIRMWARE row, not wrap. The firmware fits only ~21
+    // box-drawing cols/row (cal), so collapse clamps by COLUMNS to TERM_RULE_COLS=18.
+    term.content = ['output above the bar', '─'.repeat(74), 'status below the bar', 'last line'].join('\n')
+    const rv = await term.view()
+    const ruleRows = rv.text.split('\n').filter((l) => /^─+$/.test(l))
+    assert.equal(ruleRows.length, 1, `the 74-col ─ bar collapsed to exactly ONE row (got ${ruleRows.length})`)
+    assert.equal(ruleRows[0].length, 18, `collapsed rule clamped to TERM_RULE_COLS=18 firmware-safe cols (${ruleRows[0].length})`)
+    console.error('  3b2. rule-collapse: a 74-col ─ separator → 18-col one-row rule ✓')
+
+    // box-drawing width (Adam 2026-06-16): the firmware renders box-drawing ~2× a
+    // letter, so a box-drawing-dense line (NOT a pure rule — no horizontal glyph, so
+    // collapseRules leaves it) must wrap to ≥2 rows via termTextWidth where a naive
+    // 9.6px width would keep it one row → the invisible firmware re-wrap that caused
+    // the occasional scrollbar. 30 '┼' = 30×21 ≈ 630px > one ~456px row.
+    term.content = '┼'.repeat(30)
+    const xv = await term.view()
+    assert.ok(xv.text.split('\n').length >= 2, `box-drawing line wraps wide (got ${xv.text.split('\n').length} rows; naive width would give 1)`)
+    console.error('  3b3. box-drawing width: a 30-col ┼ line wraps to ≥2 rows (no hidden firmware re-wrap) ✓')
 
     // Grid mode
     await term.onMenuSelect('Grid'); assert.equal(term.mode, 'grid')
@@ -112,27 +170,35 @@ try {
     assert.ok(term.gridImg, 'Grid renders an image page')
     await term.onMenuSelect('Tail'); assert.equal(term.mode, 'tail')
 
-    // Focus / scrollback (new): generate >13 lines, enter scroll, page Up/Down, Live
+    // Focus / scrollback: capture history, pre-split into whole PAGES (≤8 rows
+    // each, no overflow), start at the live edge, Up/Down step one page, Live
+    // returns to the tail.
     await tmuxSendKeys('work', ['seq', 'Space', '1', 'Space', '80', 'Enter'])
     await settleCapture('work', '80')
     term.level = 'view'; term.mode = 'tail'
     await term.onMenuSelect('Focus')
     const fs0 = Date.now()
-    while (Date.now() - fs0 < 4000 && (term.scrollLines === null || term.scrollLines[0] === 'capturing scrollback…')) await new Promise((r) => setTimeout(r, 30))
-    assert.ok(term.scrollLines && term.scrollLines.length > 13, `scrollback captured (${term.scrollLines?.length} > 13 lines)`)
-    assert.match((await term.view()).title, /scroll/, 'Focus → scroll view')
+    while (Date.now() - fs0 < 4000 && (term.scrollPages === null || term.scrollPages[0] === 'capturing scrollback…')) await new Promise((r) => setTimeout(r, 30))
+    assert.ok(term.scrollPages && term.scrollPages.length >= 2, `scrollback paginated into pages (${term.scrollPages?.length})`)
+    assert.ok(term.scrollPages.every((p) => p.split('\n').length <= 6), 'every scroll page fits the pane (≤6 rows)')
+    assert.equal(term.scrollPage, term.scrollPages.length - 1, 'Focus starts at the live edge (newest page)')
+    assert.match((await term.view()).title, /scroll \d+\/\d+ \(live\)/, 'Focus → scroll view at the live edge')
     await term.onMenuSelect('Up')
-    const afterUp = term.scrollOffset
-    assert.ok(afterUp > 0, 'Up scrolls into history')
+    const afterUp = term.scrollPage
+    assert.equal(afterUp, term.scrollPages.length - 2, 'Up steps exactly one page toward older history')
     await term.onMenuSelect('Down')
-    assert.ok(term.scrollOffset < afterUp, 'Down scrolls back toward live')
+    assert.equal(term.scrollPage, afterUp + 1, 'Down steps one page back toward live')
+    // page past the top → clamps at the oldest page with a (top) marker
+    for (let i = 0; i < term.scrollPages.length + 2; i++) await term.onMenuSelect('Up')
+    assert.equal(term.scrollPage, 0, 'Up clamps at the oldest page (no underflow)')
+    assert.match((await term.view()).title, /\(top\)/, 'oldest page shows (top)')
     // scroll frame stays under the wall
     const scEst = estimateLayoutFrameBytes(composeScene(await term.view(), [], '● beardos · 1 cc').regions)
     assert.ok(scEst <= LAYOUT_FRAME_BUDGET_BYTES, `scroll frame ${scEst}B under the wall`)
     await term.onMenuSelect('Live')
-    assert.equal(term.scrollLines, null, 'Live exits scroll')
+    assert.equal(term.scrollPages, null, 'Live exits scroll')
     assert.match((await term.view()).title, /tail/, 'Live → back to live tail')
-    console.error('  3d. Focus/scrollback: capture → Up/Down page → Live ✓')
+    console.error('  3d. Focus/scrollback: paginated ≤6 rows/page, Up/Down step pages, top-clamp, Live ✓')
 
     // New session via dictation
     await term.onMenuSelect('Terms'); assert.equal(term.level, 'sessions')

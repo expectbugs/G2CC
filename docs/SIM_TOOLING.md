@@ -88,3 +88,18 @@ Automation API (`http://127.0.0.1:9898`): `GET /api/screenshot/glasses` (576×28
 Glyph widths: `W`≈15.8px, `N`/uppercase≈11.4–11.9, digits≈11.0, lowercase≈9.6, **realistic mixed text
 ≈9.0px/char**, `i`≈4.8. Rows ~34px fit 8 in 288px. Chars per region (avg / worst-case all-`W`):
 **content @432px ≈43 / ~27**, **menu @144px ≈14 / ~9**, full width @576px ≈58 / ~36.
+
+**Box-drawing renders ~2× WIDER than `fwTextWidth` assumes (Adam on glass, 2026-06-16).** A
+horizontal rule `─` (U+2500) renders **~21 px** on the firmware, NOT the lowercase 9.6 px the
+`else` branch of `fwTextWidth` (os-compose) gives it. TWO consistent on-glass cals nail it: a
+**47-col `─` bar = 2.2 content rows** and a **28-col bar = 1.25 rows** — both ⇒ **~21–22 cols per
+~466 px content row ⇒ `─` ≈ 21 px** (a first round-1 guess of 14 px was too low and still wrapped).
+Consequence: any line that is mostly box-drawing (U+2500–U+257F: `─│┌┐└┘├┤┼` etc.) under-measures
+~2.2×, so it firmware-wraps past its intended row count — invisible, same class as the CJK/Cyrillic
+bumps already in `fwTextWidth`. **Fixed Terminal-local** (`os-windows.ts` `termTextWidth` prices
+U+2500–257F at 21 px + the adjacent shape/technical/dingbat ranges claude uses at a safe 14 px,
+fed to `wrapLinesPx`'s `widthFn`; the rule-bar `collapseRules` clamps to `TERM_RULE_COLS`=18). A
+global `fwTextWidth` bump for box-drawing is the clean root fix if it ever bites another window —
+left Terminal-local per Adam's scope (it would shift CC/Aria `─`-divider pagination). Blocks +
+geometric shapes (U+2580–U+25FF) are likely wide too but uncal'd; termTextWidth over-prices them
+14 px conservatively.

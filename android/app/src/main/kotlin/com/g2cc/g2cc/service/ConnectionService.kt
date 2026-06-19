@@ -264,6 +264,9 @@ class ConnectionService : Service(), TestHarness {
     /** Phase 4b: send an SMS via SmsManager (needs SEND_SMS). Loud diag; the sent
      *  message shows on the next thread refresh (the provider records it). */
     private fun sendSms(address: String, text: String) {
+        // Prefer the live conversation notification's RemoteInput (keeps RCS as RCS;
+        // Adam 2026-06-18). Falls through to SmsManager when there's no live match.
+        if (NotifyListener.replyToSmsThread(address, text)) return
         try {
             val sm = if (Build.VERSION.SDK_INT >= 31) getSystemService(SmsManager::class.java)
                      else @Suppress("DEPRECATION") SmsManager.getDefault()

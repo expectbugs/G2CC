@@ -1,6 +1,9 @@
 package com.g2cc.g2cc.service
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.RingtoneManager
@@ -14,14 +17,16 @@ import com.g2cc.g2cc.harness.DiagLog
  * ringtone for ~30 s (self-stopping), then restores the prior volume. `stop()`
  * cancels early. No new permission. Loud diag both ends.
  *
- * NOTE: "cancel on any phone interaction" (screen-on/unlock) is a follow-up —
- * v1 relies on the 30 s auto-stop and the explicit phone_locate stop.
+ * Cancel-on-interaction (Adam 2026-06-18): while ringing we listen for SCREEN_ON /
+ * USER_PRESENT — picking up the phone silences it immediately (no waiting out the
+ * 30 s). Both are protected system broadcasts (runtime-registered, NOT_EXPORTED).
  */
 object PhoneLocator {
     private val handler = Handler(Looper.getMainLooper())
     private var ringtone: android.media.Ringtone? = null
     private var prevVolume = -1
     private var autoStop: Runnable? = null
+    private var interaction: BroadcastReceiver? = null
     private const val RING_MS = 30_000L
 
     @Synchronized
@@ -43,6 +48,16 @@ object PhoneLocator {
             DiagLog.log("locate", "ringing — STREAM_ALARM maxed (was $prevVolume), ~30 s")
             autoStop?.let { handler.removeCallbacks(it) }
             autoStop = Runnable { stop(ctx) }.also { handler.postDelayed(it, RING_MS) }
+            // silence the moment the user picks up the phone (screen on / unlock)
+            val app = ctx.applicationContext
+            interaction?.let { try { app.unregisterReceiver(it) } catch (e: Exception) {} }
+            interaction = object : BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) { DiagLog.log("locate", "interaction (${i.action}) — silencing"); stop(ctx) }
+            }.also {
+                val filter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_USER_PRESENT) }
+                if (Build.VERSION.SDK_INT >= 33) app.registerReceiver(it, filter, Context.RECEIVER_NOT_EXPORTED)
+                else app.registerReceiver(it, filter)
+            }
         } catch (e: Exception) {
             DiagLog.log("locate", "start failed: $e")
             // A partial start (volume already maxed at line above, ringtone/timer
@@ -55,6 +70,7 @@ object PhoneLocator {
     fun stop(ctx: Context) {
         try {
             autoStop?.let { handler.removeCallbacks(it) }; autoStop = null
+            interaction?.let { try { ctx.applicationContext.unregisterReceiver(it) } catch (e: Exception) {} }; interaction = null
             ringtone?.let { if (it.isPlaying) it.stop() }; ringtone = null
             if (prevVolume >= 0) {
                 ctx.getSystemService(AudioManager::class.java)?.setStreamVolume(AudioManager.STREAM_ALARM, prevVolume, 0)

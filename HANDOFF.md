@@ -71,6 +71,40 @@ state re-fired on every restart; supersedes r21's "once per drive"; backlog clea
 **`notifications.blockTitles`** config dropping noise like "Device ID accessed". **[U] verify the
 Terminal tweaks on glass** (scrollback, claude/claude2 distinct, readable wrapped tail).
 
+**2026-06-15 r24 (corrected on glass 2026-06-16, 3 rounds — server-only, APK stays v1.13, smoke
+23/23):** Focus/tail scrollback OVERFLOWED the pane → an un-scrollable firmware scrollbar (the
+MENU captures in tail/scroll, not the content), and Claude Code's full-width `─` separator wrapped
+into 2+ rows. **Root cause that took 3 rounds:** `fwTextWidth` prices box-drawing at the lowercase
+9.6 px, but the firmware renders `─` at **~21 px** (two consistent on-glass cals: 47-col bar = 2.2
+rows, 28-col bar = 1.25 ⇒ ~21–22 cols/row). So box-drawing-dense lines (claude's `─` bars + tree
+chars `│├└┌┼`) silently firmware-re-wrapped → the occasional scrollbar, and the bar never
+collapsed small enough. **Final fix (Terminal-local; global default untouched):** `wrapLinesPx`
+gained an optional `widthFn` (default fwTextWidth → other windows unchanged); the Terminal passes
+**`termTextWidth`** (box-drawing 21 px, adjacent shape/dingbat ranges 14 px) so the server wrap
+MATCHES the firmware; **`TERM_RULE_COLS = 18`** (bar = one row); **`TERM_PAGE_ROWS = 6`** (a row of
+headroom over the ~7-row capacity; tunable back to 7 now the wrap is box-aware); Focus is a
+whole-page stepper (`paginateRows`, `scroll N/M`; old offset/`firstRows`/`TERM_SCROLL_STEP` gone).
+The `─`≈21 px firmware width is in `docs/SIM_TOOLING.md`. Grid still shows the true 80 cols.
+**[U] verify on glass:** sliver GONE on every page + separator one line; if a sliver persists,
+name what's on that page → extend `termTextWidth`; blunt fallback `TERM_PAGE_ROWS` 6→5.
+
+**2026-06-18 r25 — Terminal keyboard + an upgrades.md AUDIT that found 4 SILENT gaps, all fixed
+(server + APK v1.14, smoke 23/23):** Adam asked if a full Terminal keyboard was ever planned (it
+WAS — Phase 5, never built), so he had me audit ALL 19 phases for other silent drops first. Found
++ fixed: **(server)** the Terminal **on-screen keyboard** (Keys = input hub → `⌨ Keyboard`
+group→char→buffer→Run, + `/ Slash cmd` one-tap list, + dictation now RUNS on confirm); **Mail
+Reply-all** (`build_reply_all`: To=sender, Cc=others−me, deduped); **out-for-delivery flash**
+(deliveries `notify()` once per shipment via an `out_notified` latch, `deliveries-v2` backfills so
+no burst on deploy); **voice read-the-item** (`read first email`→opens newest mail; `read X's last
+text`→opens that SMS thread, via the onOpen handoff). **(APK v1.14)** real **shuffle** (FRAMEWORK
+session API has no shuffle setter — that's androidx-only; now sends the `/shuffle/i` PlaybackState
+CUSTOM ACTION, loud fallback); **ring cancel-on-interaction** (SCREEN_ON/USER_PRESENT silences the
+ring); **SMS reply via RemoteInput-when-live** (default-SMS notification's RemoteInput → keeps RCS
+on RCS, SmsManager fallback). Also stripped a NUL byte from CHANGELOG.md (it broke grep on the
+file). **[U] ON-GLASS PENDING (install v1.14 from `/setup`):** keyboard types `/clear`+Run, slash
+list, dictation runs, Reply-all (to self), out-for-delivery flash, shuffle (on Spotify etc.),
+ring-silences-on-pickup, SMS-reply-stays-RCS (the riskiest — verify no mis-route).
+
 STILL UNIMPLEMENTED / FOLLOW-UPS: **Phase 16** (OBD — dongle on backorder); **Phase 9b** global
 always-on "butterscotch" stream + wake-word/VAD accuracy tuning (on real factory audio);
 **Phase 4b** MMS-read + New-to-a-fresh-contact; the DJI-handsfree VAD gate (int16-mono only today).
@@ -95,7 +129,7 @@ zero state). The phone is the BLE/WiFi bridge — and per **the prime directive*
 it stays in Adam's pocket, untouched, always. A small hat device (ESP32, on backorder) replaces
 the phone eventually; the DE is hat-ready by construction.
 
-## Where we are (2026-06-15, post r22 client-feature batch + r23 tweaks; APK v1.13)
+## Where we are (2026-06-18, post r25 keyboard + audit-gap batch; APK v1.14)
 
 The BLE wire format is fully decoded (`docs/G2_BLE_PROTOCOL.md`, authoritative); the
 window-manager DE is in daily use; and **the entire upgrades.md queue — server AND the five
@@ -105,13 +139,14 @@ history +2,927-turn backfill, the notification layer, dashboard Main, timers + d
 intents, the EPUB Reader, ```chart pages, Google Calendar, rpg-cli + chess) + the v2 server
 queue (Suggest, tmux Terminal, full Mail, Main category-launcher, Search, Deliveries, audio
 memos) + the r22 client batch (Phase 7 Media, 4b SMS, 4a Reply, 15 phone-finder, 6 nav line,
-9 voice plumbing). The Android client is **APK v1.13**. What remains is hardware-gated (Phase 16
+9 voice plumbing) + the r25 batch (Terminal keyboard/slash, Mail Reply-all, out-for-delivery flash,
+voice read-the-item, shuffle, ring-cancel, SMS-RemoteInput). The Android client is **APK v1.14**. What remains is hardware-gated (Phase 16
 OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's next.
 
 - **Server**: the DE — window manager, compositor, content pipeline, CC-subprocess
   bridge, Postgres store (`g2cc` DB, unix-socket peer auth), notification hub, timers,
   calendar sync, games glue. Running on `:7300` (restart procedure below).
-- **Android client: APK v1.13 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
+- **Android client: APK v1.14 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
   /tmp is wiped every boot; a legacy /tmp copy also exists) — check
   `os/OsLayout.OS_VERSION` on the connect splash for what's actually installed; Adam
   installs from `http://100.107.139.121:7300/setup`. **The on-glass verification batch
@@ -356,9 +391,14 @@ r23, smoke 23/23, APK v1.13, server restarted). What's left is on-glass verifica
    - **Phone finder** (Phase 15) — say "find my phone" to Aria → the phone rings ~30 s.
    - **Voice** (Phase 9a) — in Reader, tap **Voice on** → say "next"/"back" to page; "butterscotch
      mail" to jump windows. (9b global always-on + accuracy is the tuning follow-up.)
-   - **Terminal tweaks** (r23, server-only — already live, no install needed) — tail lines WRAP
-     (readable, no `›`); **Focus** → Up/Down pages scrollback → Live; **claude vs claude2 now show
-     DISTINCT content**. (Grid shows the true 80-col layout.)
+   - **Terminal tweaks** (r23–r24, server-only — already live, no install needed) — tail lines
+     WRAP (readable, no `›`); **claude vs claude2 now show DISTINCT content**; **(r24, corrected
+     06-16)** tail + **Focus** now FIT one page (≤6 rows — NO un-scrollable overflow scrollbar),
+     Focus steps whole pages (`scroll N/M`) Up/Down/Live, the `─` separator collapses to ONE line
+     (18 cols), and box-drawing lines wrap box-aware (`termTextWidth`: firmware `─`≈21 px, not the
+     9.6 px fwTextWidth assumes — that mismatch caused the occasional scrollbar). Grid shows the
+     true 80-col layout. *If a sliver still appears → tell me what's on that page; blunt fallback
+     `TERM_PAGE_ROWS` 6→5.*
    - Carry-overs still [U]: **dismiss-sync** both ways (r21, "needs more testing"), the **960 B
      wall** gone in Mail/tmux (r21), the **Mail LIVE send** (r19 — reply-to-self first).
 2. **[U]-tuning + follow-ups (need real on-glass/audio iteration, not a fresh build):**

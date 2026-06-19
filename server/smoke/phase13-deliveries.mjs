@@ -63,6 +63,20 @@ try {
   assert.match(summary, /\d+ in transit/, `summary: "${summary}"`)
   console.error(`  3. sync→upsert→list/detail/summary ("${summary}") ✓`)
 
+  // === 3b. out-for-delivery FLASH: fires ONCE per shipment, re-arm-safe (Adam 2026-06-18) ===
+  await query(`DELETE FROM deliveries`)
+  await query(`DELETE FROM notifications WHERE source = 'deliveries'`)
+  const oodMsg = [M('USPS <usps@usps.com>', 'Out for Delivery', 'Out for delivery 9400111899560000000001', 'Wed, 04 Jun 2026 08:00:00 -0500')]
+  const s1 = await syncFromMessages(oodMsg)
+  assert.equal(s1.outFired, 1, 'a NEW out-for-delivery fires exactly one flash')
+  const n1 = await query(`SELECT title, priority FROM notifications WHERE source = 'deliveries'`)
+  assert.equal(n1.rowCount, 1, 'one deliveries notification persisted')
+  assert.ok(/^Out for delivery: USPS/.test(n1.rows[0].title) && n1.rows[0].priority === 'info', 'flash is an info notification titled by carrier')
+  const s2 = await syncFromMessages(oodMsg)   // SAME shipment re-synced
+  assert.equal(s2.outFired, 0, 're-sync does NOT re-fire (one-shot latch)')
+  assert.equal((await query(`SELECT count(*)::int n FROM notifications WHERE source = 'deliveries'`)).rows[0].n, 1, 'still exactly one notification (no duplicate flash)')
+  console.error('  3b. out-for-delivery flash: fires once, latch holds across re-sync ✓')
+
   // === 4. DeliveriesWindow (Info category): list → read ===
   const { WindowManager } = await import('../dist/os-windows.js')
   const wm = new WindowManager({
@@ -84,7 +98,11 @@ try {
     wm.dispose()
   }
 } finally {
+  // Clean up BOTH tables — the out-for-delivery flashes (section 3 + 3b) persist
+  // notifications in the shared g2cc_smoke DB; an unseen one would title-flash on
+  // EVERY other smoke's windows and break their title assertions (caught 2026-06-18).
   try { await query(`DELETE FROM deliveries`) } catch {}
+  try { await query(`DELETE FROM notifications WHERE source = 'deliveries'`) } catch {}
   await getPool().end()
 }
 console.log('phase13-deliveries: ALL OK')

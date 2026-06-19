@@ -26,7 +26,7 @@ import time
 from email.message import EmailMessage
 from email.parser import BytesParser
 from email import policy
-from email.utils import formatdate, make_msgid, parseaddr
+from email.utils import formatdate, make_msgid, parseaddr, getaddresses
 
 
 def find_original(maildir, key):
@@ -126,6 +126,43 @@ def build_reply(req, from_addr):
     return msg, to
 
 
+def build_reply_all(req, from_addr):
+    """Reply to the sender (To) AND everyone else on the original (Cc), minus me.
+    Same threading/quoting as build_reply; msmtp -t sends to To + Cc from headers."""
+    orig = find_original(req["maildir"], req["key"])
+    to = str(orig.get("Reply-To") or orig.get("From") or "").strip()
+    if not to:
+        raise ValueError("original has no From/Reply-To to reply to")
+    me = parseaddr(from_addr)[1].lower()
+    primary = parseaddr(to)[1].lower()
+    seen = {a for a in (me, primary) if a}
+    cc = []
+    for _name, addr in getaddresses([str(orig.get("To", "")), str(orig.get("Cc", ""))]):
+        a = addr.strip()
+        if not a or "@" not in a or a.lower() in seen:
+            continue   # drop me, the primary recipient, and dups
+        seen.add(a.lower())
+        cc.append(a)
+    msg = EmailMessage()
+    msg["From"] = from_addr
+    msg["To"] = to
+    if cc:
+        msg["Cc"] = ", ".join(cc)
+    msg["Subject"] = re_subject(str(orig.get("Subject", "")), "Re:")
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
+    omid = str(orig.get("Message-ID", "")).strip()
+    if omid:
+        msg["In-Reply-To"] = omid
+        refs = " ".join(x for x in [str(orig.get("References", "")).strip(), omid] if x)
+        msg["References"] = refs
+    odate = str(orig.get("Date", "")).strip()
+    ofrom = str(orig.get("From", "")).strip()
+    body = req.get("body", "").strip()
+    msg.set_content(f"{body}\n\nOn {odate}, {ofrom} wrote:\n{quote(plain_body(orig))}")
+    return msg, (to + (f", {', '.join(cc)}" if cc else ""))
+
+
 def build_forward(req, from_addr):
     orig = find_original(req["maildir"], req["key"])
     to = req.get("to", "").strip()
@@ -172,7 +209,7 @@ def main():
     from_addr = req.get("from_addr") or os.environ.get("G2CC_MAIL_FROM") or ""
     if "@" not in from_addr:
         raise ValueError("from_addr missing/invalid (expected the migadu address)")
-    builders = {"reply": build_reply, "forward": build_forward, "compose": build_compose}
+    builders = {"reply": build_reply, "reply-all": build_reply_all, "forward": build_forward, "compose": build_compose}
     if mode not in builders:
         raise ValueError(f"unknown mode {mode!r}")
     msg, to = builders[mode](req, from_addr)

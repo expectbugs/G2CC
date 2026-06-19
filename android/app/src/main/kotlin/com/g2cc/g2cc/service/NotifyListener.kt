@@ -351,26 +351,52 @@ class NotifyListener : NotificationListenerService() {
         try {
             val sbn = activeNotifications?.firstOrNull { it.key == key }
             if (sbn == null) { ConnectionService.forwardReplyResult(key, false, "notification no longer posted on the phone"); return }
-            val action = findReplyAction(sbn.notification)
-            // Free-form ONLY — the action was selected for its free-form input; a
-            // fallback to a non-free-form RemoteInput (a choice list) would fill the
-            // wrong key with arbitrary text.
-            val remoteInput = action?.remoteInputs?.firstOrNull { it.allowFreeFormInput }
-            val pi = action?.actionIntent
-            if (action == null || remoteInput == null || pi == null) {
-                ConnectionService.forwardReplyResult(key, false, "no inline-reply action on this notification")
-                return
-            }
-            val intent = android.content.Intent()
-            val results = android.os.Bundle().apply { putCharSequence(remoteInput.resultKey, text) }
-            android.app.RemoteInput.addResultsToIntent(arrayOf(remoteInput), intent, results)
-            pi.send(this, 0, intent)
-            ConnectionService.forwardReplyResult(key, true, null)
-            DiagLog.log("notify", "inline reply sent for $key (${text.length} chars)")
+            if (fillAndFire(sbn, text)) {
+                ConnectionService.forwardReplyResult(key, true, null)
+                DiagLog.log("notify", "inline reply sent for $key (${text.length} chars)")
+            } else ConnectionService.forwardReplyResult(key, false, "no inline-reply action on this notification")
         } catch (e: Exception) {
             DiagLog.log("notify", "doReply($key) threw: $e")
             ConnectionService.forwardReplyResult(key, false, "send failed: ${e.message}")
         }
+    }
+
+    /** Fill a notification's free-form reply RemoteInput with `text` + fire its
+     *  PendingIntent. true on success. Free-form ONLY (a choice-list RemoteInput
+     *  would fill the wrong key with arbitrary text). Shared by 4a Notices-reply
+     *  and the 4b SMS RemoteInput-when-live path. */
+    private fun fillAndFire(sbn: StatusBarNotification, text: String): Boolean {
+        val action = findReplyAction(sbn.notification) ?: return false
+        val remoteInput = action.remoteInputs?.firstOrNull { it.allowFreeFormInput } ?: return false
+        val pi = action.actionIntent ?: return false
+        val intent = android.content.Intent()
+        val results = android.os.Bundle().apply { putCharSequence(remoteInput.resultKey, text) }
+        android.app.RemoteInput.addResultsToIntent(arrayOf(remoteInput), intent, results)
+        pi.send(this, 0, intent)
+        return true
+    }
+
+    /** Phase 4b (Adam 2026-06-18): prefer replying through the DEFAULT SMS app's
+     *  LIVE conversation notification (keeps an RCS thread on RCS) over SmsManager
+     *  (which downgrades to plain SMS). Matches the default-SMS package + an exact
+     *  contact-name title + a free-form RemoteInput, and ONLY on a single
+     *  unambiguous match — else false so the caller falls back to SmsManager. The
+     *  package restriction means it never mis-routes to another app (WhatsApp etc.). */
+    private fun doReplySmsThread(address: String, text: String): Boolean {
+        return try {
+            val pkg = android.provider.Telephony.Sms.getDefaultSmsPackage(this) ?: return false
+            val name = SmsProvider.resolveName(this, address).trim()
+            if (name.isEmpty()) return false
+            val matches = (activeNotifications ?: emptyArray()).filter { sbn ->
+                if (sbn.packageName != pkg) return@filter false
+                val title = sbn.notification.extras?.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString()?.trim() ?: ""
+                title.equals(name, ignoreCase = true) && findReplyAction(sbn.notification) != null
+            }
+            if (matches.size != 1) { DiagLog.log("sms", "RemoteInput: ${matches.size} live $pkg notif(s) match \"$name\" — using SmsManager"); return false }
+            val ok = fillAndFire(matches[0], text)
+            if (ok) DiagLog.log("sms", "replied to \"$name\" via the live notification (RCS-capable)")
+            ok
+        } catch (e: Exception) { DiagLog.log("sms", "RemoteInput reply failed → SmsManager: $e"); false }
     }
 
     companion object {
@@ -388,6 +414,10 @@ class NotifyListener : NotificationListenerService() {
             if (inst == null) { ConnectionService.forwardReplyResult(key, false, "no live notification listener — open the app once"); return }
             inst.doReply(key, text)
         }
+
+        /** Phase 4b: try the live-notification RemoteInput for an SMS thread; false
+         *  (no live listener / no match) → the caller uses SmsManager. */
+        fun replyToSmsThread(address: String, text: String): Boolean = live?.doReplySmsThread(address, text) ?: false
 
         /** Liveness: set in onListenerConnected, cleared on disconnect. */
         @Volatile

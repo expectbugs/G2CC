@@ -94,5 +94,39 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   console.error('  4. WM voice dispatch (butterscotch → window switch) ✓')
 }
 
+// ---------- 5. voice "read" OPENS the item, not just switches (Adam 2026-06-18) ----------
+{
+  const scenes = []
+  let wm
+  const ctx = {
+    send: (scene) => scenes.push(scene),
+    audio: () => {}, displayReload: () => {}, log: () => {},
+    pool: { count: 1 }, config: { claude: { model: 'opus', effort: 'max', defaultMode: 'bypassPermissions' } },
+    registerWatchdog: () => {}, unregisterWatchdog: () => {},
+    // scripted SMS provider: reply synchronously through the WM
+    requestSmsThreads: () => wm.onSmsThreads([
+      { id: 't1', name: 'Becky', address: '+15551234567', snippet: 'see you then', unread: false },
+      { id: 't2', name: 'Mom', address: '+15557654321', snippet: 'call me', unread: true },
+    ], 0, 2, null),
+    requestSmsThread: (id) => wm.onSmsThread(id, id === 't1' ? 'Becky' : 'Mom', '+15551234567', [{ from: 'them', text: 'see you then', ts: 0, mms: [] }], 0, 1, null),
+  }
+  wm = new WindowManager(ctx)
+  const mail = wm.windows.find((w) => w.id === 'mail')
+  mail.runMaildir = async (a) => a[0] === 'list'
+    ? JSON.stringify({ total: 1, unreadTotal: 0, rows: [{ key: 'NEW1', from: 'Boss', subject: 'newest', date: 0, unread: false }] })
+    : a[0] === 'read' ? JSON.stringify({ from: 'Boss <boss@co>', to: 'adam', subject: 'newest', date: 'd', body: 'hi', message_id: '<n@co>', images: [] })
+    : JSON.stringify({ key: a[2] })
+  wm.requestRender(); await sleep(40)
+  await wm.onVoiceCommand('butterscotch read first email'); await sleep(80)
+  assert.equal(mail.level, 'read', 'voice "read first email" OPENS the newest message (not just switches)')
+  assert.equal(mail.readKey, 'NEW1', 'opened the newest inbox key')
+  await wm.onVoiceCommand("butterscotch read becky's last text"); await sleep(80)
+  const sms = wm.windows.find((w) => w.id === 'sms')
+  assert.equal(sms.level, 'thread', 'voice "read X\'s last text" OPENS the matched thread')
+  assert.equal(sms.openName, 'Becky', 'matched + opened the named contact (not Mom)')
+  wm.dispose()
+  console.error('  5. voice read OPENS the item (mail newest + SMS by contact name) ✓')
+}
+
 console.log('phase9-voice: ALL OK')
 await getPool().end()
