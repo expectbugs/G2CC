@@ -105,6 +105,15 @@ file). **[U] ON-GLASS PENDING (install v1.14 from `/setup`):** keyboard types `/
 list, dictation runs, Reply-all (to self), out-for-delivery flash, shuffle (on Spotify etc.),
 ring-silences-on-pickup, SMS-reply-stays-RCS (the riskiest — verify no mis-route).
 
+**2026-06-18 r26 — Reader browses ~/books by SUBFOLDER + a root "Last" shortcut (server-only,
+APK stays v1.14, smoke 23/23):** Adam wanted to organize books into folders instead of one flat
+list (his ~/books already had a `Xanth/` folder the old flat list skipped). Small + server-only —
+`read_epub.py` is path-based and resume positions are keyed by full path, so only the
+`ReaderWindow` library level changed (modeled on Files): `cwd`-based folder browsing (`..`, `name/`
+rows, arbitrary nesting) + a root **`Last`** menu item (resumes the most-recently-read book;
+`getLastPosition()`). `BOOKS_DIR` is now `G2CC_BOOKS_DIR`-overridable (smoke sandbox). **[U] verify
+on glass:** descend a folder, `..` back, `Last` resumes.
+
 STILL UNIMPLEMENTED / FOLLOW-UPS: **Phase 16** (OBD — dongle on backorder); **Phase 9b** global
 always-on "butterscotch" stream + wake-word/VAD accuracy tuning (on real factory audio);
 **Phase 4b** MMS-read + New-to-a-fresh-contact; the DJI-handsfree VAD gate (int16-mono only today).
@@ -129,7 +138,7 @@ zero state). The phone is the BLE/WiFi bridge — and per **the prime directive*
 it stays in Adam's pocket, untouched, always. A small hat device (ESP32, on backorder) replaces
 the phone eventually; the DE is hat-ready by construction.
 
-## Where we are (2026-06-18, post r25 keyboard + audit-gap batch; APK v1.14)
+## Where we are (2026-06-18, post r25 audit-gap batch + r26 Reader subfolders; APK v1.14)
 
 The BLE wire format is fully decoded (`docs/G2_BLE_PROTOCOL.md`, authoritative); the
 window-manager DE is in daily use; and **the entire upgrades.md queue — server AND the five
@@ -185,7 +194,8 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
   `note: …` → ~/notes/glasses-inbox.md, else normal prompt) · **CC** (directory picker →
   session; Options cycles model/effort + History + New session; `Prompts` = quick
   prompts) · **Mail** (Maildir) · **Files** (locations → tree → preview/image viewer) ·
-  **Reader** (EPUBs in ~/books; resume-position) · **Timers** · **Calendar** (READ-ONLY
+  **Reader** (EPUBs in ~/books, browsable by SUBFOLDER + a root `Last` resume shortcut — r26;
+  resume-position) · **Timers** · **Calendar** (READ-ONLY
   agenda) · **Games** (rpg-cli dungeon @ /home/user + chess vs Stockfish) · **Notices**
   (notification history; reading marks seen; **MkAll** marks all + phone-dismisses) ·
   **Search** (dictate → mail/files/history/notes in parallel → tap hands off to Mail/Files

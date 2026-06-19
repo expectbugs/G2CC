@@ -32,6 +32,13 @@ export async function getPosition(bookPath: string): Promise<{ chapter: number; 
   return r.rowCount ? { chapter: r.rows[0].chapter, page: r.rows[0].page } : null
 }
 
+/** The most-recently-read book (for the Reader's root "Last" shortcut). */
+export async function getLastPosition(): Promise<{ bookPath: string; chapter: number; page: number } | null> {
+  const r = await query<{ book_path: string; chapter: number; page: number }>(
+    'SELECT book_path, chapter, page FROM reader_positions ORDER BY updated_at DESC LIMIT 1')
+  return r.rowCount ? { bookPath: r.rows[0].book_path, chapter: r.rows[0].chapter, page: r.rows[0].page } : null
+}
+
 function runEpub(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(PY, [EPUB_SCRIPT, ...args], { maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {

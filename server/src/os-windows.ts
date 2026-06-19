@@ -53,7 +53,7 @@ import {
   tmuxList, tmuxCapture, tmuxCaptureScrollback, tmuxSendKeys, tmuxSendLiteral, tmuxNewSession,
   renderTerminalImage, type TmuxSession,
 } from './tmux.js'
-import { savePosition, getPosition, listChapters, readChapter, type EpubChapter } from './reader.js'
+import { savePosition, getPosition, getLastPosition, listChapters, readChapter, type EpubChapter } from './reader.js'
 import { listUpcoming, getEvent } from './calendar.js'
 import { rpgRun, chessMove, chessPreview, renderBoard, DUNGEON_ROOT, type ChessState } from './games.js'
 import { moveToTrash, TRASH_DIR } from './trash.js'
@@ -4529,12 +4529,18 @@ class NoticesWindow implements OsWindow {
 
 // ============================================================ Reader window
 
-const BOOKS_DIR = '/home/user/books'   // Adam, gate A3.3 (lowercase)
+const BOOKS_DIR = process.env.G2CC_BOOKS_DIR || '/home/user/books'   // Adam, gate A3.3 (lowercase); env override = smoke sandbox (the G2CC_TMUX_SOCKET pattern)
+
+/** A library row: the `..` up-row, a subfolder, or a book (Adam 2026-06-18 —
+ *  ~/books is browsable by subdirectory now). */
+type LibCell = { t: 'up' } | { t: 'dir'; name: string } | { t: 'book'; name: string }
 
 /** EPUB reader (upgrades Phase 7) — replaces the EPUB→PDF→Teleprompt
- *  workflow. library (*.epub in ~/books) → chapters → read. RESUME POSITION
- *  IS THE FEATURE: tapping a book with a saved position drops straight back
- *  into the page; every page/chapter change persists fire-and-forget. All
+ *  workflow. library (folders + *.epub under ~/books) → chapters → read. RESUME
+ *  POSITION IS THE FEATURE: tapping a book with a saved position drops straight
+ *  back into the page; every page/chapter change persists fire-and-forget. The
+ *  library browses SUBDIRECTORIES (Adam 2026-06-18 — organize, don't scroll one
+ *  giant list); a root "Last" menu item resumes the most-recently-read book. All
  *  EPUB parsing runs in a read_epub.py subprocess (B4 — never in-process);
  *  a corrupt EPUB renders the Mail-pattern error page, never wedges. */
 class ReaderWindow implements OsWindow {
@@ -4544,7 +4550,9 @@ class ReaderWindow implements OsWindow {
   readonly category = 'Media' as const
   private level: 'library' | 'chapters' | 'read' = 'library'
   private libOffset = 0
-  private books: string[] = []
+  private cwd = ''   // current subfolder under ~/books ('' = root); navigation persists across switches
+  private lastBook: { path: string } | null = null   // the root "Last" shortcut target (most-recently-read)
+  private lastBookLoaded = false                      // lazy-load + invalidate guard for lastBook
   private bookPath: string | null = null
   private bookTitle = ''
   private chapters: EpubChapter[] = []
@@ -4567,7 +4575,7 @@ class ReaderWindow implements OsWindow {
     if (this.bookPath && this.level === 'read') {
       return `${oneLine(this.bookTitle, 18)} · ch${this.chapter + 1} p${this.page + 1}`
     }
-    return this.books.length ? `${this.books.length} books` : 'library'
+    return this.cwd ? `library · /${oneLine(this.cwd, 14)}` : 'library'
   }
 
   statusLine(): string | null { return this.voiceOn ? 'voice ▲' : null }
@@ -4581,9 +4589,74 @@ class ReaderWindow implements OsWindow {
     this.requestRender()
   }
 
-  private listBooks(): string[] {
-    // ~/books is small + local — a sync scan is fine (B4's readFileSync-class).
-    return readdirSync(BOOKS_DIR).filter((f) => /\.epub$/i.test(f)).sort()
+  private parentOf(rel: string): string { const i = rel.lastIndexOf('/'); return i < 0 ? '' : rel.slice(0, i) }
+
+  /** Subfolders + .epub files in `rel` (a path under ~/books). ~/books is small +
+   *  local — a sync scan is fine (B4's readFileSync-class). Refuses to list
+   *  outside ~/books (defence in depth; `cwd` is only ever built from listed
+   *  dirs + parentOf, so it can't escape — but a resolve-check is cheap). */
+  private listDir(rel: string): { dirs: string[]; epubs: string[] } {
+    const abs = resolvePath(BOOKS_DIR, rel)
+    if (abs !== BOOKS_DIR && !abs.startsWith(BOOKS_DIR + '/')) throw new Error(`refusing to list outside ~/books: '${rel}'`)
+    const ents = readdirSync(abs, { withFileTypes: true })
+    const dirs = ents.filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => e.name).sort()
+    const epubs = ents.filter((e) => e.isFile() && /\.epub$/i.test(e.name)).map((e) => e.name).sort()
+    return { dirs, epubs }
+  }
+
+  /** The library rows for the current `cwd` + a parallel cell map (so view() and
+   *  onBrowseSelect resolve identical indices). `..` first (off root), then
+   *  folders (`name/`), then books. */
+  private libRows(): { items: string[]; cells: LibCell[] } {
+    const { dirs, epubs } = this.listDir(this.cwd)
+    const items: string[] = []
+    const cells: LibCell[] = []
+    if (this.cwd !== '') { items.push('..'); cells.push({ t: 'up' }) }
+    for (const d of dirs) { items.push(`${d}/`); cells.push({ t: 'dir', name: d }) }
+    for (const e of epubs) { items.push(e); cells.push({ t: 'book', name: e }) }
+    return { items, cells }
+  }
+
+  /** The most-recently-read book, if it still exists on disk (the root "Last"
+   *  shortcut). Cached + lazily (re)loaded via lastBookLoaded. */
+  private async loadLast(): Promise<{ path: string } | null> {
+    try {
+      const pos = await getLastPosition()
+      return pos && existsSync(pos.bookPath) ? { path: pos.bookPath } : null
+    } catch (e) { this.ctx.log(`[reader] last-read load failed: ${(e as Error).message}`); return null }
+  }
+
+  /** Open a book by absolute path: list chapters, resume the saved position (THE
+   *  feature) or land on the chapter list; a corrupt EPUB renders the error page.
+   *  Shared by a library tap and the root "Last" shortcut. */
+  private async openBook(path: string): Promise<void> {
+    this.bookPath = path
+    this.lastBookLoaded = false   // this read becomes the new "Last"
+    const name = basename(path)
+    try {
+      const meta = await listChapters(path)
+      this.bookTitle = meta.title
+      this.chapters = meta.chapters
+      this.chapOffset = 0
+      let pos: { chapter: number; page: number } | null = null
+      try { pos = await getPosition(path) } catch (e) { this.ctx.log(`[reader] position load failed (resuming at the chapter list): ${(e as Error).message}`) }
+      if (pos && pos.chapter >= 0 && pos.chapter < this.chapters.length) {
+        this.ctx.log(`[reader] resuming ${name} at ch${pos.chapter + 1} p${pos.page + 1}`)
+        await this.openChapter(pos.chapter, pos.page)
+      } else {
+        this.level = 'chapters'
+      }
+    } catch (e) {
+      this.ctx.log(`[reader] open ${name} failed: ${(e as Error).message}`)
+      this.bookTitle = name
+      this.chapters = []
+      this.pages = paginateText(`ERROR opening ${name}:\n\n${(e as Error).message}`)
+      this.page = 0
+      this.chapterTitle = '(error)'
+      this.level = 'read'
+    }
+    this.focus = 'content'
+    this.requestRender()
   }
 
   /** Persist the resume position — fire-and-forget, loud on failure (B3).
@@ -4646,62 +4719,42 @@ class ReaderWindow implements OsWindow {
         items: paged.items.length ? paged.items : ['(no chapters found)'],
       }
     }
-    // library
+    // library (folders + books, browsable by subdirectory)
+    let rows: { items: string[]; cells: LibCell[] }
     try {
-      this.books = this.listBooks()
+      rows = this.libRows()
     } catch (e) {
-      return errorView('Reader · error', `cannot list ${BOOKS_DIR}: ${(e as Error).message}`)
+      return errorView('Reader · error', `cannot list ${join(BOOKS_DIR, this.cwd)}: ${(e as Error).message}`)
     }
-    const paged = browsePageItems(this.books, this.libOffset)
+    const atRoot = this.cwd === ''
+    if (atRoot && !this.lastBookLoaded) { this.lastBook = await this.loadLast(); this.lastBookLoaded = true }
+    const nBooks = rows.cells.filter((c) => c.t === 'book').length
+    const where = atRoot ? `${nBooks} book${nBooks === 1 ? '' : 's'}` : `/${this.cwd}`
+    const paged = browsePageItems(rows.items, this.libOffset)
+    const placeholder = atRoot ? `(drop .epub files or folders in ${BOOKS_DIR})` : '(empty — no books or folders here)'
     return {
       mode: 'browse',
       menuMode: this.focus === 'menu' ? 'capture' : 'passive',
-      title: `Reader · ${this.books.length} book${this.books.length === 1 ? '' : 's'}`,
-      menu: ['Reload', 'Main'],
-      items: paged.items.length ? paged.items : [`(drop .epub files in ${BOOKS_DIR})`],
+      title: `Reader · ${oneLine(where, 26)}`,
+      // root-only "Last" resumes the most-recently-read book (named for the menu width — Adam).
+      menu: atRoot && this.lastBook ? ['Last', 'Reload', 'Main'] : ['Reload', 'Main'],
+      items: paged.items.length ? paged.items : [placeholder],
     }
   }
 
   async onBrowseSelect(index: number): Promise<void> {
     if (this.level === 'library') {
-      const { map, prevOffset, nextOffset } = browsePageItems(this.books, this.libOffset)
+      const { items, cells } = this.libRows()
+      const { map, prevOffset, nextOffset } = browsePageItems(items, this.libOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[os] reader: library index ${index} out of range`); return }
       if (m === -1) { this.libOffset = prevOffset; this.requestRender(); return }
       if (m === -2) { this.libOffset = nextOffset; this.requestRender(); return }
-      const book = this.books[m]
-      if (!book) { this.ctx.log(`[os] reader: no book at ${m} — resyncing`); this.requestRender(); return }
-      this.bookPath = join(BOOKS_DIR, book)
-      try {
-        const meta = await listChapters(this.bookPath)
-        this.bookTitle = meta.title
-        this.chapters = meta.chapters
-        this.chapOffset = 0
-        // THE feature: a saved position resumes straight into the page.
-        let pos: { chapter: number; page: number } | null = null
-        try {
-          pos = await getPosition(this.bookPath)
-        } catch (e) {
-          this.ctx.log(`[reader] position load failed (resuming at the chapter list): ${(e as Error).message}`)
-        }
-        if (pos && pos.chapter >= 0 && pos.chapter < this.chapters.length) {
-          this.ctx.log(`[reader] resuming ${book} at ch${pos.chapter + 1} p${pos.page + 1}`)
-          await this.openChapter(pos.chapter, pos.page)
-        } else {
-          this.level = 'chapters'
-        }
-      } catch (e) {
-        // Corrupt/unreadable EPUB → the read-level error page (Mail pattern).
-        this.ctx.log(`[reader] open ${book} failed: ${(e as Error).message}`)
-        this.bookTitle = book
-        this.chapters = []
-        this.pages = paginateText(`ERROR opening ${book}:\n\n${(e as Error).message}`)
-        this.page = 0
-        this.chapterTitle = '(error)'
-        this.level = 'read'
-      }
-      this.focus = 'content'
-      this.requestRender()
+      const cell = cells[m]
+      if (!cell) { this.ctx.log(`[os] reader: no library row at ${m} — resyncing`); this.requestRender(); return }
+      if (cell.t === 'up') { this.cwd = this.parentOf(this.cwd); this.libOffset = 0; this.lastBookLoaded = false; this.requestRender(); return }
+      if (cell.t === 'dir') { this.cwd = this.cwd ? `${this.cwd}/${cell.name}` : cell.name; this.libOffset = 0; this.lastBookLoaded = false; this.requestRender(); return }
+      await this.openBook(join(BOOKS_DIR, this.cwd, cell.name))   // book — openBook sets focus + renders
       return
     }
     if (this.level === 'chapters') {
@@ -4722,6 +4775,12 @@ class ReaderWindow implements OsWindow {
   }
 
   async onMenuSelect(label: string): Promise<void> {
+    if (this.level === 'library' && label === 'Last') {   // root shortcut → resume the most-recently-read book
+      const lb = this.lastBook
+      if (!lb) { this.ctx.log('[reader] Last with no last-read book — ignored'); return }
+      await this.openBook(lb.path)
+      return
+    }
     if (this.level !== 'read') { this.ctx.log(`[os] reader: menu '${label}' outside read level — ignored`); return }
     switch (label) {
       case 'Next': {
@@ -4755,12 +4814,14 @@ class ReaderWindow implements OsWindow {
 
   async onReload(): Promise<void> {
     this.setVoice(false)   // unstick a wedged handsfree mic
+    this.lastBookLoaded = false   // re-query the "Last" shortcut
     this.focus = 'content'
   }
 
   /** Mic must not outlive focus — stop voice-paging on window switch. */
   onDeactivate(): void {
     if (this.voiceOn) { this.voiceOn = false; this.ctx.audio('stop'); this.ctx.log('[reader] voice-paging OFF (window switch)') }
+    this.lastBookLoaded = false   // refresh "Last" on the next library visit
   }
 
   async onBack(): Promise<boolean> {

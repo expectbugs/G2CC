@@ -4,6 +4,36 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-18 r26 — **Reader: browse ~/books by SUBFOLDER + a root "Last" shortcut (server-only, no APK)**
+
+Adam: organize books into subfolders instead of one giant flat list. (His ~/books already
+had a `Xanth/` folder the old flat `listBooks` silently skipped — it filtered to top-level
+`.epub` only.) Turned out small + server-only — every downstream piece was already
+path-agnostic: `read_epub.py` is path-based (never enumerated ~/books), resume positions are
+keyed by the **full book path** (so subfolder books get distinct positions for free), and the
+chapters/read levels work off `bookPath`. The whole change is the `ReaderWindow` library level,
+modeled on the Files window's folder navigation.
+
+- **Subfolder browsing.** `listBooks()` → `listDir(cwd)` returning `{dirs, epubs}`; the library
+  shows `..` (off root) + folders (`name/`) + books, arbitrary nesting via a `cwd`. Tap a folder
+  to descend, `..` to go up; navigation persists across window switches. A resolve-check refuses
+  to list outside ~/books (defence in depth — `cwd` is only built from listed dirs anyway).
+- **Root "Last" shortcut.** A `Last` menu item (named for the narrow left-menu width — Adam's
+  call vs "Continue") appears at the library ROOT when a book has a saved position; it resumes
+  the most-recently-read book regardless of which folder it's in (`getLastPosition()` =
+  `reader_positions ORDER BY updated_at DESC LIMIT 1`, existence-checked). Lazily loaded +
+  invalidated on read/reload/switch.
+- Refactor: the book-open logic (list chapters → resume saved position or land on the chapter
+  list → error page on a corrupt EPUB) extracted to `openBook(path)`, shared by a library tap
+  and the Last shortcut. `BOOKS_DIR` is now `process.env.G2CC_BOOKS_DIR || '/home/user/books'`
+  (the G2CC_TMUX_SOCKET test-isolation pattern — the smoke drives a /tmp sandbox).
+
+smoke `phase7-reader` extended (§5): a sandbox tree (root book + `Sci-Fi/Nested.epub`) — root
+lists the folder + book, descend shows `..` + the nested book, `..` returns to root, tapping a
+book opens it, and after a saved position the root `Last` appears + resumes the right book; plus
+a `getLastPosition` round-trip. Suite **23/23**. **[U] on glass:** navigate into a folder, back
+out with `..`, and tap `Last` to resume.
+
 ## (unstamped) — 2026-06-18 r25 — **Terminal keyboard + slash-list + dictation-runs; an upgrades.md AUDIT that found 4 SILENT gaps (Reply-all, out-for-delivery flash, real shuffle, voice read-the-item) + 2 minor; all fixed (server + APK v1.14)**
 
 Adam asked whether a full on-screen keyboard for the Terminal was ever planned — it WAS (upgrades.md Phase 5: "the on-screen keyboard level last … slow-ass by design, the fallback") but shipped only as quick-keys + dictation, **never built, never flagged**. He couldn't type a slash command (`/clear`) at all: quick-keys have no letters/`/`, and dictation sends the literal transcript (ASR can't emit `/`). So he had me **audit all 19 phases for OTHER silent drops before building** — and there were more.
