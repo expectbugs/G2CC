@@ -4,6 +4,44 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-25 r27 — **Reader: loss-proof your place + a Jump-to-page numpad (server-only, no APK)**
+
+Adam: "it is WAY too easy to accidentally lose my place — some double-tapping or choosing the
+wrong chapter and poof I'm a thousand pages back, tapping Next for an hour." Root cause (one
+line): the reader kept **one** saved position per book (`reader_positions`), and tapping a
+chapter ran `openChapter(idx, 0)` which **immediately persisted page 0** — one stray tap
+overwrote your real spot with *no record it ever existed*. Double-tap (back) drops you onto that
+hair-trigger chapter list, so a follow-up stray tap was the usual way it happened. Fix =
+defence-in-depth so loss is both **gated** and **reversible**, plus the absolute-page Jump he
+asked for. All server-side; the APK renders it unchanged (menus/lists/text it already draws).
+
+- **Undo / position history (the safety net).** New `reader_history` bounded stack (25 deep, per
+  full book path). Every non-sequential move — chapter pick, numpad jump, bookmark/recent tap —
+  pushes the FROM spot FIRST, so an `Undo` (`↩ p.1024`, shown on the read menu whenever history
+  exists) is always one tap back. Retroactively rescues *every* drift path (wrong chapter, mistyped
+  jump, a voice mishear), not just the gated ones.
+- **Chapter/jump picks are GATED by a Cancel-first Confirm.** A chapter tap no longer jumps — it
+  stages `Go to Ch 3 "…"? · Cancel / Confirm` (Cancel at **index 0** so a double-fire's second tap
+  cancels, never commits). The saved position is untouched until Confirm; Confirm pushes Undo
+  history first. Same gate shows the *resolved* target for a numpad jump, so a mistyped 1024-vs-124
+  is caught before it moves you.
+- **Jump to an ABSOLUTE page (numpad).** New `read_epub.py pages` (one parse → every chapter's
+  text) → the server paginates each with the SAME `paginateText` reading uses → a cached
+  per-book page-count vector (`reader_pagemaps`, keyed by a `size:mtime` fingerprint so a
+  re-exported epub re-indexes). The read title now shows `p.1024 / 6365 · 31%`; a `Jump` numpad
+  (`0–9 ⌫ Go Cancel`, one browse page) types a buffer shown in the title; out-of-range is rejected
+  LOUD (no silent clamp). Built in the background on open (Jump is instant); "indexing…" if tapped
+  first. Moby Dick = 6365 pages; all 6365 round-trip exactly (`phase7b` smoke).
+- **Bookmarks + recent-spots breadcrumbs.** `Mark` drops a named anchor (auto-label = the page's
+  first line; re-Mark of the same page relabels, no dupes); `Bookmarks` lists them in reading order
+  (tap → gate, with `Delete`); `Recent` browses the undo trail. Both jump through the same gate.
+- **No silent save loss.** A failed `savePosition` now flips a `⚠ unsaved` status-line flag
+  (cleared on the next good save) instead of only logging — B3 loud-and-proud.
+- **Smoke:** `phase7b-reader-loss.mjs` drives the real `ReaderWindow` through all of it (gate
+  loses nothing on Cancel; Confirm persists + is Undoable; numpad jump + out-of-range reject;
+  bookmarks; recent; double-tapping up the levels moves nothing; ⚠ indicator). 24-phase suite green
+  bar the pre-existing `phase10-calendar` OAuth-subprocess dependency.
+
 ## (unstamped) — 2026-06-18 r26 — **Reader: browse ~/books by SUBFOLDER + a root "Last" shortcut (server-only, no APK)**
 
 Adam: organize books into subfolders instead of one giant flat list. (His ~/books already

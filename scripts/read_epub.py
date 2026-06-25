@@ -13,6 +13,11 @@ Usage:
       -> JSON {"title": str, "chapters": [{"idx": int, "title": str}]}
   read_epub.py read <book.epub> <idx>
       -> JSON {"title": str, "chapterTitle": str, "text": str}   (NO truncation)
+  read_epub.py pages <book.epub>
+      -> JSON {"title": str, "chapters": [{"idx": int, "title": str, "text": str}]}
+      EVERY chapter's text in ONE parse (the server paginates each → the
+      absolute whole-book page map). Same text the per-chapter `read` returns,
+      so page counts match what reading shows.   (NO truncation)
 """
 import html.parser
 import io
@@ -137,14 +142,31 @@ def cmd_read(path, idx):
     }))
 
 
+def cmd_pages(path):
+    book = epub.read_epub(path)
+    titles = toc_titles(book)
+    chapters = []
+    for i, item in enumerate(spine_documents(book)):
+        title = titles.get(item.get_name()) or f"Section {i + 1}"
+        text = html_to_text(item.get_content().decode("utf-8", errors="replace"))
+        chapters.append({
+            "idx": i,
+            "title": " ".join(title.split()),
+            "text": text or "(this section has no text)",  # same placeholder as cmd_read → counts match
+        })
+    print(json.dumps({"title": book_title(book), "chapters": chapters}))
+
+
 def main():
     if len(sys.argv) < 3:
-        raise ValueError("usage: read_epub.py list <book.epub> | read <book.epub> <idx>")
+        raise ValueError("usage: read_epub.py list|pages <book.epub> | read <book.epub> <idx>")
     cmd, path = sys.argv[1], sys.argv[2]
     if cmd == "list":
         cmd_list(path)
     elif cmd == "read":
         cmd_read(path, int(sys.argv[3]))
+    elif cmd == "pages":
+        cmd_pages(path)
     else:
         raise ValueError(f"unknown command '{cmd}'")
 

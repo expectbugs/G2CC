@@ -53,7 +53,13 @@ import {
   tmuxList, tmuxCapture, tmuxCaptureScrollback, tmuxSendKeys, tmuxSendLiteral, tmuxNewSession,
   renderTerminalImage, type TmuxSession,
 } from './tmux.js'
-import { savePosition, getPosition, getLastPosition, listChapters, readChapter, type EpubChapter } from './reader.js'
+import {
+  savePosition, getPosition, getLastPosition, listChapters, readChapter,
+  pushHistory, popHistory, peekHistory, listHistory,
+  addBookmark, listBookmarks, deleteBookmark,
+  buildPageMap, globalToLocal, localToGlobal,
+  type EpubChapter, type PageMap, type ReaderMark,
+} from './reader.js'
 import { listUpcoming, getEvent } from './calendar.js'
 import { rpgRun, chessMove, chessPreview, renderBoard, DUNGEON_ROOT, type ChessState } from './games.js'
 import { moveToTrash, TRASH_DIR } from './trash.js'
@@ -4535,6 +4541,14 @@ const BOOKS_DIR = process.env.G2CC_BOOKS_DIR || '/home/user/books'   // Adam, ga
  *  ~/books is browsable by subdirectory now). */
 type LibCell = { t: 'up' } | { t: 'dir'; name: string } | { t: 'book'; name: string }
 
+/** The Jump numpad (one browse page — 13 rows ≤ BROWSE_PAGE). Digits append to a
+ *  buffer shown in the title; Go routes through the Cancel-first Confirm so a
+ *  mistyped page is caught before it commits. Single-level (not group→char like
+ *  the Terminal keyboard) — the ring stays put, so repeated digits are free. */
+const JUMP_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '⌫', 'Go', 'Cancel'] as const
+/** Recent-spots depth shown in the breadcrumb list (the undo trail). */
+const RECENT_VIEW = 20
+
 /** EPUB reader (upgrades Phase 7) — replaces the EPUB→PDF→Teleprompt
  *  workflow. library (folders + *.epub under ~/books) → chapters → read. RESUME
  *  POSITION IS THE FEATURE: tapping a book with a saved position drops straight
@@ -4548,7 +4562,9 @@ class ReaderWindow implements OsWindow {
   readonly tab = 'Reader'
   readonly label = 'Reader'
   readonly category = 'Media' as const
-  private level: 'library' | 'chapters' | 'read' = 'library'
+  // 'confirm' = the Cancel-first jump gate; 'jump' = the numpad; 'marks' = the
+  // bookmarks OR recent-spots browse list (markKind picks which).
+  private level: 'library' | 'chapters' | 'read' | 'confirm' | 'jump' | 'marks' = 'library'
   private libOffset = 0
   private cwd = ''   // current subfolder under ~/books ('' = root); navigation persists across switches
   private lastBook: { path: string } | null = null   // the root "Last" shortcut target (most-recently-read)
@@ -4569,16 +4585,47 @@ class ReaderWindow implements OsWindow {
    *  "next"/"back". The WM reads this to gate the 9a grammar. */
   voiceOn = false
 
+  // ---- loss-proofing + Jump (2026-06-25) ----
+  /** The ABSOLUTE whole-book page map (per-chapter page counts → cumulative).
+   *  Built in the background on open; drives the Jump numpad + the p.G/T · %
+   *  display. null until ready; pending = building. */
+  private pageMap: PageMap | null = null
+  private pageMapPending = false
+  /** Cached top of the undo stack — labels the read-menu Undo row without a
+   *  per-render query. Refreshed on open + after every push/pop. */
+  private undoTop: { chapter: number; page: number } | null = null
+  /** A jump awaiting Confirm (chapter pick / numpad Go / bookmark / recent tap).
+   *  Nothing moves until Confirm; Cancel returns to `ret`. */
+  private pendingNav: { chapter: number; page: number; prompt: string; ret: 'read' | 'chapters' | 'jump' | 'marks'; bookmarkId?: number } | null = null
+  private jumpBuf = ''
+  private jumpError: string | null = null
+  /** The bookmarks/recent list currently being browsed (cached on entry so
+   *  view() and onBrowseSelect resolve identical indices — the libRows pattern). */
+  private markList: ReaderMark[] = []
+  private markKind: 'bookmarks' | 'recent' = 'bookmarks'
+  private markOffset = 0
+  /** Transient "✓ marked" title note, cleared on the next page/level change. */
+  private markedNote = false
+  /** A position save FAILED (DB down) — surfaced LOUD in the status line so a
+   *  silent loss of recent progress can't happen unnoticed (B3). */
+  private saveFailed = false
+
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
   summary(): string {
     if (this.bookPath && this.level === 'read') {
-      return `${oneLine(this.bookTitle, 18)} · ch${this.chapter + 1} p${this.page + 1}`
+      const where = this.pageMap && this.pageMap.total > 0
+        ? `p.${localToGlobal(this.pageMap.counts, this.chapter, this.page)}/${this.pageMap.total}`
+        : `ch${this.chapter + 1} p${this.page + 1}`
+      return `${oneLine(this.bookTitle, 16)} · ${where}`
     }
     return this.cwd ? `library · /${oneLine(this.cwd, 14)}` : 'library'
   }
 
-  statusLine(): string | null { return this.voiceOn ? 'voice ▲' : null }
+  statusLine(): string | null {
+    if (this.saveFailed) return '⚠ unsaved'
+    return this.voiceOn ? 'voice ▲' : null
+  }
 
   /** Toggle handsfree voice-paging (Phase 9a). Starts/stops the continuous mic. */
   private setVoice(on: boolean): void {
@@ -4632,12 +4679,19 @@ class ReaderWindow implements OsWindow {
   private async openBook(path: string): Promise<void> {
     this.bookPath = path
     this.lastBookLoaded = false   // this read becomes the new "Last"
+    this.pageMap = null           // book changed — drop the old absolute map
+    this.pageMapPending = false
+    this.jumpBuf = ''
+    this.jumpError = null
+    this.markedNote = false
     const name = basename(path)
     try {
       const meta = await listChapters(path)
       this.bookTitle = meta.title
       this.chapters = meta.chapters
       this.chapOffset = 0
+      this.ensurePageMap()          // background: absolute page numbers + Jump readiness
+      await this.refreshUndoTop()   // this book's undo trail (per full path)
       let pos: { chapter: number; page: number } | null = null
       try { pos = await getPosition(path) } catch (e) { this.ctx.log(`[reader] position load failed (resuming at the chapter list): ${(e as Error).message}`) }
       if (pos && pos.chapter >= 0 && pos.chapter < this.chapters.length) {
@@ -4672,8 +4726,102 @@ class ReaderWindow implements OsWindow {
     const page = this.page
     this.persistChain = this.persistChain
       .then(() => savePosition(p, chapter, page))
-      .catch((e: unknown) =>
-        this.ctx.log(`[reader] position save failed (${basename(p)}): ${e instanceof Error ? e.message : String(e)}`))
+      .then(() => { if (this.saveFailed) { this.saveFailed = false; this.requestRender() } })   // recovered — clear the ⚠
+      .catch((e: unknown) => {
+        this.saveFailed = true   // LOUD: the status line shows ⚠ unsaved until a save succeeds
+        this.ctx.log(`[reader] position save failed (${basename(p)}): ${e instanceof Error ? e.message : String(e)}`)
+        this.requestRender()
+      })
+  }
+
+  /** Build the absolute page map in the background (don't block the first page).
+   *  Idempotent; a book switch mid-build discards the stale result. */
+  private ensurePageMap(): void {
+    if (this.pageMap || this.pageMapPending || !this.bookPath) return
+    const p = this.bookPath
+    this.pageMapPending = true
+    buildPageMap(p)
+      .then((m) => { if (this.bookPath === p) { this.pageMap = m; this.pageMapPending = false; this.requestRender() } })
+      .catch((e: unknown) => {
+        if (this.bookPath === p) { this.pageMapPending = false; this.requestRender() }
+        this.ctx.log(`[reader] page-map build failed (${basename(p)}): ${e instanceof Error ? e.message : String(e)}`)
+      })
+  }
+
+  private async refreshUndoTop(): Promise<void> {
+    try { this.undoTop = this.bookPath ? await peekHistory(this.bookPath) : null }
+    catch (e) { this.ctx.log(`[reader] history peek failed: ${(e as Error).message}`); this.undoTop = null }
+  }
+
+  /** A short label for the page you're LEAVING — its first non-empty line. Used
+   *  for history/bookmark rows so "recent spots" reads like real places. */
+  private currentLabel(): string {
+    const first = (this.pages[this.page] ?? '').split('\n').map((s) => s.trim()).find(Boolean) ?? ''
+    return oneLine(first, 40)
+  }
+
+  /** THE one navigation primitive. `pushFrom` records where you ARE (the current
+   *  saved spot) onto the undo stack BEFORE moving — so every jump is reversible.
+   *  Undo passes pushFrom=false (it just popped). */
+  private async navigate(chapter: number, page: number, pushFrom: boolean): Promise<void> {
+    if (pushFrom && this.bookPath) {
+      try { await pushHistory(this.bookPath, this.chapter, this.page, this.currentLabel()) }
+      catch (e) { this.ctx.log(`[reader] history push failed: ${(e as Error).message}`) }
+    }
+    await this.openChapter(chapter, page)   // sets level='read' + persists the new spot
+    await this.refreshUndoTop()
+    this.markedNote = false
+    this.jumpBuf = ''
+    this.jumpError = null
+    this.focus = 'content'
+    this.requestRender()
+  }
+
+  /** The read-level action menu. Next/Prev stay at index 0/1 (stable for
+   *  tap-tap-tap paging); Undo appears only with history (labeled with where it
+   *  sends you); the destructive nothing — every item is reversible. */
+  private readMenu(): string[] {
+    const m = ['Next', 'Prev', 'Jump', 'Mark', 'Bookmarks', 'Recent']
+    if (this.undoTop) {
+      const lbl = this.pageMap && this.pageMap.total > 0
+        ? `↩ p.${localToGlobal(this.pageMap.counts, this.undoTop.chapter, this.undoTop.page)}`
+        : '↩ Undo'
+      m.push(lbl)
+    }
+    m.push(this.voiceOn ? 'Voice off' : 'Voice on', 'Back', 'Reload', 'Main')
+    return m
+  }
+
+  /** Labels for the bookmarks/recent list — recomputed identically by view() and
+   *  onBrowseSelect (the libRows pattern; markList is the stable backing array). */
+  private markLabels(): string[] {
+    return this.markList.map((mk) => {
+      const where = this.pageMap && this.pageMap.total > 0
+        ? `p.${localToGlobal(this.pageMap.counts, mk.chapter, mk.page)}`
+        : `ch${mk.chapter + 1} p${mk.page + 1}`
+      const desc = mk.label || this.chapters[mk.chapter]?.title || ''
+      return desc ? `${where} · ${oneLine(desc, 26)}` : where
+    })
+  }
+
+  /** Validate the numpad buffer against the absolute total → stage a Confirm, or
+   *  reject LOUDLY in the title (NO silent clamp of a typed page). */
+  private submitJump(): void {
+    if (!this.pageMap || this.pageMap.total <= 0) {
+      this.jumpError = this.pageMapPending ? 'still indexing…' : 'no page map'
+      this.ensurePageMap()
+      this.requestRender()
+      return
+    }
+    const g = parseInt(this.jumpBuf, 10)
+    if (!this.jumpBuf || isNaN(g) || g < 1) { this.jumpError = 'enter a page ≥ 1'; this.requestRender(); return }
+    if (g > this.pageMap.total) { this.jumpError = `max is ${this.pageMap.total}`; this.requestRender(); return }
+    const loc = globalToLocal(this.pageMap.counts, g)
+    const title = oneLine(this.chapters[loc.chapter]?.title ?? `Section ${loc.chapter + 1}`, 24)
+    this.pendingNav = { chapter: loc.chapter, page: loc.page, prompt: `Jump to page ${g} · Ch ${loc.chapter + 1} "${title}"`, ret: 'jump' }
+    this.level = 'confirm'
+    this.jumpError = null
+    this.requestRender()
   }
 
   /** Load chapter `idx` and land on `page` (-1 = last page — Prev across a
@@ -4700,12 +4848,62 @@ class ReaderWindow implements OsWindow {
 
   async view(): Promise<WinView> {
     if (this.level === 'read') {
-      const pageSuffix = ` · ${this.page + 1}/${this.pages.length}`
+      // Absolute whole-book page + progress % once the map is ready; per-chapter
+      // p/N (with a '…' indexing hint) until then. The note rides between the
+      // chapter title and the page tail so the firmware middle-clamp keeps both.
+      let pageSuffix = ` · ${this.page + 1}/${this.pages.length}`
+      if (this.pageMap && this.pageMap.total > 0) {
+        const g = localToGlobal(this.pageMap.counts, this.chapter, this.page)
+        pageSuffix = ` · p.${g}/${this.pageMap.total} · ${Math.round((g / this.pageMap.total) * 100)}%`
+      } else if (this.pageMapPending) {
+        pageSuffix = ` · ${this.page + 1}/${this.pages.length} · …`
+      }
+      const note = this.markedNote ? ' ✓ marked' : ''
       return {
         mode: 'text',
-        title: `${oneLine(this.bookTitle, 16)} · ${oneLine(this.chapterTitle, 14)}${pageSuffix}`,
-        menu: ['Next', 'Prev', this.voiceOn ? 'Voice off' : 'Voice on', 'Back', 'Reload', 'Main'],
+        title: `${oneLine(this.bookTitle, 16)} · ${oneLine(this.chapterTitle, 12)}${note}${pageSuffix}`,
+        menu: this.readMenu(),
         text: this.pages[this.page] ?? '',
+      }
+    }
+    if (this.level === 'confirm' && this.pendingNav) {
+      const nav = this.pendingNav
+      const from = this.pageMap && this.pageMap.total > 0
+        ? `You're on page ${localToGlobal(this.pageMap.counts, this.chapter, this.page)} of ${this.pageMap.total}.`
+        : `You're at Ch ${this.chapter + 1}, p.${this.page + 1}.`
+      const menu = ['Cancel', 'Confirm']            // Cancel FIRST — a stray/double-fire tap lands here, never on a jump
+      if (nav.bookmarkId) menu.push('Delete')
+      menu.push('Reload', 'Main')
+      return {
+        mode: 'text',
+        title: 'Reader · confirm jump',
+        menu,
+        text: `${nav.prompt}\n\n${from}\n\nConfirm to go there. Cancel to stay put.\nEither way your place is safe — Undo is always on the read menu.`,
+      }
+    }
+    if (this.level === 'jump') {
+      const total = this.pageMap?.total
+      const head = total
+        ? `Jump → p.${this.jumpBuf || '_'} / ${total}`
+        : this.pageMapPending ? 'Jump → indexing pages…' : 'Jump → page map unavailable'
+      return {
+        mode: 'browse',
+        menuMode: this.focus === 'menu' ? 'capture' : 'passive',
+        title: `Reader · ${oneLine(this.jumpError ? `${head} · ${this.jumpError}` : head, 40)}`,
+        menu: ['Reload', 'Main'],
+        items: [...JUMP_KEYS],
+      }
+    }
+    if (this.level === 'marks') {
+      const labels = this.markLabels()
+      const paged = browsePageItems(labels, this.markOffset)
+      const empty = this.markKind === 'bookmarks' ? '(no bookmarks — Mark a page)' : '(no recent spots yet)'
+      return {
+        mode: 'browse',
+        menuMode: this.focus === 'menu' ? 'capture' : 'passive',
+        title: `Reader · ${this.markKind === 'bookmarks' ? 'bookmarks' : 'recent spots'} · ${this.markList.length}`,
+        menu: ['Reload', 'Main'],
+        items: paged.items.length ? paged.items : [empty],
       }
     }
     if (this.level === 'chapters' && this.bookPath) {
@@ -4766,12 +4964,56 @@ class ReaderWindow implements OsWindow {
       if (m === -2) { this.chapOffset = nextOffset; this.requestRender(); return }
       const c = this.chapters[m]
       if (!c) { this.ctx.log(`[os] reader: no chapter at ${m} — resyncing`); this.requestRender(); return }
-      await this.openChapter(c.idx, 0)
-      this.focus = 'content'
+      // NO instant jump (that used to persist page 0 over your real spot). Stage
+      // a Cancel-first Confirm instead — undoable even if confirmed.
+      this.pendingNav = { chapter: c.idx, page: 0, prompt: `Go to Ch ${c.idx + 1} · "${oneLine(c.title, 28)}"`, ret: 'chapters' }
+      this.level = 'confirm'
       this.requestRender()
       return
     }
-    this.ctx.log(`[os] reader: browse select ${index} at read level — ignored`)
+    if (this.level === 'jump') {
+      const key = JUMP_KEYS[index]
+      if (key === undefined) { this.ctx.log(`[os] reader: jump key ${index} out of range — resyncing`); this.requestRender(); return }
+      if (/^[0-9]$/.test(key)) {
+        if (this.jumpBuf.length < 7) this.jumpBuf += key   // 7 digits = up to 9,999,999 pages — no real book overflows it
+        this.jumpError = null
+        this.requestRender()
+      } else if (key === '⌫') {
+        this.jumpBuf = this.jumpBuf.slice(0, -1)
+        this.jumpError = null
+        this.requestRender()
+      } else if (key === 'Go') {
+        this.submitJump()
+      } else if (key === 'Cancel') {
+        this.jumpBuf = ''
+        this.jumpError = null
+        this.level = 'read'
+        this.requestRender()
+      }
+      return
+    }
+    if (this.level === 'marks') {
+      const labels = this.markLabels()
+      const { map, prevOffset, nextOffset } = browsePageItems(labels, this.markOffset)
+      const m = map[index]
+      if (m === undefined) { this.ctx.log(`[os] reader: ${this.markKind} index ${index} out of range`); return }
+      if (m === -1) { this.markOffset = prevOffset; this.requestRender(); return }
+      if (m === -2) { this.markOffset = nextOffset; this.requestRender(); return }
+      const mk = this.markList[m]
+      if (!mk) { this.ctx.log(`[os] reader: no ${this.markKind} at ${m} — resyncing`); this.requestRender(); return }
+      const g = this.pageMap && this.pageMap.total > 0 ? localToGlobal(this.pageMap.counts, mk.chapter, mk.page) : null
+      const title = oneLine(this.chapters[mk.chapter]?.title ?? `Section ${mk.chapter + 1}`, 22)
+      this.pendingNav = {
+        chapter: mk.chapter, page: mk.page,
+        prompt: g ? `Go to page ${g} · Ch ${mk.chapter + 1} "${title}"` : `Go to Ch ${mk.chapter + 1} "${title}"`,
+        ret: 'marks',
+        bookmarkId: this.markKind === 'bookmarks' ? mk.id : undefined,
+      }
+      this.level = 'confirm'
+      this.requestRender()
+      return
+    }
+    this.ctx.log(`[os] reader: browse select ${index} at ${this.level} level — ignored`)
   }
 
   async onMenuSelect(label: string): Promise<void> {
@@ -4781,9 +5023,42 @@ class ReaderWindow implements OsWindow {
       await this.openBook(lb.path)
       return
     }
+    if (this.level === 'confirm') {
+      const nav = this.pendingNav
+      switch (label) {
+        case 'Confirm':
+          this.pendingNav = null
+          if (nav) await this.navigate(nav.chapter, nav.page, true)   // pushes the FROM spot → undoable
+          else this.requestRender()
+          return
+        case 'Cancel':
+          this.level = nav?.ret ?? 'read'
+          this.pendingNav = null
+          this.requestRender()
+          return
+        case 'Delete':
+          if (nav?.bookmarkId) {
+            try { await deleteBookmark(nav.bookmarkId) } catch (e) { this.ctx.log(`[reader] bookmark delete failed: ${(e as Error).message}`) }
+            try { this.markList = this.bookPath ? await listBookmarks(this.bookPath) : [] } catch (e) { this.ctx.log(`[reader] bookmark reload failed: ${(e as Error).message}`) }
+          }
+          this.level = nav?.ret ?? 'read'
+          this.pendingNav = null
+          this.requestRender()
+          return
+        default: this.ctx.log(`[os] reader confirm: unknown label '${label}' — ignored`); return
+      }
+    }
     if (this.level !== 'read') { this.ctx.log(`[os] reader: menu '${label}' outside read level — ignored`); return }
+    if (label.startsWith('↩')) {   // Undo — pop the stack, navigate there WITHOUT re-pushing
+      const prev = this.bookPath ? await popHistory(this.bookPath) : null
+      if (!prev) { this.ctx.log('[reader] Undo: history empty'); await this.refreshUndoTop(); this.requestRender(); return }
+      this.ctx.log(`[reader] Undo → ch${prev.chapter + 1} p${prev.page + 1}`)
+      await this.navigate(prev.chapter, prev.page, false)
+      return
+    }
     switch (label) {
       case 'Next': {
+        this.markedNote = false
         if (this.page < this.pages.length - 1) {
           this.page++
           this.persist()
@@ -4796,6 +5071,7 @@ class ReaderWindow implements OsWindow {
         return
       }
       case 'Prev': {
+        this.markedNote = false
         if (this.page > 0) {
           this.page--
           this.persist()
@@ -4806,6 +5082,33 @@ class ReaderWindow implements OsWindow {
         }
         return
       }
+      case 'Jump':
+        this.jumpBuf = ''; this.jumpError = null; this.markedNote = false; this.focus = 'content'; this.level = 'jump'
+        this.ensurePageMap()
+        this.requestRender()
+        return
+      case 'Mark': {
+        if (!this.bookPath) return
+        try {
+          await addBookmark(this.bookPath, this.chapter, this.page, this.currentLabel())
+          this.markedNote = true
+          this.ctx.log(`[reader] bookmarked ${basename(this.bookPath)} ch${this.chapter + 1} p${this.page + 1}`)
+        } catch (e) { this.ctx.log(`[reader] bookmark failed: ${(e as Error).message}`) }
+        this.requestRender()
+        return
+      }
+      case 'Bookmarks':
+        this.markKind = 'bookmarks'
+        try { this.markList = this.bookPath ? await listBookmarks(this.bookPath) : [] } catch (e) { this.ctx.log(`[reader] bookmarks load failed: ${(e as Error).message}`); this.markList = [] }
+        this.markOffset = 0; this.focus = 'content'; this.markedNote = false; this.level = 'marks'
+        this.requestRender()
+        return
+      case 'Recent':
+        this.markKind = 'recent'
+        try { this.markList = this.bookPath ? await listHistory(this.bookPath, RECENT_VIEW) : [] } catch (e) { this.ctx.log(`[reader] recent load failed: ${(e as Error).message}`); this.markList = [] }
+        this.markOffset = 0; this.focus = 'content'; this.markedNote = false; this.level = 'marks'
+        this.requestRender()
+        return
       case 'Voice on': this.setVoice(true); return
       case 'Voice off': this.setVoice(false); return
       default: this.ctx.log(`[os] reader read: unknown menu label '${label}' — ignored (LOUD)`)
@@ -4815,7 +5118,10 @@ class ReaderWindow implements OsWindow {
   async onReload(): Promise<void> {
     this.setVoice(false)   // unstick a wedged handsfree mic
     this.lastBookLoaded = false   // re-query the "Last" shortcut
+    this.jumpError = null
     this.focus = 'content'
+    this.ensurePageMap()          // re-attempt a failed page-map build
+    await this.refreshUndoTop()   // keep the Undo label honest
   }
 
   /** Mic must not outlive focus — stop voice-paging on window switch. */
@@ -4830,6 +5136,26 @@ class ReaderWindow implements OsWindow {
       // Position already persisted on every change — backing out loses nothing.
       this.level = this.chapters.length ? 'chapters' : 'library'
       this.focus = 'content'
+      this.requestRender()
+      return true
+    }
+    if (this.level === 'confirm') {   // double-tap on the gate = Cancel (stay put)
+      this.level = this.pendingNav?.ret ?? 'read'
+      this.pendingNav = null
+      this.requestRender()
+      return true
+    }
+    if (this.level === 'jump') {       // discard the typed buffer, back to the page
+      this.jumpBuf = ''
+      this.jumpError = null
+      this.level = 'read'
+      this.requestRender()
+      return true
+    }
+    if (this.level === 'marks') {
+      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+      this.focus = 'content'
+      this.level = 'read'
       this.requestRender()
       return true
     }
