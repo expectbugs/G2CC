@@ -24,6 +24,7 @@ import { renderSetupPage, getLocalInterfaces } from './setup-page.js'
 import { getEndpointJson } from './endpoints.js'
 import { warmParakeet } from './stt.js'
 import { warmStore } from './store.js'
+import { paperclips } from './paperclips.js'
 import { armTimersFromDb } from './timers.js'
 import { startCalendarSync } from './calendar.js'
 import { startDeliveriesSync } from './deliveries.js'
@@ -207,9 +208,13 @@ function shutdown(): void {
   // server.close() rejects (rare but possible: stuck connection). Loud-and-
   // proud per the no-silent-failure rule.
   server.close()
+    // Persist the idle Paperclips game before exit (a DB write, not a time-bounded
+    // wait — compatible with the no-timeouts rule; otherwise up to ~30 s of idle
+    // progress is silently lost on every restart — review 2026-06-27, C-F2/D-F1).
+    .then(() => paperclips.flush())
     .then(() => process.exit(0))
     .catch((err) => {
-      console.error('[g2cc-server] server.close() rejected:', err)
+      console.error('[g2cc-server] shutdown (server.close/paperclips.flush) rejected:', err)
       process.exit(1)
     })
 }

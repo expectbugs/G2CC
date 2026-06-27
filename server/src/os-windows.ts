@@ -62,6 +62,7 @@ import {
 } from './reader.js'
 import { listUpcoming, getEvent } from './calendar.js'
 import { rpgRun, chessMove, chessPreview, renderBoard, DUNGEON_ROOT, type ChessState } from './games.js'
+import { paperclips, type PcSnapshot, type PcPhase } from './paperclips.js'
 import { moveToTrash, TRASH_DIR } from './trash.js'
 import { overviewText, chartSpecs, readStorage, readTopProcs, storageText } from './stats.js'
 import { hostname } from 'node:os'
@@ -3594,6 +3595,459 @@ class FilesWindow implements OsWindow {
 const RPG_ACTIONS = ['» stat', '» battle', '» ls (inspect)', '» todo', '» buy (list shop)'] as const
 const CHESS_SKILLS = [1, 5, 10, 20] as const
 
+// ============================================================ Paperclips (Universal Paperclips)
+//
+// The window-side controller for the real game (engine in paperclips.ts). The
+// Games window delegates to it when its level is 'pc'. Design (Adam 2026-06-27):
+// a phase-aware ONE-PAGE twocol dashboard is home (the engine ticks in the
+// background — a 2 s re-render pacer keeps the numbers live while it's on
+// screen), the left menu carries the phase's hot verbs (fired directly,
+// tap-tap-tap), and parametric / list actions open drill-down levels. Menu
+// labels are SHORT (≤~7 chars — the 96 px menu wraps) and CONSTANT (toggle/cycle
+// state rides the CONTENT, never the label — the chess "Skill" rule — so a tap
+// resolved against the last-rendered view can't miss after a state change).
+// Irreversible spends go through a Cancel-first confirm.
+
+type PcLevel = 'dash' | 'more' | 'projects' | 'confirm' | 'drones' | 'probe' | 'strat' | 'quant' | 'invest' | 'swarm'
+
+interface PcVerb { label: string; run: () => void }
+
+const PHASE_LABEL: Record<PcPhase, string> = { business: 'biz', space: 'space', end: 'end' }
+const PC_DRONE_QTY = [1, 10, 100, 1000] as const
+const PC_SLIDER_POS = [0, 100, 200] as const
+const PC_PROBE_DIMS = [
+  { key: 'Speed', raise: 'raiseProbeSpeed', lower: 'lowerProbeSpeed' },
+  { key: 'Nav', raise: 'raiseProbeNav', lower: 'lowerProbeNav' },
+  { key: 'Rep', raise: 'raiseProbeRep', lower: 'lowerProbeRep' },
+  { key: 'Haz', raise: 'raiseProbeHaz', lower: 'lowerProbeHaz' },
+  { key: 'Fac', raise: 'raiseProbeFac', lower: 'lowerProbeFac' },
+  { key: 'Harv', raise: 'raiseProbeHarv', lower: 'lowerProbeHarv' },
+  { key: 'Wire', raise: 'raiseProbeWire', lower: 'lowerProbeWire' },
+  { key: 'Combat', raise: 'raiseProbeCombat', lower: 'lowerProbeCombat' },
+] as const
+
+/** Compact number formatter for the tiny display: 1.2k / 3.4M / …T, then
+ *  exponential for the game's astronomical late ranges (matter ~1e27+). */
+function pcNum(n: number): string {
+  if (!isFinite(n)) return n > 0 ? '∞' : '-∞'
+  const neg = n < 0
+  let a = Math.abs(n)
+  let s: string
+  if (a < 1000) s = Number.isInteger(a) ? String(a) : a.toFixed(a < 10 ? 1 : 0)
+  else if (a < 1e6) s = (a / 1e3).toFixed(1).replace(/\.0$/, '') + 'k'
+  else if (a < 1e9) s = (a / 1e6).toFixed(1).replace(/\.0$/, '') + 'M'
+  else if (a < 1e12) s = (a / 1e9).toFixed(1).replace(/\.0$/, '') + 'B'
+  else if (a < 1e15) s = (a / 1e12).toFixed(1).replace(/\.0$/, '') + 'T'
+  else s = a.toExponential(1)
+  return neg ? '-' + s : s
+}
+function pcMoney(n: number): string { return '$' + pcNum(n) }
+
+/** Pre-fit a twocol line to the column pixel width (twocol pre-fits; compose
+ *  px-clamps as a backstop but logs a warning if it has to — we avoid that). */
+function pcCol(s: string, maxPx = 222): string {   // twocol compose clamps to colW-14 ≈ 223; stay just under
+  if (fwTextWidth(s) <= maxPx) return s
+  let out = ''
+  for (const ch of s) { if (fwTextWidth(out + ch) > maxPx) break; out += ch }
+  return out
+}
+
+class PaperclipsController {
+  private level: PcLevel = 'dash'
+  private focus: 'content' | 'menu' = 'content'   // projects browse focus-flip (rpg pattern)
+  private projOffset = 0
+  private shownProjects: { id: string; title: string; price: string; description: string; affordable: boolean }[] = []
+  private droneQtyIdx = 0
+  private probeDim = 0
+  private sliderIdx = 0
+  private pending: { title: string; body: string; run: () => boolean } | null = null
+  private confirmPages: string[] = []
+  private confirmPage = 0
+  /** 2 s dashboard re-render pacer — runs while the controller is entered (the
+   *  requestRender it calls self-gates on the Games window being active, so it's
+   *  harmless when switched away; cleared on leave/dispose). A cadence, not a
+   *  timeout. */
+  private pacer: ReturnType<typeof setInterval> | null = null
+
+  constructor(private ctx: WmContext, private requestRender: () => void) {}
+
+  // ------------------------------------------------ lifecycle (from GamesWindow)
+
+  enter(): void {
+    this.level = 'dash'
+    this.focus = 'content'
+    this.projOffset = 0
+    this.pending = null
+    this.confirmPages = []
+    this.confirmPage = 0
+    // Boot the engine (lazy, single-flight). A load failure surfaces in view().
+    void paperclips.ensureStarted().then(() => this.requestRender()).catch((e: unknown) => {
+      this.ctx.log(`[os] paperclips: engine start failed: ${e instanceof Error ? e.message : String(e)}`)
+      this.requestRender()
+    })
+    this.startPacer()
+    this.requestRender()   // paint "⏳ starting…" immediately — don't wait for the async boot or the 2 s pacer
+  }
+
+  private startPacer(): void {
+    if (this.pacer) return
+    this.pacer = setInterval(() => { if (this.level === 'dash') this.requestRender() }, 2000)
+    if (typeof this.pacer.unref === 'function') this.pacer.unref()
+  }
+  private stopPacer(): void { if (this.pacer) { clearInterval(this.pacer); this.pacer = null } }
+
+  /** GamesWindow switched away — persist; keep the pacer so a switch-back resumes
+   *  (its requestRender no-ops while inactive). The engine keeps ticking. */
+  onDeactivate(): void { void paperclips.flush() }
+  /** ws close — stop our pacer. The engine is a process singleton; we do NOT
+   *  tear it down (idle game keeps running for the next connection). */
+  dispose(): void { this.stopPacer(); void paperclips.flush() }
+  /** Called when GamesWindow leaves the pc area entirely (back to the games list). */
+  leave(): void { this.stopPacer(); void paperclips.flush() }
+
+  summary(): string {
+    const st = paperclips.status()
+    if (!st.running) return 'paperclips · idle'
+    return `paperclips · ${pcNum(paperclips.snapshot().clips)} clips`
+  }
+  statusLine(): string | null {
+    const st = paperclips.status()
+    if (st.loadError) return `⚠ ${st.loadError}`.slice(0, 40)
+    if (st.saveError) return '⚠ unsaved'
+    return null
+  }
+
+  // ------------------------------------------------ verbs (label↔action, drift-free)
+
+  /** The menu verbs for the CURRENT level. view() renders the labels; onMenuSelect
+   *  dispatches by matching them. Labels are constant (state shows in content). */
+  private menuVerbs(s: PcSnapshot): PcVerb[] {
+    const C = paperclips
+    switch (this.level) {
+      case 'dash': {
+        const v: PcVerb[] = []
+        if (s.phase === 'space' || s.phase === 'end') {
+          v.push({ label: 'Build', run: () => this.go('drones') })
+          v.push({ label: 'Probe', run: () => this.go('probe') })
+          if (s.swarmUnlocked) v.push({ label: 'Swarm', run: () => this.go('swarm') })
+          v.push({ label: 'Proj', run: () => this.go('projects') })
+          v.push({ label: 'More', run: () => this.go('more') })
+        } else {
+          v.push({ label: 'Clip', run: () => C.bulkClip() })
+          v.push({ label: 'Wire', run: () => C.call('buyWire') })
+          if (s.autoClipperUnlocked) v.push({ label: 'AutoC', run: () => C.call('makeClipper') })
+          v.push({ label: 'Ads', run: () => C.call('buyAds') })
+          v.push({ label: 'P-', run: () => C.call('lowerPrice') })
+          v.push({ label: 'P+', run: () => C.call('raisePrice') })
+          if (s.megaClipperUnlocked) v.push({ label: 'MegaC', run: () => C.call('makeMegaClipper') })
+          if (s.compUnlocked) { v.push({ label: 'Proc', run: () => C.call('addProc') }); v.push({ label: 'Mem', run: () => C.call('addMem') }) }
+          v.push({ label: 'Proj', run: () => this.go('projects') })
+          v.push({ label: 'More', run: () => this.go('more') })
+        }
+        return v
+      }
+      case 'more': {
+        const v: PcVerb[] = []
+        if (s.wireBuyerUnlocked && s.phase !== 'space') v.push({ label: 'WBuy', run: () => C.call('toggleWireBuyer') })
+        if (s.stratUnlocked) v.push({ label: 'Strat', run: () => this.go('strat') })
+        if (s.investUnlocked) v.push({ label: 'Invest', run: () => this.go('invest') })
+        if (s.qUnlocked) v.push({ label: 'Quant', run: () => this.go('quant') })
+        return v
+      }
+      case 'strat': {
+        const v: PcVerb[] = [{ label: 'New', run: () => C.call('newTourney') }, { label: 'Run', run: () => C.call('runTourney') }]
+        if (s.autoTourneyUnlocked) v.push({ label: 'AutoT', run: () => C.call('toggleAutoTourney') })
+        return v
+      }
+      case 'quant':
+        return [{ label: 'AutoQ', run: () => C.setAutoQuantum(!C.isAutoQuantum()) }]
+      case 'invest':
+        return [
+          { label: 'Dep', run: () => C.call('investDeposit') },
+          { label: 'Wd', run: () => C.call('investWithdraw') },
+          { label: 'Upgr', run: () => C.call('investUpgrade') },
+          { label: 'Risk', run: () => { const o = ['low', 'med', 'hi']; const cur = paperclips.snapshot().investRisk; C.setInvestRisk(o[(o.indexOf(cur) + 1) % o.length] ?? 'low') } },
+        ]
+      case 'drones':
+        return [
+          { label: 'Qty', run: () => { this.droneQtyIdx = (this.droneQtyIdx + 1) % PC_DRONE_QTY.length } },
+          { label: 'Fact', run: () => C.call('makeFactory') },
+          { label: 'Harv', run: () => C.call('makeHarvester', this.droneQty()) },
+          { label: 'Drone', run: () => C.call('makeWireDrone', this.droneQty()) },
+          { label: 'Farm', run: () => C.call('makeFarm', this.droneQty()) },
+          { label: 'Batt', run: () => C.call('makeBattery', this.droneQty()) },
+        ]
+      case 'probe': {
+        const d = PC_PROBE_DIMS[this.probeDim]
+        const v: PcVerb[] = [
+          { label: '+Probe', run: () => C.call('makeProbe') },
+          { label: 'Sel', run: () => { this.probeDim = (this.probeDim + 1) % PC_PROBE_DIMS.length } },
+          { label: 'Up', run: () => C.call(d.raise) },
+          { label: 'Dn', run: () => C.call(d.lower) },
+        ]
+        if (s.combatUnlocked) { v.push({ label: 'MaxT', run: () => C.call('increaseMaxTrust') }); v.push({ label: 'PTrust', run: () => C.call('increaseProbeTrust') }) }
+        return v
+      }
+      case 'swarm':
+        return [
+          { label: 'Synch', run: () => C.call('synchSwarm') },
+          { label: 'Entmt', run: () => C.call('entertainSwarm') },
+          { label: 'Slider', run: () => { this.sliderIdx = (this.sliderIdx + 1) % PC_SLIDER_POS.length; C.setSlider(PC_SLIDER_POS[this.sliderIdx]) } },
+        ]
+      case 'confirm': {
+        const v: PcVerb[] = [
+          { label: 'Cancel', run: () => { this.pending = null; this.go('projects') } },
+          { label: 'Confirm', run: () => {
+            const p = this.pending
+            if (!p) { this.go('projects'); return }
+            if (p.run()) { this.pending = null; this.go('projects') }
+            // Resource drained between render and tap — keep the card and say so LOUDLY
+            // (review 2026-06-27, B-LOW-MED), instead of silently dropping to the list.
+            else { this.confirmPages = paginateText(`${p.body}\n\n⚠ Couldn't buy — nothing was spent (cost no longer met).`); this.confirmPage = 0 }
+          } },
+        ]
+        if (this.confirmPages.length > 1) {
+          v.push({ label: 'Next', run: () => { this.confirmPage = Math.min(this.confirmPages.length - 1, this.confirmPage + 1) } })
+          v.push({ label: 'Prev', run: () => { this.confirmPage = Math.max(0, this.confirmPage - 1) } })
+        }
+        return v
+      }
+      case 'projects':
+        return []   // browse level — actions are content-row taps; menu is just Back/Reload/Main
+    }
+  }
+
+  private droneQty(): number { return PC_DRONE_QTY[this.droneQtyIdx] }
+
+  private go(level: PcLevel): void {
+    this.level = level
+    if (level === 'projects') { this.projOffset = 0; this.focus = 'content' }
+    this.requestRender()
+  }
+
+  // ------------------------------------------------ view
+
+  async view(): Promise<WinView> {
+    const st = paperclips.status()
+    if (!st.running) {
+      const body = st.loadError ? `Failed to start:\n${st.loadError}\n\nReload to retry.` : '⏳ starting Universal Paperclips…'
+      return { mode: 'text', title: 'Paperclips', menu: ['Reload', 'Main'], text: body }
+    }
+    const s = paperclips.snapshot()
+    if (this.level === 'dash') return this.dashView(s)
+    if (this.level === 'projects') return this.projectsView()
+    if (this.level === 'confirm') {
+      // Paginated so a long project description is never silently clipped past
+      // the 6-row window (review 2026-06-27, B-MEDIUM — NO TRUNCATION).
+      const pages = this.confirmPages.length ? this.confirmPages : [this.pending?.body ?? '(nothing pending)']
+      const page = Math.min(this.confirmPage, pages.length - 1)
+      const suffix = pages.length > 1 ? ` · ${page + 1}/${pages.length}` : ''
+      const menu = [...this.menuVerbs(s).map((v) => v.label), 'Reload', 'Main']
+      return { mode: 'text', title: clampMid((this.pending?.title ?? 'Confirm') + suffix), menu, text: pages[page] ?? '' }
+    }
+    return this.subView(s)
+  }
+
+  private dashView(s: PcSnapshot): WinView {
+    const verbs = this.menuVerbs(s)
+    const menu = [...verbs.map((v) => v.label), 'Reload', 'Main']
+    const title = `Paperclips · ${PHASE_LABEL[s.phase]} · ${pcNum(s.clips)} clips`
+    let left: string[]
+    let right: string[]
+    if (s.phase === 'end') {
+      // The dismantle sequence — space stats are zeroing out; show progress, not zeros.
+      left = [
+        `Clips ${pcNum(s.clips)}`,
+        `Dismantle ${s.dismantle}/7`,
+        `Matter ${pcNum(s.availableMatter)}`,
+        `Probe ${pcNum(s.probes)}`,
+        `Explor ${s.colonizedPct.toFixed(1)}%`,
+        `Honor ${pcNum(s.honor)}`,
+      ]
+      right = [
+        `Yomi ${pcNum(s.yomi)}`,
+        `Creat ${pcNum(s.creativity)}`,
+        `Ops ${pcNum(s.operations)}`,
+        `Fact ${pcNum(s.factories)}`,
+        `Drone ${pcNum(s.wireDrones)}`,
+        `Power ${pcNum(s.storedPower)}`,
+      ]
+    } else if (s.phase === 'space') {
+      // Covers BOTH the Earth-disassembly sub-phase (humanFlag=0, spaceFlag=0) and
+      // full space. Power performance + swarm health are surfaced because they
+      // silently throttle everything (review 2026-06-27, E-F3/E-F4).
+      const perf = s.powMod < 1 ? ` ⚠${Math.round(s.powMod * 100)}%` : ''
+      left = [
+        `Clips ${pcNum(s.clips)}`,
+        `Matter ${pcNum(s.availableMatter)}`,
+        `Wire ${pcNum(s.wireSpace)}`,
+        `Fact ${pcNum(s.factories)} Hrv ${pcNum(s.harvesters)}`,
+        `Drone ${pcNum(s.wireDrones)}`,
+        `Pwr ${pcNum(s.storedPower)}${perf}`,
+      ]
+      right = [
+        `Acq ${pcNum(s.acquiredMatter)}`,
+        `Farm ${pcNum(s.farms)} Bat ${pcNum(s.batteries)}`,
+        s.swarmUnlocked ? `Swrm ${s.swarmStatusLabel || '—'}` : `Yomi ${pcNum(s.yomi)}`,
+        `Probe ${pcNum(s.probes)}`,
+        `Explor ${s.colonizedPct.toFixed(1)}%`,
+        s.combatUnlocked ? `Honor ${pcNum(s.honor)} D${pcNum(s.drifters)}` : `Born ${pcNum(s.probesBorn)}`,
+      ]
+    } else {
+      left = [
+        `Clips ${pcNum(s.clips)}`,
+        `Rev/s ${pcMoney(s.avgRev)}`,
+        `Funds ${pcMoney(s.funds)}`,
+        `$/clip ${s.margin.toFixed(2)}`,
+        `Demand ${s.demandPct}%`,
+        `Unsold ${pcNum(s.unsoldClips)}`,
+      ]
+      right = [
+        `Wire ${pcNum(s.wire)}`,
+        `WCost ${pcMoney(s.wireCost)}`,
+        `AutoC ${pcNum(s.autoClippers)}`,
+        `Clip/s ${pcNum(s.clipRate)}`,
+        s.compUnlocked ? `Trust ${s.trust}` : `Mkt L${s.marketingLvl}`,
+        s.compUnlocked ? `Ops ${pcNum(s.operations)}/${pcNum(s.opMax)}` : `Ad ${pcMoney(s.adCost)}`,
+      ]
+    }
+    return { mode: 'twocol', title, menu, textLeft: left.map((l) => pcCol(l)).join('\n'), textRight: right.map((l) => pcCol(l)).join('\n') }
+  }
+
+  private subView(s: PcSnapshot): WinView {
+    const verbs = this.menuVerbs(s)
+    const menu = [...verbs.map((v) => v.label), 'Back', 'Reload', 'Main']
+    let title = 'Paperclips'
+    let text = ''
+    switch (this.level) {
+      case 'more':
+        title = `Paperclips · ${PHASE_LABEL[s.phase]} · more`
+        text = `Yomi ${pcNum(s.yomi)} · Ops ${pcNum(s.operations)}/${pcNum(s.opMax)}\nCreativity ${pcNum(s.creativity)}\nCash $${pcNum(s.investBankroll)} · Stocks $${pcNum(s.investStocks)}`
+        break
+      case 'strat':
+        title = 'Paperclips · Strategy'
+        text = `Yomi ${pcNum(s.yomi)}\nTournament: ${s.tourneyInProgress ? 'running…' : 'idle'}\nAuto-tourney: ${s.autoTourneyOn ? 'ON' : 'off'}\n\nNew sets up, Run plays it for yomi.`
+        break
+      case 'quant':
+        title = 'Paperclips · Quantum'
+        text = `Photonic chips: ${s.qChipsActive}\nSignal Σ: ${s.qSum.toFixed(2)}\nOps ${pcNum(s.operations)}/${pcNum(s.opMax)}\n\nAuto-quantum: ${s.autoQuantum ? 'ON' : 'off'} — auto-fires qComp\nwhenever the chip sum is positive.`
+        break
+      case 'invest':
+        title = 'Paperclips · Invest'
+        text = `Cash $${pcNum(s.investBankroll)}\nStocks $${pcNum(s.investStocks)}\nEngine L${s.investLevel} · Risk ${s.investRisk}\n\nDep deposits, Wd withdraws, Upgr levels up.\nRisk cycles low/med/hi.`
+        break
+      case 'drones':
+        title = `Paperclips · Build ×${this.droneQty()}`
+        text = [
+          `Qty per tap: ×${this.droneQty()}  (Qty cycles)`,
+          `Factory ${pcNum(s.factories)} — $${pcNum(s.factoryCost)} clips`,
+          `Harvester ${pcNum(s.harvesters)} — ${pcNum(s.harvesterCost)}`,
+          `WireDrone ${pcNum(s.wireDrones)} — ${pcNum(s.wireDroneCost)}`,
+          `Farm ${pcNum(s.farms)} — ${pcNum(s.farmCost)} · Batt ${pcNum(s.batteries)}`,
+        ].join('\n')
+        break
+      case 'probe': {
+        title = `Paperclips · Probe [${PC_PROBE_DIMS[this.probeDim].key}]`
+        const p = s.probe
+        const free = s.probeTrust - s.probeUsedTrust
+        text = [
+          `Trust free ${free}/${pcNum(s.probeTrust)} · probes ${pcNum(s.probes)}`,
+          `Spd ${p.Speed} Nav ${p.Nav} Rep ${p.Rep} Haz ${p.Haz}`,
+          `Fac ${p.Fac} Hrv ${p.Harv} Wir ${p.Wire} Cbt ${p.Combat}`,
+          `Sel=${PC_PROBE_DIMS[this.probeDim].key}; Up/Dn adjusts it.`,
+          s.combatUnlocked ? `Honor ${pcNum(s.honor)} · maxTrust ${s.maxTrust}` : '',
+        ].filter(Boolean).join('\n')
+        break
+      }
+      case 'swarm': {
+        title = 'Paperclips · Swarm'
+        const slbl = s.sliderPos <= 0 ? 'Work' : s.sliderPos >= 200 ? 'Think' : `Bal(${s.sliderPos})`
+        text = [
+          `Status: ${s.swarmStatusLabel || '—'}`,
+          `Gifts ${pcNum(s.swarmGifts)} · ${slbl}`,
+          '',
+          'Synch fixes Disorganized (yomi).',
+          'Entmt fixes Bored/Hungry (creativity).',
+          'Slider trades production for gifts.',
+        ].join('\n')
+        break
+      }
+      default:
+        text = '(?)'
+    }
+    return { mode: 'text', title, menu, text }
+  }
+
+  private projectsView(): WinView {
+    this.shownProjects = paperclips.listProjects()
+    const rows = this.shownProjects.map((p) => `${p.affordable ? '●' : '○'} ${p.title} ${p.price}`)
+    const display = rows.length ? rows : ['(no projects available yet)']
+    const paged = browsePageItems(display, this.projOffset)
+    return {
+      mode: 'browse',
+      menuMode: this.focus === 'menu' ? 'capture' : 'passive',
+      title: `Paperclips · Projects (${this.shownProjects.length})`,
+      menu: ['Back', 'Reload', 'Main'],
+      items: paged.items,
+    }
+  }
+
+  // ------------------------------------------------ input
+
+  async onMenuSelect(label: string): Promise<void> {
+    const st = paperclips.status()
+    if (!st.running) return
+    const verb = this.menuVerbs(paperclips.snapshot()).find((v) => v.label === label)
+    if (verb) { verb.run(); this.requestRender(); return }
+    this.ctx.log(`[os] paperclips ${this.level}: menu '${label}' — not a verb (Back/Reload/Main are WM-handled) (LOUD)`)
+  }
+
+  async onBrowseSelect(index: number): Promise<void> {
+    if (this.level !== 'projects' || this.focus !== 'content') return
+    const rows = this.shownProjects.map((p) => `${p.affordable ? '●' : '○'} ${p.title} ${p.price}`)
+    const display = rows.length ? rows : ['(no projects available yet)']
+    const { map } = browsePageItems(display, this.projOffset)
+    const m = map[index]
+    if (m === undefined) { this.ctx.log(`[os] paperclips projects: index ${index} out of range`); return }
+    if (m === -1) { const { prevOffset } = browsePageItems(display, this.projOffset); this.projOffset = prevOffset; this.requestRender(); return }
+    if (m === -2) { const { nextOffset } = browsePageItems(display, this.projOffset); this.projOffset = nextOffset; this.requestRender(); return }
+    const proj = this.shownProjects[m]
+    if (!proj) { this.ctx.log('[os] paperclips projects: no project at row — resyncing'); this.requestRender(); return }
+    // Cancel-first confirm before spending (body paginated in the view).
+    const body = `${proj.price}\n${proj.affordable ? 'Affordable ✓' : '⚠ Not affordable yet'}\n\n${proj.description}\n\nConfirm to buy · Cancel to go back.`
+    this.pending = { title: `Buy: ${proj.title}`, body, run: () => paperclips.applyProject(proj.id) }
+    this.confirmPages = paginateText(body)
+    this.confirmPage = 0
+    this.level = 'confirm'
+    this.requestRender()
+  }
+
+  /** Pop one level. false = at the dash root (GamesWindow then pops pc → games list). */
+  async onBack(): Promise<boolean> {
+    if (this.level === 'confirm') { this.pending = null; this.level = 'projects'; this.requestRender(); return true }
+    if (this.level === 'projects') {
+      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+      this.focus = 'content'; this.level = 'dash'; this.requestRender(); return true
+    }
+    // Pop ONE level (DE: double-tap = back). strat/invest/quant are reached via
+    // 'more', so they pop back to it; everything else (more/drones/probe/swarm) → dash.
+    if (this.level === 'strat' || this.level === 'invest' || this.level === 'quant') { this.level = 'more'; this.requestRender(); return true }
+    if (this.level !== 'dash') { this.level = 'dash'; this.requestRender(); return true }
+    return false
+  }
+
+  async onReload(): Promise<void> {
+    this.focus = 'content'
+    // A failed engine start retries on Reload.
+    if (!paperclips.status().running) {
+      void paperclips.ensureStarted().then(() => this.requestRender()).catch((e: unknown) => {
+        this.ctx.log(`[os] paperclips: Reload restart failed: ${e instanceof Error ? e.message : String(e)}`)
+        this.requestRender()
+      })
+    }
+  }
+}
+
 /** Games (upgrades Phase 11): rpg-cli (the filesystem dungeon, root pinned to
  *  /home/user — sandbox-verified to never write outside $HOME/.rpg) and chess
  *  vs Stockfish (stateless chess_move.py rounds; the board is an IMAGE page —
@@ -3604,8 +4058,10 @@ class GamesWindow implements OsWindow {
   readonly tab = 'Games'
   readonly label = 'Games'
   readonly category = 'Games' as const
-  private level: 'menu' | 'rpg' | 'rpg-out' | 'chess' | 'chess-pieces' | 'chess-moves' | 'chess-confirm' = 'menu'
+  private level: 'menu' | 'rpg' | 'rpg-out' | 'chess' | 'chess-pieces' | 'chess-moves' | 'chess-confirm' | 'pc' = 'menu'
   private focus: 'content' | 'menu' = 'content'
+  /** Universal Paperclips (Adam 2026-06-27) — delegated to while level === 'pc'. */
+  private readonly pc: PaperclipsController
   // --- rpg state ---
   private cwd = DUNGEON_ROOT
   private rpgDirs: string[] = []
@@ -3643,12 +4099,21 @@ class GamesWindow implements OsWindow {
    *  forever; Reload re-requests it — review 2026-06-11b). */
   private boardFailed = false
 
-  constructor(private ctx: WmContext, private requestRender: () => void) {}
+  constructor(private ctx: WmContext, private requestRender: () => void) {
+    this.pc = new PaperclipsController(ctx, requestRender)
+  }
 
   summary(): string {
+    if (this.level === 'pc') return this.pc.summary()
     if (this.fen && !this.gameOver) return `chess · ${this.chessTitle}`
-    return 'rpg · chess'
+    if (paperclips.status().running) return this.pc.summary()
+    return 'rpg · chess · paperclips'
   }
+
+  statusLine(): string | null { return this.level === 'pc' ? this.pc.statusLine() : null }
+
+  onDeactivate(): void { if (this.level === 'pc') this.pc.onDeactivate() }
+  dispose(): void { this.pc.dispose() }
 
   // ------------------------------------------------ rpg helpers
 
@@ -3849,6 +4314,7 @@ class GamesWindow implements OsWindow {
   // ------------------------------------------------ views
 
   async view(): Promise<WinView> {
+    if (this.level === 'pc') return this.pc.view()
     const menuMode = this.focus === 'menu' ? 'capture' as const : 'passive' as const
     if (this.level === 'rpg-out') {
       const pageSuffix = this.rpgPages.length > 1 ? ` · ${this.rpgPage + 1}/${this.rpgPages.length}` : ''
@@ -3925,16 +4391,18 @@ class GamesWindow implements OsWindow {
       menuMode,
       title: 'Games',
       menu: ['Reload', 'Main'],
-      items: ['rpg-cli — the filesystem dungeon', 'Chess vs Stockfish'],
+      items: ['rpg-cli — the filesystem dungeon', 'Chess vs Stockfish', 'Universal Paperclips — idle game'],
     }
   }
 
   // ------------------------------------------------ input
 
   async onBrowseSelect(index: number): Promise<void> {
+    if (this.level === 'pc') { await this.pc.onBrowseSelect(index); return }
     if (this.level === 'menu') {
       if (index === 0) { this.level = 'rpg'; this.rpgOffset = 0; this.focus = 'content'; this.requestRender(); return }
       if (index === 1) { this.level = 'chess'; this.focus = 'content'; this.requestRender(); return }
+      if (index === 2) { this.level = 'pc'; this.pc.enter(); return }
       this.ctx.log(`[os] games: menu index ${index} out of range`)
       return
     }
@@ -3986,6 +4454,7 @@ class GamesWindow implements OsWindow {
   }
 
   async onMenuSelect(label: string): Promise<void> {
+    if (this.level === 'pc') { await this.pc.onMenuSelect(label); return }
     if (this.level === 'rpg-out') {
       switch (label) {
         case 'Next': if (this.rpgPage < this.rpgPages.length - 1) { this.rpgPage++; this.requestRender() } break
@@ -4060,6 +4529,7 @@ class GamesWindow implements OsWindow {
   }
 
   async onReload(): Promise<void> {
+    if (this.level === 'pc') { await this.pc.onReload(); return }
     this.focus = 'content'
     // Unstick a wedged in-flight flag (the documented Reload contract). The
     // chessSeq bump makes the orphaned subprocess result ACTUALLY drop — the
@@ -4087,6 +4557,11 @@ class GamesWindow implements OsWindow {
   }
 
   async onBack(): Promise<boolean> {
+    if (this.level === 'pc') {
+      if (await this.pc.onBack()) return true
+      this.pc.leave()
+      this.level = 'menu'; this.focus = 'content'; this.requestRender(); return true
+    }
     if (this.level === 'rpg-out') { this.level = 'rpg'; this.focus = 'content'; this.requestRender(); return true }
     if (this.level === 'chess-confirm') {
       // Double-tap on the confirm step = Cancel (never silently apply).

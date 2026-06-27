@@ -4,6 +4,43 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-27 — **Games: Universal Paperclips, end-to-end (server-only, no APK)**
+
+Adam wanted more games, starting with Universal Paperclips — "all state is plain globals, every
+action is a global function, the growing UI is just an array." The win was to **not reimplement
+anything**: the REAL, byte-for-byte upstream game (`combat/globals/projects/main.js`, vendored +
+pinned in `games/paperclips/`) runs **headlessly in jsdom** inside the server (`paperclips.ts`),
+and we just read its globals and call its functions. It's an idle game, so the engine is a
+**process-lifetime singleton** that keeps ticking across phone reconnects on Node timers (real
+time, no browser, no tab-throttling).
+
+- **The one load-bearing gotcha:** jsdom with no `url:` makes `localStorage` an opaque-origin
+  *throw* at the game's top-level save check, which aborts the rest of `main.js` — including the
+  economy-loop registration (the game froze at `ticks:0`). A real `url:` fixes it. Lesson logged:
+  when a headless page "loads but does nothing," suspect a top-level throw eating the loop setup.
+- **The UI is the G2CC window contract, Paperclips-shaped** (not a parallel renderer — we keep the
+  multi-packet-wall guards, preemption, confirms, persistence). A **phase-aware twocol dashboard**
+  (biz/space/end) is home; the left menu carries **short, CONSTANT-label** hot verbs (state rides
+  the content, the chess "Skill" rule, so a tap can't drift after a state change); list/parametric
+  actions open drill-downs (Projects browse→Cancel-first **paginated** confirm, Build/Probe/Swarm,
+  Strat/Invest/Quant). Adam's two interface adaptations: **Clip = ×1000** (the game self-clamps to
+  wire) since one-clip taps are useless at BLE latency, and an **auto-quantum** toggle that auto-fires
+  `qComp()` whenever the photonic-chip sum is positive (the twitch mechanic, automated).
+- **Persistence:** the whole `localStorage` save is mirrored to Postgres (`paperclips_save`),
+  forcing the game's own `save()` first (it only autosaves on its own timer, so an early mirror was
+  empty → a resume started fresh). Restore now THROWS on a DB error instead of silently starting a
+  fresh game that would then clobber the real save; shutdown awaits a final flush.
+- **Reviewed by 5 parallel agents, every finding verified against the game source before fixing.**
+  The material catches: a **human→space soft-lock** (the game zeroes `humanFlag` BEFORE `spaceFlag`
+  for the Earth-disassembly phase — classified as `business` it hid the Build UI → unwinnable;
+  fixed by treating `humanFlag=0` as space), three snapshot fields reading **display-element ids
+  instead of the real globals** (`probesLaunched`→`probeLaunchLevel`, `probesBorn`→`probeDescendents`,
+  `investmentLevel`→`investLevel` — all silently 0, masked by the `num()` guard), the endgame
+  `confirm()` poisoning `loadError` (shimmed), and invisible **power/swarm** state in space (now on
+  the dashboard). Three deep-endgame edge cases deferred + documented (`games/paperclips/SOURCE.md`).
+
+---
+
 ## (unstamped) — 2026-06-25 r27 — **Reader: loss-proof your place + a Jump-to-page numpad (server-only, no APK)**
 
 Adam: "it is WAY too easy to accidentally lose my place — some double-tapping or choosing the
