@@ -52,7 +52,9 @@ registerMigration('2026-06-27-paperclips-save', `CREATE TABLE IF NOT EXISTS pape
   updated_at timestamptz NOT NULL DEFAULT now()
 )`)
 
-export type PcPhase = 'business' | 'space' | 'end'
+// 'factory' = the Earth-disassembly phase (humanFlag=0, spaceFlag=0): manual Build +
+// power. 'space' = FULL SPACE (spaceFlag=1): probe-driven, Build/power are dead.
+export type PcPhase = 'business' | 'factory' | 'space' | 'end'
 
 /** One available project (the "growing UI" array — activeProjects). */
 export interface PcProject {
@@ -119,6 +121,7 @@ export interface PcSnapshot {
   qChipsActive: number
   qSum: number               // current Σ chip value (the auto-fire signal)
   autoQuantum: boolean
+  autoYomi: boolean          // auto-run tournaments at the best strategy
   // --- space ---
   spaceUnlocked: boolean
   availableMatter: number
@@ -144,9 +147,13 @@ export interface PcSnapshot {
   probesLaunched: number
   probesBorn: number
   probeCost: number
+  unusedClips: number        // clips banked for probes/factories (space) — probe cost is paid from this
   colonizedPct: number       // 100 * foundMatter / totalMatter
   drifters: number
   driftersKilled: number
+  probesLostHaz: number      // probes lost to hazards (Haz trust too low)
+  probesLostDrift: number    // probes lost to value drift (→ become drifters)
+  probesLostCombat: number   // probes lost in combat
   // probe-trust allocation
   probeTrust: number
   probeUsedTrust: number
@@ -162,6 +169,7 @@ export interface PcSnapshot {
   powMod: number             // power "performance" fraction (1 = full; <1 = power-starved, throttles matter)
   swarmStatusLabel: string   // the game's own swarm word (Active/Hungry/Bored/Disorganized/Sleeping/…)
   sliderPos: number          // swarm Work(0)↔Think(200) slider position
+  shortage: string           // the production bottleneck to buy next ('Farms (pwr)'/'Harvesters'/…), '' outside the chain
 }
 
 /** Status for the window's statusLine + Main summary. */
@@ -181,6 +189,7 @@ class PaperclipsEngine {
   private loadError: string | null = null
   private saveError: string | null = null
   private autoQuantum = false
+  private autoYomi = false
   private pacer: ReturnType<typeof setInterval> | null = null
   private pacerTicks = 0
   /** Serialized fire-and-forget save chain (the Reader persist-chain pattern):
@@ -311,6 +320,7 @@ class PaperclipsEngine {
     // uncaughtException that could kill the server (review 2026-06-27, O4).
     try {
       if (this.autoQuantum) this.autoFireQuantum(win)
+      if (this.autoYomi) this.autoFireYomi(win)
       this.pacerTicks++
       if (this.pacerTicks % SAVE_EVERY_TICKS === 0) this.save()
     } catch (e) {
@@ -352,6 +362,22 @@ class PaperclipsEngine {
    *  useless at BLE latency). clipClick(n) self-clamps to available wire — makes
    *  min(1000, wire), or nothing if wire < 1. */
   bulkClip(): void { this.call('clipClick', 1000) }
+
+  /** Launch up to 1000 Von Neumann probes this tap (Adam 2026-06-27), clamped to
+   *  what's affordable. makeProbe pays a flat probeCost (1e17) from unusedClips and
+   *  self-guards (unusedClips > probeCost), so this stops when you run out. Loud when
+   *  0 launch (so a no-op isn't mysterious). Returns the count launched. */
+  bulkProbe(): number {
+    if (!this.win) return 0
+    const before = this.num('probeLaunchLevel')
+    for (let i = 0; i < 1000; i++) {
+      if (this.num('unusedClips') <= this.num('probeCost')) break
+      this.call('makeProbe')
+    }
+    const launched = this.num('probeLaunchLevel') - before
+    if (launched === 0) console.error(`[paperclips] +Probe launched 0: need >${this.num('probeCost')} unused clips, have ${this.num('unusedClips')} (LOUD)`)
+    return launched
+  }
 
   /** The available projects (activeProjects), each with its current
    *  affordability (cost() evaluated now). The "growing UI" array, read live. */
@@ -401,6 +427,38 @@ class PaperclipsEngine {
   setAutoQuantum(on: boolean): void { this.autoQuantum = on }
   isAutoQuantum(): boolean { return this.autoQuantum }
 
+  /** Auto-yomi (Adam 2026-06-27): keep tournaments running at the strongest
+   *  unlocked strategy so yomi flows without manual New/Run/picking. Uses the
+   *  game's own auto-tourney once unlocked; before that, kicks a tournament
+   *  whenever idle + affordable (tourneyCost ops). */
+  private autoFireYomi(win: Win): void {
+    if (this.num('strategyEngineFlag') !== 1) return
+    this.setBestStrat()
+    if (this.num('autoTourneyFlag') === 1 && this.num('autoTourneyStatus') !== 1) {
+      (win['toggleAutoTourney'] as () => void)()
+    }
+    // Only run a tournament when strategies actually exist (else newTourney/runTourney
+    // would operate on an empty field) and it's idle + affordable.
+    const strats = win['strats'] as unknown[] | undefined
+    if (Array.isArray(strats) && strats.length > 0 && this.num('tourneyInProg') !== 1 && this.num('operations') >= this.num('tourneyCost')) {
+      (win['newTourney'] as () => void)()
+      ;(win['runTourney'] as () => void)()
+    }
+  }
+  /** Field the most-advanced unlocked strategy (the last picker option). The game
+   *  reads stratPicker.value, which follows selectedIndex. */
+  private setBestStrat(): void {
+    const el = this.win?.document.getElementById('stratPicker') as HTMLSelectElement | null
+    if (el && el.options.length > 0) el.selectedIndex = el.options.length - 1
+  }
+  setAutoYomi(on: boolean): void {
+    this.autoYomi = on
+    if (!on && this.win && this.num('autoTourneyStatus') === 1) {
+      try { (this.win['toggleAutoTourney'] as () => void)() } catch (e) { console.error(`[paperclips] AutoY off/toggleAutoTourney threw: ${e instanceof Error ? e.message : String(e)}`) }
+    }
+  }
+  isAutoYomi(): boolean { return this.autoYomi }
+
   /** DEBUG/TEST: set a game global directly (loud). Not used by the UI — it
    *  exists for the smoke test (forcing a phase deterministically) and for
    *  ad-hoc debugging of the live game. */
@@ -426,6 +484,26 @@ class PaperclipsEngine {
     const el = this.win?.document.getElementById('investStrat') as HTMLSelectElement | null
     if (!el) { console.error('[paperclips] setInvestRisk: no #investStrat — ignored (LOUD)'); return }
     el.value = value
+  }
+
+  // investUpgrade / synchSwarm / entertainSwarm spend a resource but the GAME guards
+  // ONLY via the button's disabled state — calling them directly (as our menu does)
+  // bypasses that and can drive yomi/creativity NEGATIVE (the -57M yomi bug,
+  // 2026-06-27). Replicate the button-disable guard; loud refusal when unaffordable.
+  investUpgrade(): void {
+    if (!this.win) return
+    if (this.num('yomi') < this.num('investUpgradeCost')) { console.error('[paperclips] investUpgrade refused: yomi < cost (LOUD)'); return }
+    this.call('investUpgrade')
+  }
+  synchSwarm(): void {
+    if (!this.win) return
+    if (this.num('yomi') < this.num('synchCost')) { console.error('[paperclips] synchSwarm refused: yomi < cost (LOUD)'); return }
+    this.call('synchSwarm')
+  }
+  entertainSwarm(): void {
+    if (!this.win) return
+    if (this.num('creativity') < this.num('entertainCost')) { console.error('[paperclips] entertainSwarm refused: creativity < cost (LOUD)'); return }
+    this.call('entertainSwarm')
   }
 
   // ---------------------------------------------------------------- snapshot
@@ -459,7 +537,10 @@ class PaperclipsEngine {
     // The Earth-disassembly sub-phase (humanFlag=0 BEFORE spaceFlag=1) needs the
     // factory/drone/power UI too — classify it as 'space', or the player soft-locks
     // with the clip-market dashboard and no Build access (review 2026-06-27, E-F1).
-    const phase: PcPhase = dismantle >= 1 ? 'end' : (this.flag('spaceFlag') || !this.flag('humanFlag')) ? 'space' : 'business'
+    const phase: PcPhase = dismantle >= 1 ? 'end'
+      : this.flag('spaceFlag') ? 'space'        // full space (probes)
+      : !this.flag('humanFlag') ? 'factory'     // Earth disassembly (manual build + power)
+      : 'business'
     return {
       running: true,
       phase,
@@ -507,6 +588,7 @@ class PaperclipsEngine {
       qChipsActive: qActive,
       qSum,
       autoQuantum: this.autoQuantum,
+      autoYomi: this.autoYomi,
       spaceUnlocked: this.flag('spaceFlag'),
       availableMatter: this.num('availableMatter'),
       acquiredMatter: this.num('acquiredMatter'),
@@ -530,9 +612,13 @@ class PaperclipsEngine {
       probesLaunched: this.num('probeLaunchLevel'),   // real global (probesLaunched is only a DOM id)
       probesBorn: this.num('probeDescendents'),       // real global (probesBorn is only a DOM id)
       probeCost: this.num('probeCost'),
+      unusedClips: this.num('unusedClips'),
       colonizedPct: totalMatter > 0 ? (100 * foundMatter) / totalMatter : 0,
       drifters: this.num('drifterCount'),
       driftersKilled: this.num('driftersKilled'),
+      probesLostHaz: this.num('probesLostHazards'),
+      probesLostDrift: this.num('probesLostDrift'),
+      probesLostCombat: this.num('probesLostCombat'),
       probeTrust: this.num('probeTrust'),
       probeUsedTrust: this.num('probeUsedTrust'),
       probe: {
@@ -547,7 +633,50 @@ class PaperclipsEngine {
       powMod: this.num('powMod'),   // power performance fraction; only meaningful post-humanFlag (controller gates the warning)
       swarmStatusLabel: stripTags(this.dom('swarmStatus')),
       sliderPos: this.num('sliderPos'),
+      shortage: this.computeShortage(),
     }
+  }
+
+  /** The production bottleneck to buy next in the factory/space phase (Adam
+   *  2026-06-27): power throttles the whole matter→wire→clips chain, so a sub-100%
+   *  powMod means Farms; otherwise it's the slowest stage. Throughputs per main.js
+   *  (acquireMatter/processMatter/spawnFactories): harvesters & wire drones scale with
+   *  level² under droneBoost AND with the Work/Think slider; factories scale linearly
+   *  with factoryBoost and ignore the slider. powMod is a common factor (cancels in
+   *  the argmin), so it's omitted here. '' outside the production phase. */
+  private computeShortage(): string {
+    if (!this.win || this.flag('humanFlag')) return ''       // business phase → no chain
+    if (this.flag('spaceFlag')) {
+      // FULL SPACE: the bottleneck is trust allocation, not buildings (Adam 2026-06-27).
+      // Probes need Rep (replicate), Haz (survive), Speed+Nav (explore→matter) or they die.
+      const pt = this.num('probeTrust'), used = this.num('probeUsedTrust')
+      if (pt <= 0) return 'buy PTrust'                         // no pool → buy with yomi
+      if (used < pt) {                                         // unallocated trust → spend on what's missing
+        if (this.num('probeRep') < 1) return 'add Rep'
+        if (this.num('probeHaz') < 1) return 'add Haz'
+        if (this.num('probeSpeed') < 1 || this.num('probeNav') < 1) return 'add Spd+Nav'
+        return 'spend trust'
+      }
+      if (this.num('probeRep') < 1) return 'PTrust+Rep'        // fully allocated but a key dim is 0 → buy more
+      if (this.num('probeHaz') < 1) return 'PTrust+Haz'
+      if (this.num('probeSpeed') < 1 || this.num('probeNav') < 1) return 'add Spd/Nav'
+      return ''                                                // healthy
+    }
+    // FACTORY phase: the build bottleneck.
+    if (this.num('powMod') < 0.99) return 'Farms (pwr)'      // power-starved: raise supply with farms
+    const db = this.num('droneBoost')
+    const wf = (200 - this.num('sliderPos')) / 100           // Work/Think — boosts harvesters/drones, not factories
+    const hL = Math.floor(this.num('harvesterLevel'))
+    const wL = Math.floor(this.num('wireDroneLevel'))
+    const fL = Math.floor(this.num('factoryLevel'))
+    if (hL <= 0) return 'Harvesters'
+    if (wL <= 0) return 'WireDrones'
+    if (fL <= 0) return 'Factories'
+    const H = wf * (db > 1 ? db * hL * hL : hL) * this.num('harvesterRate')
+    const W = wf * (db > 1 ? db * wL * wL : wL) * this.num('wireDroneRate')
+    const F = this.num('factoryBoost') * fL * this.num('factoryRate')
+    const min = Math.min(H, W, F)
+    return min === H ? 'Harvesters' : min === W ? 'WireDrones' : 'Factories'
   }
 
   status(): PcStatus {
@@ -636,16 +765,17 @@ const EMPTY_SNAPSHOT: PcSnapshot = {
   compUnlocked: false, trust: 0, nextTrust: 0, processors: 0, memory: 0, operations: 0, opMax: 0, creativity: 0, creativityOn: false,
   stratUnlocked: false, yomi: 0, tourneyInProgress: false, autoTourneyOn: false, autoTourneyUnlocked: false,
   investUnlocked: false, investBankroll: 0, investStocks: 0, investLevel: 0, investRisk: 'low',
-  qUnlocked: false, qChipsActive: 0, qSum: 0, autoQuantum: false,
+  qUnlocked: false, qChipsActive: 0, qSum: 0, autoQuantum: false, autoYomi: false,
   spaceUnlocked: false, availableMatter: 0, acquiredMatter: 0, wireSpace: 0,
   factories: 0, factoryCost: 0, harvesters: 0, harvesterCost: 0, wireDrones: 0, wireDroneCost: 0,
   farms: 0, farmCost: 0, batteries: 0, batteryCost: 0, storedPower: 0,
   swarmUnlocked: false, swarmGifts: 0, swarmStatus: 0,
-  probesUnlocked: false, probes: 0, probesLaunched: 0, probesBorn: 0, probeCost: 0, colonizedPct: 0, drifters: 0, driftersKilled: 0,
+  probesUnlocked: false, probes: 0, probesLaunched: 0, probesBorn: 0, probeCost: 0, unusedClips: 0, colonizedPct: 0, drifters: 0, driftersKilled: 0,
+  probesLostHaz: 0, probesLostDrift: 0, probesLostCombat: 0,
   probeTrust: 0, probeUsedTrust: 0,
   probe: { Speed: 0, Nav: 0, Rep: 0, Haz: 0, Fac: 0, Harv: 0, Wire: 0, Combat: 0 },
   combatUnlocked: false, honor: 0, maxTrust: 0, dismantle: 0,
-  humanEra: true, powMod: 1, swarmStatusLabel: '', sliderPos: 0,
+  humanEra: true, powMod: 1, swarmStatusLabel: '', sliderPos: 0, shortage: '',
 }
 
 /** Process-lifetime singleton (see the LIFECYCLE note up top). */

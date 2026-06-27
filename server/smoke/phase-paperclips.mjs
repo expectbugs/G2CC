@@ -59,6 +59,7 @@ try {
   let sc = await settle((x) => titleOf(x).includes('Paperclips') && menuOf(x).includes('Clip'), 'paperclips business dashboard')
   assert.ok(paperclips.status().running, 'engine running')
   assert.match(regionText(sc, 'content'), /Clips/, 'dashboard left column shows Clips')
+  assert.deepEqual(menuOf(sc), ['Clip', 'Buy', 'Opts', 'Proj', 'Main'], 'business dash menu is Clip/Buy/Opts/Proj/Main (Main restored, no Reload)')
   const est1 = checkMenu(sc, 'business dash')
   console.error(`  1. boot → business dashboard (twocol), menu fits 96px, frame ${est1}B ✓`)
 
@@ -102,58 +103,97 @@ try {
   await settle(() => !paperclips.listProjects().some((p) => p.id === targetId), 'the confirmed project left the active list')
   console.error('  3. Projects browse → Cancel (no buy) → re-open → Confirm (applies) ✓')
 
-  // --- 3.5. business sub-levels (More → Strat/Invest/Quant). These are human-era
-  // mechanics (the game zeroes investmentEngineFlag at humanFlag=0), so they're
-  // tested HERE in business, not in space. ---
+  // --- 3.5. business sub-levels: Buy (shop) → Stocks (invest), Opts (automations). ---
   await games.onBack(); await games.onBack()            // projects → dash
   await settle((x) => titleOf(x).includes('biz'), 'business dash')
-  paperclips.poke('strategyEngineFlag', 1); paperclips.poke('investmentEngineFlag', 1); paperclips.poke('qFlag', 1)
-  await games.onMenuSelect('More')
-  sc = await settle((x) => titleOf(x).includes('more'), 'business more level'); checkMenu(sc, 'more')
-  assert.ok(menuOf(sc).includes('Invest'), 'business More exposes Invest')
-  for (const [verb, key] of [['Strat', 'Strategy'], ['Invest', 'Invest'], ['Quant', 'Quantum']]) {
-    await games.onMenuSelect(verb)
-    sc = await settle((x) => titleOf(x).includes(key), `${verb} level`); checkMenu(sc, verb)
-    if (verb === 'Invest') {
-      assert.ok(menuOf(sc).includes('Risk'), 'invest exposes the Risk lever (was pinned at Low)')
-      const r0 = paperclips.snapshot().investRisk
-      await games.onMenuSelect('Risk')
-      await settle(() => paperclips.snapshot().investRisk !== r0, 'invest Risk cycles')
-    }
-    await games.onBack()
-    await settle((x) => titleOf(x).includes('more'), `back to more after ${verb}`)
-  }
-  await games.onBack()                                  // more → dash
+  // unlock the relevant engines so their verbs appear (business: humanFlag still 1)
+  paperclips.poke('strategyEngineFlag', 1); paperclips.poke('investmentEngineFlag', 1)
+  paperclips.poke('qFlag', 1); paperclips.poke('wireBuyerFlag', 1)
+  // Buy shop → Stocks (investment) → Risk cycle
+  await games.onMenuSelect('Buy')
+  sc = await settle((x) => titleOf(x).includes('Buy'), 'buy shop'); checkMenu(sc, 'buy')
+  assert.ok(menuOf(sc).includes('Market') && menuOf(sc).includes('Wire'), 'Buy has Market + Wire')
+  assert.ok(menuOf(sc).includes('Stocks'), 'Buy exposes Stocks (investment)')
+  await games.onMenuSelect('Stocks')
+  sc = await settle((x) => titleOf(x).includes('Invest'), 'stocks/invest level'); checkMenu(sc, 'invest')
+  assert.ok(menuOf(sc).includes('Risk'), 'invest exposes the Risk lever (was pinned at Low)')
+  const r0 = paperclips.snapshot().investRisk
+  await games.onMenuSelect('Risk')
+  await settle(() => paperclips.snapshot().investRisk !== r0, 'invest Risk cycles')
+  await games.onBack()                                  // invest → buy
+  await settle((x) => titleOf(x).includes('Buy'), 'back to buy')
+  await games.onBack()                                  // buy → dash
+  await settle((x) => titleOf(x).includes('biz'), 'back to dash')
+  // Opts (P±, AutoQ, AutoY, Proc, Mem) + toggle the automations
+  await games.onMenuSelect('Opts')
+  sc = await settle((x) => titleOf(x).includes('Opts'), 'opts level'); checkMenu(sc, 'opts')
+  for (const lbl of ['P-', 'P+', 'AutoQ', 'AutoY', 'Proc', 'Mem']) assert.ok(menuOf(sc).includes(lbl), `Opts has ${lbl}`)
+  await games.onMenuSelect('AutoQ'); assert.ok(paperclips.isAutoQuantum(), 'AutoQ on')
+  await games.onMenuSelect('AutoY'); assert.ok(paperclips.isAutoYomi(), 'AutoY on')
+  await games.onMenuSelect('AutoQ'); assert.ok(!paperclips.isAutoQuantum(), 'AutoQ off')
+  await games.onMenuSelect('AutoY'); assert.ok(!paperclips.isAutoYomi(), 'AutoY off')
+  await games.onBack()                                  // opts → dash
   await settle((x) => titleOf(x).includes('biz'), 'back at business dash')
-  console.error('  3.5. business sub-levels Strat/Invest(+Risk)/Quant render + fit ✓')
+  console.error('  3.5. Buy(shop)→Stocks(+Risk) + Opts(P±/AutoQ/AutoY/Proc/Mem) render + fit ✓')
 
-  // --- 4. force the SPACE phase and verify the space dashboard renders + fits ---
-  paperclips.poke('humanFlag', 0)
-  paperclips.poke('spaceFlag', 1)
+  // --- 4. FACTORY phase (humanFlag=0, spaceFlag=0): manual Build + power, NO Probe ---
+  paperclips.poke('humanFlag', 0)            // Earth disassembly; spaceFlag stays 0
   paperclips.poke('availableMatter', 6e27)
-  paperclips.poke('probeCount', 5)
-  sc = await settle((x) => titleOf(x).includes('space'), 'space dashboard (pacer re-render)')
-  assert.match(regionText(sc, 'content'), /Matter/, 'space dash shows Matter')
-  assert.ok(menuOf(sc).includes('Build') && menuOf(sc).includes('Probe'), 'space verbs present')
-  const est2 = checkMenu(sc, 'space dash')
-  console.error(`  4. forced space → space dashboard, Build/Probe verbs, frame ${est2}B ✓`)
+  sc = await settle((x) => titleOf(x).includes('factory'), 'factory dashboard')
+  assert.match(regionText(sc, 'content'), /Matter/, 'factory dash shows Matter')
+  assert.ok(menuOf(sc).includes('Build'), 'factory has Build')
+  assert.ok(!menuOf(sc).includes('Probe'), 'factory has NO Probe (probes are full-space)')
+  const est2 = checkMenu(sc, 'factory dash')
+  console.error(`  4. factory phase → Build dash (no Probe), frame ${est2}B ✓`)
 
-  // --- 5. the space Build + Probe sub-levels render and fit ---
+  // --- 5. factory Build level (Qty) + the build bottleneck hints ---
   await games.onMenuSelect('Build')
-  sc = await settle((x) => titleOf(x).includes('Build'), 'drones level')
-  checkMenu(sc, 'drones')
-  await games.onMenuSelect('Qty')   // cycle qty (constant label, value in title)
+  sc = await settle((x) => titleOf(x).includes('Build'), 'drones level'); checkMenu(sc, 'drones')
+  await games.onMenuSelect('Qty')
   sc = await settle((x) => titleOf(x).includes('×10'), 'qty cycled to ×10')
-  console.error('  5. Build level: Qty cycles (×10), fits ✓')
   await games.onBack()
-  await games.onMenuSelect('Probe')
-  sc = await settle((x) => titleOf(x).includes('Probe'), 'probe level')
-  checkMenu(sc, 'probe')
-  await games.onMenuSelect('Sel')   // cycle the selected dimension
-  sc = await settle((x) => /Probe \[(Nav)\]/.test(titleOf(x)), 'probe dim cycled to Nav')
-  console.error('  6. Probe level: Sel cycles dimension (Nav), fits ✓')
+  await settle((x) => titleOf(x).includes('factory'), 'back to factory dash')
+  // updatePower recomputes powMod each tick in the factory phase, so drive it via the
+  // real inputs: supply = farmLevel×0.5, demand = factory×2 + (harv+wire)×0.01.
+  // deficit (demand>0, supply=0) → powMod→0 → ⚠ + Short: Farms.
+  paperclips.poke('harvesterLevel', 0); paperclips.poke('wireDroneLevel', 0); paperclips.poke('factoryLevel', 1000)
+  paperclips.poke('farmLevel', 0); paperclips.poke('batteryLevel', 0); paperclips.poke('storedPower', 0)
+  await settle((x) => regionText(x, 'content').includes('⚠') && regionText(x, 'content2').includes('Short: Farms'), 'power-short ⚠ + Short: Farms')
+  // surplus (supply≥demand) → powMod snaps to 1; harvesters lag → Short: Harvesters
+  paperclips.poke('farmLevel', 1000)
+  paperclips.poke('harvesterLevel', 1); paperclips.poke('wireDroneLevel', 100); paperclips.poke('factoryLevel', 100)
+  await settle((x) => regionText(x, 'content2').includes('Short: Harvesters'), 'balanced → Short: Harvesters')
+  console.error('  5. factory: Build(Qty×10) + ⚠N% "Short: Farms"→"Short: Harvesters" hints ✓')
 
-  // --- 7. space Swarm sub-level (+Slider) + the human→space mechanic boundary ---
+  // --- 6. FULL SPACE (spaceFlag=1): probe-driven — Build gone, Probe + trust hint ---
+  paperclips.poke('spaceFlag', 1)
+  sc = await settle((x) => titleOf(x).includes('space'), 'full-space dashboard')
+  assert.ok(menuOf(sc).includes('Probe'), 'full space has Probe')
+  assert.ok(!menuOf(sc).includes('Build'), 'full space has NO Build (probes drive production)')
+  assert.match(regionText(sc, 'content'), /Probes/, 'space dash shows Probes')
+  checkMenu(sc, 'space dash')
+  paperclips.poke('probeTrust', 0); paperclips.poke('probeUsedTrust', 0)
+  await settle((x) => regionText(x, 'content2').includes('Short: buy PTrust'), 'trust hint = buy PTrust when probeTrust=0')
+  console.error('  6. full space → Probe dash (no Build) + "Short: buy PTrust" hint ✓')
+
+  // --- 7. probe level: PTrust AVAILABLE (the bug fix) + Sel + +Probe clamp ---
+  await games.onMenuSelect('Probe')
+  sc = await settle((x) => titleOf(x).includes('Probe'), 'probe level'); checkMenu(sc, 'probe')
+  assert.ok(menuOf(sc).includes('PTrust'), 'PTrust available in full space (was wrongly gated on combat)')
+  await games.onMenuSelect('Sel')
+  sc = await settle((x) => /Probe \[(Nav)\]/.test(titleOf(x)), 'probe dim cycled to Nav')
+  paperclips.poke('probeCost', 100); paperclips.poke('unusedClips', 100 * 1500)   // afford 1500
+  const pl0 = paperclips.snapshot().probesLaunched
+  await games.onMenuSelect('+Probe')
+  await settle(() => paperclips.snapshot().probesLaunched > pl0, '+Probe launched some')
+  assert.equal(paperclips.snapshot().probesLaunched - pl0, 1000, '+Probe clamps to 1000 (1500 affordable)')
+  paperclips.poke('unusedClips', 0)
+  const pl1 = paperclips.snapshot().probesLaunched
+  await games.onMenuSelect('+Probe'); await sleep(120)
+  assert.equal(paperclips.snapshot().probesLaunched, pl1, '+Probe launches 0 when unaffordable')
+  console.error('  7. probe level: PTrust available + Sel cycles + +Probe clamps ≤1000 (0 broke) ✓')
+
+  // --- 8. space Swarm (+Slider) + Opts carry-over ---
   paperclips.poke('swarmFlag', 1)
   await games.onBack()                                  // probe → dash
   await settle((x) => titleOf(x).includes('space'), 'space dash for swarm')
@@ -162,31 +202,30 @@ try {
   assert.ok(menuOf(sc).includes('Slider'), 'swarm exposes the Work/Think Slider')
   await games.onBack()
   await settle((x) => titleOf(x).includes('space'), 'back to space dash')
-  await games.onMenuSelect('More')
-  sc = await settle((x) => titleOf(x).includes('more'), 'space more level'); checkMenu(sc, 'more')
-  assert.ok(menuOf(sc).includes('Strat') && menuOf(sc).includes('Quant'), 'Strat/Quant carry into space')
-  assert.ok(!menuOf(sc).includes('Invest'), 'Invest is correctly GONE in space (the game zeroes it at humanFlag=0)')
-  await games.onBack()                                  // more → dash
+  await games.onMenuSelect('Opts')
+  sc = await settle((x) => titleOf(x).includes('Opts'), 'space opts level'); checkMenu(sc, 'opts')
+  assert.ok(menuOf(sc).includes('AutoQ') && menuOf(sc).includes('AutoY'), 'AutoQ/AutoY carry into space')
+  assert.ok(!menuOf(sc).includes('P-') && !menuOf(sc).includes('P+'), 'pricing (P-/P+) correctly absent in space')
+  await games.onBack()                                  // opts → dash
   await settle((x) => titleOf(x).includes('space'), 'back to space dash')
-  console.error('  7. space Swarm(+Slider) + Strat/Quant carry-over, Invest gone ✓')
+  console.error('  8. space Swarm(+Slider) + Opts(AutoQ/AutoY carry, no P±) ✓')
 
-  // --- 8. power-short warning + dedicated end (dismantle) dashboard (already at space dash) ---
-  paperclips.poke('powMod', 0.5)                        // 50% performance
-  await settle((x) => regionText(x, 'content').includes('⚠'), 'power-short ⚠ on the space dashboard')
-  console.error('  8a. power-short shows ⚠N% on the space dashboard ✓')
+  // --- 9. end (dismantle) dashboard ---
   paperclips.poke('dismantle', 1)
   sc = await settle((x) => titleOf(x).includes('end'), 'end-phase dashboard')
   assert.match(regionText(sc, 'content'), /Dismantle 1\/7/, 'end dashboard shows dismantle progress')
   checkMenu(sc, 'end dash')
-  console.error('  8b. end phase → dedicated dismantle dashboard ✓')
+  console.error('  9. end phase → dedicated dismantle dashboard ✓')
 
-  // --- 9. auto-quantum toggles + ticks safely with no photonic chips ---
+  // --- 9. auto-quantum + auto-yomi toggle + tick safely (no chips, no strats) ---
   paperclips.setAutoQuantum(true)
-  assert.ok(paperclips.isAutoQuantum(), 'auto-quantum on')
-  await sleep(400)                                      // the 150ms engine pacer fires autoFireQuantum a few times
-  assert.ok(paperclips.status().running, 'engine survives auto-quantum ticks with no chips')
+  paperclips.setAutoYomi(true)
+  assert.ok(paperclips.isAutoQuantum() && paperclips.isAutoYomi(), 'both automations on')
+  await sleep(400)                                      // the 150ms engine pacer fires both a few times
+  assert.ok(paperclips.status().running, 'engine survives auto-quantum + auto-yomi ticks')
   paperclips.setAutoQuantum(false)
-  console.error('  9. auto-quantum toggle ticks safely (no chips) ✓')
+  paperclips.setAutoYomi(false)
+  console.error('  10. auto-quantum + auto-yomi toggles tick safely ✓')
 
   console.log('phase-paperclips: ALL OK')
 } finally {

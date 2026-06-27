@@ -3608,11 +3608,11 @@ const CHESS_SKILLS = [1, 5, 10, 20] as const
 // resolved against the last-rendered view can't miss after a state change).
 // Irreversible spends go through a Cancel-first confirm.
 
-type PcLevel = 'dash' | 'more' | 'projects' | 'confirm' | 'drones' | 'probe' | 'strat' | 'quant' | 'invest' | 'swarm'
+type PcLevel = 'dash' | 'buy' | 'opts' | 'projects' | 'confirm' | 'drones' | 'probe' | 'invest' | 'swarm'
 
 interface PcVerb { label: string; run: () => void }
 
-const PHASE_LABEL: Record<PcPhase, string> = { business: 'biz', space: 'space', end: 'end' }
+const PHASE_LABEL: Record<PcPhase, string> = { business: 'biz', factory: 'factory', space: 'space', end: 'end' }
 const PC_DRONE_QTY = [1, 10, 100, 1000] as const
 const PC_SLIDER_POS = [0, 100, 200] as const
 const PC_PROBE_DIMS = [
@@ -3641,7 +3641,6 @@ function pcNum(n: number): string {
   else s = a.toExponential(1)
   return neg ? '-' + s : s
 }
-function pcMoney(n: number): string { return '$' + pcNum(n) }
 
 /** Pre-fit a twocol line to the column pixel width (twocol pre-fits; compose
  *  px-clamps as a backstop but logs a warning if it has to — we avoid that). */
@@ -3725,47 +3724,58 @@ class PaperclipsController {
     const C = paperclips
     switch (this.level) {
       case 'dash': {
+        // 4 stable top-level verbs (Adam 2026-06-27): no Reload/Main — double-tap
+        // backs out toward Main. Buy = the shop; Opts = pricing + automations + compute.
         const v: PcVerb[] = []
-        if (s.phase === 'space' || s.phase === 'end') {
-          v.push({ label: 'Build', run: () => this.go('drones') })
+        if (s.phase === 'space') {
+          // FULL SPACE — probe-driven; Build/power are dead here.
           v.push({ label: 'Probe', run: () => this.go('probe') })
           if (s.swarmUnlocked) v.push({ label: 'Swarm', run: () => this.go('swarm') })
+          v.push({ label: 'Opts', run: () => this.go('opts') })
           v.push({ label: 'Proj', run: () => this.go('projects') })
-          v.push({ label: 'More', run: () => this.go('more') })
+        } else if (s.phase === 'factory') {
+          // Earth disassembly — manual Build + power.
+          v.push({ label: 'Build', run: () => this.go('drones') })
+          if (s.swarmUnlocked) v.push({ label: 'Swarm', run: () => this.go('swarm') })
+          v.push({ label: 'Opts', run: () => this.go('opts') })
+          v.push({ label: 'Proj', run: () => this.go('projects') })
+        } else if (s.phase === 'end') {
+          v.push({ label: 'Proj', run: () => this.go('projects') })
+          v.push({ label: 'Opts', run: () => this.go('opts') })
         } else {
           v.push({ label: 'Clip', run: () => C.bulkClip() })
-          v.push({ label: 'Wire', run: () => C.call('buyWire') })
-          if (s.autoClipperUnlocked) v.push({ label: 'AutoC', run: () => C.call('makeClipper') })
-          v.push({ label: 'Ads', run: () => C.call('buyAds') })
-          v.push({ label: 'P-', run: () => C.call('lowerPrice') })
-          v.push({ label: 'P+', run: () => C.call('raisePrice') })
-          if (s.megaClipperUnlocked) v.push({ label: 'MegaC', run: () => C.call('makeMegaClipper') })
-          if (s.compUnlocked) { v.push({ label: 'Proc', run: () => C.call('addProc') }); v.push({ label: 'Mem', run: () => C.call('addMem') }) }
+          v.push({ label: 'Buy', run: () => this.go('buy') })
+          v.push({ label: 'Opts', run: () => this.go('opts') })
           v.push({ label: 'Proj', run: () => this.go('projects') })
-          v.push({ label: 'More', run: () => this.go('more') })
         }
         return v
       }
-      case 'more': {
+      case 'buy': {
+        // The shop — everything funds buy (business era).
+        const v: PcVerb[] = [
+          { label: 'Market', run: () => C.call('buyAds') },
+          { label: 'Wire', run: () => C.call('buyWire') },
+        ]
+        if (s.wireBuyerUnlocked) v.push({ label: 'WBuyer', run: () => C.call('toggleWireBuyer') })
+        if (s.autoClipperUnlocked) v.push({ label: 'AutoC', run: () => C.call('makeClipper') })
+        if (s.megaClipperUnlocked) v.push({ label: 'MegaC', run: () => C.call('makeMegaClipper') })
+        if (s.investUnlocked) v.push({ label: 'Stocks', run: () => this.go('invest') })
+        return v
+      }
+      case 'opts': {
+        // Pricing + automations + compute spends. AutoQ/AutoY are constant-label toggles.
         const v: PcVerb[] = []
-        if (s.wireBuyerUnlocked && s.phase !== 'space') v.push({ label: 'WBuy', run: () => C.call('toggleWireBuyer') })
-        if (s.stratUnlocked) v.push({ label: 'Strat', run: () => this.go('strat') })
-        if (s.investUnlocked) v.push({ label: 'Invest', run: () => this.go('invest') })
-        if (s.qUnlocked) v.push({ label: 'Quant', run: () => this.go('quant') })
+        if (s.phase === 'business') { v.push({ label: 'P-', run: () => C.call('lowerPrice') }); v.push({ label: 'P+', run: () => C.call('raisePrice') }) }
+        if (s.qUnlocked) v.push({ label: 'AutoQ', run: () => C.setAutoQuantum(!C.isAutoQuantum()) })
+        if (s.stratUnlocked) v.push({ label: 'AutoY', run: () => C.setAutoYomi(!C.isAutoYomi()) })
+        if (s.compUnlocked) { v.push({ label: 'Proc', run: () => C.call('addProc') }); v.push({ label: 'Mem', run: () => C.call('addMem') }) }
         return v
       }
-      case 'strat': {
-        const v: PcVerb[] = [{ label: 'New', run: () => C.call('newTourney') }, { label: 'Run', run: () => C.call('runTourney') }]
-        if (s.autoTourneyUnlocked) v.push({ label: 'AutoT', run: () => C.call('toggleAutoTourney') })
-        return v
-      }
-      case 'quant':
-        return [{ label: 'AutoQ', run: () => C.setAutoQuantum(!C.isAutoQuantum()) }]
       case 'invest':
         return [
           { label: 'Dep', run: () => C.call('investDeposit') },
           { label: 'Wd', run: () => C.call('investWithdraw') },
-          { label: 'Upgr', run: () => C.call('investUpgrade') },
+          { label: 'Upgr', run: () => C.investUpgrade() },   // guarded (yomi≥cost) — the -57M bug
           { label: 'Risk', run: () => { const o = ['low', 'med', 'hi']; const cur = paperclips.snapshot().investRisk; C.setInvestRisk(o[(o.indexOf(cur) + 1) % o.length] ?? 'low') } },
         ]
       case 'drones':
@@ -3780,18 +3790,19 @@ class PaperclipsController {
       case 'probe': {
         const d = PC_PROBE_DIMS[this.probeDim]
         const v: PcVerb[] = [
-          { label: '+Probe', run: () => C.call('makeProbe') },
+          { label: '+Probe', run: () => C.bulkProbe() },   // up to 1000/tap, clamped to affordable
           { label: 'Sel', run: () => { this.probeDim = (this.probeDim + 1) % PC_PROBE_DIMS.length } },
           { label: 'Up', run: () => C.call(d.raise) },
           { label: 'Dn', run: () => C.call(d.lower) },
+          { label: 'PTrust', run: () => C.call('increaseProbeTrust') },   // yomi → +probeTrust — available ALL of full space (was wrongly gated on combat)
         ]
-        if (s.combatUnlocked) { v.push({ label: 'MaxT', run: () => C.call('increaseMaxTrust') }); v.push({ label: 'PTrust', run: () => C.call('increaseProbeTrust') }) }
+        if (s.combatUnlocked) v.push({ label: 'MaxT', run: () => C.call('increaseMaxTrust') })   // honor → +maxTrust (post-combat)
         return v
       }
       case 'swarm':
         return [
-          { label: 'Synch', run: () => C.call('synchSwarm') },
-          { label: 'Entmt', run: () => C.call('entertainSwarm') },
+          { label: 'Synch', run: () => C.synchSwarm() },        // guarded (yomi≥cost)
+          { label: 'Entmt', run: () => C.entertainSwarm() },    // guarded (creativity≥cost)
           { label: 'Slider', run: () => { this.sliderIdx = (this.sliderIdx + 1) % PC_SLIDER_POS.length; C.setSlider(PC_SLIDER_POS[this.sliderIdx]) } },
         ]
       case 'confirm': {
@@ -3813,7 +3824,7 @@ class PaperclipsController {
         return v
       }
       case 'projects':
-        return []   // browse level — actions are content-row taps; menu is just Back/Reload/Main
+        return []   // browse level — actions are content-row taps; menu is just Back
     }
   }
 
@@ -3842,7 +3853,7 @@ class PaperclipsController {
       const pages = this.confirmPages.length ? this.confirmPages : [this.pending?.body ?? '(nothing pending)']
       const page = Math.min(this.confirmPage, pages.length - 1)
       const suffix = pages.length > 1 ? ` · ${page + 1}/${pages.length}` : ''
-      const menu = [...this.menuVerbs(s).map((v) => v.label), 'Reload', 'Main']
+      const menu = [...this.menuVerbs(s).map((v) => v.label), 'Main']   // Cancel/Confirm (+Next/Prev) + Main
       return { mode: 'text', title: clampMid((this.pending?.title ?? 'Confirm') + suffix), menu, text: pages[page] ?? '' }
     }
     return this.subView(s)
@@ -3850,7 +3861,7 @@ class PaperclipsController {
 
   private dashView(s: PcSnapshot): WinView {
     const verbs = this.menuVerbs(s)
-    const menu = [...verbs.map((v) => v.label), 'Reload', 'Main']
+    const menu = [...verbs.map((v) => v.label), 'Main']   // Main back (Adam 2026-06-27) — quick return to the OS dashboard
     const title = `Paperclips · ${PHASE_LABEL[s.phase]} · ${pcNum(s.clips)} clips`
     let left: string[]
     let right: string[]
@@ -3873,9 +3884,27 @@ class PaperclipsController {
         `Power ${pcNum(s.storedPower)}`,
       ]
     } else if (s.phase === 'space') {
-      // Covers BOTH the Earth-disassembly sub-phase (humanFlag=0, spaceFlag=0) and
-      // full space. Power performance + swarm health are surfaced because they
-      // silently throttle everything (review 2026-06-27, E-F3/E-F4).
+      // FULL SPACE (spaceFlag=1) — probe-driven (Adam 2026-06-27). Build/power are dead;
+      // what matters is probe count, trust allocation, exploration %, and what's killing them.
+      left = [
+        `Clips ${pcNum(s.clips)}`,
+        `Probes ${pcNum(s.probes)}`,
+        `Descend ${pcNum(s.probesBorn)}`,
+        `Explor ${s.colonizedPct.toFixed(1)}%`,
+        `Matter ${pcNum(s.availableMatter)}`,
+        `Yomi ${pcNum(s.yomi)}`,
+      ]
+      right = [
+        `Trust ${s.probeUsedTrust}/${s.probeTrust} m${s.maxTrust}`,
+        `Launch ${pcNum(s.probesLaunched)}`,
+        `LostH ${pcNum(s.probesLostHaz)} Dr ${pcNum(s.probesLostDrift)}`,
+        s.combatUnlocked ? `Honor ${pcNum(s.honor)}` : `LostC ${pcNum(s.probesLostCombat)}`,
+        `Driftr ${pcNum(s.drifters)} k${pcNum(s.driftersKilled)}`,
+      ]
+      if (s.shortage) right.push(`Short: ${s.shortage}`)   // trust hint (e.g. 'buy PTrust')
+    } else if (s.phase === 'factory') {
+      // Earth disassembly (humanFlag=0, spaceFlag=0): manual Build + power. Power
+      // performance + the build bottleneck are surfaced (they throttle everything).
       const perf = s.powMod < 1 ? ` ⚠${Math.round(s.powMod * 100)}%` : ''
       left = [
         `Clips ${pcNum(s.clips)}`,
@@ -3893,44 +3922,61 @@ class PaperclipsController {
         `Explor ${s.colonizedPct.toFixed(1)}%`,
         s.combatUnlocked ? `Honor ${pcNum(s.honor)} D${pcNum(s.drifters)}` : `Born ${pcNum(s.probesBorn)}`,
       ]
+      // bottleneck hint under Born (Adam 2026-06-27): what to buy more of next.
+      if (s.shortage) right.push(`Short: ${s.shortage}`)
     } else {
+      // Business — dense combined lines (Adam 2026-06-27): the whole state on one page.
+      // Left = money/market, right = production/compute/automation. All < column width.
+      const opsK = s.operations / 1000
+      const opsKs = opsK < 10 ? opsK.toFixed(1).replace(/\.0$/, '') : Math.round(opsK).toString()
       left = [
-        `Clips ${pcNum(s.clips)}`,
-        `Rev/s ${pcMoney(s.avgRev)}`,
-        `Funds ${pcMoney(s.funds)}`,
-        `$/clip ${s.margin.toFixed(2)}`,
-        `Demand ${s.demandPct}%`,
-        `Unsold ${pcNum(s.unsoldClips)}`,
+        `Clips ${pcNum(s.clips)} Uns ${pcNum(s.unsoldClips)}`,
+        `Funds $${pcNum(s.funds)} @$${s.margin.toFixed(2)}`,
+        `Dem ${s.demandPct}% R/s $${pcNum(s.avgRev)}`,
+        `Mkt L${s.marketingLvl} $${pcNum(s.adCost)}`,
       ]
+      if (s.investUnlocked) left.push(`Cash $${pcNum(s.investBankroll)} Stk $${pcNum(s.investStocks)}`)
       right = [
-        `Wire ${pcNum(s.wire)}`,
-        `WCost ${pcMoney(s.wireCost)}`,
-        `AutoC ${pcNum(s.autoClippers)}`,
-        `Clip/s ${pcNum(s.clipRate)}`,
-        s.compUnlocked ? `Trust ${s.trust}` : `Mkt L${s.marketingLvl}`,
-        s.compUnlocked ? `Ops ${pcNum(s.operations)}/${pcNum(s.opMax)}` : `Ad ${pcMoney(s.adCost)}`,
+        `Wire ${pcNum(s.wire)} $${pcNum(s.wireCost)}`,
+        `AutoC ${pcNum(s.autoClippers)}${s.megaClipperUnlocked ? ` Mega ${pcNum(s.megaClippers)}` : ''}`,
       ]
+      if (s.compUnlocked) right.push(`T${s.trust} P${s.processors} Ops ${opsKs}/${s.memory}k`)
+      if (s.compUnlocked) right.push(`Creat ${pcNum(s.creativity)} Yomi ${pcNum(s.yomi)}`)
+      const autos: string[] = []
+      if (s.wireBuyerUnlocked) autos.push(`WB${s.wireBuyerOn ? '+' : '-'}`)
+      if (s.qUnlocked) autos.push(`AQ${s.autoQuantum ? '+' : '-'}`)
+      if (s.stratUnlocked) autos.push(`AY${s.autoYomi ? '+' : '-'}`)
+      if (autos.length) right.push(`Auto ${autos.join(' ')}`)
     }
     return { mode: 'twocol', title, menu, textLeft: left.map((l) => pcCol(l)).join('\n'), textRight: right.map((l) => pcCol(l)).join('\n') }
   }
 
   private subView(s: PcSnapshot): WinView {
     const verbs = this.menuVerbs(s)
-    const menu = [...verbs.map((v) => v.label), 'Back', 'Reload', 'Main']
+    const menu = [...verbs.map((v) => v.label), 'Back', 'Main']   // Back + Main (no Reload)
     let title = 'Paperclips'
     let text = ''
     switch (this.level) {
-      case 'more':
-        title = `Paperclips · ${PHASE_LABEL[s.phase]} · more`
-        text = `Yomi ${pcNum(s.yomi)} · Ops ${pcNum(s.operations)}/${pcNum(s.opMax)}\nCreativity ${pcNum(s.creativity)}\nCash $${pcNum(s.investBankroll)} · Stocks $${pcNum(s.investStocks)}`
+      case 'buy':
+        title = 'Paperclips · Buy'
+        text = [
+          `Funds $${pcNum(s.funds)}`,
+          `Wire ${pcNum(s.wire)} @ $${pcNum(s.wireCost)}`,
+          `Market L${s.marketingLvl} @ $${pcNum(s.adCost)} · Dem ${s.demandPct}%`,
+          `AutoC ${pcNum(s.autoClippers)} @ $${pcNum(s.clipperCost)}`,
+          s.megaClipperUnlocked ? `MegaC ${pcNum(s.megaClippers)} @ $${pcNum(s.megaClipperCost)}` : '',
+          s.wireBuyerUnlocked ? `WireBuyer: ${s.wireBuyerOn ? 'ON' : 'off'} · Stocks→` : '',
+        ].filter(Boolean).join('\n')
         break
-      case 'strat':
-        title = 'Paperclips · Strategy'
-        text = `Yomi ${pcNum(s.yomi)}\nTournament: ${s.tourneyInProgress ? 'running…' : 'idle'}\nAuto-tourney: ${s.autoTourneyOn ? 'ON' : 'off'}\n\nNew sets up, Run plays it for yomi.`
-        break
-      case 'quant':
-        title = 'Paperclips · Quantum'
-        text = `Photonic chips: ${s.qChipsActive}\nSignal Σ: ${s.qSum.toFixed(2)}\nOps ${pcNum(s.operations)}/${pcNum(s.opMax)}\n\nAuto-quantum: ${s.autoQuantum ? 'ON' : 'off'} — auto-fires qComp\nwhenever the chip sum is positive.`
+      case 'opts':
+        title = 'Paperclips · Opts'
+        text = [
+          s.phase === 'business' ? `Price $${s.margin.toFixed(2)} (P-/P+) · Dem ${s.demandPct}%` : '',
+          s.compUnlocked ? `Trust ${s.trust} · Proc ${s.processors} · Mem ${s.memory}` : '',
+          s.compUnlocked ? `Ops ${pcNum(s.operations)}/${pcNum(s.opMax)} · Creat ${pcNum(s.creativity)}` : '',
+          s.qUnlocked ? `AutoQ: ${s.autoQuantum ? 'ON' : 'off'} (qComp on +chip sum)` : '',
+          s.stratUnlocked ? `AutoY: ${s.autoYomi ? 'ON' : 'off'} · Yomi ${pcNum(s.yomi)} (auto-tourney @ best)` : '',
+        ].filter(Boolean).join('\n')
         break
       case 'invest':
         title = 'Paperclips · Invest'
@@ -3950,13 +3996,17 @@ class PaperclipsController {
         title = `Paperclips · Probe [${PC_PROBE_DIMS[this.probeDim].key}]`
         const p = s.probe
         const free = s.probeTrust - s.probeUsedTrust
+        const canMake = s.probeCost > 0 ? Math.floor(s.unusedClips / s.probeCost) : 0
+        // The full-space loop: PTrust (yomi) grows the pool → Sel+Up/Dn allocates it →
+        // Rep/Haz/Spd/Nav keep probes alive+exploring → +Probe launches; they replicate.
         text = [
-          `Trust free ${free}/${pcNum(s.probeTrust)} · probes ${pcNum(s.probes)}`,
+          `Probes ${pcNum(s.probes)} alive · ${pcNum(s.probesBorn)} bred`,
+          `+Probe ${pcNum(s.probeCost)}/ea, can make ${pcNum(canMake)}`,
+          `Trust free ${free}/${s.probeTrust} (max ${s.maxTrust})`,
           `Spd ${p.Speed} Nav ${p.Nav} Rep ${p.Rep} Haz ${p.Haz}`,
           `Fac ${p.Fac} Hrv ${p.Harv} Wir ${p.Wire} Cbt ${p.Combat}`,
-          `Sel=${PC_PROBE_DIMS[this.probeDim].key}; Up/Dn adjusts it.`,
-          s.combatUnlocked ? `Honor ${pcNum(s.honor)} · maxTrust ${s.maxTrust}` : '',
-        ].filter(Boolean).join('\n')
+          s.shortage ? `> ${s.shortage}` : '> allocated — Up/Dn tunes [Sel]',
+        ].join('\n')
         break
       }
       case 'swarm': {
@@ -3987,7 +4037,7 @@ class PaperclipsController {
       mode: 'browse',
       menuMode: this.focus === 'menu' ? 'capture' : 'passive',
       title: `Paperclips · Projects (${this.shownProjects.length})`,
-      menu: ['Back', 'Reload', 'Main'],
+      menu: ['Back', 'Main'],
       items: paged.items,
     }
   }
@@ -4029,9 +4079,9 @@ class PaperclipsController {
       if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
       this.focus = 'content'; this.level = 'dash'; this.requestRender(); return true
     }
-    // Pop ONE level (DE: double-tap = back). strat/invest/quant are reached via
-    // 'more', so they pop back to it; everything else (more/drones/probe/swarm) → dash.
-    if (this.level === 'strat' || this.level === 'invest' || this.level === 'quant') { this.level = 'more'; this.requestRender(); return true }
+    // Pop ONE level (DE: double-tap = back). 'invest' (Stocks) is reached via 'buy',
+    // so it pops back there; everything else (buy/opts/drones/probe/swarm) → dash.
+    if (this.level === 'invest') { this.level = 'buy'; this.requestRender(); return true }
     if (this.level !== 'dash') { this.level = 'dash'; this.requestRender(); return true }
     return false
   }
