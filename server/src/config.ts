@@ -32,6 +32,13 @@ export interface G2CCConfig {
     whisperCompute: 'float16' | 'int8' | 'int8_float16'
     /** Parakeet model id (only used when engine='parakeet', Phase 8+). */
     parakeetModel: string
+    /** DJI-over-Bluetooth path: apply per-utterance ADAPTIVE noise reduction
+     *  (local-noise Wiener, 32 ms window) before Parakeet. Validated 2026-06-23
+     *  to roughly halve WER at a realistic standing spot; ~neutral point-blank.
+     *  Kill-switch — set false to fall back to raw transcribe(). */
+    djiBtFilter: boolean
+    /** Wiener over-subtraction factor for the BT adaptive filter (validated 1.5). */
+    djiBtAlpha: number
   }
   claude: {
     /** Default permission mode. 'bypassPermissions' = --dangerously-skip-permissions. */
@@ -89,6 +96,8 @@ function defaultConfig(): G2CCConfig {
       whisperDevice: 'cuda',
       whisperCompute: 'float16',
       parakeetModel: 'nvidia/parakeet-tdt-0.6b-v2',
+      djiBtFilter: true,
+      djiBtAlpha: 1.5,
     },
     claude: {
       defaultMode: 'bypassPermissions',

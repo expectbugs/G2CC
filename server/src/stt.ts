@@ -205,6 +205,58 @@ export async function transcribeDji(
   }
 }
 
+// ---- DJI-over-Bluetooth daily path (g2_custom_app_spec.md §8) ----
+// DJI TX2 → BT HFP/SCO → phone → 16 kHz mono int16. Adam's ACTUAL daily source
+// (USB receiver out of service). Originally routed through transcribe() with NO
+// machine-noise reduction — the reason Parakeet mangled speech at work.
+//
+// FIX (validated 2026-06-23 on real captures): per-utterance ADAPTIVE local-noise
+// Wiener (pipeline.denoise.adaptive_denoise) inside the WARM daemon — NOT the
+// static learned profile, which mismatches under Android's per-clip SCO AGC and
+// failed every test. Roughly halves WER at a realistic standing spot; ~neutral
+// point-blank. Gated by config.stt.djiBtFilter (kill-switch).
+//
+// Default Wiener over-subtraction factor; config.stt.djiBtAlpha overrides.
+const DJI_BT_ALPHA = 1.5
+
+/** DJI-over-Bluetooth path: 16 kHz mono int16 → ADAPTIVE local-noise Wiener →
+ *  WARM Parakeet daemon. Deliberately BYPASSES preprocessAudio(): its peak-
+ *  normalize keys off the loud machine peak (never lifts buried speech), and the
+ *  adaptive per-utterance subtraction replaces its generic RNNoise. REQUIRES
+ *  engine=parakeet (the daemon path); ws-handler enforces that before calling. */
+export async function transcribeDjiBt(
+  pcmBuffer: Buffer,
+  format: { sampleRate: number; channels: number; encoding: string },
+  config: G2CCConfig,
+): Promise<string> {
+  if (format.encoding !== 'int16') {
+    throw new Error(`transcribeDjiBt expects int16, got ${format.encoding}`)
+  }
+  // 16-bit integer PCM WAV (audioFormat=1). soundfile decodes int16 → float32
+  // in [-1, 1], the SAME normalization learn_noise_profile.py applies, so the
+  // profile and the live audio share one amplitude convention.
+  const wavBuffer = pcmToWav(pcmBuffer, format.sampleRate, 16, format.channels)
+  const tmpPath = sttTmpPath('g2cc-djibt')
+  try {
+    writeFileSync(tmpPath, wavBuffer)
+    const result = (await getParakeetDaemon(config).transcribe(tmpPath, {
+      adaptive: true,
+      alpha: config.stt.djiBtAlpha ?? DJI_BT_ALPHA,
+    })).trim()
+    console.log(`[stt] dji-bt(NR) result (${result.length} chars): "${result}"`)
+    if (isLikelyHallucination(result)) {
+      console.warn(`[stt] Rejected hallucination: "${result}"`)
+      throw new Error('No speech detected (likely background noise)')
+    }
+    return result
+  } finally {
+    if (existsSync(tmpPath)) {
+      try { unlinkSync(tmpPath) }
+      catch (err) { console.warn(`[stt] tmpfile cleanup failed (${tmpPath}): ${err}`) }
+    }
+  }
+}
+
 // ---- Warm Parakeet daemon: load the NeMo model ONCE, transcribe many ----
 // The old per-request execFile(parakeet_cli) cold-loaded the model (~12 s) on
 // EVERY call (the "transcribing…" stall). This persistent process loads it once
@@ -223,14 +275,23 @@ const DAEMON_MAX_BUF = 4 * 1024 * 1024
 class ParakeetDaemon {
   private proc: ChildProcessWithoutNullStreams | null = null
   private buf = ''
-  private queue: Array<{ wav: string; resolve: (t: string) => void; reject: (e: Error) => void }> = []
+  private queue: Array<{ line: string; resolve: (t: string) => void; reject: (e: Error) => void }> = []
   private inflight: { resolve: (t: string) => void; reject: (e: Error) => void } | null = null
 
   constructor(private pythonPath: string, private cwd: string) {}
 
-  transcribe(wavPath: string): Promise<string> {
+  /** Transcribe a WAV. A bare path → transcribe only (warm-up, legacy). With
+   *  `opts.profile` → send a JSON job so the WARM daemon applies notch+Wiener
+   *  noise reduction before Parakeet (no model reload). JSON.stringify is a
+   *  single line (WAV paths never contain newlines), so the daemon's line-
+   *  oriented protocol is preserved. */
+  transcribe(wavPath: string, opts?: { profile?: string; alpha?: number; adaptive?: boolean }): Promise<string> {
+    let line: string
+    if (opts?.adaptive) line = JSON.stringify({ wav: wavPath, adaptive: true, alpha: opts.alpha ?? 1.5 })
+    else if (opts?.profile) line = JSON.stringify({ wav: wavPath, profile: opts.profile, alpha: opts.alpha ?? 1.5 })
+    else line = wavPath
     return new Promise<string>((resolve, reject) => {
-      this.queue.push({ wav: wavPath, resolve, reject })
+      this.queue.push({ line, resolve, reject })
       this.pump()
     })
   }
@@ -273,7 +334,7 @@ class ParakeetDaemon {
     const job = this.queue.shift()!
     this.inflight = { resolve: job.resolve, reject: job.reject }
     try {
-      proc.stdin.write(job.wav + '\n')
+      proc.stdin.write(job.line + '\n')
     } catch (e) {
       const j = this.inflight; this.inflight = null
       j.reject(e as Error)

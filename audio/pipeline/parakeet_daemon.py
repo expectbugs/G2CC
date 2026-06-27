@@ -23,9 +23,15 @@ swallowed. EOF on stdin (server closed the pipe) ends the loop cleanly.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
 
+import numpy as np
+import soundfile as sf
+
+from . import denoise, spectral_subtract
 from .parakeet_engine import get_engine
 
 # Server contract — these MUST match the sentinels parsed in stt.ts.
@@ -33,6 +39,64 @@ RESULT_BEGIN = "___G2CC_RESULT_BEGIN___"
 RESULT_END = "___G2CC_RESULT_END___"
 ERROR_BEGIN = "___G2CC_ERROR_BEGIN___"
 ERROR_END = "___G2CC_ERROR_END___"
+
+# Profile cache keyed by (path, mtime) so a re-learned profile at the same path
+# is picked up on the NEXT job without a daemon/server restart — important for
+# offline alpha tuning where machine-bt.npz gets regenerated in place.
+_profile_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _load_profile_cached(path: str) -> dict:
+    """Load + cache a noise profile. Raises loudly (FileNotFoundError / KeyError
+    via spectral_subtract.load_profile) on a missing or malformed profile."""
+    mtime = os.path.getmtime(path)
+    cached = _profile_cache.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    profile = spectral_subtract.load_profile(path)
+    _profile_cache[path] = (mtime, profile)
+    return profile
+
+
+def _transcribe_job(engine, line: str) -> str:
+    """Run one job line → transcript text.
+
+    The line is EITHER a bare absolute WAV path (transcribe only — back-compat
+    with the warm-up silence ping and any legacy caller) OR a JSON object:
+        {"wav": "<path>", "adaptive": true, "alpha": 1.5}            # live BT path
+        {"wav": "<path>", "profile": "<npz>", "alpha": 1.5}          # static-profile (USB)
+        {"wav": "<path>", "no_denoise": true}                        # transcribe only
+    - adaptive=true  → pipeline.denoise.adaptive_denoise (per-utterance local-noise
+      estimate, 32 ms window, floor 0.25). THIS is the method validated on real
+      DJI-BT captures and used by the live 16 kHz-mono path.
+    - profile given  → static-profile NR (apply_profile_denoise) — the float/stereo
+      USB path only; do NOT use for BT (AGC re-levels each clip → magnitude mismatch).
+    All NR runs inside this warm process (~tens of ms), NOT a ~12 s model reload.
+    """
+    if line.startswith("{"):
+        job = json.loads(line)
+        wav = job["wav"]
+        profile_path = job.get("profile")
+        alpha = float(job.get("alpha", 1.5))
+        no_denoise = bool(job.get("no_denoise", False))
+        adaptive = bool(job.get("adaptive", False))
+    else:
+        wav, profile_path, alpha, no_denoise, adaptive = line, None, 1.5, False, False
+
+    if no_denoise or (not adaptive and not profile_path):
+        # Bare transcribe: warm-up silence ping, or NR explicitly skipped.
+        return engine.transcribe(wav).text
+
+    # Decode → mono → NR → transcribe the cleaned array.
+    data, sr = sf.read(wav, dtype="float32")
+    if data.ndim > 1:
+        data = data.mean(axis=1).astype(np.float32, copy=False)
+    if adaptive:
+        cleaned, sr = denoise.adaptive_denoise(data, sr, alpha=alpha)
+    else:
+        profile = _load_profile_cached(profile_path)
+        cleaned, sr = denoise.apply_profile_denoise(data, sr, profile, alpha=alpha)
+    return engine.transcribe_numpy(cleaned, sample_rate=sr).text
 
 
 def _emit(begin: str, body: str, end: str) -> None:
@@ -71,14 +135,14 @@ def main() -> int:
         line = sys.stdin.readline()
         if not line:          # EOF — server closed the pipe
             break
-        wav_path = line.strip()
-        if not wav_path:
+        job_line = line.strip()
+        if not job_line:
             continue
         try:
-            result = engine.transcribe(wav_path)
-            _emit(RESULT_BEGIN, result.text, RESULT_END)
+            text = _transcribe_job(engine, job_line)
+            _emit(RESULT_BEGIN, text, RESULT_END)
         except Exception as exc:  # loud + framed — never swallow
-            logging.getLogger("g2cc.parakeet").exception("transcribe failed for %s", wav_path)
+            logging.getLogger("g2cc.parakeet").exception("transcribe failed for %s", job_line)
             detail = f"{type(exc).__name__}: {exc}"
             # Defang any sentinel in the diagnostic text so _emit's guard can't
             # trip on the ERROR path (the body here is diagnostics, not the

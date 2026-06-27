@@ -21,6 +21,7 @@ import type { WebSocket } from '@fastify/websocket'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { mkdir, writeFile } from 'node:fs/promises'
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import {
   AUTH_TIMEOUT_MS,
@@ -38,7 +39,8 @@ import { validateToken } from './auth.js'
 import { type CCUsage } from './cc-session.js'
 import { SessionPool, type PoolEntry } from './session-pool.js'
 import { Watchdog } from './watchdog.js'
-import { transcribe, transcribeDji } from './stt.js'
+import { transcribe, transcribeDji, transcribeDjiBt } from './stt.js'
+import { pcmToWav } from './pcm-wav.js'
 import { markdownToPlaintext, formatToolUse } from './output-parser.js'
 import { listProjectDirectories, validateProjectPath } from './directory-picker.js'
 import { CCDispatcher, DISPATCH_TARGETS, type Dispatcher, getDispatchTarget } from './dispatch.js'
@@ -1279,6 +1281,45 @@ function wireSessionEvents(client: WSClient, entry: PoolEntry): void {
   })
 }
 
+// ---- Dev capture tee — learn a noise profile / validation clip through the
+// EXACT live path (DJI→BT→phone SCO→server) ----
+// When the sentinel file exists, the NEXT dictation's RAW pcm (pre-NR, pre-
+// normalize) is written to audio/samples/<name>-<ts>.wav and the sentinel is
+// deleted (one-shot). Non-invasive: it tees, then transcription proceeds as
+// normal. Absolute paths — the server's cwd is .../G2CC/server, not the repo
+// root, so a relative 'audio/...' would land in the wrong place.
+const CAPTURE_SENTINEL = '/home/user/G2CC/audio/.capture-armed'
+const CAPTURE_DIR = '/home/user/G2CC/audio/samples'
+
+function maybeTeeRawCapture(pcmBuffer: Buffer, format: AudioFormat): void {
+  let name: string
+  try {
+    if (!existsSync(CAPTURE_SENTINEL)) return
+    const raw = readFileSync(CAPTURE_SENTINEL, 'utf-8').trim()
+    name = (raw || 'capture').replace(/[^A-Za-z0-9_-]/g, '') || 'capture'
+  } catch (err) {
+    console.error(`[capture] sentinel read failed (skipping tee): ${err}`)
+    return
+  }
+  try {
+    const bits = format.encoding === 'float32' ? 32 : 16
+    const audioFormat = format.encoding === 'float32' ? 3 : 1
+    const wav = pcmToWav(pcmBuffer, format.sampleRate, bits, format.channels, audioFormat)
+    const secs = pcmBuffer.length / (format.sampleRate * format.channels * (bits / 8))
+    const out = join(CAPTURE_DIR, `${name}-${Date.now()}.wav`)
+    writeFileSync(out, wav)
+    console.log(
+      `[capture] ARMED tee → ${out} (${secs.toFixed(1)}s, ${pcmBuffer.length} B, ` +
+      `${format.sampleRate}Hz/${format.channels}ch/${format.encoding}) via the live path`,
+    )
+    unlinkSync(CAPTURE_SENTINEL)   // one-shot: consume the arm
+    console.log('[capture] one-shot consumed → disarmed')
+  } catch (err) {
+    // Loud, but never break the dictation over an aux-capture failure.
+    console.error(`[capture] tee FAILED (dictation continues): ${err}`)
+  }
+}
+
 async function handleAudio(
   client: WSClient,
   pcmBuffer: Buffer,
@@ -1293,6 +1334,10 @@ async function handleAudio(
     sttError(client, 'Audio too short')
     return
   }
+
+  // Tee the RAW live-path audio to disk if armed (one-shot). Must be the
+  // unprocessed buffer so a profile learned from it matches the live capture.
+  maybeTeeRawCapture(pcmBuffer, format)
 
   // Route based on the phone-announced format:
   //   - DJI USB path (float32 / 2 ch / rate >= 8 kHz): full noise pipeline
@@ -1370,6 +1415,14 @@ async function handleAudio(
     console.warn(`[ws] ${reason}`)
     if (isHandsfree) return   // a misconfigured handsfree shape — quiet (no dictation to unwind)
     sttError(client, reason)
+    return
+  }
+  // DJI-over-Bluetooth (16 kHz mono int16, Adam's daily source): run per-utterance
+  // ADAPTIVE local-noise Wiener in the warm daemon before Parakeet (validated to
+  // ~halve WER at a realistic spot; ~neutral point-blank). config.stt.djiBtFilter
+  // is the kill-switch — set false to fall back to raw transcribe().
+  if (config.stt.engine === 'parakeet' && config.stt.djiBtFilter !== false) {
+    try { onText(await transcribeDjiBt(pcmBuffer, format, config)) } catch (err) { onErr(err) }
     return
   }
   try { onText(await transcribe(pcmBuffer, config)) } catch (err) { onErr(err) }
