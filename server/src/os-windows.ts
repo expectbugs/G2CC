@@ -209,6 +209,10 @@ export interface OsWindow {
   /** Called when the WM switches AWAY from this window — stop anything that
    *  must not outlive focus (the dictation mic, review 2026-06-10). */
   onDeactivate?(): void
+  /** Called when the WM switches TO this window (foregrounds it). A launcher-style
+   *  window resets to its root here — e.g. Games always lands on the games list,
+   *  not the last game played (Adam 2026-06-28). Absent = keep prior state. */
+  onActivate?(): void
   /** May a notification OVERLAY repaint this window right now? (Phase 4, B5.)
    *  Session windows answer false while listening/transcribing/pendingStt/
    *  pendingPermission — the confirm step's "nothing reaches CC unread"
@@ -4196,6 +4200,17 @@ class GamesWindow implements OsWindow {
   statusLine(): string | null { return this.level === 'pc' ? this.pc.statusLine() : null }
 
   onDeactivate(): void { if (this.level === 'pc') this.pc.onDeactivate() }
+  /** Foregrounding Games (from Main) ALWAYS lands on the games list — not the
+   *  last game played — so you can switch games freely (a chess move while the
+   *  paperclips build; Adam 2026-06-28). Every game keeps running/persisting in
+   *  the background (the paperclips engine, the chess position, the rpg cwd);
+   *  only the VIEW resets. Mirrors the pc→menu Back exit (pc.leave stops the
+   *  render-pacer + flushes — the game itself keeps ticking). */
+  onActivate(): void {
+    if (this.level === 'pc') this.pc.leave()
+    this.level = 'menu'
+    this.focus = 'content'
+  }
   dispose(): void { this.pc.dispose() }
 
   // ------------------------------------------------ rpg helpers
@@ -6085,7 +6100,15 @@ class MainWindow implements OsWindow {
     }
     // categories level: a category name → swap to its programs.
     if ((CATEGORY_ORDER as string[]).includes(label)) {
-      this.selectedCategory = label as WindowCategory
+      const cat = label as WindowCategory
+      const wins = this.categoryWindows(cat)
+      // A single-window category with no pseudo-entries (Stats under Info, Dictate
+      // under Tools) has no real submenu — its one program shares the category name,
+      // so the submenu was a redundant second tap. Jump straight in (Adam 2026-06-28:
+      // Games does this). Multi-window / extra-bearing categories still expand.
+      const hasExtras = cat === 'Info' || cat === 'Tools'
+      if (wins.length === 1 && !hasExtras) { throw new SwitchTo(wins[0].id) }
+      this.selectedCategory = cat
       this.level = 'category'
       this.requestRender()
       return
@@ -8190,6 +8213,7 @@ export class WindowManager {
     this.active = w
     if (id !== 'main') this.lastUsed.set(id, ++this.useCounter)   // Phase 11 MRU (monotonic, distinct)
     else (w as MainWindow).resetToRoot()                          // Phase 11: Main returns to its launcher root
+    w.onActivate?.()                                              // launcher-style reset (Games → games list)
     this.requestRender()
   }
 

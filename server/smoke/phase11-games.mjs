@@ -114,9 +114,9 @@ if (!EMIT) {
   const imageRegions = (sc) => sc.regions.filter((r) => r.kind === 'image')
   try {
     const games = wm.windows.find((w) => w.id === 'games')
-    games.level = 'chess'
-    wm.switchTo('games')
-    await games.onMenuSelect('New game')   // startpos, white to move
+    wm.switchTo('games')                    // lands on the games LIST (Adam 2026-06-28: always, not the last game)
+    await games.onBrowseSelect(1)           // tap Chess → the chess level
+    await games.onMenuSelect('New game')    // startpos, white to move
     let sc = await settle((x) => menuOf(x).includes('Moves') && !titleOf(x).includes('thinking'), 'chess level after new game')
     assert.ok(menuOf(sc).includes('Skill') && !menuOf(sc).some((m) => m.startsWith('Skill:')), 'chess menu has a CONSTANT "Skill" label (value in the title)')
     assert.match(titleOf(sc), /skill 5/, 'skill value rides the title')

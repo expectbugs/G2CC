@@ -60,6 +60,8 @@ try {
   }
   const menuOf = (s) => s.regions.find((r) => r.name === 'menu')?.content?.items ?? []
   const contentOf = (s) => `${s.regions.find((r) => r.name === 'content')?.content?.text ?? ''}\n${s.regions.find((r) => r.name === 'content2')?.content?.text ?? ''}`
+  const titleOf = (s) => s.regions.find((r) => r.name === 'title')?.content?.text ?? ''
+  const itemsOf = (s) => s.regions.find((r) => r.name === 'browse')?.content?.items ?? []
 
   const main = scenes[scenes.length - 1]
   // Phase 11: TWO columns (content + content2), menu = the CATEGORY launcher.
@@ -105,6 +107,30 @@ try {
   const text = contentOf(mru)
   assert.ok(text.indexOf('Games:') !== -1 && (text.indexOf('Search:') === -1 || text.indexOf('Games:') < text.indexOf('Search:')), 'MRU: most-recent (Games) leads Search')
   console.error('  MRU ordering: recently-used windows lead the dashboard ✓')
+
+  // --- Games category COLLAPSES straight into the games window — no redundant
+  //     "Main · Games" second-tap submenu (Adam 2026-06-28). Games is the only
+  //     single-window category; Tools/Info still expand (multi-window + extras). ---
+  wm.switchTo('main')
+  const catRoot = await settleMain((s) => menuOf(s).includes('Games') && !menuOf(s).includes('Back'), 'categories root for Games')
+  await wm.onSelect('menu', menuOf(catRoot).indexOf('Games'))
+  const direct = await settleMain((s) => itemsOf(s).some((i) => i.toLowerCase().includes('paperclips')), 'one tap → games list (no Main·Games submenu)')
+  assert.ok(!titleOf(direct).includes('Main ·'), `single tap opens the games window, not the Main·Games submenu (title='${titleOf(direct).trim()}')`)
+  assert.ok(itemsOf(direct).some((i) => i.includes('Chess')) && itemsOf(direct).some((i) => i.includes('rpg')), 'the games LIST is shown (rpg/chess/paperclips)')
+  console.error('  Games category → ONE tap to the games list (double-select jank gone) ✓')
+
+  // --- Games ALWAYS re-opens on the LIST, never the last game played — so you can
+  //     switch games freely (a chess move while paperclips build). Games persist. ---
+  const games = wm.windows.find((w) => w.id === 'games')
+  await games.onBrowseSelect(1)               // enter Chess (level 'chess' — lightweight, no engine spawn)
+  let gv = await games.view()
+  assert.notEqual(gv.mode, 'browse', `entered a game (chess) — view is no longer the list (mode=${gv.mode})`)
+  wm.switchTo('main'); wm.switchTo('games')   // leave to Main, then re-open Games
+  gv = await games.view()
+  assert.equal(gv.mode, 'browse', 'Games re-opens on the LIST (browse), not the last game')
+  assert.ok((gv.items ?? []).some((i) => i.toLowerCase().includes('paperclips')), 'the games list is shown on re-entry')
+  console.error('  Games re-opens on the list, not the last game (switch games freely) ✓')
+
   if (EMIT) process.stdout.write(JSON.stringify(main))
   else console.log('phase5-dashboard: ALL OK')
 } finally {
