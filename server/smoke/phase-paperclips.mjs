@@ -294,6 +294,30 @@ try {
   assert.ok(sp.prestigeU >= 1, `prestige carried across the restart (savePrestige.prestigeU=${sp.prestigeU} ≥ 1)`)
   console.error(`  12. prestige restart → fresh business game, ticks reset, prestigeU=${sp.prestigeU} carried ✓`)
 
+  // --- 13. The Universe Within (prestigeS) → the CREATIVITY bonus actually loads ---
+  // calculateCreativity (main.js:3266) reads the global prestigeS live every tick:
+  //   ss = creativitySpeed * (1 + prestigeS/10)  — no enable flag, so the +10%/level
+  // boost is active iff the rebooted game has prestigeS set. Prove it carries AND loads,
+  // and that it's CUMULATIVE with the prestigeU from check 12 (a real reload keeps both).
+  paperclips.poke('project147', { flag: 1 })
+  paperclips.poke('creativity', 400000)                       // ≥ 300,000 (project201's cost)
+  paperclips.call('manageProjects')
+  await until(() => paperclips.listProjects().some((p) => p.id === 'projectButton201' && p.affordable), 'The Universe Within active+affordable')
+  const okS = paperclips.applyProject('projectButton201')     // prestigeS++ → reset() → reboot
+  assert.ok(okS, 'applyProject(The Universe Within) succeeded')
+  assert.ok(paperclips.consumeRestarted(), 'prestigeS restart signalled')
+  // the REBOOTED game loaded prestigeS (loadPrestige ran) → the creativity bonus is live
+  const liveS = paperclips.win?.prestigeS
+  const liveU = paperclips.win?.prestigeU
+  assert.equal(liveS, 1, `rebooted game has prestigeS=${liveS} (loadPrestige applied it → +${(liveS ?? 0) * 10}% creativity speed)`)
+  assert.equal(liveU, 1, `prestigeU=${liveU} carried cumulatively from the earlier restart (a real reload keeps both)`)
+  // and it's persisted to disk so it survives a server restart too
+  await paperclips.flush()
+  const r2 = await query('SELECT blob FROM paperclips_save WHERE id = $1', ['default'])
+  const sp2 = JSON.parse(r2.rows[0].blob.savePrestige)
+  assert.ok(sp2.prestigeS >= 1 && sp2.prestigeU >= 1, `both carried to disk (U=${sp2.prestigeU}, S=${sp2.prestigeS})`)
+  console.error(`  13. The Universe Within → creativity bonus LIVE (prestigeS=${liveS} = +${liveS * 10}% speed), cumulative with U=${liveU} ✓`)
+
   console.log('phase-paperclips: ALL OK')
 } finally {
   wm.dispose()
