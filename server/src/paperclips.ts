@@ -170,6 +170,15 @@ export interface PcSnapshot {
   swarmStatusLabel: string   // the game's own swarm word (Active/Hungry/Bored/Disorganized/Sleeping/…)
   sliderPos: number          // swarm Work(0)↔Think(200) slider position
   shortage: string           // the production bottleneck to buy next ('Farms (pwr)'/'Harvesters'/…), '' outside the chain
+  // per-project unlock flags (2026-06-28 audit) — the game reveals each control via a project
+  factoryBuildUnlocked: boolean   // factoryFlag (project45) → Build Fact
+  harvesterBuildUnlocked: boolean // harvesterFlag (project43) → Build Harv
+  wireDroneBuildUnlocked: boolean // wireDroneFlag (project44) → Build Drone
+  powerUnlocked: boolean          // project127 Power Grid → Build Farm/Batt
+  maxTrustUnlocked: boolean        // project121 "Name the battles" → increaseMaxTrust (honor)
+  combatDimUnlocked: boolean       // project131 "Combat" → the Combat probe-trust dim
+  projectsAvail: number            // count of available projects (so the dashboard shows it)
+  projectsAfford: number           // …of which affordable now
 }
 
 /** Status for the window's statusLine + Main summary. */
@@ -505,6 +514,25 @@ class PaperclipsEngine {
     if (this.num('creativity') < this.num('entertainCost')) { console.error('[paperclips] entertainSwarm refused: creativity < cost (LOUD)'); return }
     this.call('entertainSwarm')
   }
+  // addProc/addMem: the game caps these at processors+memory < trust (or a swarm gift) via the
+  // disabled BUTTON only; calling directly would exceed the trust allowance (2026-06-28 audit).
+  private hasProcAllowance(): boolean { return this.num('processors') + this.num('memory') < this.num('trust') || this.num('swarmGifts') > 0 }
+  addProc(): void {
+    if (!this.win) return
+    if (this.hasProcAllowance()) this.call('addProc'); else console.error('[paperclips] addProc refused: no trust allowance (processors+memory ≥ trust) (LOUD)')
+  }
+  addMem(): void {
+    if (!this.win) return
+    if (this.hasProcAllowance()) this.call('addMem'); else console.error('[paperclips] addMem refused: no trust allowance (processors+memory ≥ trust) (LOUD)')
+  }
+  /** increaseProbeTrust self-guards but no-ops SILENTLY when unaffordable / at maxTrust;
+   *  wrap it so a dead tap is loud (the probe screen also shows the trust readout). */
+  increaseProbeTrust(): void {
+    if (!this.win) return
+    if (this.num('probeTrust') >= this.num('maxTrust')) { console.error('[paperclips] PTrust refused: already at maxTrust (raise it with MaxT/honor) (LOUD)'); return }
+    if (this.num('yomi') < this.num('probeTrustCost')) { console.error(`[paperclips] PTrust refused: yomi ${this.num('yomi')} < cost ${this.num('probeTrustCost')} (LOUD)`); return }
+    this.call('increaseProbeTrust')
+  }
 
   // ---------------------------------------------------------------- snapshot
 
@@ -541,6 +569,7 @@ class PaperclipsEngine {
       : this.flag('spaceFlag') ? 'space'        // full space (probes)
       : !this.flag('humanFlag') ? 'factory'     // Earth disassembly (manual build + power)
       : 'business'
+    const pc = this.projectCounts()
     return {
       running: true,
       phase,
@@ -548,7 +577,7 @@ class PaperclipsEngine {
       message: stripTags(this.dom('readout1')),
       clips: this.num('clips'),
       unsoldClips: this.num('unsoldClips'),
-      clipRate: this.num('clipmakerRate'),
+      clipRate: this.num('clipRate'),   // the LIVE clips/sec (clipmakerRate is a vestigial, always-0 global)
       funds: this.num('funds'),
       avgRev: this.num('avgRev'),
       margin: this.num('margin'),
@@ -592,7 +621,7 @@ class PaperclipsEngine {
       spaceUnlocked: this.flag('spaceFlag'),
       availableMatter: this.num('availableMatter'),
       acquiredMatter: this.num('acquiredMatter'),
-      wireSpace: this.num('nanoWire'),
+      wireSpace: this.num('wire'),   // the LIVE wire stock in factory/space (nanoWire freezes at the HypnoDrones moment)
       factories: this.num('factoryLevel'),
       factoryCost: this.num('factoryCost'),
       harvesters: this.num('harvesterLevel'),
@@ -616,7 +645,7 @@ class PaperclipsEngine {
       colonizedPct: totalMatter > 0 ? (100 * foundMatter) / totalMatter : 0,
       drifters: this.num('drifterCount'),
       driftersKilled: this.num('driftersKilled'),
-      probesLostHaz: this.num('probesLostHazards'),
+      probesLostHaz: this.num('probesLostHaz'),   // real global (probesLostHazards is only a DOM id)
       probesLostDrift: this.num('probesLostDrift'),
       probesLostCombat: this.num('probesLostCombat'),
       probeTrust: this.num('probeTrust'),
@@ -634,7 +663,34 @@ class PaperclipsEngine {
       swarmStatusLabel: stripTags(this.dom('swarmStatus')),
       sliderPos: this.num('sliderPos'),
       shortage: this.computeShortage(),
+      factoryBuildUnlocked: this.flag('factoryFlag'),
+      harvesterBuildUnlocked: this.flag('harvesterFlag'),
+      wireDroneBuildUnlocked: this.flag('wireDroneFlag'),
+      powerUnlocked: this.projFlag('project127'),
+      maxTrustUnlocked: this.projFlag('project121'),
+      combatDimUnlocked: this.projFlag('project131'),
+      projectsAvail: pc.avail,
+      projectsAfford: pc.afford,
     }
+  }
+
+  /** A game project object's flag (1 = bought). Used for controls the game reveals
+   *  via a specific project (power, max-trust, the combat trust dim). */
+  private projFlag(id: string): boolean {
+    const p = this.win?.[id] as { flag?: number } | undefined
+    return p?.flag === 1
+  }
+  /** Count available projects (the "growing UI" array) + how many are affordable now. */
+  private projectCounts(): { avail: number; afford: number } {
+    const active = this.win?.['activeProjects'] as ProjectObj[] | undefined
+    if (!Array.isArray(active)) return { avail: 0, afford: 0 }
+    let avail = 0, afford = 0
+    for (const p of active) {
+      if (!p || typeof p.id !== 'string') continue
+      avail++
+      try { if (typeof p.cost === 'function' && p.cost()) afford++ } catch { /* not affordable */ }
+    }
+    return { avail, afford }
   }
 
   /** The production bottleneck to buy next in the factory/space phase (Adam
@@ -651,6 +707,10 @@ class PaperclipsEngine {
       // Probes need Rep (replicate), Haz (survive), Speed+Nav (explore→matter) or they die.
       const pt = this.num('probeTrust'), used = this.num('probeUsedTrust')
       if (pt <= 0) return 'buy PTrust'                         // no pool → buy with yomi
+      // under attack with no combat allocation → urgent (win battles → honor)
+      if (this.projFlag('project131') && this.num('drifterCount') > 0 && this.num('probeCombat') < 1) {
+        return used < pt ? 'add Cbt' : 'PTrust+Cbt'
+      }
       if (used < pt) {                                         // unallocated trust → spend on what's missing
         if (this.num('probeRep') < 1) return 'add Rep'
         if (this.num('probeHaz') < 1) return 'add Haz'
@@ -674,7 +734,8 @@ class PaperclipsEngine {
     if (fL <= 0) return 'Factories'
     const H = wf * (db > 1 ? db * hL * hL : hL) * this.num('harvesterRate')
     const W = wf * (db > 1 ? db * wL * wL : wL) * this.num('wireDroneRate')
-    const F = this.num('factoryBoost') * fL * this.num('factoryRate')
+    const fb = this.num('factoryBoost')
+    const F = (fb > 1 ? fb * fL * fL : fL) * this.num('factoryRate')   // factories ALSO square under boost (spawnFactories)
     const min = Math.min(H, W, F)
     return min === H ? 'Harvesters' : min === W ? 'WireDrones' : 'Factories'
   }
@@ -776,6 +837,8 @@ const EMPTY_SNAPSHOT: PcSnapshot = {
   probe: { Speed: 0, Nav: 0, Rep: 0, Haz: 0, Fac: 0, Harv: 0, Wire: 0, Combat: 0 },
   combatUnlocked: false, honor: 0, maxTrust: 0, dismantle: 0,
   humanEra: true, powMod: 1, swarmStatusLabel: '', sliderPos: 0, shortage: '',
+  factoryBuildUnlocked: false, harvesterBuildUnlocked: false, wireDroneBuildUnlocked: false, powerUnlocked: false,
+  maxTrustUnlocked: false, combatDimUnlocked: false, projectsAvail: 0, projectsAfford: 0,
 }
 
 /** Process-lifetime singleton (see the LIFECYCLE note up top). */

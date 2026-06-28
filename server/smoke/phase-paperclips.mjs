@@ -136,34 +136,35 @@ try {
   await settle((x) => titleOf(x).includes('biz'), 'back at business dash')
   console.error('  3.5. Buy(shop)→Stocks(+Risk) + Opts(P±/AutoQ/AutoY/Proc/Mem) render + fit ✓')
 
-  // --- 4. FACTORY phase (humanFlag=0, spaceFlag=0): manual Build + power, NO Probe ---
+  // --- 4. FACTORY phase (humanFlag=0, spaceFlag=0): manual Build (gated) + power, NO Probe ---
   paperclips.poke('humanFlag', 0)            // Earth disassembly; spaceFlag stays 0
   paperclips.poke('availableMatter', 6e27)
-  sc = await settle((x) => titleOf(x).includes('factory'), 'factory dashboard')
+  paperclips.poke('factoryFlag', 1); paperclips.poke('harvesterFlag', 1); paperclips.poke('wireDroneFlag', 1)   // unlock the builders
+  sc = await settle((x) => titleOf(x).includes('factory') && menuOf(x).includes('Build'), 'factory dash with Build')
   assert.match(regionText(sc, 'content'), /Matter/, 'factory dash shows Matter')
-  assert.ok(menuOf(sc).includes('Build'), 'factory has Build')
+  assert.match(regionText(sc, 'content'), /Unused/, 'factory dash shows the Unused build budget')
   assert.ok(!menuOf(sc).includes('Probe'), 'factory has NO Probe (probes are full-space)')
   const est2 = checkMenu(sc, 'factory dash')
-  console.error(`  4. factory phase → Build dash (no Probe), frame ${est2}B ✓`)
+  console.error(`  4. factory phase → Build dash (no Probe) + Unused budget, frame ${est2}B ✓`)
 
-  // --- 5. factory Build level (Qty) + the build bottleneck hints ---
+  // --- 5. Build level: only UNLOCKED builders show; power bottleneck hint (⚠ in right col) ---
   await games.onMenuSelect('Build')
   sc = await settle((x) => titleOf(x).includes('Build'), 'drones level'); checkMenu(sc, 'drones')
+  assert.ok(menuOf(sc).includes('Fact') && menuOf(sc).includes('Harv') && menuOf(sc).includes('Drone'), 'unlocked builders show')
+  assert.ok(!menuOf(sc).includes('Farm') && !menuOf(sc).includes('Batt'), 'Farm/Batt gated until Power Grid (project127)')
   await games.onMenuSelect('Qty')
   sc = await settle((x) => titleOf(x).includes('×10'), 'qty cycled to ×10')
   await games.onBack()
   await settle((x) => titleOf(x).includes('factory'), 'back to factory dash')
-  // updatePower recomputes powMod each tick in the factory phase, so drive it via the
-  // real inputs: supply = farmLevel×0.5, demand = factory×2 + (harv+wire)×0.01.
-  // deficit (demand>0, supply=0) → powMod→0 → ⚠ + Short: Farms.
+  // updatePower recomputes powMod each tick, so drive it via real inputs (supply=farm×0.5, demand=factory×2…).
+  // deficit (demand>0, supply=0) → powMod→0 → ⚠ + Short: Farms (both now in the right column).
   paperclips.poke('harvesterLevel', 0); paperclips.poke('wireDroneLevel', 0); paperclips.poke('factoryLevel', 1000)
   paperclips.poke('farmLevel', 0); paperclips.poke('batteryLevel', 0); paperclips.poke('storedPower', 0)
-  await settle((x) => regionText(x, 'content').includes('⚠') && regionText(x, 'content2').includes('Short: Farms'), 'power-short ⚠ + Short: Farms')
-  // surplus (supply≥demand) → powMod snaps to 1; harvesters lag → Short: Harvesters
+  await settle((x) => regionText(x, 'content2').includes('⚠') && regionText(x, 'content2').includes('Short: Farms'), 'power-short ⚠ + Short: Farms')
   paperclips.poke('farmLevel', 1000)
   paperclips.poke('harvesterLevel', 1); paperclips.poke('wireDroneLevel', 100); paperclips.poke('factoryLevel', 100)
   await settle((x) => regionText(x, 'content2').includes('Short: Harvesters'), 'balanced → Short: Harvesters')
-  console.error('  5. factory: Build(Qty×10) + ⚠N% "Short: Farms"→"Short: Harvesters" hints ✓')
+  console.error('  5. Build: gated builders (Fact/Harv/Drone, no Farm/Batt) + Qty×10; ⚠ + Short Farms→Harvesters ✓')
 
   // --- 6. FULL SPACE (spaceFlag=1): probe-driven — Build gone, Probe + trust hint ---
   paperclips.poke('spaceFlag', 1)
@@ -171,15 +172,19 @@ try {
   assert.ok(menuOf(sc).includes('Probe'), 'full space has Probe')
   assert.ok(!menuOf(sc).includes('Build'), 'full space has NO Build (probes drive production)')
   assert.match(regionText(sc, 'content'), /Probes/, 'space dash shows Probes')
+  assert.match(regionText(sc, 'content'), /Fact/, 'space dash shows the probe-built Factories (Adam asked)')
+  assert.match(regionText(sc, 'content2'), /Proj \d/, 'space dash shows the projects-available counter')
   checkMenu(sc, 'space dash')
   paperclips.poke('probeTrust', 0); paperclips.poke('probeUsedTrust', 0)
   await settle((x) => regionText(x, 'content2').includes('Short: buy PTrust'), 'trust hint = buy PTrust when probeTrust=0')
-  console.error('  6. full space → Probe dash (no Build) + "Short: buy PTrust" hint ✓')
+  console.error('  6. full space → Probe dash (no Build) + probe-built Fact + Proj count + "Short: buy PTrust" ✓')
 
   // --- 7. probe level: PTrust AVAILABLE (the bug fix) + Sel + +Probe clamp ---
   await games.onMenuSelect('Probe')
   sc = await settle((x) => titleOf(x).includes('Probe'), 'probe level'); checkMenu(sc, 'probe')
   assert.ok(menuOf(sc).includes('PTrust'), 'PTrust available in full space (was wrongly gated on combat)')
+  assert.ok(menuOf(sc).includes('Step'), 'Step (×N trust allocation) available')
+  assert.ok(!menuOf(sc).includes('MaxT'), 'MaxT gated until project121 (not just any battle)')
   await games.onMenuSelect('Sel')
   sc = await settle((x) => /Probe \[(Nav)\]/.test(titleOf(x)), 'probe dim cycled to Nav')
   paperclips.poke('probeCost', 100); paperclips.poke('unusedClips', 100 * 1500)   // afford 1500

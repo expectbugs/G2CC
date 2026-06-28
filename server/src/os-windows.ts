@@ -3615,6 +3615,8 @@ interface PcVerb { label: string; run: () => void }
 const PHASE_LABEL: Record<PcPhase, string> = { business: 'biz', factory: 'factory', space: 'space', end: 'end' }
 const PC_DRONE_QTY = [1, 10, 100, 1000] as const
 const PC_SLIDER_POS = [0, 100, 200] as const
+const PC_SLIDER_LABEL = ['Work', 'Bal', 'Think'] as const
+const PC_TRUST_STEP = [1, 5, 10, 25] as const   // probe-trust allocation step per Up/Dn tap
 const PC_PROBE_DIMS = [
   { key: 'Speed', raise: 'raiseProbeSpeed', lower: 'lowerProbeSpeed' },
   { key: 'Nav', raise: 'raiseProbeNav', lower: 'lowerProbeNav' },
@@ -3658,6 +3660,7 @@ class PaperclipsController {
   private shownProjects: { id: string; title: string; price: string; description: string; affordable: boolean }[] = []
   private droneQtyIdx = 0
   private probeDim = 0
+  private probeStepIdx = 0   // trust-allocation step (PC_TRUST_STEP)
   private sliderIdx = 0
   private pending: { title: string; body: string; run: () => boolean } | null = null
   private confirmPages: string[] = []
@@ -3713,7 +3716,10 @@ class PaperclipsController {
     const st = paperclips.status()
     if (st.loadError) return `⚠ ${st.loadError}`.slice(0, 40)
     if (st.saveError) return '⚠ unsaved'
-    return null
+    // Surface the game's latest readout (Adam 2026-06-28) — trust grants, the value-drift
+    // warning, combat VICTORY/DEFEAT, story beats — which otherwise had nowhere to show.
+    const msg = st.running ? paperclips.snapshot().message : ''
+    return msg ? msg.slice(0, 46) : null
   }
 
   // ------------------------------------------------ verbs (label↔action, drift-free)
@@ -3734,8 +3740,8 @@ class PaperclipsController {
           v.push({ label: 'Opts', run: () => this.go('opts') })
           v.push({ label: 'Proj', run: () => this.go('projects') })
         } else if (s.phase === 'factory') {
-          // Earth disassembly — manual Build + power.
-          v.push({ label: 'Build', run: () => this.go('drones') })
+          // Earth disassembly — manual Build + power. Build appears once a builder unlocks.
+          if (s.factoryBuildUnlocked || s.harvesterBuildUnlocked || s.wireDroneBuildUnlocked || s.powerUnlocked) v.push({ label: 'Build', run: () => this.go('drones') })
           if (s.swarmUnlocked) v.push({ label: 'Swarm', run: () => this.go('swarm') })
           v.push({ label: 'Opts', run: () => this.go('opts') })
           v.push({ label: 'Proj', run: () => this.go('projects') })
@@ -3768,7 +3774,7 @@ class PaperclipsController {
         if (s.phase === 'business') { v.push({ label: 'P-', run: () => C.call('lowerPrice') }); v.push({ label: 'P+', run: () => C.call('raisePrice') }) }
         if (s.qUnlocked) v.push({ label: 'AutoQ', run: () => C.setAutoQuantum(!C.isAutoQuantum()) })
         if (s.stratUnlocked) v.push({ label: 'AutoY', run: () => C.setAutoYomi(!C.isAutoYomi()) })
-        if (s.compUnlocked) { v.push({ label: 'Proc', run: () => C.call('addProc') }); v.push({ label: 'Mem', run: () => C.call('addMem') }) }
+        if (s.compUnlocked) { v.push({ label: 'Proc', run: () => C.addProc() }); v.push({ label: 'Mem', run: () => C.addMem() }) }   // guarded (trust allowance)
         return v
       }
       case 'invest':
@@ -3778,25 +3784,27 @@ class PaperclipsController {
           { label: 'Upgr', run: () => C.investUpgrade() },   // guarded (yomi≥cost) — the -57M bug
           { label: 'Risk', run: () => { const o = ['low', 'med', 'hi']; const cur = paperclips.snapshot().investRisk; C.setInvestRisk(o[(o.indexOf(cur) + 1) % o.length] ?? 'low') } },
         ]
-      case 'drones':
-        return [
-          { label: 'Qty', run: () => { this.droneQtyIdx = (this.droneQtyIdx + 1) % PC_DRONE_QTY.length } },
-          { label: 'Fact', run: () => C.call('makeFactory') },
-          { label: 'Harv', run: () => C.call('makeHarvester', this.droneQty()) },
-          { label: 'Drone', run: () => C.call('makeWireDrone', this.droneQty()) },
-          { label: 'Farm', run: () => C.call('makeFarm', this.droneQty()) },
-          { label: 'Batt', run: () => C.call('makeBattery', this.droneQty()) },
-        ]
+      case 'drones': {
+        // Each builder unlocks via its own project (2026-06-28 audit) — show only the unlocked ones.
+        const v: PcVerb[] = [{ label: 'Qty', run: () => { this.droneQtyIdx = (this.droneQtyIdx + 1) % PC_DRONE_QTY.length } }]
+        if (s.factoryBuildUnlocked) v.push({ label: 'Fact', run: () => C.call('makeFactory') })
+        if (s.harvesterBuildUnlocked) v.push({ label: 'Harv', run: () => C.call('makeHarvester', this.droneQty()) })
+        if (s.wireDroneBuildUnlocked) v.push({ label: 'Drone', run: () => C.call('makeWireDrone', this.droneQty()) })
+        if (s.powerUnlocked) { v.push({ label: 'Farm', run: () => C.call('makeFarm', this.droneQty()) }); v.push({ label: 'Batt', run: () => C.call('makeBattery', this.droneQty()) }) }
+        return v
+      }
       case 'probe': {
-        const d = PC_PROBE_DIMS[this.probeDim]
+        const d = this.selectedDim(s)
+        const step = PC_TRUST_STEP[this.probeStepIdx]
         const v: PcVerb[] = [
           { label: '+Probe', run: () => C.bulkProbe() },   // up to 1000/tap, clamped to affordable
-          { label: 'Sel', run: () => { this.probeDim = (this.probeDim + 1) % PC_PROBE_DIMS.length } },
-          { label: 'Up', run: () => C.call(d.raise) },
-          { label: 'Dn', run: () => C.call(d.lower) },
-          { label: 'PTrust', run: () => C.call('increaseProbeTrust') },   // yomi → +probeTrust — available ALL of full space (was wrongly gated on combat)
+          { label: 'Sel', run: () => { this.probeDim = (this.probeDim + 1) % this.activeDims(s).length } },
+          { label: 'Up', run: () => { for (let i = 0; i < step; i++) C.call(d.raise) } },   // ×step (Step cycles 1/5/10/25)
+          { label: 'Dn', run: () => { for (let i = 0; i < step; i++) C.call(d.lower) } },
+          { label: 'Step', run: () => { this.probeStepIdx = (this.probeStepIdx + 1) % PC_TRUST_STEP.length } },
+          { label: 'PTrust', run: () => C.increaseProbeTrust() },   // yomi → +probeTrust (all of full space; guarded+loud)
         ]
-        if (s.combatUnlocked) v.push({ label: 'MaxT', run: () => C.call('increaseMaxTrust') })   // honor → +maxTrust (post-combat)
+        if (s.maxTrustUnlocked) v.push({ label: 'MaxT', run: () => C.call('increaseMaxTrust') })   // honor → +maxTrust (project121)
         return v
       }
       case 'swarm':
@@ -3829,6 +3837,15 @@ class PaperclipsController {
   }
 
   private droneQty(): number { return PC_DRONE_QTY[this.droneQtyIdx] }
+
+  /** Probe-trust dims available now — Combat only after project131 (2026-06-28 audit). */
+  private activeDims(s: PcSnapshot): { key: string; raise: string; lower: string }[] {
+    return PC_PROBE_DIMS.filter((dim) => dim.key !== 'Combat' || s.combatDimUnlocked)
+  }
+  private selectedDim(s: PcSnapshot): { key: string; raise: string; lower: string } {
+    const dims = this.activeDims(s)
+    return dims[this.probeDim % dims.length]
+  }
 
   private go(level: PcLevel): void {
     this.level = level
@@ -3865,6 +3882,9 @@ class PaperclipsController {
     const title = `Paperclips · ${PHASE_LABEL[s.phase]} · ${pcNum(s.clips)} clips`
     let left: string[]
     let right: string[]
+    // Projects-available counter (Adam 2026-06-28) — on every phase so you needn't open the
+    // Projects menu to spot new ones. ● = affordable now.
+    const projLine = `Proj ${pcNum(s.projectsAvail)}${s.projectsAfford ? ` ●${pcNum(s.projectsAfford)}` : ''}`
     if (s.phase === 'end') {
       // The dismantle sequence — space stats are zeroing out; show progress, not zeros.
       left = [
@@ -3879,9 +3899,9 @@ class PaperclipsController {
         `Yomi ${pcNum(s.yomi)}`,
         `Creat ${pcNum(s.creativity)}`,
         `Ops ${pcNum(s.operations)}`,
-        `Fact ${pcNum(s.factories)}`,
+        `Fact ${pcNum(s.factories)} Hrv ${pcNum(s.harvesters)}`,
         `Drone ${pcNum(s.wireDrones)}`,
-        `Power ${pcNum(s.storedPower)}`,
+        projLine,
       ]
     } else if (s.phase === 'space') {
       // FULL SPACE (spaceFlag=1) — probe-driven (Adam 2026-06-27). Build/power are dead;
@@ -3890,16 +3910,16 @@ class PaperclipsController {
         `Clips ${pcNum(s.clips)}`,
         `Probes ${pcNum(s.probes)}`,
         `Descend ${pcNum(s.probesBorn)}`,
+        `Fact ${pcNum(s.factories)} Hrv ${pcNum(s.harvesters)}`,   // PROBE-BUILT (Adam 2026-06-28)
+        `Drone ${pcNum(s.wireDrones)}`,
         `Explor ${s.colonizedPct.toFixed(1)}%`,
-        `Matter ${pcNum(s.availableMatter)}`,
-        `Yomi ${pcNum(s.yomi)}`,
       ]
       right = [
         `Trust ${s.probeUsedTrust}/${s.probeTrust} m${s.maxTrust}`,
-        `Launch ${pcNum(s.probesLaunched)}`,
-        `LostH ${pcNum(s.probesLostHaz)} Dr ${pcNum(s.probesLostDrift)}`,
-        s.combatUnlocked ? `Honor ${pcNum(s.honor)}` : `LostC ${pcNum(s.probesLostCombat)}`,
-        `Driftr ${pcNum(s.drifters)} k${pcNum(s.driftersKilled)}`,
+        `Yomi ${pcNum(s.yomi)}`,
+        `Lost H${pcNum(s.probesLostHaz)} D${pcNum(s.probesLostDrift)}`,
+        s.combatDimUnlocked ? `Honor ${pcNum(s.honor)} Dr${pcNum(s.drifters)}` : `Matter ${pcNum(s.availableMatter)}`,
+        projLine,
       ]
       if (s.shortage) right.push(`Short: ${s.shortage}`)   // trust hint (e.g. 'buy PTrust')
     } else if (s.phase === 'factory') {
@@ -3908,21 +3928,19 @@ class PaperclipsController {
       const perf = s.powMod < 1 ? ` ⚠${Math.round(s.powMod * 100)}%` : ''
       left = [
         `Clips ${pcNum(s.clips)}`,
+        `Unused ${pcNum(s.unusedClips)}`,   // the BUILD BUDGET — what factories/drones/farms cost
         `Matter ${pcNum(s.availableMatter)}`,
         `Wire ${pcNum(s.wireSpace)}`,
         `Fact ${pcNum(s.factories)} Hrv ${pcNum(s.harvesters)}`,
         `Drone ${pcNum(s.wireDrones)}`,
-        `Pwr ${pcNum(s.storedPower)}${perf}`,
       ]
       right = [
-        `Acq ${pcNum(s.acquiredMatter)}`,
         `Farm ${pcNum(s.farms)} Bat ${pcNum(s.batteries)}`,
-        s.swarmUnlocked ? `Swrm ${s.swarmStatusLabel || '—'}` : `Yomi ${pcNum(s.yomi)}`,
-        `Probe ${pcNum(s.probes)}`,
-        `Explor ${s.colonizedPct.toFixed(1)}%`,
-        s.combatUnlocked ? `Honor ${pcNum(s.honor)} D${pcNum(s.drifters)}` : `Born ${pcNum(s.probesBorn)}`,
+        `Pwr ${pcNum(s.storedPower)}${perf}`,
+        `Acq ${pcNum(s.acquiredMatter)}`,
+        projLine,
       ]
-      // bottleneck hint under Born (Adam 2026-06-27): what to buy more of next.
+      // Dropped the always-zero probe/explore/born lines (2026-06-28) so the bottleneck hint sits visible.
       if (s.shortage) right.push(`Short: ${s.shortage}`)
     } else {
       // Business — dense combined lines (Adam 2026-06-27): the whole state on one page.
@@ -3947,6 +3965,7 @@ class PaperclipsController {
       if (s.qUnlocked) autos.push(`AQ${s.autoQuantum ? '+' : '-'}`)
       if (s.stratUnlocked) autos.push(`AY${s.autoYomi ? '+' : '-'}`)
       if (autos.length) right.push(`Auto ${autos.join(' ')}`)
+      right.push(projLine)
     }
     return { mode: 'twocol', title, menu, textLeft: left.map((l) => pcCol(l)).join('\n'), textRight: right.map((l) => pcCol(l)).join('\n') }
   }
@@ -3993,32 +4012,38 @@ class PaperclipsController {
         ].join('\n')
         break
       case 'probe': {
-        title = `Paperclips · Probe [${PC_PROBE_DIMS[this.probeDim].key}]`
+        const dim = this.selectedDim(s)
+        const step = PC_TRUST_STEP[this.probeStepIdx]
+        title = `Paperclips · Probe [${dim.key}] ×${step}`
         const p = s.probe
         const free = s.probeTrust - s.probeUsedTrust
         const canMake = s.probeCost > 0 ? Math.floor(s.unusedClips / s.probeCost) : 0
-        // The full-space loop: PTrust (yomi) grows the pool → Sel+Up/Dn allocates it →
-        // Rep/Haz/Spd/Nav keep probes alive+exploring → +Probe launches; they replicate.
+        // The full-space loop: PTrust (yomi) grows the pool → Sel+Up/Dn allocates it (Step sets the
+        // ±N) → Rep/Haz/Spd/Nav keep probes alive+exploring → +Probe launches; they replicate.
         text = [
           `Probes ${pcNum(s.probes)} alive · ${pcNum(s.probesBorn)} bred`,
           `+Probe ${pcNum(s.probeCost)}/ea, can make ${pcNum(canMake)}`,
-          `Trust free ${free}/${s.probeTrust} (max ${s.maxTrust})`,
+          `Trust free ${free}/${s.probeTrust} (max ${s.maxTrust}) · Up/Dn ±${step}`,
           `Spd ${p.Speed} Nav ${p.Nav} Rep ${p.Rep} Haz ${p.Haz}`,
           `Fac ${p.Fac} Hrv ${p.Harv} Wir ${p.Wire} Cbt ${p.Combat}`,
-          s.shortage ? `> ${s.shortage}` : '> allocated — Up/Dn tunes [Sel]',
+          s.shortage ? `> ${s.shortage}` : `> [${dim.key}] selected — Sel changes it`,
         ].join('\n')
         break
       }
       case 'swarm': {
-        title = 'Paperclips · Swarm'
-        const slbl = s.sliderPos <= 0 ? 'Work' : s.sliderPos >= 200 ? 'Think' : `Bal(${s.sliderPos})`
+        // Slider feedback (Adam 2026-06-28): show the current position clearly in the title
+        // AND a bracketed bar, so a tap visibly moves it. sliderIdx is what we just set
+        // (immediate); the game applies it on the next swarm tick.
+        const si = this.sliderIdx
+        title = `Paperclips · Swarm · ${PC_SLIDER_LABEL[si]}`
+        const bar = PC_SLIDER_LABEL.map((l, i) => (i === si ? `[${l}]` : l)).join(' ')
         text = [
-          `Status: ${s.swarmStatusLabel || '—'}`,
-          `Gifts ${pcNum(s.swarmGifts)} · ${slbl}`,
+          `Status: ${s.swarmStatusLabel || '—'} · Gifts ${pcNum(s.swarmGifts)}`,
+          `Slider: ${bar}`,
+          'Work=production, Think=gifts · tap Slider',
           '',
           'Synch fixes Disorganized (yomi).',
           'Entmt fixes Bored/Hungry (creativity).',
-          'Slider trades production for gifts.',
         ].join('\n')
         break
       }
