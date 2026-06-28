@@ -41,6 +41,13 @@ const settle = async (pred, what, ms = 25000) => {
   }
   throw new Error(`timeout settling: ${what} (last title="${titleOf(last())}")`)
 }
+// Poll an engine-state predicate (not a scene) — used where there's no render to
+// settle on (the controller's auto-render pump only fires on the dash).
+const until = async (pred, what, ms = 15000) => {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms) { if (pred()) return; await sleep(40) }
+  throw new Error(`timeout: ${what}`)
+}
 const MENU_MAX_PX = 90   // the 96 px menu region minus border/inset (Adam: labels must not wrap)
 function checkMenu(sc, where) {
   for (const lbl of menuOf(sc)) assert.ok(fwTextWidth(lbl) <= MENU_MAX_PX, `${where}: menu label '${lbl}' is ${fwTextWidth(lbl)}px > ${MENU_MAX_PX}px (would wrap)`)
@@ -96,6 +103,13 @@ try {
   await games.onMenuSelect('Cancel')
   await settle((x) => titleOf(x).includes('Projects'), 'back to projects after Cancel')
   assert.ok(paperclips.listProjects().some((p) => p.id === targetId), 'Cancel did NOT buy the project')
+  // Reload (WM-global, driven via wm.onSelect like the glasses) refreshes the list
+  // IN PLACE — stays in Projects, buys nothing (Adam 2026-06-28).
+  const rIdx = menuOf(last()).indexOf('Reload')
+  assert.ok(rIdx >= 0, 'Projects menu exposes Reload')
+  await wm.onSelect('menu', rIdx)
+  await settle((x) => titleOf(x).includes('Projects'), 'Reload stays in Projects (refreshes in place)')
+  assert.ok(paperclips.listProjects().some((p) => p.id === targetId), 'Reload did not buy/lose the project')
   // Re-open and Confirm → applies that project's effect → it leaves activeProjects.
   await games.onBrowseSelect(0)
   await settle((x) => menuOf(x).includes('Confirm'), 'confirm again')
@@ -231,6 +245,54 @@ try {
   paperclips.setAutoQuantum(false)
   paperclips.setAutoYomi(false)
   console.error('  10. auto-quantum + auto-yomi toggles tick safely ✓')
+
+  // --- 11. MaxT: project121 reveals it, honor cost gates it, a too-poor tap is LOUD ---
+  // Back to full space (drop dismantle so the Probe level is reachable again).
+  paperclips.poke('dismantle', 0)
+  paperclips.poke('project121', { flag: 1 })                 // "Name the battles" → reveals increaseMaxTrust
+  paperclips.poke('maxTrust', 20); paperclips.poke('maxTrustCost', 91117.99); paperclips.poke('honor', 50000)  // 50k < 91.1k cost
+  await settle((x) => titleOf(x).includes('space'), 'space dash for MaxT')
+  await games.onMenuSelect('Probe')                          // renders the probe view with honor=50k
+  let scp = await settle((x) => titleOf(x).includes('Probe'), 'probe level (MaxT)'); checkMenu(scp, 'probe (maxt)')
+  assert.ok(menuOf(scp).includes('MaxT'), 'MaxT appears once project121 is done')
+  assert.match(regionText(scp, 'content'), /MaxT 50k\/91\.1k h/, 'probe view shows the honor gate (have/need), no ✓ when short')
+  assert.ok(!regionText(scp, 'content').includes('✓'), 'no affordable ✓ when honor < cost')
+  const mt0 = paperclips.snapshot().maxTrust
+  await games.onMenuSelect('MaxT'); await sleep(80)
+  assert.equal(paperclips.snapshot().maxTrust, mt0, 'MaxT refused when honor<cost — maxTrust unchanged (LOUD no-op, not a silent dead tap)')
+  paperclips.poke('honor', 200000)                            // now affordable
+  await games.onMenuSelect('Step')                            // harmless re-render of the probe view
+  scp = await settle((x) => regionText(x, 'content').includes('✓'), 'probe view marks MaxT affordable (✓)')
+  await games.onMenuSelect('MaxT')
+  await until(() => paperclips.snapshot().maxTrust === mt0 + 10, 'MaxT +10 when honor≥cost')
+  console.error('  11. MaxT: project121-gated, honor/cost shown, LOUD refuse < cost, +10 when affordable ✓')
+
+  // --- 12. PRESTIGE restart: a restart project rebuilds the game FRESH, carrying the bonus ---
+  // location.reload() is a jsdom no-op, so the engine must tear down + re-boot itself.
+  await games.onBack()                                        // probe → space dash
+  paperclips.poke('project147', { flag: 1 })                  // unlocks "The Universe Next Door/Within"
+  paperclips.poke('memory', 1000)                             // raise the standardOps cap (memory×1000)
+  paperclips.poke('standardOps', 600000)                      // → operations ≥ 300,000 (project200's cost)
+  paperclips.call('manageProjects')                           // activate the now-triggered projects immediately
+  await until(() => paperclips.listProjects().some((p) => p.id === 'projectButton200' && p.affordable), 'The Universe Next Door active+affordable')
+  const before = paperclips.snapshot()
+  assert.ok(before.clips > 1000 || before.phase !== 'business', 'pre-restart game is advanced (not a fresh business game)')
+  const ok = paperclips.applyProject('projectButton200')      // prestigeU++ → game reset() → engine reboot
+  assert.ok(ok, 'applyProject(The Universe Next Door) succeeded')
+  assert.ok(paperclips.consumeRestarted(), 'engine signals a restart happened (consumeRestarted)')
+  assert.ok(!paperclips.consumeRestarted(), 'restart signal is one-shot')
+  assert.ok(paperclips.status().running, 'engine running after the reboot')
+  const fresh = paperclips.snapshot()
+  assert.equal(fresh.phase, 'business', 'restart → FRESH game back in the business phase (humanFlag reset)')
+  assert.ok(fresh.clips < 1000, `restart reset clips to ~0 (got ${fresh.clips})`)
+  assert.ok(fresh.ticks < before.ticks, `restart reset the game tick counter (${fresh.ticks} < ${before.ticks})`)
+  // the prestige bonus survives the reboot (savePrestige carried; saveGame dropped)
+  await paperclips.flush()
+  const rr = await query('SELECT blob FROM paperclips_save WHERE id = $1', ['default'])
+  assert.ok(rr.rows[0]?.blob?.savePrestige, 'savePrestige present in the mirrored save')
+  const sp = JSON.parse(rr.rows[0].blob.savePrestige)
+  assert.ok(sp.prestigeU >= 1, `prestige carried across the restart (savePrestige.prestigeU=${sp.prestigeU} ≥ 1)`)
+  console.error(`  12. prestige restart → fresh business game, ticks reset, prestigeU=${sp.prestigeU} carried ✓`)
 
   console.log('phase-paperclips: ALL OK')
 } finally {

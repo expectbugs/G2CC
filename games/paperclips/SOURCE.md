@@ -37,14 +37,15 @@ and writes to them every tick; a missing id is covered by the engine's `getEleme
 The full arc is playable end-to-end — clip economy → trust/processors → strategic
 modeling / investment / quantum → Release-the-HypnoDrones → Earth-disassembly (factories /
 drones / farms / batteries / power) → space / von-Neumann probes + probe-trust design → combat
-(honor) → dismantle/endgame. These three edge cases are degraded, none blocking:
+(honor) → dismantle/endgame. **Prestige restart now works** (2026-06-28) — "The Universe Next
+Door" / "The Universe Within" (projects.js:2131/2159) and "Quantum Temporal Reversion"
+(projects.js:2378) call the game's `reset()`, which ends in a `location.reload()` that jsdom
+no-ops. The engine intercepts it (`installRestartHook` replaces `reset()` with a flag): after
+the project's effect runs, `applyProject` calls `reboot()` to tear down the jsdom window
+(`window.close()` → `stopAllTimers`) and re-boot a FRESH game carrying only `savePrestige` (the
+demand / creativity bonus) — exactly what a real reload preserves. See `reboot` in
+`server/src/paperclips.ts`. These two edge cases are degraded, none blocking:
 
-- **In-game prestige restart is a no-op.** "Quantum Temporal Reversion" (projects.js:2389, the
-  post-victory restart) calls `reset()` → `localStorage.removeItem(...)` + `location.reload()`.
-  jsdom's `location.reload()` is a no-op, so the universe doesn't actually restart (the next
-  autosave re-writes the in-memory state). No data loss — it just doesn't reset. To truly start
-  over: stop the server, `DELETE FROM paperclips_save WHERE id='default'`, restart. (A real
-  in-process re-init would mean tearing down + rebuilding the jsdom engine — deferred.)
 - **Tournament strategy isn't chosen.** `runTourney` fields the default (leftmost) strategy
   (`stratPicker` has runtime-appended options we don't surface). Tournaments still run and pay
   yomi — just not optimally. (The Strategy level's New/Run/AutoT all work.)

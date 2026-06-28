@@ -162,6 +162,7 @@ export interface PcSnapshot {
   combatUnlocked: boolean
   honor: number
   maxTrust: number
+  maxTrustCost: number       // honor to raise maxTrust +10 (FIXED 91,117.99 — the game never recomputes it)
   // endgame
   dismantle: number
   // review additions (2026-06-27)
@@ -201,6 +202,12 @@ class PaperclipsEngine {
   private autoYomi = false
   private pacer: ReturnType<typeof setInterval> | null = null
   private pacerTicks = 0
+  /** A prestige/restart project called the game's reset() (which only does a
+   *  jsdom-no-op location.reload()); applyProject consumes restartPending to
+   *  rebuild the game fresh, and `restarted` then signals the window to jump
+   *  back to the dash so the fresh run is visible. */
+  private restartPending = false
+  private restarted = false
   /** Serialized fire-and-forget save chain (the Reader persist-chain pattern):
    *  rapid saves run in order, last-write-wins, never awaited in a render path. */
   private saveChain: Promise<void> = Promise.resolve()
@@ -222,22 +229,34 @@ class PaperclipsEngine {
   }
 
   private async start(): Promise<void> {
-    // 1) restore the save into a plain map BEFORE the DOM exists, so we can seed
-    //    localStorage before main.js runs its top-level load() check.
+    // Restore the save into a plain map BEFORE the DOM exists, so buildDom can
+    // seed localStorage before main.js runs its top-level load() check.
     const saved = await this.restore()
+    const { dom, win } = this.buildDom(saved)
+    this.installRestartHook(win)
+    this.jsdom = dom
+    this.win = win
+    this.loadError = null
+    this.startPacer()
+    console.log(`[paperclips] engine started (${saved && Object.keys(saved).length ? 'resumed save' : 'new game'})`)
+  }
 
-    // 2) build the DOM from the cleaned scaffold (no <script> tags — we inject).
-    const html = readFileSync(join(GAME_DIR, 'index.html'), 'utf8')
+  /** Build a fresh jsdom game: parse the scaffold (no <script> tags — we inject),
+   *  seed `seed` into localStorage (the game auto-loads it on init), inject the
+   *  four game files in upstream order, and verify the economy actually wired up.
+   *  Shared by start() (seed = the full restored save) and reboot() (seed = just
+   *  the prestige bonus). Throws loudly on failure; the CALLER owns this.jsdom/win. */
+  private buildDom(seed: Record<string, string>): { dom: JSDOM; win: Win } {
+    // The game logs to console; route to our log, drop nothing silently. A
+    // jsdomError while this.win is still null is a fatal LOAD error; one after
+    // boot is a transient runtime throw from a game timer — log it, but don't let
+    // it permanently poison loadError/statusLine (review 2026-06-27, O1).
     const vc = new VirtualConsole()
-    // The game logs to console; route to our log, drop nothing silently.
-    // A jsdomError BEFORE the game finishes loading (this.win still null) is a
-    // fatal load error; one AFTER boot is a transient runtime throw from a game
-    // timer — log it, but don't let it permanently poison loadError/statusLine
-    // (review 2026-06-27, O1).
     vc.on('jsdomError', (e: Error) => {
       if (!this.win) this.loadError = e.message
       console.error(`[paperclips] jsdom: ${e.message}`)
     })
+    const html = readFileSync(join(GAME_DIR, 'index.html'), 'utf8')
     const dom = new JSDOM(html, {
       url: GAME_URL,
       runScripts: 'dangerously',
@@ -246,33 +265,78 @@ class PaperclipsEngine {
       beforeParse: (window) => this.installShims(window),
     })
     const win = window2win(dom.window)
-
-    // 3) seed localStorage from the save (the game auto-loads it on init).
     try {
-      for (const [k, v] of Object.entries(saved)) dom.window.localStorage.setItem(k, v)
+      for (const [k, v] of Object.entries(seed)) dom.window.localStorage.setItem(k, v)
     } catch (e) {
       throw new Error(`seeding localStorage failed: ${e instanceof Error ? e.message : String(e)}`)
     }
-
-    // 4) inject the four game files in upstream order; a throw here is fatal+loud.
     for (const f of GAME_FILES) {
       const code = readFileSync(join(GAME_DIR, f), 'utf8')
       const script = dom.window.document.createElement('script')
       script.textContent = code
       dom.window.document.body.appendChild(script)
     }
-
-    // 5) sanity: the economy must actually be wired (the spike's frozen-tick trap).
+    // Sanity: the economy must actually be wired (the spike's frozen-tick trap).
     if (typeof win['clipClick'] !== 'function' || typeof win['ticks'] !== 'number') {
       throw new Error('game loaded but clipClick/ticks missing — the engine did not initialize')
     }
-
-    this.jsdom = dom
-    this.win = win
-    this.loadError = null
-    this.startPacer()
-    console.log(`[paperclips] engine started (${saved && Object.keys(saved).length ? 'resumed save' : 'new game'})`)
+    return { dom, win }
   }
+
+  /** The game's reset() (prestige projects 200 "The Universe Next Door" / 201
+   *  "The Universe Within", and 217 "Quantum Temporal Reversion") ends in
+   *  location.reload() — a jsdom NO-OP, so without intervention the game would
+   *  keep its old in-memory state forever. Replace reset() with a flag that the
+   *  applyProject path consumes to rebuild the jsdom fresh. */
+  private installRestartHook(win: Win): void {
+    win['reset'] = (): void => { this.restartPending = true }
+  }
+
+  /** Rebuild the game fresh after a prestige/restart project. Tear down the old
+   *  window (stopping its game timers via close()) and boot a new one carrying
+   *  ONLY `savePrestige` — exactly what a real reload preserves (reset() clears
+   *  every other save key). Synchronous: no PG read, the bonus rides localStorage. */
+  private reboot(): void {
+    const old = this.jsdom
+    const carry: Record<string, string> = {}
+    try {
+      const sp = old?.window.localStorage.getItem('savePrestige')
+      if (sp != null) carry['savePrestige'] = sp
+    } catch (e) {
+      console.error(`[paperclips] reboot: reading savePrestige failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    // Null this.win FIRST so a load error in the new boot is treated as fatal,
+    // then stop the old window's game timers before dropping it.
+    this.win = null
+    this.jsdom = null
+    try { old?.window.close() } catch (e) {
+      console.error(`[paperclips] reboot: closing old window threw: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    try {
+      const { dom, win } = this.buildDom(carry)
+      this.installRestartHook(win)
+      this.jsdom = dom
+      this.win = win
+      this.loadError = null
+      this.restarted = true
+      console.log(`[paperclips] prestige restart — fresh game (carry: ${Object.keys(carry).join(',') || 'none'})`)
+      // Mirror the fresh state immediately so a crash right after prestige can't
+      // resurrect the old run from the last autosave.
+      this.save()
+    } catch (e) {
+      this.loadError = e instanceof Error ? e.message : String(e)
+      // Clear the single-flight latch so the window's Reload re-runs start() from
+      // the last good PG save (we never reached save(), so the pre-prestige run is
+      // still on disk — recoverable, just minus the prestige purchase). LOUD, not
+      // a silent dead engine. (Near-impossible: the identical buildDom just ran at start.)
+      this.starting = null
+      console.error(`[paperclips] reboot FAILED — game stopped; Reload re-boots from the last save: ${this.loadError}`)
+    }
+  }
+
+  /** True exactly once after a prestige/restart rebuilt the game — lets the
+   *  window jump back to the dashboard so the fresh run is visible. */
+  consumeRestarted(): boolean { const r = this.restarted; this.restarted = false; return r }
 
   private installShims(window: DOMWindow): void {
     // These are deliberately-untyped browser-shim pokes (replacing constructors /
@@ -426,11 +490,16 @@ class PaperclipsEngine {
     try {
       if (typeof p.effect !== 'function') { console.error(`[paperclips] applyProject('${id}'): no effect() (LOUD)`); return false }
       p.effect()
-      return true
     } catch (e) {
       console.error(`[paperclips] applyProject('${id}') threw: ${e instanceof Error ? e.message : String(e)}`)
       return false
     }
+    // A prestige/restart project (200/201/217) called the game's reset() → our
+    // hook flagged a restart. Rebuild the jsdom fresh NOW, OUTSIDE the game's
+    // effect() (re-entrancy-safe), carrying the prestige bonus. The window reads
+    // consumeRestarted() to jump to the fresh dashboard.
+    if (this.restartPending) { this.restartPending = false; this.reboot() }
+    return true
   }
 
   setAutoQuantum(on: boolean): void { this.autoQuantum = on }
@@ -532,6 +601,16 @@ class PaperclipsEngine {
     if (this.num('probeTrust') >= this.num('maxTrust')) { console.error('[paperclips] PTrust refused: already at maxTrust (raise it with MaxT/honor) (LOUD)'); return }
     if (this.num('yomi') < this.num('probeTrustCost')) { console.error(`[paperclips] PTrust refused: yomi ${this.num('yomi')} < cost ${this.num('probeTrustCost')} (LOUD)`); return }
     this.call('increaseProbeTrust')
+  }
+  /** increaseMaxTrust self-guards (honor ≥ maxTrustCost) but no-ops SILENTLY when
+   *  unaffordable — wrap it so a dead tap is LOUD (the Probe screen also shows the
+   *  honor/cost gate). maxTrustCost is a FIXED 91,117.99; the game never recomputes it. */
+  increaseMaxTrust(): void {
+    if (!this.win) return
+    if (!this.projFlag('project121')) { console.error('[paperclips] MaxT refused: locked until the "Name the battles" project (LOUD)'); return }
+    const honor = this.num('honor'); const cost = this.num('maxTrustCost')
+    if (honor < cost) { console.error(`[paperclips] MaxT refused: honor ${Math.round(honor)} < cost ${Math.round(cost)} (LOUD)`); return }
+    this.call('increaseMaxTrust')
   }
 
   // ---------------------------------------------------------------- snapshot
@@ -657,6 +736,7 @@ class PaperclipsEngine {
       combatUnlocked: this.flag('battleFlag'),
       honor: this.num('honor'),
       maxTrust: this.num('maxTrust'),
+      maxTrustCost: this.num('maxTrustCost'),
       dismantle,
       humanEra: this.flag('humanFlag'),
       powMod: this.num('powMod'),   // power performance fraction; only meaningful post-humanFlag (controller gates the warning)
@@ -835,7 +915,7 @@ const EMPTY_SNAPSHOT: PcSnapshot = {
   probesLostHaz: 0, probesLostDrift: 0, probesLostCombat: 0,
   probeTrust: 0, probeUsedTrust: 0,
   probe: { Speed: 0, Nav: 0, Rep: 0, Haz: 0, Fac: 0, Harv: 0, Wire: 0, Combat: 0 },
-  combatUnlocked: false, honor: 0, maxTrust: 0, dismantle: 0,
+  combatUnlocked: false, honor: 0, maxTrust: 0, maxTrustCost: 0, dismantle: 0,
   humanEra: true, powMod: 1, swarmStatusLabel: '', sliderPos: 0, shortage: '',
   factoryBuildUnlocked: false, harvesterBuildUnlocked: false, wireDroneBuildUnlocked: false, powerUnlocked: false,
   maxTrustUnlocked: false, combatDimUnlocked: false, projectsAvail: 0, projectsAfford: 0,

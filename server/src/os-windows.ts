@@ -3804,7 +3804,7 @@ class PaperclipsController {
           { label: 'Step', run: () => { this.probeStepIdx = (this.probeStepIdx + 1) % PC_TRUST_STEP.length } },
           { label: 'PTrust', run: () => C.increaseProbeTrust() },   // yomi → +probeTrust (all of full space; guarded+loud)
         ]
-        if (s.maxTrustUnlocked) v.push({ label: 'MaxT', run: () => C.call('increaseMaxTrust') })   // honor → +maxTrust (project121)
+        if (s.maxTrustUnlocked) v.push({ label: 'MaxT', run: () => C.increaseMaxTrust() })   // honor → +maxTrust (guarded+loud; project121)
         return v
       }
       case 'swarm':
@@ -3819,7 +3819,13 @@ class PaperclipsController {
           { label: 'Confirm', run: () => {
             const p = this.pending
             if (!p) { this.go('projects'); return }
-            if (p.run()) { this.pending = null; this.go('projects') }
+            if (p.run()) {
+              this.pending = null
+              // A prestige/restart project (The Universe Next Door/Within, Quantum
+              // Temporal Reversion) rebuilt the game — show the fresh dashboard, not
+              // the now-reset project list.
+              if (C.consumeRestarted()) this.go('dash'); else this.go('projects')
+            }
             // Resource drained between render and tap — keep the card and say so LOUDLY
             // (review 2026-06-27, B-LOW-MED), instead of silently dropping to the list.
             else { this.confirmPages = paginateText(`${p.body}\n\n⚠ Couldn't buy — nothing was spent (cost no longer met).`); this.confirmPage = 0 }
@@ -4023,7 +4029,9 @@ class PaperclipsController {
         text = [
           `Probes ${pcNum(s.probes)} alive · ${pcNum(s.probesBorn)} bred`,
           `+Probe ${pcNum(s.probeCost)}/ea, can make ${pcNum(canMake)}`,
-          `Trust free ${free}/${s.probeTrust} (max ${s.maxTrust}) · Up/Dn ±${step}`,
+          s.maxTrustUnlocked
+            ? `Trust ${free}/${s.probeTrust} max${s.maxTrust} · MaxT ${pcNum(s.honor)}/${pcNum(s.maxTrustCost)} h${s.honor >= s.maxTrustCost ? '✓' : ''}`
+            : `Trust free ${free}/${s.probeTrust} (max ${s.maxTrust}) · Up/Dn ±${step}`,
           `Spd ${p.Speed} Nav ${p.Nav} Rep ${p.Rep} Haz ${p.Haz}`,
           `Fac ${p.Fac} Hrv ${p.Harv} Wir ${p.Wire} Cbt ${p.Combat}`,
           s.shortage ? `> ${s.shortage}` : `> [${dim.key}] selected — Sel changes it`,
@@ -4062,7 +4070,7 @@ class PaperclipsController {
       mode: 'browse',
       menuMode: this.focus === 'menu' ? 'capture' : 'passive',
       title: `Paperclips · Projects (${this.shownProjects.length})`,
-      menu: ['Back', 'Main'],
+      menu: ['Back', 'Reload', 'Main'],   // Reload re-reads listProjects() in place (new/affordable projects)
       items: paged.items,
     }
   }
