@@ -4,6 +4,33 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-29 — **DE/WM overhaul: planning + prep (no behaviour change)**
+
+Paused Blackjack to lay the foundation first: the menu-driven WM doesn't scale as windows grow, and
+the pinned left menu + two bars permanently eat the tiny screen. Researched TUIs/DEs/WMs against the
+R1's 3-gesture input (scroll/tap/double-tap), mocked alternatives in the real g2 font via the EvenHub
+sim, and converged on a **ribbon** root selector (MRU recents + a categorized drawer for the cold tail,
+antenna-driven tiered live preview, sovereign full-width windows, full persistence). Decided to do it
+**modularization-first**: split the 15 windows out of the 8.8k-line `os-windows.ts` behind the
+*existing, proven* `OsWindow`/`WmContext` contracts + a registry (NO behaviour change), STOP and soak,
+then build the ribbon flag-gated on that foundation.
+
+- **`overhaul.md`** — the canonical plan: fresh-session onboarding (reading list, verified HW/wire
+  constraints, the antenna scroll finding, the measured ack-latency budget) → Phase 1 modularization →
+  CLEAN STOP gate → Phase 2 ribbon. Payoff baked in: `summary()`/`view()` already give the two preview
+  tiers the ribbon needs.
+- **Doc correctness:** `g2code`/`g2aria` were archived to `g2-old-backup-2026-06-24.tar.gz` (live dirs
+  gone) — corrected README/CLAUDE/HANDOFF (no longer live fallbacks; inherited code lives in `server/src`)
+  and SIM_TOOLING (the sim's stale `g2code/node_modules` path). The sim is now pinned as a **`sdk-demo`
+  devDependency** so it survives. Disambiguated the bare `overhaul.md §N` refs (those mean
+  `aria2/overhaul.md`, the swarm doc — not the new G2CC file).
+- **`sdk-demo/src/mockup.ts`** — additive design-loop screens (ribbon flow + alternatives); existing
+  `cc`/`aria`/`main`/`mail` screens untouched.
+- **Blackjack parked** on branch `wip/blackjack` (unfinished; its smoke passes). Resume by re-applying
+  onto the post-modularization `windows/` layout. Tag `pre-overhaul-2026-06-29` marks the clean baseline.
+
+---
+
 ## (unstamped) — 2026-06-27 — **Games: Universal Paperclips, end-to-end (server-only, no APK)**
 
 Adam wanted more games, starting with Universal Paperclips — "all state is plain globals, every
