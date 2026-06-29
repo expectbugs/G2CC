@@ -32,7 +32,7 @@ import {
   composeScene, paginateText, wrapLinesPx, errorView, blankScene, blankFlashScene, fwTextWidth,
   DEFAULT_BROWSE_MENU, type WinView,
 } from './os-compose.js'
-import type { SessionPool, PoolEntry } from './session-pool.js'
+import type { PoolEntry } from './session-pool.js'
 import type { CCUsage } from './cc-session.js'
 import {
   ensureConversation, recordTurn, listConversations, listTurns, getTurn, recentTurns,
@@ -46,7 +46,7 @@ import {
 } from './os-notify.js'
 import { createTimer, cancelTimer, listPending, nextPending, fmtRemaining, type TimerRow } from './timers.js'
 import { parseIntent, appendNote } from './intents.js'
-import { saveMemo, type MemoAudio } from './memo.js'
+import { saveMemo } from './memo.js'
 import { searchAll, type SearchHit } from './search.js'
 import { listDeliveries, getDelivery, deliveriesSummary, type DeliveryRow } from './deliveries.js'
 import {
@@ -66,6 +66,14 @@ import { paperclips, type PcSnapshot, type PcPhase } from './paperclips.js'
 import { moveToTrash, TRASH_DIR } from './trash.js'
 import { overviewText, chartSpecs, readStorage, readTopProcs, storageText } from './stats.js'
 import { hostname } from 'node:os'
+// Phase 1 (overhaul.md §1.1): contracts + shared helpers extracted into windows/.
+import {
+  type OsWindow, type WmContext, type WindowCategory, CATEGORY_ORDER, type WindowOpen, SwitchTo,
+} from './windows/types.js'
+import {
+  browsePageItems, browseRowBytes, BROWSE_PAGE, MORE_ROW, PREV_ROW,
+} from './windows/_browse.js'
+import { clampConfirmBody, fmtStamp, oneLine } from './windows/_util.js'
 
 /** How long a notification FLASH holds a BLANKED screen before auto-returning
  *  to blank. 10 s → 5 s (Adam 2026-06-12, Phase 2: "i use blank mode when
@@ -101,200 +109,12 @@ function cycleNext<T>(list: readonly T[], current: T): T {
   return list[i === -1 ? 0 : (i + 1) % list.length]
 }
 
-/** DB-fetch page size for the STORE-backed browse windows (History/Mail/Notices):
- *  their LIMIT/OFFSET fetch count. Those windows have short titles + a tiny
- *  [Reload, Main] menu, so 14 compose-clamped rows (≤43 B each) + chrome stays
- *  under the multi-packet wall. The IN-MEMORY-list windows (Files/Reader/rpg/
- *  picker/prompts/timers/calendar) do NOT use this — they paginate byte-aware
- *  via browsePageItems below (review 2026-06-13). */
-const BROWSE_PAGE = 14
-const MORE_ROW = '— more —'
-const PREV_ROW = '— prev —'
-/** Byte-aware browse-page budget (review 2026-06-13 — the Files "≈970 B" wall:
- *  a FIXED 14-row page + a deep cwd title (~110 B middle-clamped) + long
- *  filenames tripped compose's 960 B frame guard, so the directory NEVER
- *  displayed — it threw into errorView). compose clamps every browse row to
- *  BROWSE_ROW_MAX_BYTES (40) before estimating, so a row costs ≤ 43 B on the
- *  wire; the wall is therefore a function of ROW COUNT × 43 + chrome. This
- *  packs as many rows as fit a conservative content budget that leaves headroom
- *  for the worst chrome (deep title + tree menu + status + the prev/more nav
- *  rows + a prepended `..`), capped so the list stays ≤ the 20-item SDK cap.
- *  Long names → fewer rows; short names → more (strictly better than fixed 14). */
-const BROWSE_CONTENT_BUDGET_BYTES = 420
-const BROWSE_ROW_CAP = 17
 /** Files window head-preview bound (event-loop-blocking read guard). */
 const FILE_PREVIEW_BYTES = 256 * 1024
 
-/** What the WM needs from ws-handler (kept narrow so windows stay testable). */
-export interface WmContext {
-  /** Send the composed scene to the glasses. */
-  send(scene: WireScene): void
-  /** Drive the phone mic. mode 'handsfree' (Phase 9) = continuous listening for
-   *  the voice grammar; omitted/'dictate' = one-shot push-to-talk (the default). */
-  audio(action: 'start' | 'stop', mode?: 'dictate' | 'handsfree'): void
-  /** Tell the client to abort + COLD_INIT-relaunch its current scene (the
-   *  'Reload' unstick — display_reload on the wire). */
-  displayReload(): void
-  log(msg: string): void
-  pool: SessionPool
-  config: G2CCConfig
-  registerWatchdog(entry: PoolEntry): void
-  unregisterWatchdog(entryId: string): void
-  /** Latest phone battery % from client_hb (Phase 9; null until reported). */
-  phoneBattery?(): number | null
-  /** Latest GLASSES battery % from client_hb (Adam 2026-06-12; null until the
-   *  client decodes a 09-00/09-01 device-info frame — [U] on-glass pending). */
-  g2Battery?(): number | null
-  /** The raw PCM (+ format) of the dictation that produced the CURRENT confirmed
-   *  transcript — plumbed from ws-handler so a `memo:` intent (Phase 14) saves
-   *  the clip. null when no audio is in hand (a typed/test path, or the buffer
-   *  was cleared). */
-  lastDictationAudio?(): MemoAudio | null
-  /** Tell the phone to cancel a notification it forwarded (Adam 2026-06-13:
-   *  reading/MkAll on glass dismisses it on the phone too). */
-  dismissPhoneNotification?(key: string): void
-  /** Phase 4a: fill + fire a forwarded notification's inline-reply RemoteInput
-   *  (the client reports the outcome back via onNotificationReplyResult). */
-  replyToNotification?(key: string, text: string): void
-  /** Phase 7: a media transport command for the phone's active MediaSession
-   *  (play_pause/next/prev/shuffle/subscribe/unsubscribe). */
-  mediaCommand?(cmd: 'play_pause' | 'next' | 'prev' | 'shuffle' | 'subscribe' | 'unsubscribe'): void
-  /** Phase 4b: query the phone's SMS/MMS thread list (reply → onSmsThreads). */
-  requestSmsThreads?(offset: number, limit: number): void
-  /** Phase 4b: query one SMS/MMS thread's messages (reply → onSmsThread). */
-  requestSmsThread?(threadId: string, page: number): void
-  /** Phase 4b: send an SMS (after the dictation confirm; needs SEND_SMS). */
-  sendSms?(address: string, text: string): void
-  /** Phase 15: ring the phone to find it (start/stop). */
-  phoneLocate?(action: 'start' | 'stop'): void
-}
-
-/** Main's category-launcher groups (upgrades.md v2 Phase 11, XFCE-style). Each
- *  window self-places by declaring its category; new windows need only set it. */
-export type WindowCategory = 'AI' | 'Comms' | 'Media' | 'Tools' | 'Info' | 'Games'
-export const CATEGORY_ORDER: WindowCategory[] = ['AI', 'Comms', 'Media', 'Tools', 'Info', 'Games']
-
-export interface OsWindow {
-  readonly id: string
-  readonly tab: string
-  readonly label: string
-  /** Which Main category this window lives under (Phase 11). Main (the
-   *  launcher itself) is excluded from grouping; its value is unused. */
-  readonly category: WindowCategory
-  /** One-line live status for the Main switcher row. May be async — windows
-   *  whose state lives in the DB (Timers/Calendar) query it fresh, so the
-   *  dashboard can't contradict itself on a cold connection (it showed
-   *  "Timers: none pending" beside a live next-timer line until the window
-   *  was first visited; review 2026-06-11b). Main isolates failures per row. */
-  summary(): string | Promise<string>
-  /** Live activity phase for the bottom status bar (g2aria-style: listening →
-   *  transcribing → confirm → thinking → tool → writing). null = idle. */
-  statusLine?(): string | null
-  view(): Promise<WinView>
-  /** A tap on the window's OWN menu rows. The WM resolves the label from the
-   *  last-RENDERED view (so taps can't misroute across state changes) and
-   *  handles the global labels (Retry/Reload/Back/Main) before delegating. */
-  onMenuSelect(label: string): Promise<void>
-  /** A tap on browse row `index` INTO THE WINDOW'S OWN items, exactly as the
-   *  window rendered them (no offset — the once-planned compose-injected Reload
-   *  row was superseded by the v1.3 browse focus-flip: Reload lives in the left
-   *  menu list, reached by double-tap). */
-  onBrowseSelect(index: number): Promise<void>
-  /** Pop one level. false = already at root (WM goes to Main). In browse
-   *  windows the FIRST pop flips focus content→menu (Adam 2026-06-10: "double
-   *  tap should back out to the menu list rather than to Main"). */
-  onBack(): Promise<boolean>
-  /** The Reload action: clear any stuck transient state; view() re-derives. */
-  onReload?(): Promise<void>
-  /** Called when the WM switches AWAY from this window — stop anything that
-   *  must not outlive focus (the dictation mic, review 2026-06-10). */
-  onDeactivate?(): void
-  /** Called when the WM switches TO this window (foregrounds it). A launcher-style
-   *  window resets to its root here — e.g. Games always lands on the games list,
-   *  not the last game played (Adam 2026-06-28). Absent = keep prior state. */
-  onActivate?(): void
-  /** May a notification OVERLAY repaint this window right now? (Phase 4, B5.)
-   *  Session windows answer false while listening/transcribing/pendingStt/
-   *  pendingPermission — the confirm step's "nothing reaches CC unread"
-   *  guarantee must never be repainted over. Absent = always interruptible. */
-  interruptible?(): boolean
-  onStt?(text: string): Promise<void>
-  onSttError?(error: string): Promise<void>
-  /** Release any window-held resource (timers, pollers) on ws-close. The WM
-   *  calls it for every window in dispose(). Absent = nothing to release. */
-  dispose?(): void
-  /** Open a SPECIFIC item after the WM switches to this window (Phase 12 Search
-   *  hand-off): a window-specific payload it knows how to act on. The WM calls
-   *  it post-switch, exactly like menuLabel. Absent = the window has no
-   *  open-by-id entry point (Search routes those inline instead). */
-  onOpen?(open: WindowOpen): Promise<void>
-}
-
-/** Cross-window open payloads (Phase 12). Mail opens a message by maildir key;
- *  Files navigates to a path's parent dir. History/notes have no window, so
- *  Search reads them inline rather than handing off. */
-export type WindowOpen =
-  | { kind: 'mail'; key?: string; first?: boolean }   // key = a specific message (Search); first = the newest (voice "read first email")
-  | { kind: 'file'; path: string }
-  | { kind: 'sms'; name: string }                     // voice "read <name>'s last text" → open that contact's thread
 
 // ============================================================ helpers
 
-/** A browse row's worst-case wire cost: compose clamps it to ≤40 B then the
- *  estimator adds 3 B framing. */
-function browseRowBytes(s: string): number { return 3 + Math.min(Buffer.byteLength(s, 'utf8'), 40) }
-
-/** Bound a single-region confirm-card body so a pathologically long dictation
- *  can't blow the 960 B multi-packet wall (→ errorView, which loses the input).
- *  The FULL value still drives the action; this clamps only the DISPLAY, loudly
- *  marked. (Mail paginates instead — its bodies are long by nature.) */
-function clampConfirmBody(body: string, max = 600): string {
-  if (Buffer.byteLength(body, 'utf8') <= max) return body
-  return body.slice(0, max) + `\n… (+${body.length - max} more chars — the full text is used)`
-}
-
-/** Page-START indices for `all` under a byte + row-count budget, computed from 0
- *  so view() and the tap handler agree given the same `all`. Always ≥1 row per
- *  page (a single over-budget row still shows — compose clamps it). */
-function browseBoundaries(all: string[], budget: number, rowCap: number): number[] {
-  const bounds = [0]
-  let i = 0
-  while (i < all.length) {
-    let bytes = 0
-    let count = 0
-    while (i < all.length && count < rowCap && (count === 0 || bytes + browseRowBytes(all[i]) <= budget)) {
-      bytes += browseRowBytes(all[i]); i++; count++
-    }
-    if (i >= all.length) break
-    bounds.push(i)
-  }
-  return bounds
-}
-
-/** Byte-aware browse pagination. `offset` is an item index, snapped down to a
- *  page boundary. `reserveBytes`/`reserveRows` account for rows the CALLER
- *  prepends after this (Files prepends `..`) so the list stays ≤ the 20-item
- *  cap and under the wall. Returns the visible items, their `map` (-1 = PREV,
- *  -2 = MORE, else the index into `all`), and the prev/next page-start offsets
- *  — variable page sizes mean callers must JUMP to these, not ±BROWSE_PAGE. */
-function browsePageItems(
-  all: string[], offset: number, reserveBytes = 0, reserveRows = 0,
-): { items: string[]; map: number[]; prevOffset: number; nextOffset: number } {
-  const rowCap = Math.max(1, BROWSE_ROW_CAP - reserveRows)
-  // Leave room for the caller's prefix rows AND the (≤2) prev/more nav rows.
-  const budget = Math.max(120, BROWSE_CONTENT_BUDGET_BYTES - reserveBytes - 2 * browseRowBytes(MORE_ROW))
-  const bounds = browseBoundaries(all, budget, rowCap)
-  let pi = 0
-  for (let k = 0; k < bounds.length; k++) { if (bounds[k] <= offset) pi = k; else break }
-  const start = bounds[pi]
-  const end = pi + 1 < bounds.length ? bounds[pi + 1] : all.length
-  const items: string[] = []
-  const map: number[] = []
-  if (pi > 0) { items.push(PREV_ROW); map.push(-1) }
-  for (let i = start; i < end; i++) { items.push(all[i]); map.push(i) }
-  if (pi + 1 < bounds.length) { items.push(MORE_ROW); map.push(-2) }
-  return { items, map, prevOffset: bounds[Math.max(0, pi - 1)], nextOffset: end }
-}
 
 function permissionSummary(rawEvent: Record<string, unknown>): Block[] {
   // Best-effort extraction of CC's can_use_tool control_request; JSON fallback.
@@ -1440,21 +1260,6 @@ class SessionOptions {
 
 // ============================================================ history browser (CC + Aria share it)
 
-function fmtStamp(d: Date): string {
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
-
-/** Collapse whitespace runs and pre-trim a browse-row preview. This is a
- *  NAVIGATIONAL summary (the full text is one tap away in the read view) —
- *  the compose-side clampLabel byte cap remains the loud backstop. The cut is
- *  marked with '…' so truncation is VISIBLE (it used to be silent — two
- *  distinct rows could render identically with no hint; review 2026-06-11b).
- *  No log: this runs per row per render (logging here would spam). */
-function oneLine(s: string, max = 34): string {
-  const flat = s.replace(/\s+/g, ' ').trim()
-  return flat.length > max ? [...flat].slice(0, max - 1).join('') + '…' : flat
-}
 
 /** Read-only session-history browser (upgrades Phase 3): conversations →
  *  turns → full turn text. Owns ONLY its own level state (B5) — leaving it
@@ -7794,15 +7599,6 @@ class SmsWindow implements OsWindow {
  *  menuLabel is invoked on the TARGET window after the switch — how Main's
  *  `Ask` reuses Aria's existing dictation verb path verbatim (Phase 6: never
  *  a parallel dictation pipeline). */
-class SwitchTo extends Error {
-  constructor(
-    readonly windowId: string,
-    readonly menuLabel?: string,
-    /** Phase 12: open a specific item on the target after the switch (Search
-     *  hand-off). Mutually exclusive with menuLabel in practice. */
-    readonly open?: WindowOpen,
-  ) { super(`switch-to-${windowId}`) }
-}
 
 /** Full-page notification view (Phase 4) — composed exactly like errorView:
  *  text mode, bounded to ONE page (the full text always lives in Notices),
