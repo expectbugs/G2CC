@@ -27,13 +27,11 @@ setup below is what actually works; the gotchas below cost an afternoon — **re
 
 ## Run it
 
-> **⚠ 2026-06-29 — the sim is NOT at the `g2code/...` path below anymore.** `g2code` and `g2aria` were
-> archived to `/home/user/g2-old-backup-2026-06-24.tar.gz` and their live dirs deleted, taking the sim's
-> `node_modules` copy with them. The system setup (egl-gbm, nvidia-drm, `gtkwl_stub.so`) is intact — only
-> the npm package is gone. Reinstall it first:
-> `SIMENV=/tmp/g2cc-simenv; mkdir -p "$SIMENV"; cd "$SIMENV"; npm i @evenrealities/evenhub-simulator@0.7.3 @evenrealities/sim-linux-x64@0.7.3`
-> — the command block below already references `$SIMENV` for the wrapper. (Or extract the original from
-> the tarball, or install into `sdk-demo` devDeps — see `overhaul.md` §0.8.)
+> **⚠ 2026-06-29 — the sim moved, and is now pinned in `sdk-demo`.** `g2code`/`g2aria` (its old home)
+> were archived to `/home/user/g2-old-backup-2026-06-24.tar.gz` and deleted. The sim is now a **`sdk-demo`
+> devDependency**, so `cd /home/user/G2CC/sdk-demo && npm i` installs it to
+> `sdk-demo/node_modules/@evenrealities/evenhub-simulator/bin/index.js` (the launch block below uses that
+> path). The system setup (egl-gbm, nvidia-drm, `gtkwl_stub.so`) is intact.
 
 ```bash
 # 1. serve the app (vite, from sdk-demo) — leave running
@@ -41,7 +39,7 @@ cd /home/user/G2CC/sdk-demo && node_modules/.bin/vite --host 127.0.0.1 --port 51
 
 # 2. launch the sim  (apps: fontcal.html | mockup.html)
 GDK_BACKEND=x11 LD_PRELOAD=/home/user/G2CC/scripts/simtools/gtkwl_stub.so DISPLAY=:0.0 \
-  nohup node "$SIMENV/node_modules/@evenrealities/evenhub-simulator/bin/index.js" \
+  nohup node /home/user/G2CC/sdk-demo/node_modules/@evenrealities/evenhub-simulator/bin/index.js \
   http://127.0.0.1:5174/mockup.html --automation-port 9898 > /tmp/sim.log 2>&1 < /dev/null & disown
 sleep 14   # it needs ~12s to load + render (+ a couple more for image tiles)
 

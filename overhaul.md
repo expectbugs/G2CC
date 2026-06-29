@@ -187,7 +187,7 @@ doc. Phase 1 closes exactly these three gaps and nothing else.
   launch path is STALE.** The sim used to live in `g2code/node_modules`; **`g2code` and `g2aria` were
   archived to `/home/user/g2-old-backup-2026-06-24.tar.gz` on 2026-06-24 and the live dirs deleted**, so
   the sim went with them. To use the sim: `npm i @evenrealities/evenhub-simulator@0.7.3
-  @evenrealities/sim-linux-x64@0.7.3` (into a scratch dir or — pending Adam's call — `sdk-demo` devDeps),
+  @evenrealities/sim-linux-x64@0.7.3` (now pinned as a `sdk-demo` devDependency — `cd /home/user/G2CC/sdk-demo && npm i` provides it; wrapper at `sdk-demo/node_modules/@evenrealities/evenhub-simulator/bin/index.js`),
   serve `sdk-demo` via vite on :5174, launch the sim binary with `GDK_BACKEND=x11
   LD_PRELOAD=scripts/simtools/gtkwl_stub.so DISPLAY=:0.0 … <wrapper> http://127.0.0.1:5174/mockup.html?
   screen=<name> --automation-port 9898`, then `GET /api/screenshot/glasses`. The egl-gbm / nvidia-drm /
