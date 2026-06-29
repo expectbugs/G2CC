@@ -55,13 +55,19 @@ function fwTextWidth(s: string): number {
 // ---- screen definitions ----------------------------------------------------
 type MenuList = { kind: 'list'; items: string[] }
 type MenuHint = { kind: 'hint'; text: string }
+type MenuNone = { kind: 'none' }
 type ContentTiles = { kind: 'tiles'; draw: (c: CanvasRenderingContext2D) => void }
 type ContentList = { kind: 'list'; items: string[] }
+type RegionSpec = { x: number; y: number; w: number; h: number; content: string; bright?: boolean; capture?: boolean; pad?: number; noBorder?: boolean }
+type ContentRegions = { kind: 'regions'; regions: RegionSpec[] }
 interface ScreenDef {
   title: string
-  menu: MenuList | MenuHint
-  content: ContentTiles | ContentList
-  activeTab: string
+  menu: MenuList | MenuHint | MenuNone
+  content: ContentTiles | ContentList | ContentRegions
+  activeTab?: string
+  status?: string
+  tabs?: string[] | null   // undefined => default tab strip; null => no tabs (status full width)
+  clock?: string
 }
 
 const TABS = ['Main', 'Aria', 'CC', 'Mail']
@@ -112,6 +118,171 @@ const SCREENS: Record<string, ScreenDef> = {
       ],
     },
     activeTab: 'Mail',
+  },
+
+  // ===== DE/WM design explorations (2026-06-29) — text+list only, full g2 font =====
+
+  // A1 — Scrollable window strip (niri/PaperWM). Title = position ribbon across the
+  // running windows; you're reading a mail INSIDE the focused window; the action menu
+  // is the left column. Scroll reads, double-tap pops to the overview (below).
+  strip: {
+    title: '< Files · [Mail] · Reader >',
+    menu: { kind: 'list', items: ['Reply', 'Del', 'Unread', 'More', 'Main'] },
+    content: {
+      kind: 'regions',
+      regions: [{
+        x: 100, y: 44, w: 468, h: 200, pad: 8,
+        content: 'From: Amazon\nYour order shipped\n\nArrives Tue — track TBA1234567\n\npage 1 / 3',
+      }],
+    },
+    tabs: null,
+    status: '● beardos · mail · 2 unseen    scroll=read  2tap=overview',
+  },
+
+  // A2 — Card/overview switcher (webOS / Mission Control). Text-only cards = instant,
+  // no image wall. Bright-bordered card is the selection; scroll pans, tap enters.
+  overview: {
+    title: 'Windows    scroll <>,  tap = enter',
+    menu: { kind: 'none' },
+    content: {
+      kind: 'regions',
+      regions: [
+        { x: 12, y: 46, w: 176, h: 150, content: 'CC\n\nthinking...\naria 3/3' },
+        { x: 200, y: 46, w: 176, h: 150, bright: true, capture: true, content: '> MAIL\n\n2 unread\n2m ago' },
+        { x: 388, y: 46, w: 176, h: 150, content: 'READER\n\nDune  p.42\n73%' },
+        { x: 12, y: 202, w: 552, h: 44, noBorder: true, content: '● 4 windows live · 1 cc · 2 unseen        2tap = back' },
+      ],
+    },
+    tabs: null,
+    status: '● beardos · G2 78%',
+  },
+
+  // B — Command palette + dictation (dmenu/rofi/fzf/Spotlight). Say or type a few
+  // letters; a huge command set narrows to a handful; scroll the survivors, tap to run.
+  palette: {
+    title: 'Find:  mai_',
+    menu: { kind: 'none' },
+    content: {
+      kind: 'list',
+      items: [
+        'Mail — inbox  (2 unread)',
+        'Mail: Compose',
+        'Mail: Search',
+        'Media: play / pause',
+        'Aria: remind me...',
+      ],
+    },
+    tabs: null,
+    status: 'say or scroll · tap = run · 2tap = cancel',
+  },
+
+  // C — Transient leader menu (Magit / which-key / Doom). Grouped, labelled, sticky;
+  // uses the full width for columns instead of a cramped 5-item rail. Scales with commands.
+  transient: {
+    title: 'Mail > Amazon — "Your order shipped"',
+    menu: { kind: 'none' },
+    content: {
+      kind: 'regions',
+      regions: [
+        { x: 12, y: 44, w: 268, h: 200, bright: true, capture: true, pad: 8,
+          content: 'REPLY ---\n> Reply\n  Reply all\n  Forward\nREAD ---\n  Open    Images' },
+        { x: 292, y: 44, w: 272, h: 200, pad: 8,
+          content: 'MANAGE ---\n  Del>Trash\n  Unread\n  Move\nGO ---\n  Next  Prev  Back' },
+      ],
+    },
+    tabs: null,
+    status: 'scroll = move · tap = do · sticky (do many)',
+  },
+
+  // D — Zooming UI, level 0 (Eagle Mode / Pad++ / Raskin). Fixed font, so "zoom" =
+  // changing the LABEL SET per level, not glyph size: out = few big targets.
+  zui0: {
+    title: 'root',
+    menu: { kind: 'none' },
+    content: { kind: 'list', items: ['WORK', 'COMMS', 'MEDIA', 'SYSTEM'] },
+    tabs: null,
+    status: 'scroll · tap = zoom in',
+  },
+  // D — ZUI level 1: inside WORK.
+  zui1: {
+    title: 'root > work',
+    menu: { kind: 'none' },
+    content: { kind: 'list', items: ['CC', 'Aria', 'Terminal', 'Files'] },
+    tabs: null,
+    status: 'tap = in · 2tap = zoom out',
+  },
+  // D — ZUI level 2: inside CC — the item itself, full detail.
+  zui2: {
+    title: 'root > work > cc',
+    menu: { kind: 'none' },
+    content: {
+      kind: 'regions',
+      regions: [{
+        x: 10, y: 44, w: 556, h: 200, pad: 8, capture: true,
+        content: '## Plan\n- transient menu layer\n- palette + dictation\n- session persistence\npage 2 / 4',
+      }],
+    },
+    tabs: null,
+    status: '2tap = zoom out',
+  },
+
+  // ===== Antenna-ribbon switcher (2026-06-29) — ribbon lives in the bottom bar, live
+  // preview fills the reclaimed middle. Antenna-driven (scroll=true): each notch redraws
+  // the preview live, no tap. title = breadcrumb/level · status bar = the ribbon · the
+  // selected window shown in [brackets]. Multiple layers: recents -> categories ->
+  // category windows -> the entered (sovereign, full-width) window.
+  ribA: {
+    title: 'Recents',
+    menu: { kind: 'none' },
+    content: { kind: 'regions', regions: [{
+      x: 6, y: 44, w: 564, h: 200, pad: 10,
+      content: 'Mail — 2 unread\n\n● Amazon — Your order shipped\n  Mom — re: Sunday\n\ntap to open',
+    }]},
+    tabs: null,
+    status: '[ Mail·2 ]  CC~  Chess  Reader  Timers  All>',
+  },
+  ribB: {
+    title: 'Recents',
+    menu: { kind: 'none' },
+    content: { kind: 'regions', regions: [{
+      x: 6, y: 44, w: 564, h: 200, pad: 10,
+      content: 'CC — aria · thinking...\n\n> add transient menu layer\n  tests: 42 passed\n\ntap to enter',
+    }]},
+    tabs: null,
+    status: 'Mail·2  [ CC~ ]  Chess  Reader  Timers  All>',
+  },
+  ribcat: {
+    title: 'All',
+    menu: { kind: 'none' },
+    content: { kind: 'regions', regions: [{
+      x: 6, y: 44, w: 564, h: 200, pad: 10,
+      content: 'Games  (3 windows)\n\nChess · your move\nPaperclips · 1.2M clips\nRPG · dungeon lvl 4\n\ntap to open category',
+    }]},
+    tabs: null,
+    status: 'Comms  Work  Media  System  [ Games ]',
+  },
+  ribwin: {
+    title: 'All > Games',
+    menu: { kind: 'none' },
+    content: { kind: 'regions', regions: [{
+      x: 6, y: 44, w: 564, h: 200, pad: 10,
+      content: 'Chess vs Stockfish (lvl 5)\n\nYour move — White\nlast: e2-e4\n\ntap to enter · 2tap = back',
+    }]},
+    tabs: null,
+    status: '[ Chess ]  Paperclips  RPG',
+  },
+  winsample: {
+    title: 'Mail · inbox 1-5 / 12',
+    menu: { kind: 'none' },
+    content: { kind: 'list', items: [
+      'Amazon — Your order shipped',
+      'Mom — re: Sunday dinner?',
+      'GitHub — [g2cc] CI passed',
+      'Stripe — Receipt #4471',
+      'Seeed — XIAO backorder update',
+    ]},
+    tabs: null,
+    status: 'window owns full width · tap=read · 2tap=ribbon',
   },
 }
 
@@ -238,12 +409,19 @@ function grayBmp4(img: ImageData): number[] {
 async function main(): Promise<void> {
   const name = new URLSearchParams(location.search).get('screen') ?? 'cc'
   const def = SCREENS[name]
-  if (!def) throw new Error(`unknown screen '${name}' (cc|aria|main|mail)`)
+  if (!def) throw new Error(`unknown screen '${name}'`)
   const bridge = await waitForEvenAppBridge()
 
   const texts: InstanceType<typeof TextContainerProperty>[] = []
   const lists: InstanceType<typeof ListContainerProperty>[] = []
   const images: InstanceType<typeof ImageContainerProperty>[] = []
+
+  const hasMenu = def.menu.kind !== 'none'
+  const cx = hasMenu ? CONTENT_X : 0          // content x: after the menu, or full-bleed
+  const cw = hasMenu ? CONTENT_W : W          // content width: 480 with menu, else 576
+  const clockText = def.clock ?? CLOCK_TEXT
+  const statusText = def.status ?? STATUS_TEXT
+  const tabsArr = def.tabs === undefined ? TABS : def.tabs   // null => no tab strip
 
   // Title bar (left of the clock cutout) + the stand-in client clock.
   texts.push(new TextContainerProperty({
@@ -254,10 +432,10 @@ async function main(): Promise<void> {
   texts.push(new TextContainerProperty({
     containerID: 1, containerName: 'clock', xPosition: W - CLOCK_W, yPosition: 0,
     width: CLOCK_W, height: BAR_H, ...BORDER, paddingLength: 4,
-    isEventCapture: 0, content: CLOCK_TEXT,
+    isEventCapture: 0, content: clockText,
   }))
 
-  // Left menu: the action list (event-capture) OR passive hints in browse mode.
+  // Left menu: action list (event-capture), passive hints, or omitted (full-width modes).
   if (def.menu.kind === 'list') {
     lists.push(new ListContainerProperty({
       containerID: 3, containerName: 'menu', xPosition: 0, yPosition: BAR_H,
@@ -267,7 +445,7 @@ async function main(): Promise<void> {
         itemName: def.menu.items,
       }),
     }))
-  } else {
+  } else if (def.menu.kind === 'hint') {
     texts.push(new TextContainerProperty({
       containerID: 3, containerName: 'menu', xPosition: 0, yPosition: BAR_H,
       width: MENU_W, height: CONTENT_H, ...BORDER, paddingLength: 6,
@@ -275,40 +453,59 @@ async function main(): Promise<void> {
     }))
   }
 
-  // Content pane: 4 image tiles OR the native browse list (the focus region there).
+  // Content pane: image tiles · native browse list · or absolute text regions.
   if (def.content.kind === 'tiles') {
     for (let i = 0; i < 4; i++) {
       const col = i % 2, row = (i / 2) | 0
       images.push(new ImageContainerProperty({
         containerID: 10 + i, containerName: `t${i}`,
-        xPosition: CONTENT_X + col * TW, yPosition: CONTENT_Y + row * TH, width: TW, height: TH,
+        xPosition: cx + col * TW, yPosition: CONTENT_Y + row * TH, width: TW, height: TH,
       }))
     }
-  } else {
+  } else if (def.content.kind === 'list') {
     lists.push(new ListContainerProperty({
-      containerID: 6, containerName: 'browse', xPosition: CONTENT_X, yPosition: CONTENT_Y,
-      width: CONTENT_W, height: CONTENT_H, ...BORDER, paddingLength: 4, isEventCapture: 1,
+      containerID: 6, containerName: 'browse', xPosition: cx, yPosition: CONTENT_Y,
+      width: cw, height: CONTENT_H, ...BORDER, paddingLength: 4, isEventCapture: 1,
       itemContainer: new ListItemContainerProperty({
         itemCount: def.content.items.length, itemWidth: 0, isItemSelectBorderEn: 1,
         itemName: def.content.items,
       }),
     }))
+  } else {
+    def.content.regions.forEach((r, i) => {
+      const border = r.noBorder
+        ? NO_BORDER
+        : { borderWidth: 1, borderColor: r.bright ? 13 : 6, borderRadius: 0 }
+      texts.push(new TextContainerProperty({
+        containerID: 20 + i, containerName: `r${i}`, xPosition: r.x, yPosition: r.y,
+        width: r.w, height: r.h, ...border, paddingLength: r.pad ?? 6,
+        isEventCapture: r.capture ? 1 : 0, content: r.content,
+      }))
+    })
   }
 
-  // Status bar: connection left; window tabs right-aligned (own region, no overlap).
-  const tabText = TABS.map((t) => (t === def.activeTab ? `[${t}]` : t)).join('  ')
-  const tabW = fwTextWidth(tabText) + 12
-  const tabX = W - tabW
-  texts.push(new TextContainerProperty({
-    containerID: 4, containerName: 'status', xPosition: 0, yPosition: H - BAR_H,
-    width: tabX, height: BAR_H, ...BORDER, paddingLength: 4,
-    isEventCapture: 0, content: STATUS_TEXT,
-  }))
-  texts.push(new TextContainerProperty({
-    containerID: 5, containerName: 'tabs', xPosition: tabX, yPosition: H - BAR_H,
-    width: tabW, height: BAR_H, ...NO_BORDER, paddingLength: 4,
-    isEventCapture: 0, content: tabText,
-  }))
+  // Status bar: connection/phase left; window tabs right-aligned — or full-width when tabs===null.
+  if (tabsArr && tabsArr.length) {
+    const tabText = tabsArr.map((t) => (t === def.activeTab ? `[${t}]` : t)).join('  ')
+    const tabW = fwTextWidth(tabText) + 12
+    const tabX = W - tabW
+    texts.push(new TextContainerProperty({
+      containerID: 4, containerName: 'status', xPosition: 0, yPosition: H - BAR_H,
+      width: tabX, height: BAR_H, ...BORDER, paddingLength: 4,
+      isEventCapture: 0, content: statusText,
+    }))
+    texts.push(new TextContainerProperty({
+      containerID: 5, containerName: 'tabs', xPosition: tabX, yPosition: H - BAR_H,
+      width: tabW, height: BAR_H, ...NO_BORDER, paddingLength: 4,
+      isEventCapture: 0, content: tabText,
+    }))
+  } else {
+    texts.push(new TextContainerProperty({
+      containerID: 4, containerName: 'status', xPosition: 0, yPosition: H - BAR_H,
+      width: W, height: BAR_H, ...BORDER, paddingLength: 4,
+      isEventCapture: 0, content: statusText,
+    }))
+  }
 
   await bridge.createStartUpPageContainer(new CreateStartUpPageContainer({
     containerTotalNum: texts.length + lists.length + images.length,
