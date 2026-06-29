@@ -26,11 +26,11 @@ import type { G2CCConfig } from './config.js'
 import { listProjectDirectories } from './directory-picker.js'
 import {
   parseMarkdown, renderImageFile, renderChart, splitDocForPages,
-  type Block, type RenderedImage,
+  type Block, type RenderedImage, type RenderedTile,
 } from './os-content.js'
 import {
   composeScene, paginateText, wrapLinesPx, errorView, blankScene, blankFlashScene, fwTextWidth,
-  DEFAULT_BROWSE_MENU, type WinView,
+  DEFAULT_BROWSE_MENU, BJ_DEALER_RECT, BJ_PLAYER_RECT, type WinView,
 } from './os-compose.js'
 import type { SessionPool, PoolEntry } from './session-pool.js'
 import type { CCUsage } from './cc-session.js'
@@ -61,7 +61,11 @@ import {
   type EpubChapter, type PageMap, type ReaderMark,
 } from './reader.js'
 import { listUpcoming, getEvent } from './calendar.js'
-import { rpgRun, chessMove, chessPreview, renderBoard, DUNGEON_ROOT, type ChessState } from './games.js'
+import {
+  rpgRun, chessMove, chessPreview, renderBoard, renderHand, saveBlackjack, loadBlackjack,
+  DUNGEON_ROOT, type ChessState, type HandCard,
+} from './games.js'
+import { Blackjack, isBust, type Phase as BjPhase } from './blackjack.js'
 import { paperclips, type PcSnapshot, type PcPhase } from './paperclips.js'
 import { moveToTrash, TRASH_DIR } from './trash.js'
 import { overviewText, chartSpecs, readStorage, readTopProcs, storageText } from './stats.js'
@@ -4135,20 +4139,265 @@ class PaperclipsController {
   }
 }
 
+/** Blackjack bet presets — the constant-label cycle (no numpad level). */
+const BJ_BETS = [5, 10, 25, 50, 100, 250, 500] as const
+
+/** Integers plain, else 2-dp (a 3:2 payout on an odd bet is e.g. 37.5). */
+function bjMoney(n: number): string {
+  return Number.isInteger(n) ? String(n) : (Math.round(n * 100) / 100).toString()
+}
+
+/** Blackjack vs the dealer (Adam 2026-06-29, graphics-first build). A
+ *  GamesWindow sub-controller mirroring PaperclipsController: it owns one
+ *  Blackjack engine (pure rules; the dealer is fixed-rule, so there is NO AI
+ *  subprocess) and renders the two hands as two SMALL independent image tiles
+ *  (dealer=t0, player=t2) with the live numbers as cheap text. v1's whole point
+ *  is proving the card-rendering UI under the G2 image-cost rule — small tiles,
+ *  re-pushed ONLY when a hand changes; Hit re-pushes just the player tile,
+ *  Stand/reveal just the dealer tile. Split/Double/Insurance are follow-ups.
+ *  Bet is a CONSTANT-label cycle (no numpad, no layout churn). Bankroll + the
+ *  in-progress hand persist to blackjack_save (re-entering resumes exactly). */
+class BlackjackController {
+  private readonly game = new Blackjack()
+  private loaded = false
+  // Per-tile render cache (chess prefetchBoard pattern, ×2). The bmp holds the
+  // LAST successful render so a re-render swaps IN PLACE — it never nulls back
+  // to a text placeholder mid-hand (that would flip the layout). `key` is the
+  // rendered hand's signature; a mismatch kicks one re-render (seq-guarded).
+  private dealerBmp: string | null = null
+  private dealerKey: string | null = null
+  private dealerSeq = 0
+  private dealerFailed = false
+  private playerBmp: string | null = null
+  private playerKey: string | null = null
+  private playerSeq = 0
+  private playerFailed = false
+
+  constructor(private ctx: WmContext, private requestRender: () => void) {}
+
+  // ----------------------------------------------- lifecycle (from GamesWindow)
+
+  enter(): void {
+    if (!this.loaded) {
+      this.loaded = true
+      void loadBlackjack().then((s) => {
+        if (!s) return
+        this.game.restore(s)
+        this.dealerKey = null
+        this.playerKey = null
+        this.syncTiles()
+        this.requestRender()
+      }).catch((e: unknown) => this.ctx.log(`[os] blackjack: load failed: ${e instanceof Error ? e.message : String(e)}`))
+    }
+    this.syncTiles()
+    this.requestRender()
+  }
+  onDeactivate(): void { this.persist() }
+  leave(): void { this.persist() }
+  dispose(): void { this.persist() }
+
+  private persist(): void {
+    void saveBlackjack(this.game.snapshot()).catch((e: unknown) =>
+      this.ctx.log(`[os] blackjack: save failed: ${e instanceof Error ? e.message : String(e)}`))
+  }
+
+  // ----------------------------------------------- tile rendering
+
+  /** The cards as the HUD shows them: the dealer's hole (index 1) is face-DOWN
+   *  until revealed; the player's are all face-up. */
+  private renderCards(): { dealer: HandCard[]; player: HandCard[] } {
+    const revealed = this.game.dealerRevealed()
+    const dealer = this.game.dealer().map((c, i): HandCard => ({ rank: c.rank, suit: c.suit, down: !revealed && i === 1 }))
+    const player = this.game.player().map((c): HandCard => ({ rank: c.rank, suit: c.suit }))
+    return { dealer, player }
+  }
+
+  /** Re-render any tile whose contents changed. Called after every state change
+   *  (NOT from view()), so each change kicks at most one render per tile; a
+   *  superseding change drops the older render via the seq guard. */
+  private syncTiles(): void {
+    const { dealer, player } = this.renderCards()
+    const dKey = JSON.stringify(dealer)
+    const pKey = JSON.stringify(player)
+    if (dealer.length && dKey !== this.dealerKey) {
+      const seq = ++this.dealerSeq
+      this.dealerFailed = false
+      void renderHand(dealer, BJ_DEALER_RECT.w, BJ_DEALER_RECT.h).then((t: RenderedTile) => {
+        if (seq !== this.dealerSeq) return
+        this.dealerBmp = t.bmpBase64
+        this.dealerKey = dKey
+        this.requestRender()
+      }).catch((e: unknown) => {
+        if (seq !== this.dealerSeq) return
+        this.dealerFailed = true
+        this.ctx.log(`[os] blackjack: dealer render failed: ${e instanceof Error ? e.message : String(e)}`)
+        this.requestRender()
+      })
+    }
+    if (player.length && pKey !== this.playerKey) {
+      const seq = ++this.playerSeq
+      this.playerFailed = false
+      void renderHand(player, BJ_PLAYER_RECT.w, BJ_PLAYER_RECT.h).then((t: RenderedTile) => {
+        if (seq !== this.playerSeq) return
+        this.playerBmp = t.bmpBase64
+        this.playerKey = pKey
+        this.requestRender()
+      }).catch((e: unknown) => {
+        if (seq !== this.playerSeq) return
+        this.playerFailed = true
+        this.ctx.log(`[os] blackjack: player render failed: ${e instanceof Error ? e.message : String(e)}`)
+        this.requestRender()
+      })
+    }
+  }
+
+  // ----------------------------------------------- view
+
+  summary(): string { return `blackjack · $${bjMoney(this.game.bankroll())}` }
+  statusLine(): string | null {
+    const g = this.game
+    if (g.phase() === 'settled') return this.resultLine().slice(0, 46)
+    if (g.phase() === 'player') return `your move · ${g.playerTotal()}`
+    return null
+  }
+
+  view(): WinView {
+    const g = this.game
+    const phase = g.phase()
+    const menu = this.menuFor(phase)
+    const title = `Blackjack · $${bjMoney(g.bankroll())} · bet $${bjMoney(g.bet())}`
+    const text = this.numbersText()
+    const hasHand = g.player().length > 0
+    // Pre-first-deal intro, or the ONE-TIME wait before the first render lands
+    // (after that the bmps persist, so we stay in hands mode — no layout flip
+    // on a hit/stand; a stale bmp just shows for the render's ~hundred ms).
+    if (!hasHand) return { mode: 'text', title, menu, text }
+    if (!this.dealerBmp || !this.playerBmp) {
+      const why = (this.dealerFailed || this.playerFailed) ? 'card render FAILED — Reload retries' : '⏳ dealing…'
+      return { mode: 'text', title, menu, text: `${why}\n\n${text}` }
+    }
+    return { mode: 'hands', title, menu, dealerTile: this.dealerBmp, playerTile: this.playerBmp, text }
+  }
+
+  private menuFor(phase: BjPhase): string[] {
+    if (phase === 'player') return ['Hit', 'Stand', 'Reload', 'Main']
+    if (this.game.bankroll() < this.game.minBet) return ['Rebuy', 'Reload', 'Main']
+    return ['Deal', 'Bet', 'Reload', 'Main']
+  }
+
+  private numbersText(): string {
+    const g = this.game
+    const lines: string[] = []
+    lines.push(g.dealer().length
+      ? `DEALER  ${g.dealerRevealed() ? g.dealerShownTotal() : `${g.dealerShownTotal()}+?`}`
+      : 'DEALER  -')
+    lines.push('────────')
+    lines.push(g.player().length ? `YOU     ${g.playerTotal()}` : 'YOU     -')
+    lines.push('')
+    lines.push(`Bet   $${bjMoney(g.bet())}`)
+    lines.push(`Bank  $${bjMoney(g.bankroll())}`)
+    lines.push(`Shoe  ${Math.round(100 * g.shoeRemaining() / g.shoeFull())}%`)
+    if (g.phase() === 'settled') { lines.push(''); lines.push(this.resultLine()) }
+    else if (g.player().length === 0) { lines.push(''); lines.push('Deal to play.') }
+    return lines.join('\n')
+  }
+
+  private resultLine(): string {
+    const g = this.game
+    const d = g.lastDelta()
+    const money = `${d >= 0 ? '+' : '-'}$${bjMoney(Math.abs(d))}`
+    switch (g.outcome()) {
+      case 'blackjack': return `BLACKJACK!  ${money}`
+      case 'win': return `YOU WIN  ${money}`
+      case 'lose': return isBust(g.player()) ? `BUST  ${money}` : `DEALER WINS  ${money}`
+      case 'push': return 'PUSH · bet back'
+      default: return ''
+    }
+  }
+
+  // ----------------------------------------------- input
+
+  /** Run a game mutation, then re-render changed tiles + persist. Engine misuse
+   *  THROWS — caught + logged loud (the menu already gates by phase). */
+  private act(fn: () => void): void {
+    try {
+      fn()
+    } catch (e) {
+      this.ctx.log(`[os] blackjack: action failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    this.syncTiles()
+    this.persist()
+    this.requestRender()
+  }
+
+  async onMenuSelect(label: string): Promise<void> {
+    const g = this.game
+    switch (label) {
+      case 'Hit':
+        if (g.phase() === 'player') this.act(() => g.hit())
+        else this.ctx.log('[os] blackjack: Hit outside the player turn — ignored (LOUD)')
+        return
+      case 'Stand':
+        if (g.phase() === 'player') this.act(() => g.stand())
+        else this.ctx.log('[os] blackjack: Stand outside the player turn — ignored (LOUD)')
+        return
+      case 'Deal': {
+        const bet = Math.min(g.bet() || g.minBet, g.bankroll())
+        if (bet < g.minBet) { this.ctx.log('[os] blackjack: too broke to deal — Rebuy first (LOUD)'); return }
+        this.act(() => g.deal(bet))
+        return
+      }
+      case 'Bet': this.cycleBet(); return
+      case 'Rebuy': this.act(() => g.rebuy(1000)); return
+      default: this.ctx.log(`[os] blackjack: unknown menu '${label}' at phase ${g.phase()} — ignored (LOUD)`)
+    }
+  }
+
+  /** Cycle to the next affordable preset bet (constant label; value rides the
+   *  title + text — a cheap text update, NEVER a tile re-push). */
+  private cycleBet(): void {
+    const g = this.game
+    if (g.phase() === 'player' || g.phase() === 'dealer') { this.ctx.log('[os] blackjack: Bet mid-hand — ignored (LOUD)'); return }
+    const affordable = BJ_BETS.filter((b) => b <= g.bankroll())
+    if (!affordable.length) { this.ctx.log('[os] blackjack: no affordable bet — Rebuy (LOUD)'); return }
+    const next = affordable.find((b) => b > g.bet()) ?? affordable[0]
+    try { g.setBet(next) } catch (e) { this.ctx.log(`[os] blackjack: setBet failed: ${e instanceof Error ? e.message : String(e)}`); return }
+    this.persist()
+    this.requestRender()
+  }
+
+  async onReload(): Promise<void> {
+    // Retry any failed/stale card render (the bmp is kept; clearing the key
+    // forces syncTiles to re-render).
+    this.dealerKey = null
+    this.playerKey = null
+    this.syncTiles()
+    this.requestRender()
+  }
+
+  /** No internal levels (bet is a cycle, not a level) — let GamesWindow exit to
+   *  the games list. The bankroll + in-progress hand persist, so re-entering
+   *  resumes exactly. */
+  async onBack(): Promise<boolean> { return false }
+}
+
 /** Games (upgrades Phase 11): rpg-cli (the filesystem dungeon, root pinned to
  *  /home/user — sandbox-verified to never write outside $HOME/.rpg) and chess
  *  vs Stockfish (stateless chess_move.py rounds; the board is an IMAGE page —
  *  page-2-class tile load, placeholder-swapped like Phase 8 charts). Lichess
- *  is DEFERRED until post-testing (Adam, gate A3.2). */
+ *  is DEFERRED until post-testing (Adam, gate A3.2). Blackjack (2026-06-29) is
+ *  a third game — the BlackjackController above. */
 class GamesWindow implements OsWindow {
   readonly id = 'games'
   readonly tab = 'Games'
   readonly label = 'Games'
   readonly category = 'Games' as const
-  private level: 'menu' | 'rpg' | 'rpg-out' | 'chess' | 'chess-pieces' | 'chess-moves' | 'chess-confirm' | 'pc' = 'menu'
+  private level: 'menu' | 'rpg' | 'rpg-out' | 'chess' | 'chess-pieces' | 'chess-moves' | 'chess-confirm' | 'pc' | 'bj' = 'menu'
   private focus: 'content' | 'menu' = 'content'
   /** Universal Paperclips (Adam 2026-06-27) — delegated to while level === 'pc'. */
   private readonly pc: PaperclipsController
+  /** Blackjack (Adam 2026-06-29) — delegated to while level === 'bj'. */
+  private readonly bj: BlackjackController
   // --- rpg state ---
   private cwd = DUNGEON_ROOT
   private rpgDirs: string[] = []
@@ -4188,18 +4437,27 @@ class GamesWindow implements OsWindow {
 
   constructor(private ctx: WmContext, private requestRender: () => void) {
     this.pc = new PaperclipsController(ctx, requestRender)
+    this.bj = new BlackjackController(ctx, requestRender)
   }
 
   summary(): string {
     if (this.level === 'pc') return this.pc.summary()
+    if (this.level === 'bj') return this.bj.summary()
     if (this.fen && !this.gameOver) return `chess · ${this.chessTitle}`
     if (paperclips.status().running) return this.pc.summary()
-    return 'rpg · chess · paperclips'
+    return 'rpg · chess · clips · 21'
   }
 
-  statusLine(): string | null { return this.level === 'pc' ? this.pc.statusLine() : null }
+  statusLine(): string | null {
+    if (this.level === 'pc') return this.pc.statusLine()
+    if (this.level === 'bj') return this.bj.statusLine()
+    return null
+  }
 
-  onDeactivate(): void { if (this.level === 'pc') this.pc.onDeactivate() }
+  onDeactivate(): void {
+    if (this.level === 'pc') this.pc.onDeactivate()
+    if (this.level === 'bj') this.bj.onDeactivate()
+  }
   /** Foregrounding Games (from Main) ALWAYS lands on the games list — not the
    *  last game played — so you can switch games freely (a chess move while the
    *  paperclips build; Adam 2026-06-28). Every game keeps running/persisting in
@@ -4208,10 +4466,11 @@ class GamesWindow implements OsWindow {
    *  render-pacer + flushes — the game itself keeps ticking). */
   onActivate(): void {
     if (this.level === 'pc') this.pc.leave()
+    if (this.level === 'bj') this.bj.leave()
     this.level = 'menu'
     this.focus = 'content'
   }
-  dispose(): void { this.pc.dispose() }
+  dispose(): void { this.pc.dispose(); this.bj.dispose() }
 
   // ------------------------------------------------ rpg helpers
 
@@ -4413,6 +4672,7 @@ class GamesWindow implements OsWindow {
 
   async view(): Promise<WinView> {
     if (this.level === 'pc') return this.pc.view()
+    if (this.level === 'bj') return this.bj.view()
     const menuMode = this.focus === 'menu' ? 'capture' as const : 'passive' as const
     if (this.level === 'rpg-out') {
       const pageSuffix = this.rpgPages.length > 1 ? ` · ${this.rpgPage + 1}/${this.rpgPages.length}` : ''
@@ -4489,7 +4749,7 @@ class GamesWindow implements OsWindow {
       menuMode,
       title: 'Games',
       menu: ['Reload', 'Main'],
-      items: ['rpg-cli — the filesystem dungeon', 'Chess vs Stockfish', 'Universal Paperclips — idle game'],
+      items: ['rpg-cli — the filesystem dungeon', 'Chess vs Stockfish', 'Universal Paperclips — idle game', 'Blackjack — vs the dealer'],
     }
   }
 
@@ -4501,6 +4761,7 @@ class GamesWindow implements OsWindow {
       if (index === 0) { this.level = 'rpg'; this.rpgOffset = 0; this.focus = 'content'; this.requestRender(); return }
       if (index === 1) { this.level = 'chess'; this.focus = 'content'; this.requestRender(); return }
       if (index === 2) { this.level = 'pc'; this.pc.enter(); return }
+      if (index === 3) { this.level = 'bj'; this.focus = 'content'; this.bj.enter(); return }
       this.ctx.log(`[os] games: menu index ${index} out of range`)
       return
     }
@@ -4553,6 +4814,7 @@ class GamesWindow implements OsWindow {
 
   async onMenuSelect(label: string): Promise<void> {
     if (this.level === 'pc') { await this.pc.onMenuSelect(label); return }
+    if (this.level === 'bj') { await this.bj.onMenuSelect(label); return }
     if (this.level === 'rpg-out') {
       switch (label) {
         case 'Next': if (this.rpgPage < this.rpgPages.length - 1) { this.rpgPage++; this.requestRender() } break
@@ -4628,6 +4890,7 @@ class GamesWindow implements OsWindow {
 
   async onReload(): Promise<void> {
     if (this.level === 'pc') { await this.pc.onReload(); return }
+    if (this.level === 'bj') { await this.bj.onReload(); return }
     this.focus = 'content'
     // Unstick a wedged in-flight flag (the documented Reload contract). The
     // chessSeq bump makes the orphaned subprocess result ACTUALLY drop — the
@@ -4658,6 +4921,11 @@ class GamesWindow implements OsWindow {
     if (this.level === 'pc') {
       if (await this.pc.onBack()) return true
       this.pc.leave()
+      this.level = 'menu'; this.focus = 'content'; this.requestRender(); return true
+    }
+    if (this.level === 'bj') {
+      if (await this.bj.onBack()) return true
+      this.bj.leave()
       this.level = 'menu'; this.focus = 'content'; this.requestRender(); return true
     }
     if (this.level === 'rpg-out') { this.level = 'rpg'; this.focus = 'content'; this.requestRender(); return true }

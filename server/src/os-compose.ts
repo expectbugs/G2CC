@@ -19,7 +19,7 @@ import {
 } from '@g2cc/shared'
 import type { WireScene, SceneRegion, RegionStyle } from '@g2cc/shared'
 
-export type WinMode = 'tiles' | 'tile' | 'browse' | 'text' | 'twocol'
+export type WinMode = 'tiles' | 'tile' | 'browse' | 'text' | 'twocol' | 'hands'
 
 /** Browse-mode menu behavior (docs/DE_DESIGN.md §2, revised 2026-06-10;
  *  the 'antenna' per-notch preview mode was REVERTED 2026-06-11 — Adam: "feels
@@ -58,11 +58,27 @@ export interface WinView {
   tilesRect?: { w: number; h: number }
   /** tile mode: ONE centered base64 gray4 BMP (TILE_W×TILE_H — Main's logo). */
   tile?: string
+  /** hands mode (blackjack): two small INDEPENDENT card tiles at the fixed
+   *  BJ_*_RECT geometry, plus the numbers in `text`. Fixed geometry keeps the
+   *  layout constant across a hand so only a changed tile's bytes re-push (the
+   *  G2 image-cost rule). A null tile is omitted — the controller shows a text
+   *  placeholder until the first render lands, then keeps the last bmp. */
+  dealerTile?: string
+  playerTile?: string
 }
 
 /** Single-tile mode geometry — the classic proven 200×100, centered. */
 export const SINGLE_TILE_W = 200
 export const SINGLE_TILE_H = 100
+
+/** Blackjack hands layout (Adam 2026-06-29) — two small card tiles stacked on
+ *  the LEFT of the content pane, the live numbers as text on the RIGHT. Sized
+ *  small ON PURPOSE (a full tile is ~10 s on the G2, a small one exponentially
+ *  quicker — memory g2-image-tile-cost). Tunable against real glass. All within
+ *  the 480×222 content pane (x ≥ DE_CONTENT_X); tiles and text never overlap. */
+export const BJ_DEALER_RECT = { x: DE_CONTENT_X + 8, y: DE_CONTENT_Y + 8, w: 176, h: 60 }
+export const BJ_PLAYER_RECT = { x: DE_CONTENT_X + 8, y: DE_CONTENT_Y + 80, w: 192, h: 64 }
+export const BJ_TEXT_RECT = { x: DE_CONTENT_X + 208, y: DE_CONTENT_Y + 4, w: DE_CONTENT_W - 212, h: DE_CONTENT_H - 8 }
 
 export interface TabSpec {
   label: string
@@ -278,6 +294,31 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
       id: DE_REGION_IDS.contentRight, name: 'content2', x: DE_CONTENT_X + colW + 6, y: DE_CONTENT_Y, w: colW, h: DE_CONTENT_H,
       kind: 'text', style: { ...CHROME, padding: 6 },
       content: { kind: 'text', text: clampCol(view.textRight ?? '', 'twocol-right') },
+    })
+  } else if (view.mode === 'hands') {
+    // Blackjack: two small INDEPENDENT card tiles (dealer=t0, player=t2) at
+    // FIXED geometry + the numbers text on the right. Fixed rects keep the
+    // layout constant across a hand so only a changed tile's bytes re-push.
+    // A null tile is omitted (the controller's first-deal text placeholder).
+    if (view.dealerTile) {
+      regions.push({
+        id: DE_REGION_IDS.tile0, name: 't0',
+        x: BJ_DEALER_RECT.x, y: BJ_DEALER_RECT.y, w: BJ_DEALER_RECT.w, h: BJ_DEALER_RECT.h,
+        kind: 'image', content: { kind: 'image', bmpBase64: view.dealerTile },
+      })
+    }
+    if (view.playerTile) {
+      regions.push({
+        id: DE_REGION_IDS.tile2, name: 't2',
+        x: BJ_PLAYER_RECT.x, y: BJ_PLAYER_RECT.y, w: BJ_PLAYER_RECT.w, h: BJ_PLAYER_RECT.h,
+        kind: 'image', content: { kind: 'image', bmpBase64: view.playerTile },
+      })
+    }
+    regions.push({
+      id: DE_REGION_IDS.contentText, name: 'content',
+      x: BJ_TEXT_RECT.x, y: BJ_TEXT_RECT.y, w: BJ_TEXT_RECT.w, h: BJ_TEXT_RECT.h,
+      kind: 'text', style: { ...CHROME, padding: 4 },
+      content: { kind: 'text', text: view.text ?? '' },
     })
   } else {
     regions.push({
