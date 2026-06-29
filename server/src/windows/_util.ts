@@ -25,3 +25,11 @@ export function oneLine(s: string, max = 34): string {
   const flat = s.replace(/\s+/g, ' ').trim()
   return flat.length > max ? [...flat].slice(0, max - 1).join('') + '…' : flat
 }
+
+/** Next item in a cycle list; an unknown current value (e.g. a full model name
+ *  from config) restarts at index 0 instead of silently landing wherever
+ *  `indexOf(-1)+1` points. */
+export function cycleNext<T>(list: readonly T[], current: T): T {
+  const i = list.indexOf(current)
+  return list[i === -1 ? 0 : (i + 1) % list.length]
+}
