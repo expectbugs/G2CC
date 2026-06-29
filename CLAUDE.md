@@ -10,7 +10,7 @@ This project covers TWO joined initiatives Adam is implementing together:
 
 ## Dispatch-target architecture (load-bearing)
 
-The downstream of the WebSocket is a Claude Code subprocess. Server-side dispatcher decides which subprocess. Ship the app pointed at vanilla CC immediately (engineering-oriented system prompt; lets Adam progress the ARIA overhaul itself while at work). When the ARIA swarm ships, the dispatcher swaps to the swarm's Code/Engineering specialist (`overhaul.md` §5.16) — same WebSocket contract, no app changes. The `menu.ts` pattern from g2code lets Adam pick at runtime once both exist. **The app is dispatch-target-agnostic by design.**
+The downstream of the WebSocket is a Claude Code subprocess. Server-side dispatcher decides which subprocess. Ship the app pointed at vanilla CC immediately (engineering-oriented system prompt; lets Adam progress the ARIA overhaul itself while at work). When the ARIA swarm ships, the dispatcher swaps to the swarm's Code/Engineering specialist (`/home/user/aria2/overhaul.md` §5.16 — NOT the G2CC `overhaul.md`, which is the DE/WM overhaul) — same WebSocket contract, no app changes. The `menu.ts` pattern from g2code lets Adam pick at runtime once both exist. **The app is dispatch-target-agnostic by design.**
 
 When "Claude Code" is chosen from the menu, the HUD shows a scrollable list of directories under `/home/user/*` and Adam taps to pick one. Server spawns CC with `cwd` = chosen directory and the flag set: `--print --output-format stream-json --input-format stream-json --include-partial-messages --dangerously-skip-permissions --effort max [--model opus]`. `--effort max` is NEW vs g2code; everything else matches g2code's existing pattern in `cc-session.ts`. Session is keyed in `session-pool.ts` by chosen directory so re-selecting resumes via `--resume <sessionId>`. Flags verified against `claude --help` 2026-05-05 — re-verify when wiring.
 
@@ -22,12 +22,14 @@ The global "verify before execute" applies. Project-specific extensions:
 - **NEVER guess Android BLE library API shapes.** Read Nordic's Android-BLE-Library docs, or `BluetoothGatt` source, before writing the connection / bonding / reconnect code.
 - **NEVER guess NeMo or DeepFilterNet API surface.** Read the model card, the package README, and actual function signatures before wiring inference into the server.
 - **NEVER guess DJI Mic 3 receiver settings or recording capabilities.** Verify against the DJI spec page or the device itself. Two-Level Noise Cancelling MUST be off on both transmitters; auto-gain MUST be off; 32-bit float Dual-File mode MUST be enabled. Misconfigured input destroys ANC quality.
-- **NEVER guess existing g2code or g2aria source.** Read `/home/user/g2code/` (primary architectural baseline) and `/home/user/g2aria/` (robustness overlay) before assuming a function exists or what it returns.
+- **NEVER guess existing g2code or g2aria source.** ⚠ ARCHIVED 2026-06-29 → `/home/user/g2-old-backup-2026-06-24.tar.gz` (live dirs removed). The living copies of every inherited module are in G2CC's own `server/src` — read those. Extract from the tarball only if you need to consult the original ancestor.
 - **Claude CLI flag?** Run `claude --help` and re-verify. Flag names and value ranges change across CC versions.
 
 ## Don't modify g2code or g2aria
 
-`/home/user/g2code/` and `/home/user/g2aria/` are BOTH working today. Don't modify either during G2CC development unless explicitly authorized:
+> **ARCHIVED 2026-06-29:** `g2code` and `g2aria` were tarred to `/home/user/g2-old-backup-2026-06-24.tar.gz` and their live dirs removed — no longer live references. The inherited code already lives in G2CC's own `server/src`; the notes below are retained for historical context (where code came from). Extract from the tarball to consult an ancestor.
+
+These were the working ancestors during G2CC development; the disciplines they motivated still apply to the inherited code now in `server/src`:
 
 - BLE pairing/bonding state changes can require a manual unpair-and-repair on the glasses to recover. Don't experiment with bonding flows without saying so first.
 - Firmware-update windows are precious — once or twice a year via the official app. Don't break the official-app fallback path without authorization.

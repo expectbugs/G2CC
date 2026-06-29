@@ -1,7 +1,7 @@
 # G2CC (G2 Control Center) — Handoff for fresh Claude Code sessions
 
 Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI contract:
-`docs/DE_DESIGN.md`. The 2026-06-11 build-out is COMPLETE (its annotated queue lives in git at
+`docs/DE_DESIGN.md`. **Planned overhaul (modularization → the ribbon DE): see `overhaul.md` — read it first for any overhaul work.** The 2026-06-11 build-out is COMPLETE (its annotated queue lives in git at
 `60e6578:upgrades.md`); **`upgrades.md` is now the v2 QUEUE (2026-06-12, extended 2026-06-13)**.
 `UPGRADE_PROGRESS.md` records the v1 phases incl. Adam's gate answers; `CHANGELOG.md` r3–r18
 carries the WHY of everything.
@@ -275,8 +275,7 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
   blanked-popup display cadence are the sanctioned categories); no silent failures (loud
   `[subsystem]` logs everywhere); no truncation (paginate — the byte-cap label clamps and
   documented navigational previews are the only sanctioned trims, and they log).
-- **Don't modify `/home/user/g2code/` or `/home/user/g2aria/`** (working ancestors, read-only
-  fallbacks). **Never log or commit the auth token** (`~/.g2cc/config.json`; baked into the
+- **`/home/user/g2code/` and `/home/user/g2aria/` are ARCHIVED** (2026-06-29 → `g2-old-backup-2026-06-24.tar.gz`; live dirs removed — the inherited code lives in G2CC's own `server/src` now). **Never log or commit the auth token** (`~/.g2cc/config.json`; baked into the
   APK via gitignored `android/harness-secrets.properties`).
 - **History retention is UNLIMITED** ("do not curtail capability") — no caps, no pruning.
 

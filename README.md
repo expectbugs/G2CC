@@ -58,8 +58,8 @@ G2CC/
 
 External:
 - `/home/user/G2 Custom/even-g2-protocol/` — i-soxi protocol clone (SHA `b227335` as of 2026-05-05).
-- `/home/user/g2code/` — primary architectural baseline (DO NOT MODIFY).
-- `/home/user/g2aria/` — robustness overlay source (DO NOT MODIFY).
+- `/home/user/g2code/` — primary architectural baseline. **ARCHIVED 2026-06-29 → `/home/user/g2-old-backup-2026-06-24.tar.gz`** (live dir removed; inherited code now lives in G2CC's `server/src`).
+- `/home/user/g2aria/` — robustness overlay source. **ARCHIVED 2026-06-29** (same tarball).
 - `/home/user/aria/whisper_engine.py` — lazy-load + threading.Lock pattern that Parakeet wrapper inherits.
 
 ## Phase status — all phases complete (code-only; hardware tests gated on Adam)
@@ -90,7 +90,7 @@ External:
 - **No truncation** — HUD scrolls; never `…`.
 - **Verify everything** — every BLE UUID, every NeMo function signature, every g2code/g2aria import. Lineage citations in source for reverse-engineered values.
 - **Investigation ≠ permission.** Each phase begins after explicit "go."
-- **Don't modify g2code or g2aria.** Working escape hatches.
+- **g2code/g2aria are ARCHIVED** (2026-06-29 → `g2-old-backup-2026-06-24.tar.gz`); the inherited code lives in G2CC's `server/src`. Not live references anymore.
 
 See `CLAUDE.md` for the full rules.
 
