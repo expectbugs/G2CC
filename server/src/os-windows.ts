@@ -35,20 +35,11 @@ import {
 } from './windows/types.js'
 import { oneLine } from './windows/_util.js'
 // Extracted window modules (Phase 1 §1.2+ — one import per window as it leaves this file):
-import { AriaWindow } from './windows/aria.js'
-import { CcWindow } from './windows/cc.js'
-import { GamesWindow } from './windows/games.js'
-import { FilesWindow } from './windows/files.js'
-import { MailWindow } from './windows/mail.js'
-import { TerminalWindow } from './windows/terminal.js'
-import { SearchWindow } from './windows/search.js'
+import { WINDOW_FACTORIES } from './windows/registry.js'
 import { ReaderWindow } from './windows/reader.js'
 import { SmsWindow } from './windows/sms.js'
 import { MediaWindow } from './windows/media.js'
 import { NoticesWindow } from './windows/notices.js'
-import { DeliveriesWindow } from './windows/deliveries.js'
-import { CalendarWindow } from './windows/calendar.js'
-import { TimersWindow } from './windows/timers.js'
 
 /** How long a notification FLASH holds a BLANKED screen before auto-returning
  *  to blank. 10 s → 5 s (Adam 2026-06-12, Phase 2: "i use blank mode when
@@ -459,20 +450,9 @@ export class WindowManager {
       ctx, () => this.windows.filter((w) => w.id !== 'main'), () => this.mruWindows(), () => this.unseen, rr))
     this.windows = [
       main,
-      mk((rr) => new AriaWindow(ctx, rr)),
-      mk((rr) => new CcWindow(ctx, rr)),
-      mk((rr) => new MailWindow(ctx, rr)),
-      mk((rr) => new FilesWindow(ctx, rr)),
-      mk((rr) => new ReaderWindow(ctx, rr)),
-      mk((rr) => new TimersWindow(ctx, rr)),
-      mk((rr) => new CalendarWindow(ctx, rr)),
-      mk((rr) => new GamesWindow(ctx, rr)),
-      mk((rr) => new NoticesWindow(ctx, rr)),
-      mk((rr) => new SearchWindow(ctx, rr)),
-      mk((rr) => new TerminalWindow(ctx, rr)),
-      mk((rr) => new DeliveriesWindow(ctx, rr)),
-      mk((rr) => new MediaWindow(ctx, rr)),
-      mk((rr) => new SmsWindow(ctx, rr)),
+      // The 14 non-Main windows come from the registry (windows/registry.ts) — adding a
+      // window is a new file + one line there, with NO edit to this host.
+      ...WINDOW_FACTORIES.map((factory) => mk((rr) => factory(ctx, rr))),
     ]
     this.active = main
     // Phase 4: subscribe to the global notification hub (dispose() detaches on
