@@ -4,6 +4,25 @@
 modularizing the window system *with no behaviour change*, then **STOP and soak**, and **(Phase 2+)**
 build the new ribbon-based DE/WM on that modular foundation, flag-gated and reversible.
 
+> ## ✅ STATUS — Phase 1 COMPLETE (2026-06-29), merged + on-glass verified
+> **Phase 1 (modularization) is DONE, merged to master, restarted as the daily driver, and verified
+> on real glasses ("works like a charm" — Adam, 2026-06-29).** The 15 windows were split out of the old
+> `os-windows.ts` (8,555 lines) into `server/src/windows/` (one window per file) behind the frozen
+> `OsWindow`/`WmContext` contracts + a registry; the host is now **`server/src/window-manager.ts`**
+> (~1,098 lines). 20 commits, each a pure move, smoke green throughout; the proven wire/compose layer +
+> Android were never touched. The window contract is now its own doc: **`docs/WINDOW_API.md`**. Layout:
+> `windows/` = 14 one-per-file windows + shared `types.ts` (the contracts) / `_browse.ts` / `_util.ts` /
+> `_image.ts` / `_session.ts` (the CC/Aria machinery) / `registry.ts`. Main stays in the host.
+>
+> **Phase 2 (the ribbon) has NOT started** — it begins only on Adam's explicit go after Phase 1 soaks
+> clean in daily use (the CLEAN STOP gate). PART 1 below is preserved as the executed plan; PART 2 is the
+> live forward plan. Next concrete step before Phase 2: re-apply the parked Blackjack (`wip/blackjack`)
+> onto `windows/games.ts`.
+>
+> **Smoke baseline is 24/25**, not "23/23" (the suite grew): `phase10-calendar` is a *pre-existing
+> environmental* red — aria's Google OAuth token has no refresh_token (`google_auth.py`; live
+> Calendar/Deliveries sync affected too), NOT a regression. Gate: 24/25 with phase10 the ONLY red.
+
 > **Name clash — read this first.** Elsewhere in this repo a **bare** `overhaul.md §N` (e.g. §5.16,
 > §10, §22/§23/§24) refers to the *separate* `/home/user/aria2/overhaul.md` (the ARIA swarm overhaul) —
 > **not** this file. **This** document is the **G2CC DE/WM overhaul** (Phase 1 modularization → Phase 2
@@ -33,9 +52,11 @@ work for a wearable.
 
 ## 0.2 Current state (what is running and proven, as of 2026-06-29)
 
-- The **window-manager DE is in daily use**: 15 windows, an MRU dashboard `Main`, a left-menu
-  "action set" interaction model. Server on `:7300`. Android client APK v1.14.
-- **Server smoke suite: 23/23 green** (`server/smoke/run-all.mjs`). Android unit tests green.
+- The **window-manager DE is in daily use**: 15 windows (now MODULAR — one file each in
+  `server/src/windows/`, host = `window-manager.ts`; see the ✅ status banner above), an MRU dashboard
+  `Main`, a left-menu "action set" interaction model. Server on `:7300`. Android client APK v1.14.
+- **Server smoke suite: 24/25 green** (`server/smoke/run-all.mjs`) — the lone red is `phase10-calendar`
+  (external Google-OAuth, see status banner), NOT a regression. Android unit tests green.
 - The **BLE wire format is fully decoded** (`docs/G2_BLE_PROTOCOL.md`, authoritative).
 - The interaction model today: a pinned **left menu column** is the "current action set"; **scroll**
   moves the firmware list selection, **tap** activates, **double-tap** backs out/pops a level. This is
@@ -70,10 +91,12 @@ work for a wearable.
     ⚠ Its launch command is **stale** — see §0.8.
 
 **The code (read structurally, not line-by-line — it's large):**
-11. `server/src/os-windows.ts` (~8,800 lines / ~418 KB). Read the **interfaces and the host**, not every
-    window: `WmContext` (:133), `WindowCategory`/`CATEGORY_ORDER` (:178), `OsWindow` (:181), `WindowOpen`
-    (:240), and `class WindowManager` (:8095) incl. the hardcoded window array (~:8165). Skim one window
-    class (e.g. `TimersWindow`) to see the shape.
+11. **`server/src/window-manager.ts`** (~1,098 lines — the host: `class WindowManager` + `MainWindow` +
+    the notification overlay) and **`server/src/windows/`** (one window per file). The frozen contracts
+    now live in `windows/types.ts` (`WmContext`, `OsWindow`, `WindowCategory`/`CATEGORY_ORDER`,
+    `WindowOpen`, `SwitchTo`); shared helpers in `_browse.ts`/`_util.ts`/`_image.ts`; CC+Aria machinery in
+    `_session.ts`; the factory list in `registry.ts`. Read `docs/WINDOW_API.md` first, then skim one
+    window (e.g. `windows/timers.ts`) for the shape. (Was the 8,555-line `os-windows.ts` pre-Phase-1.)
 12. `server/src/os-compose.ts` — `WinView`→`WireScene`; the byte budgets, clamps, the frame **estimator**
     that throws >960 B, `blankFlashScene`. **Proven; do not modify during Phase 1.**
 13. `server/src/os-content.ts` — markdown→blocks, chart/image rendering, `splitGray4Tiles`. Proven.
@@ -149,7 +172,12 @@ work for a wearable.
 
 ## 0.7 The current architecture (what is ALREADY modular vs frozen)
 
-**Already a clean modular shape — it just lives in one file:**
+> **✅ Phase 1 (2026-06-29) CLOSED the gaps below.** The contracts now live in `windows/types.ts`, each
+> window in `windows/<id>.ts`, the registry in `windows/registry.ts`, and the host in `window-manager.ts`.
+> The descriptions below are how the code was structured *pre-split* (the contracts themselves are
+> byte-for-byte unchanged — only their location moved); the `os-windows.ts:line` refs are pre-Phase-1.
+
+**Was a clean modular shape that lived in one file (now split into `windows/`):**
 - **`OsWindow` (`os-windows.ts:181`)** — the per-window contract every window `implements`: `view()`→
   `WinView`; input `onMenuSelect`/`onBrowseSelect`/`onBack`; lifecycle `onActivate`/`onDeactivate`/
   `dispose`/`interruptible`/`onReload`; the `Main` hooks `summary()` & `statusLine()`; cross-window
@@ -225,7 +253,15 @@ Research compared TUIs/DEs/WMs against the R1's 3-gesture input. Conclusions Ada
 
 ---
 
-# PART 1 — Phase 1: Modularization (server-only, NO behaviour change)
+# PART 1 — Phase 1: Modularization (server-only, NO behaviour change) — ✅ DONE 2026-06-29
+
+> **✅ EXECUTED & VERIFIED (2026-06-29).** All of PART 1 below is done: `os-windows.ts` (8,555 ln) →
+> `window-manager.ts` (1,098 ln) + `windows/` (14 windows + types/_browse/_util/_image/_session/registry),
+> 20 pure-move commits, smoke green throughout, proven layer + Android untouched, merged to master and
+> on-glass verified. Kept below as the executed plan. Two discoveries worth carrying into Phase 2:
+> (a) two helpers were silently SHARED and got their own modules — `renderImageB64` (Media+SMS) →
+> `_image.ts`, `cycleNext` (Games+SessionOptions) → `_util.ts`; (b) the dictation INTENT handling lives
+> inside `SessionLevel`, so `parseIntent`/`createTimer`/`notify`/`saveMemo` moved with it into `_session.ts`.
 
 **Goal:** split the 15 windows out of `os-windows.ts` into self-contained modules behind the *existing,
 proven* `OsWindow`/`WmContext` contracts, add a registry so new features don't edit the core, and write
@@ -333,14 +369,14 @@ The "easily referenced design and API" Adam wants. Contents:
 # ============================== CLEAN STOP — PHASE 1 GATE ==============================
 
 **Do not begin Phase 2 until ALL of the following hold and Adam explicitly says go.**
+**Progress (2026-06-29): 1 ✅ · 2 ✅ · 3 ⏳ soaking · 4 ⏳ pending.**
 
-1. Phase 1 acceptance criteria (§1.7) met; server restarted on the modularized build.
-2. **On-glass parity pass (Adam runs it):** every window behaves *identically* to the pre-refactor
-   system — open/scroll/tap/double-tap/Reload/Back/Main, dictation+confirm, notifications, the Main
-   dashboard, switching. No visual or behavioural diff.
-3. **Soak in daily use.** Run the modularized system as the daily driver for a period of Adam's choosing
-   (suggest ≥ several days of normal use) to surface any latent regression the smoke suite can't.
-4. Adam confirms: "Phase 1 is stable, proceed to Phase 2."
+1. ✅ Phase 1 acceptance criteria (§1.7) met; server restarted on the modularized build (live on :7300).
+2. ✅ **On-glass parity pass:** Adam tested on real glasses — "works like a charm" (2026-06-29). The phone
+   auto-reconnected and the modular build (incl. the extracted Games/Paperclips window) rendered live.
+3. ⏳ **Soak in daily use.** Running the modularized system as the daily driver now (started 2026-06-29) —
+   surfacing any latent regression the smoke suite can't.
+4. ⏳ Adam confirms: "Phase 1 is stable, proceed to Phase 2." — pending the soak.
 
 The whole point of this gate: Phase 1 carries **none** of the days-of-on-glass-hardening risk that
 Phase 2 does. Bank the modular foundation as the new proven baseline before introducing the big change.
@@ -423,11 +459,14 @@ the visual target.
 
 ---
 
-# Appendix A — Quick file:line index (verified 2026-06-29; re-verify before relying)
+# Appendix A — Quick file index (Phase 1 done — the old `os-windows.ts:line` refs are OBSOLETE)
 
-- `os-windows.ts:133` `WmContext` · `:178` `WindowCategory`/`CATEGORY_ORDER` · `:181` `OsWindow` ·
-  `:240` `WindowOpen` · `:362` `SessionLevel` · `:1468` `HistoryLevel` · `:1597` `CcWindow` ·
-  `:8095` `WindowManager` · `~:8165` the hardcoded window array.
+- **⚠ POST-PHASE-1: `os-windows.ts` no longer exists.** The contracts (`WmContext`, `OsWindow`,
+  `WindowCategory`/`CATEGORY_ORDER`, `WindowOpen`, `SwitchTo`) → `server/src/windows/types.ts`;
+  `SessionLevel`/`SessionOptions`/`HistoryLevel` → `windows/_session.ts`; `CcWindow` → `windows/cc.ts`,
+  `AriaWindow` → `windows/aria.ts`; each window → `windows/<id>.ts`; `class WindowManager` + the
+  registry-driven window array + `MainWindow` → `server/src/window-manager.ts`; factory list →
+  `windows/registry.ts`. (Pre-Phase-1 line numbers were `:133/:181/:8095` etc. in the old monolith.)
 - `ws-handler.ts ~:1053–1099` input dispatch (`hub_select` / `focus`-antenna / `double_tap` / `tap`).
 - `os-menu.ts:100` the `scroll=true` antenna region; `:109` `menuScene` (cache + dirty-diff pattern).
 - `shared/src/constants.ts:132` `EVENT_DEBOUNCE_MS=300`; `DE_*` geometry; render-limit caps.

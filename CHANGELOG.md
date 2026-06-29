@@ -4,6 +4,36 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-06-29 — **Phase 1: modularization DONE (the windows/ split), merged + on-glass**
+
+Executed `overhaul.md` Phase 1: split the 15 windows out of the 8,555-line `os-windows.ts` into
+`server/src/windows/` (one window per file) behind the FROZEN `OsWindow`/`WmContext` contracts + a
+`registry.ts`, host renamed to **`server/src/window-manager.ts`** (~1,098 lines: WindowManager + Main +
+the notification overlay). **20 commits, every one a pure move** (cut/paste + fix imports; smoke gated
+every step). The proven wire/compose layer + Android were never touched (verified). Merged to master
+(fast-forward), server restarted on :7300, **Adam verified on real glasses: "works like a charm"** (phone
+auto-reconnected; the modular build incl. the extracted Games/Paperclips window rendered live). Now
+soaking as the daily driver (the CLEAN STOP gate); Phase 2 (the ribbon) waits for Adam's explicit go.
+
+- **The recipe that made it problem-free:** byte-exact `sed` extraction per window (no retyping → no
+  transcription drift), then let strict TS `noUnusedLocals`/`noUnusedParameters` point at exactly which
+  host imports went dead → prune those. Build + full smoke + commit per window. Compiler-guided, not guess-guided.
+- **Three traps the extraction surfaced (lessons):** (1) **silently-shared helpers** — `renderImageB64`
+  (Media+SMS) and `cycleNext` (Games+SessionOptions) would have broken the other window if moved into one;
+  they went to shared `_image.ts`/`_util.ts` (grep a helper's usage across ALL windows first). (2) **Helpers
+  hiding in a neighbour's preamble** — `paginateRows`/`termTextWidth` sit between the Deliveries and Terminal
+  classes; find the real closing brace, don't assume the gap to the next class. (3) **Intent handling lives
+  in `SessionLevel`, not Aria** — so `parseIntent`/`createTimer`/`notify`/`saveMemo` moved into `_session.ts`;
+  the host kept value-imports of Reader/Sms/Media/Notices ONLY for its `instanceof` input routing.
+- **The registry seam (the payoff):** the hardcoded array became `[main, ...WINDOW_FACTORIES.map(...)]`;
+  adding a window = a new `windows/<id>.ts` + ONE line in `registry.ts` + one smoke — zero host edits.
+  New doc **`docs/WINDOW_API.md`** (contracts + reserved labels + recurring-bug checklist + a window template).
+- **Smoke baseline correction:** the suite is **24/25**, not the old "23/23" — it grew, and `phase10-calendar`
+  is a PRE-EXISTING environmental red (aria's Google OAuth token has no refresh_token → `read_gcal`/`read_gmail`
+  fail; `google_auth.py` fixes it; live Calendar + Deliveries sync affected too). Not a regression; don't chase it.
+- Blackjack stays parked on `wip/blackjack` (unfinished, deliberately off master) — re-apply onto the new
+  `windows/games.ts` after the soak.
+
 ## (unstamped) — 2026-06-29 — **DE/WM overhaul: planning + prep (no behaviour change)**
 
 Paused Blackjack to lay the foundation first: the menu-driven WM doesn't scale as windows grow, and

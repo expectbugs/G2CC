@@ -6,10 +6,11 @@ glasses render the active window's `WinView` and send input back. This doc is th
 checklist; the FINALIZED UI behaviour lives in `DE_DESIGN.md` (it wins on any conflict), the wire
 reality in `G2_BLE_PROTOCOL.md`.
 
-> **Status:** authored at Phase 1 Step 1.0 of `overhaul.md` (the modularization). It describes the
-> **target** `windows/` layout that Phase 1 creates. Until a window is extracted, its class still
-> lives in `server/src/os-windows.ts`; the contracts move to `windows/types.ts` in Step 1.1. The
-> contracts themselves are **frozen** — Phase 1 changes *where code lives*, never the API.
+> **Status:** Phase 1 (the modularization) is **DONE** — merged + on-glass verified, 2026-06-29. The
+> `windows/` layout below is **live**: all 14 windows are one-per-file modules, the contracts live in
+> `windows/types.ts`, the host is `server/src/window-manager.ts`, and adding a window touches only a new
+> file + one `registry.ts` line + one smoke. The contracts are **frozen** — Phase 1 moved *where code
+> lives*, never the API.
 
 ---
 

@@ -102,7 +102,7 @@ horizontal rule `─` (U+2500) renders **~21 px** on the firmware, NOT the lower
 ~466 px content row ⇒ `─` ≈ 21 px** (a first round-1 guess of 14 px was too low and still wrapped).
 Consequence: any line that is mostly box-drawing (U+2500–U+257F: `─│┌┐└┘├┤┼` etc.) under-measures
 ~2.2×, so it firmware-wraps past its intended row count — invisible, same class as the CJK/Cyrillic
-bumps already in `fwTextWidth`. **Fixed Terminal-local** (`os-windows.ts` `termTextWidth` prices
+bumps already in `fwTextWidth`. **Fixed Terminal-local** (`windows/terminal.ts` `termTextWidth` prices
 U+2500–257F at 21 px + the adjacent shape/technical/dingbat ranges claude uses at a safe 14 px,
 fed to `wrapLinesPx`'s `widthFn`; the rule-bar `collapseRules` clamps to `TERM_RULE_COLS`=18). A
 global `fwTextWidth` bump for box-drawing is the clean root fix if it ever bites another window —

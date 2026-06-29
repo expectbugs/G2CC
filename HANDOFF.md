@@ -6,6 +6,24 @@ Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI
 `UPGRADE_PROGRESS.md` records the v1 phases incl. Adam's gate answers; `CHANGELOG.md` r3–r18
 carries the WHY of everything.
 
+**2026-06-29 — PHASE 1 MODULARIZATION DONE + on-glass verified (server-only, smoke 24/25, NO APK):**
+The DE/WM overhaul's Phase 1 (see `overhaul.md`): the 15 windows were split out of the old 8,555-line
+`os-windows.ts` into **`server/src/windows/`** (one window per file) behind the FROZEN
+`OsWindow`/`WmContext` contracts + a `registry.ts`; the host is now **`server/src/window-manager.ts`**
+(~1,098 lines: WindowManager + Main + the notification overlay). 20 commits, every one a **pure move**
+(no behaviour change), smoke green throughout; the proven wire/compose layer (`os-compose`/`os-content`/
+`os-display`/`os-menu`/`os-notify`) + Android were **never touched**. Merged to master, server restarted,
+**Adam verified on real glasses: "works like a charm."** Layout: `windows/` = the 14 windows + shared
+`types.ts` (contracts) / `_browse.ts` / `_util.ts` (incl. `cycleNext`) / `_image.ts` (`renderImageB64`,
+shared Media+SMS) / `_session.ts` (SessionLevel/SessionOptions/HistoryLevel + the dictation intents) /
+`registry.ts`. **Adding a window = a new `windows/<id>.ts` + ONE line in `registry.ts` + one smoke — the
+host never changes** (new doc: `docs/WINDOW_API.md`). Now SOAKING as the daily driver (the CLEAN STOP
+gate); Phase 2 (the ribbon) is NOT started — Adam's explicit go only. **Smoke is 24/25 now, not "23/23":
+the suite grew, and `phase10-calendar` is a pre-existing ENVIRONMENTAL red — aria's Google OAuth token has
+no refresh_token (`google_auth.py`; live Calendar + Deliveries sync affected too). Don't chase it as a
+regression.** Next before Phase 2: re-apply the parked Blackjack (`wip/blackjack`, unfinished) onto
+`windows/games.ts`.
+
 **2026-06-13 batch r18 (server-only, smoke 12/12 — NO APK):** Phase 18 chess tile-redraw fix,
 Phase 19 Files overhaul (the "970 B" wall), Phase 17 trash, Phase 2 (5 s blank flash), Phase 10
 (stats alerts) + a whole-project review.
@@ -187,7 +205,8 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
   15 phone-finder, 6 nav line, 9 voice plumbing (handsfree + "butterscotch" grammar). New perms:
   READ_SMS/READ_CONTACTS/SEND_SMS. **[U] ON-GLASS PENDING: install v1.13 from `/setup`; verify
   dismiss-sync, the 960 B wall, the Mail live send (reply-to-self), AND the whole r22 batch.**
-- **The FIFTEEN windows** (`server/src/os-windows.ts`): **Main** (live dashboard: host/pool/
+- **The FIFTEEN windows** (now MODULAR — one file each in `server/src/windows/`, host =
+  `window-manager.ts`; Phase 1, 2026-06-29): **Main** (live dashboard: host/pool/
   battery/unseen/next-timer + one summary line per window; menu = switcher + `Ask`) ·
   **Aria** (CC subprocess @ ~/aria, `server/prompts/aria-g2.md` display prompt; the Ask
   flow runs confirmed-dictation INTENTS: `timer/remind me N min…` → instant timer,
@@ -314,8 +333,11 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
   the batch review: fixed items + 4 DEFERRED client findings w/ file:line + fixes)** ·
   `CHANGELOG.md` (the WHY of every change) ·
   `UPGRADE_PROGRESS.md` (the batch record + Adam's gate answers).
-- **Server (`server/src/`):** `os-windows.ts` (WM + the fifteen windows + SessionLevel/
-  HistoryLevel — the heart, ~6.4k lines) · `os-compose.ts` (WinView→WireScene; budgets/
+- **Server (`server/src/`):** `window-manager.ts` (the host — WindowManager + Main + the
+  notification overlay, ~1.1k lines) + **`windows/`** (the 14 windows one-per-file + shared
+  `types.ts` contracts / `_browse.ts` / `_util.ts` / `_image.ts` / `_session.ts` = SessionLevel/
+  HistoryLevel + `registry.ts`; Phase 1 2026-06-29 — was the 8.5k-line `os-windows.ts`) ·
+  `os-compose.ts` (WinView→WireScene; budgets/
   clamps/estimator; `blankFlashScene`) · `os-content.ts` (markdown→blocks, chart/image
   rendering, `splitGray4Tiles`) · `store.ts` (pg pool + migrations) · `history.ts` ·
   `os-notify.ts` (hub + persistence) · `timers.ts` · `intents.ts` · `reader.ts` ·
@@ -346,8 +368,9 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
   access row; Test/Server buttons retired) · `intents/IntentReceiver.kt` + `INTENTS.md`
   (PING live; rest deprecated-with-log). Parked, not in manifest: ProbeActivity,
   G2Pipeline, G2CCService, hud/*.
-- **Verification:** `server/smoke/run-all.mjs` — 23 scripts, THE regression suite; run it
-  after every server change. **ISOLATED since review #4: everything store-backed runs in
+- **Verification:** `server/smoke/run-all.mjs` — 25 scripts, THE regression suite (**24/25**:
+  `phase10-calendar` is a pre-existing external Google-OAuth red — no refresh_token, NOT a
+  regression; don't chase it); run it after every server change. **ISOLATED since review #4: everything store-backed runs in
   the `g2cc_smoke` DB + a temp notes file (`server/smoke/_env.mjs` preamble — never the
   production g2cc DB, which the suite used to pollute/consume timers from); phase9-wire
   spawns a hermetic server on :7399; phase10 hits the real Google Calendar read-only.** `scripts/scene_to_png.py`
