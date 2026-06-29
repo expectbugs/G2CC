@@ -5,7 +5,7 @@ what the game is, why it fits the G2 input/display model, and the concrete bridg
 (how the PC-side game connects to a G2CC window). This is a planning doc; per-game specifics
 get hashed out in a dedicated session.
 
-Last updated 2026-06-27.
+Last updated 2026-06-28.
 
 ## The fit lens (why these and not others)
 
@@ -66,7 +66,10 @@ Game-specific glue lives in `server/src/games.ts`. Category is `'Games'`.
 |---|---|---|---|---|---|
 | Universal Paperclips | Incremental | jsdom engine host | Excellent | — | **In progress** |
 | Balatro | Deckbuilder roguelike | BalatroBot (JSON-RPC) | Excellent | Low | Candidate |
-| Texas Hold'Em | Poker | Native module | Excellent | Low | Candidate |
+| Blackjack | Card | Native TS module | Excellent | Low | **Next (graphics build)** |
+| Poker (Hold'em) | Card | RLCard via Python daemon | Excellent | Low–Med | Candidate |
+| Spades · Euchre · Gin · Cribbage | Card (trick/melds) | OpenSpiel via Python daemon | Excellent | Medium | Candidate |
+| Hearts | Card (trick) | jsdom host (html5-hearts) or native | Very good | Medium | Candidate |
 | Dungeon Crawl Stone Soup | Roguelike | PTY / webtiles | Excellent | Low–Med | Candidate |
 | Brogue | Roguelike | PTY | Excellent | Low–Med | Candidate |
 | Angband | Roguelike | PTY (curses) | Excellent | Low–Med | Candidate |
@@ -132,18 +135,100 @@ list.
 - **Effort:** Low — localhost HTTP against a finished API. Verify current BalatroBot ↔ Balatro
   version compatibility when wiring.
 
-## Texas Hold'Em — *candidate*
+## Card games (standard 52-card deck) — *researched 2026-06-28*
 
-Heads-up or full-table poker vs AI opponents. Adam's framing: deal individual hands as
-text/formatting with a single image tile for the community cards, redrawn only when the next
-card is dealt — so it stays mostly on the fast text path. Turn-based, naturally glanceable.
+Poker, blackjack, spades, hearts, euchre, gin rummy, cribbage, and the like — all turn-based,
+list/number-shaped, and resumable, so among the cleanest fits on this list. Research verdict: a
+single **Python "card daemon"** (JSON-over-stdio, mirroring `scripts/chess_move.py` and
+`audio/pipeline/parakeet_daemon.py`) wrapping two engines covers almost everything vs CPU, behind
+one interface whose core call is *"here are the legal actions — pick one by index,"* which IS the
+G2 input model (scroll list → tap → numpad). Each game is then one `OsWindow` that renders
+`legal_actions` as its menu.
 
-- **Bridge:** native TS module (or a small Python helper like the chess adapter). No external
-  dependency, no networked service. Engine = hand evaluation + bet/AI logic.
-- **G2 mapping:** menu = `Fold / Check / Call / Raise` (+ numpad for raise size); hole +
-  community cards as text; one image tile for the board.
-- **Open question:** opponent AI quality (simple heuristic vs a real solver). Single-player only
-  — no real-money, no online.
+### Engines (CPU opponents) — verified 2026-06-28
+
+| Engine | License / health | Covers | Interface | Bridge |
+|---|---|---|---|---|
+| **OpenSpiel** (DeepMind) — [repo](https://github.com/google-deepmind/open_spiel) | Apache-2.0, active (v1.6.15, May 2026); pip wheels py3.11–3.14 | Spades, Euchre, Gin Rummy, Cribbage, Blackjack, Bridge, Oh Hell, + Leduc/limit poker | `state.legal_actions()`→ints, `action_to_string()`→HUD labels, `apply_action()`; CFR/MCTS/ISMCTS bots | Python daemon (pattern 2) |
+| **RLCard** — [repo](https://github.com/datamllab/rlcard) | MIT, dormant since ~2022–24 but stable | Blackjack, Gin Rummy, **Limit/No-Limit Hold'em**, UNO, Leduc | `env.step()`, `get_state()['raw_legal_actions']`; ships **pretrained rule-based bots** | Python daemon |
+| **html5-hearts** — [repo](https://github.com/yyjhao/html5-hearts) | BSD-2 | **Hearts** | logic split from UI, DOM-based, ships a headless simulator | **jsdom host** (Paperclips pattern) |
+| native TS | — | **Blackjack** (+ War-class) | hand-eval + fixed-rule dealer; ~50 LOC | in-process (pattern 1) |
+
+**Per-game pick:** Poker → RLCard (best API + a real bot; OpenSpiel's full No-Limit `universal_poker`
+has known issues). Blackjack → native TS (no real opponent — the dealer is fixed-rule). Spades /
+Euchre / Gin / Cribbage → OpenSpiel (trick-takers flagged "experimental" — expect rule-edge
+verification + ISMCTS tuning). Hearts → jsdom html5-hearts or native (⚠ two researchers disagreed
+on whether OpenSpiel actually ships Hearts — verify before relying on it). Bridge is supported but
+its bidding/play is a poor G2-input fit — deprioritize.
+
+**Meta-finding:** every engine with real card AI is Python, so the spine is pattern 2 (Python
+subprocess), same shape as chess. No JS card engine with competent AI is worth wrapping (except
+html5-hearts for the jsdom route).
+
+### Real / internet opponents — verdict: self-host or nothing
+
+Feasible only by **self-hosting a server you control** (vs friends, or by publicising your
+instance). Best ROI: **boardgame.io** or **Colyseus** (both MIT, active) — write each game's rules
+once, get networking + lobby + reconnection + auto-bots (so the same engine also serves the CPU
+path); the G2CC Node server is the network client, the glasses just render. **PokerTH** (AGPLv3,
+alive — v2.0.6, Mar 2026) is the only maintained ready-made server with public games to join, but
+poker-only + protobuf-binary. **Do NOT bother** (closed / bot-banned / no public client API,
+verified against their ToS): online poker (PokerStars / 888 / GGPoker — active bans + fund
+seizures), BoardGameArena, Trickster Cards, PlayOK/kurnik, VIP Games, Tabletopia, Tabletop
+Simulator. No live federated standard exists (XMPP gaming never shipped; GGZ Gaming Zone is defunct
+~2008 — a rules/protocol reference only).
+
+### Blackjack — *first build (graphics-first), with Adam*
+
+Engine: **native TS** — the dealer follows fixed house rules, so there's no AI to import (a
+basic-strategy hint can ride alongside). Reason to start here: it proves the **card-rendering UI**
+with zero engine dependencies, then the Python-daemon games inherit it.
+
+Rendering plan (Adam 2026-06-28 — to build together): a **card atlas** (one master image of all 52
+cards + back, generated once, converted to G2 gray4) plus a **sprite-coordinate map** (x,y,w,h per
+card). The server composites per-hand tiles by blitting sprites from the atlas, then ships **four
+small image regions**: (1) player hand, cards fanned/overlapping; (2) dealer hand, overlapping the
+face-down hole card; (3) the deck/shoe, shrinking as it's used; (4) the player's chip stack,
+growing/shrinking at settlement. Reuses the existing chess
+board-render → tile-splitter → compose substrate (`scripts/render_board.py`, the shared splitter,
+`composeScene` tiles).
+
+Constraints + refinements that shape it (from `docs/G2_BLE_PROTOCOL.md`, memory `g2-render-limits`):
+- **Hard caps:** ≤4 image regions — the four tiles (hand / dealer / deck / chips) hit the ceiling
+  EXACTLY, so a SPLIT (a second player hand) gets composited into the one player tile, not a 5th
+  region. Each single image **≤288×129** (≥384×192 silently drops); size each tile to its content,
+  not the max.
+- **Latency ∝ tile area.** Images blit UNCOMPRESSED gray4 (no RLE on the wire), ~1 s for a full
+  288×129 tile; a content-sized ~130×70 hand tile is a few hundred ms. Small tiles = minor tax —
+  the instinct is right.
+- **Re-push a tile ONLY when its cards change** — NEVER on menu navigation. This is exactly the
+  "redraw fix" already learned on the chess board (selection levels render zero image regions to
+  avoid re-pushing tiles). A Hit re-sends only the player tile; Stand / dealer-reveal re-sends only
+  the dealer tile; the deck updates in discrete steps (it's the most decorative — could even be a
+  text "shoe ~60%" if a tile isn't worth its tax).
+- **Suits must read by SHAPE, not colour** — red and black both render dark in 16-gray, so
+  hearts/diamonds vs spades/clubs disambiguate only by pip glyph. Design HUD-legible cards (bold
+  rank + large suit pip, high contrast), not photorealistic ones.
+- **Card art = AI style layer + code-composited exact index/pips** (Adam 2026-06-28). Generate the
+  *art* with the local image models (Qwen-Image / Flux.2): the frame/border, the back, the J/Q/K
+  face portraits, four stylish suit-pip glyphs, and the chip art. Composite the correctness-critical
+  layer — the large corner rank+suit index and the exact 2–10 pip COUNT — programmatically on top,
+  so all 52 come out exact and consistent. (Raw txt2img-per-card garbles ranks / pip-counts / style
+  — avoid it; for the face cards, AI ControlNet/inpaint onto a fixed layout template is the
+  exact-AND-stylish route.) The **corner index is what shows when cards are fanned**, so it must be
+  the crisp code-rendered element; the AI body is mostly hidden in a fan.
+- **Design the AI art for the medium.** A card is only ~66×92 px in 16-gray on glass, so bold / flat
+  / high-contrast / graphic styles (art-deco, woodcut, engraving, poster) survive; painterly or
+  photoreal detail turns to mud after the downscale + 4-bpp posterise. Generate 2–3 sample cards and
+  verify on REAL glass before committing the full 52 (suits must stay distinguishable by silhouette,
+  ~10–15 px).
+- **Overlap separation:** a 1 px outline / slight drop-shadow so fanned cards read as distinct in
+  mono.
+- The **atlas never goes to the glasses** — it's a server asset; only composited tiles ship
+  (convert each composited tile → gray4 at send, or pre-store the atlas in gray4 and blit
+  gray4→gray4).
+- Text regions carry the live numbers (hand totals, bet, bankroll, result) and the menu
+  (`Hit / Stand / Double / Split`) — within the ≤8 text / ≤12 container budget.
 
 ## Roguelikes (Angband · Cataclysm: DDA · Brogue · DCSS) — *candidates*
 
