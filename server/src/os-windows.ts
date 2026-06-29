@@ -16,9 +16,8 @@
 
 import { execFile } from 'node:child_process'
 import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync, existsSync, constants as fsConstants } from 'node:fs'
-import { rename, copyFile, unlink, mkdir, rm, cp, writeFile } from 'node:fs/promises'
+import { rename, copyFile, unlink, mkdir, rm, cp } from 'node:fs/promises'
 import { join, basename, dirname, resolve as resolvePath } from 'node:path'
-import { tmpdir } from 'node:os'
 import { DE_CONTENT_W, DE_CONTENT_H, SCREEN_WIDTH } from '@g2cc/shared'
 import type { WireScene, MediaState, SmsThread, SmsMessage } from '@g2cc/shared'
 import { getLyrics, parseLrc, currentLrcIndex, type LrcLine } from './lyrics.js'
@@ -72,6 +71,7 @@ import {
   browsePageItems, browseRowBytes, BROWSE_PAGE, MORE_ROW, PREV_ROW,
 } from './windows/_browse.js'
 import { clampConfirmBody, fmtStamp, oneLine } from './windows/_util.js'
+import { renderImageB64 } from './windows/_image.js'
 // Extracted window modules (Phase 1 §1.2+ — one import per window as it leaves this file):
 import { NoticesWindow } from './windows/notices.js'
 import { DeliveriesWindow } from './windows/deliveries.js'
@@ -6413,17 +6413,6 @@ function fmtClock(ms: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
-/** Render a base64 JPEG/PNG to gray4 tiles (Media album art, MMS image parts).
- *  renderImageFile is path-based, so write a temp file → render → unlink. */
-async function renderImageB64(b64: string): Promise<RenderedImage> {
-  const path = join(tmpdir(), `g2cc-img-${process.pid}-${Math.random().toString(36).slice(2)}.jpg`)
-  await writeFile(path, Buffer.from(b64, 'base64'))
-  try {
-    return await renderImageFile(path, DE_CONTENT_W, DE_CONTENT_H)
-  } finally {
-    void unlink(path).catch(() => {})
-  }
-}
 
 /** Phase 7 — a real media player driven by the phone's MediaSessionManager.
  *  The client pushes `media_state` on every change WHILE subscribed (the window
