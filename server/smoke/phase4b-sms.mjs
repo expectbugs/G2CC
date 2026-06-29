@@ -4,7 +4,7 @@
 // dictates → confirm → sms_send. Real WindowManager + scene capture.
 import './_env.mjs'
 import { strict as assert } from 'node:assert'
-import { WindowManager } from '../dist/os-windows.js'
+import { WindowManager } from '../dist/window-manager.js'
 import { getPool } from '../dist/store.js'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))

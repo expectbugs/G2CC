@@ -43,7 +43,7 @@ try {
   await query('DELETE FROM reader_bookmarks WHERE book_path=$1', [BOOK])
   await query('DELETE FROM reader_pagemaps WHERE book_path=$1', [BOOK])
 
-  const { WindowManager } = await import('../dist/os-windows.js')
+  const { WindowManager } = await import('../dist/window-manager.js')
   const wm = new WindowManager(mkCtx())
   try {
     const reader = wm.windows.find((w) => w.id === 'reader')

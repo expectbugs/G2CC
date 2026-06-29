@@ -90,7 +90,7 @@ console.error(`  4. board 480×222 → 4 tiles, layout ${est}B ≤ ${LAYOUT_FRAM
 // chess Skill control is a CONSTANT menu label (cycling it never changes the
 // menu, so the board can't be wiped). ---
 if (!EMIT) {
-  const { WindowManager } = await import('../dist/os-windows.js')
+  const { WindowManager } = await import('../dist/window-manager.js')
   const scenes = []
   const wm = new WindowManager({
     send: (sc) => scenes.push(sc),

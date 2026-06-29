@@ -63,7 +63,7 @@ try {
   console.error('  2. searchTurns runs with LIKE metacharacters escaped ✓')
 
   // --- 3. SearchWindow state machine ---
-  const { WindowManager } = await import('../dist/os-windows.js')
+  const { WindowManager } = await import('../dist/window-manager.js')
   const wm = new WindowManager({
     send: () => {}, audio: () => {}, displayReload: () => {},
     log: () => {},

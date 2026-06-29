@@ -5,7 +5,7 @@
 // frame stays under the multi-packet wall. DB isolated to g2cc_smoke by _env.
 import './_env.mjs'   // MUST be first — DB isolation
 import { strict as assert } from 'node:assert'
-import { WindowManager } from '../dist/os-windows.js'
+import { WindowManager } from '../dist/window-manager.js'
 import { paperclips } from '../dist/paperclips.js'
 import { query } from '../dist/store.js'
 import { composeScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES, fwTextWidth } from '../dist/os-compose.js'

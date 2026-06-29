@@ -3,7 +3,7 @@
 // Real WindowManager + scene capture. Self-cleaning.
 import './_env.mjs'
 import { strict as assert } from 'node:assert'
-import { WindowManager } from '../dist/os-windows.js'
+import { WindowManager } from '../dist/window-manager.js'
 import { parseIntent } from '../dist/intents.js'
 import { getPool } from '../dist/store.js'
 

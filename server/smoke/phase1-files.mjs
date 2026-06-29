@@ -80,7 +80,7 @@ if (process.argv.includes('--emit-scene')) {
 // window in a sandbox dir — `..`-always, file tap → actions, move/copy/del
 // round-trips, dir stats. WM windows are exercised via the public tap API.
 {
-  const { WindowManager } = await import('../dist/os-windows.js')
+  const { WindowManager } = await import('../dist/window-manager.js')
   const { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } = await import('node:fs')
   const { join } = await import('node:path')
   const { tmpdir } = await import('node:os')

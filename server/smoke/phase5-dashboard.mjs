@@ -4,7 +4,7 @@
 // DROPS vs the old tabbed equivalent.
 import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
-import { WindowManager } from '../dist/os-windows.js'
+import { WindowManager } from '../dist/window-manager.js'
 import { composeScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
 import { getPool } from '../dist/store.js'
 

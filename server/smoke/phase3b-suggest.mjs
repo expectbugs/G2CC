@@ -50,7 +50,7 @@ try {
   console.error('  2. recentTurns: chronological, tool_calls, limit-keeps-newest ✓')
 
   // === layer 2: the real SessionLevel state machine, via the Aria window ===
-  const { WindowManager } = await import('../dist/os-windows.js')
+  const { WindowManager } = await import('../dist/window-manager.js')
   const wm = new WindowManager({
     send: () => {}, audio: () => {}, displayReload: () => {},
     log: () => {},

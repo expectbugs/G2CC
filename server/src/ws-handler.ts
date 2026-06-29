@@ -48,7 +48,7 @@ import { ChannelRouter } from './channel-router.js'
 import { notify, markSeenByKey, type NotifyPriority } from './os-notify.js'
 import { probeScene, gTextScene, gImageScene, ensureRendered, isRate, testKind, testLabel, errorScene } from './os-display.js'
 import { menuScene, ensureMenuRendered, menuItemLabel, MENU_ITEM_COUNT } from './os-menu.js'
-import { WindowManager } from './os-windows.js'
+import { WindowManager } from './window-manager.js'
 import { type MemoAudio } from './memo.js'
 import { segmentUtterances } from './voice.js'
 

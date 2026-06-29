@@ -4,7 +4,7 @@
 // shortened), newest-wins, double-tap wake, seen-marking. Self-cleaning.
 import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
-import { WindowManager, setBlankPopupMsForSmoke } from '../dist/os-windows.js'
+import { WindowManager, setBlankPopupMsForSmoke } from '../dist/window-manager.js'
 import { notify, getNotification, markSeen, markSeenByKey, markAllSeen } from '../dist/os-notify.js'
 import { query, getPool } from '../dist/store.js'
 

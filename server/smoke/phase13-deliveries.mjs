@@ -78,7 +78,7 @@ try {
   console.error('  3b. out-for-delivery flash: fires once, latch holds across re-sync ✓')
 
   // === 4. DeliveriesWindow (Info category): list → read ===
-  const { WindowManager } = await import('../dist/os-windows.js')
+  const { WindowManager } = await import('../dist/window-manager.js')
   const wm = new WindowManager({
     send: () => {}, audio: () => {}, displayReload: () => {}, log: () => {},
     pool: { count: 0 }, config: { claude: { model: 'opus', effort: 'max', defaultMode: 'bypassPermissions', quickPrompts: [] } },

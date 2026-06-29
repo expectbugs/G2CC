@@ -65,7 +65,7 @@ try {
   await copyFile('/home/user/books/frankenstein.epub', `${SANDBOX}/RootBook.epub`)
   await copyFile('/home/user/books/frankenstein.epub', `${SANDBOX}/Sci-Fi/Nested.epub`)
   await query('DELETE FROM reader_positions')   // clean slate so "Last" starts ABSENT
-  const { WindowManager } = await import('../dist/os-windows.js')   // reads G2CC_BOOKS_DIR=SANDBOX now
+  const { WindowManager } = await import('../dist/window-manager.js')   // reads G2CC_BOOKS_DIR=SANDBOX now
   const wm = new WindowManager({
     send: () => {}, audio: () => {}, displayReload: () => {}, log: () => {},
     pool: { count: 0 }, config: { claude: { model: 'opus', effort: 'max', defaultMode: 'bypassPermissions', quickPrompts: [] } },

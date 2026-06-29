@@ -50,7 +50,7 @@ try {
   console.error('  2. saveMemo: wav+row+note+duration; missing/broken buffer still saves transcript loudly ✓')
 
   // === 3. the real Aria intent flow: onStt('memo: …') → Confirm → saveMemo ===
-  const { WindowManager } = await import('../dist/os-windows.js')
+  const { WindowManager } = await import('../dist/window-manager.js')
   const fakeAudio = { pcm: Buffer.alloc(32000), sampleRate: 16000, channels: 1, encoding: 'int16' }   // 1.0 s
   const wm = new WindowManager({
     send: () => {}, audio: () => {}, displayReload: () => {},

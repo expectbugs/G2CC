@@ -4,7 +4,7 @@
 // Self-cleaning (unique source 'smoke-4a').
 import './_env.mjs'
 import { strict as assert } from 'node:assert'
-import { WindowManager } from '../dist/os-windows.js'
+import { WindowManager } from '../dist/window-manager.js'
 import { notify } from '../dist/os-notify.js'
 import { query, getPool } from '../dist/store.js'
 
