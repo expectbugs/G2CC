@@ -23,11 +23,14 @@ build the new ribbon-based DE/WM on that modular foundation, flag-gated and reve
 > environmental* red — aria's Google OAuth token has no refresh_token (`google_auth.py`; live
 > Calendar/Deliveries sync affected too), NOT a regression. Gate: 24/25 with phase10 the ONLY red.
 
-> ## 🚧 STATUS — Phase 2 (the ribbon) IN PROGRESS (2026-06-30), behind the `de.rootNav` flag
-> **Adam gave the explicit Phase-2 go on 2026-06-30** (he opted past the soak wait — the whole thing is
-> flag-gated, so the proven menu shell stays his daily driver until the on-glass cutover). Done +
-> smoke-verified OFF-GLASS on branch **`phase2-ribbon`** (NOT merged; server NOT restarted — Adam holds
-> the restart):
+> ## 🚧 STATUS — Phase 2 (the ribbon): BUILT, MERGED TO MASTER, LIVE behind the `de.rootNav` flag (2026-06-30)
+> **The ribbon is merged to master and DEPLOYED (`rootNav:'ribbon'` in Adam's `~/.g2cc/config.json`; backup
+> `config.json.bak-pre-ribbon`), and Adam is testing it on glass — "I love it - way better."** Flag-gated,
+> so `menu` stays the instant one-line revert. After his on-glass design pass the layout is: the recents
+> strip at the **TOP** bar, the **glasses battery beside the clock** (`58% 1:04 PM`, server-rendered, no
+> APK), **NO bottom status bar** (content reclaims the row; CC/Aria show a thin phase bar only while
+> active), and **comprehensive per-window previews** (a read-only `preview()` per window — in-memory + fast
+> read-only DB only, NEVER `view()`). Done + smoke-verified (**26/27**, menu mode byte-for-byte unchanged):
 > - **Blackjack re-applied** (the pre-Phase-2 step) onto `windows/games.ts` — `BlackjackController` +
 >   the additive `'hands'` compose mode; smoke 25/26 → **26/27**, scene_to_png OK. (tile sizes / thin "J"
 >   / the `⏳`+`…` placeholder glyphs are Adam's on-glass tuning.)
@@ -56,14 +59,18 @@ build the new ribbon-based DE/WM on that modular foundation, flag-gated and reve
 >   scene like `os-menu.ts`/`blankScene`). Full smoke **26/27** (phase10 the only red).
 >
 > **The on-glass-gated remainder (needs Adam's glasses — this session has none):**
-> - **§2.2.5 (in-window full-bleed) — DEFERRED for on-glass co-design.** It redesigns the *in-window*
->   surface (where the action menu lives once the pinned left column is gone — a bottom antenna? a float?),
->   and the doc itself pairs it with on-glass checks. Doing it blind would likely produce a wrong in-window
->   interaction. The ribbon ROOT already reclaims its chrome; the in-window reclaim is the deferred polish.
-> - **§2.2.7 (on-glass hardening)** — antenna feel, settle latency, scrollbar artifacts at the tight bottom
->   bar, fast-scroll coalescing on real BLE. Inherently on-glass ("expect days"). The OFF-glass robustness
->   (conflated render senders, estimator/wall guards, strip windowing to stay zero-range, the settle
->   debounce) is in and smoke/scene_to_png-verified.
+> - **§2.2.5 — chrome reclaim PARTLY DONE; the in-window LEFT-MENU reclaim DEFERRED for on-glass co-design.**
+>   The bottom status bar is gone + the battery folded into the top (Adam's design pass) — that chrome is
+>   reclaimed. What REMAINS is dropping the pinned 96px LEFT menu and relocating a window's action menu.
+>   Discussed with Adam: the one-capture / one-scroll-axis hardware rule means the menu needs a focus-toggle
+>   home (reading windows could use a bottom action strip like the ribbon root; browse windows are
+>   constrained because their content list must capture). Doing it blind would likely break the in-window
+>   interaction — it needs on-glass co-design. NOT built.
+> - **§2.2.7 (on-glass hardening)** — antenna feel + latency (the strip is now at the TOP, the proven
+>   os-menu antenna location), the ~415px strip-width tightness (`All>` just off the right at depth 6 — drop
+>   `recentsDepth` or shave the battery), fast-scroll coalescing on real BLE. Inherently on-glass ("expect
+>   days"). The OFF-glass robustness (conflated render senders, estimator/wall guards, strip windowing to
+>   stay zero-range, the F2 fast-scroll coalescing skip) is in and smoke/scene_to_png-verified.
 > - **§2.2.8 (cutover)** — flipping the default to `'ribbon'` waits for the §2.2.7 soak; flipping it blind
 >   would make an unverified shell the daily driver. **To try the ribbon on glass NOW: set
 >   `"de": { "rootNav": "ribbon" }` in `~/.g2cc/config.json` and restart the server** (the phone

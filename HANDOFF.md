@@ -6,28 +6,45 @@ Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI
 `UPGRADE_PROGRESS.md` records the v1 phases incl. Adam's gate answers; `CHANGELOG.md` r3–r18
 carries the WHY of everything.
 
-**2026-06-30 — PHASE 2 RIBBON IN PROGRESS (server-only, behind the `de.rootNav` flag, smoke 26/27 — NO
-APK):** Adam gave the explicit Phase-2 go; built flag-gated on branch **`phase2-ribbon`** (NOT merged;
-server NOT restarted — Adam holds the restart). **Blackjack re-applied** onto `windows/games.ts` first
-(`BlackjackController` + the additive `'hands'` compose mode; smoke 25/26 → 26/27). **The ribbon root-nav**
-(NEW `server/src/ribbon.ts` = `RibbonShell`): `de.rootNav: 'menu'|'ribbon'` (default `menu` = the proven
-launcher, **byte-for-byte unchanged** + the instant fallback). Antenna-driven MRU recents strip (scroll =
-a server-drawn cursor, tap = enter, double-tap = **straight-to-ribbon** landing on the PREVIOUS window,
-double-tap-at-root = blank — **but BROWSE windows navigate hierarchically on double-tap** (flip→pop→exit-
-at-root, so Files/Mail/history stay usable; review fix), the categorized **`All>` drawer**, a **cheap
-per-notch preview** (`summary()` or an optional read-only `preview()` hook — `view()` is NOT called on a
-hovered window, it would spawn CC / hit the phone), lossless persistence. The 15 windows are reused
-UNCHANGED. `composeScene` NOT touched (the ribbon builds its own scene like `os-menu`/`blankScene`).
-Host touch: `window-manager.ts` (atRibbon + mode-branched gestures), `ws-handler.ts` (DE `focus`→`onScroll`),
-`config.ts` (flag). **3-agent adversarial review + own pass, every finding verified** (fixed: a HIGH
-render-race painting over the ribbon, the view()-on-hover side-effect, browse-menu reachability, a
-multibyte wall-clamp, the strip scroll-capture id, Blackjack numbersText fit/glyphs/cap; CONFIRMED CLEAN:
-state machine, menu-mode-unchanged, no-timeouts/truncation, leaks). **Remaining = on-glass-gated (needs
-Adam's glasses):** §2.2.5 in-window full-bleed
-(DEFERRED — on-glass co-design of where the menu lives once the pinned column is gone), §2.2.7 on-glass
-hardening (the antenna feel/latency), §2.2.8 cutover (flip the default after the soak). **Try it on glass:
-set `"de":{"rootNav":"ribbon"}` in `~/.g2cc/config.json` + restart the server.** Full plan + the on-glass
-remainder: `overhaul.md` (the 🚧 STATUS banner).
+**2026-06-30 — PHASE 2 RIBBON: BUILT, MERGED TO MASTER, LIVE behind the `de.rootNav` flag (server-only,
+smoke 26/27 — NO APK). Adam is testing on glass and likes it.** A new root-nav DE, flag-gated
+(`config.de.rootNav: 'menu'|'ribbon'`, default `menu` = the proven launcher, **byte-for-byte unchanged** +
+the instant one-line fallback; the 15 windows are reused UNCHANGED). NEW `server/src/ribbon.ts` =
+`RibbonShell`. **Currently DEPLOYED with `rootNav:'ribbon'`** in Adam's `~/.g2cc/config.json` (a backup is
+at `config.json.bak-pre-ribbon`; revert to `menu` to fall back). Blackjack was re-applied onto
+`windows/games.ts` first (`BlackjackController` + the additive `'hands'` compose mode).
+
+THE LAYOUT (after Adam's on-glass design pass — he iterated bottom-strip → this):
+- **Recents ribbon in the TOP bar** — an antenna-driven strip (a `scroll=true` text region = the SOLE
+  event-capture, dedicated antenna id 50; the SERVER draws the cursor → enables "lands on the PREVIOUS
+  window" alt-tab, which a native firmware list can't). Scroll = move cursor, tap = enter, double-tap =
+  back/blank. Transient: in a window the top bar IS the window title. The breadcrumb is folded into a strip
+  prefix. (The strip is ~415px now that the battery shares the bar — tight at depth 6, `All>` sits just off
+  the right; on-glass tuning.)
+- **Battery beside the clock** (`58% 1:04 PM`) — SERVER-rendered (no APK; G2 battery off the heartbeat,
+  decode verified live 2026-06-12), globally on the ribbon + in every window. **No bottom status bar** —
+  content reclaims the row (`DE_CONTENT_H_FULL=255`); CC/Aria show a thin bottom phase bar ONLY while active.
+- **Comprehensive per-window previews** — each window has a READ-ONLY `preview()` (multi-line, in-memory +
+  fast read-only DB reads ONLY — NEVER `view()`, which spawns CC / pings the phone on hover). mail/sms stay
+  on the one-line summary (their detail needs a subprocess / a phone ping a hover must not trigger).
+- **Gestures:** reading windows go STRAIGHT to the ribbon on double-tap; BROWSE windows navigate
+  hierarchically (their own onBack: flip→pop→exit-at-root, so Files/Mail-list/Aria-history stay usable).
+  `All>` opens the categorized drawer (category → window).
+
+Touchpoints: `ribbon.ts` (NEW), `window-manager.ts` (atRibbon/parked state + mode-branched gestures + the
+`g2BatteryText`/`ribbonPreview`), `os-compose.ts` (the `RibbonChrome` param — battery + optional bottom bar;
+menu mode passes nothing → **byte-for-byte unchanged**), `ws-handler.ts` (DE `focus`→`onScroll`), `config.ts`
+(the flag + validation), `shared/constants.ts` (`DE_REGION_IDS.battery=8`, `DE_BATT_W=54`,
+`DE_CONTENT_H_FULL=255`), + every `windows/*.ts` (a read-only `preview()`). **3-agent adversarial review +
+own pass, every finding verified** (fixed: a HIGH render-race painting over the ribbon, the view()-on-hover
+side-effect → the safe `preview()` hook, browse-menu reachability, a multibyte wall-clamp, the strip's
+scroll-capture id, Blackjack numbersText fit/glyphs/cap; CONFIRMED CLEAN: state machine, menu-mode-unchanged,
+no-timeouts/truncation, leaks).
+
+**Remaining = on-glass-gated (needs Adam's glasses):** §2.2.5 the in-window full-bleed reclaim of the LEFT
+menu (the open question: where the action menu lives once the pinned column is gone — on-glass co-design;
+discussed but NOT built), §2.2.7 hardening (antenna feel/latency, the strip-width tightness), §2.2.8 cutover
+(flip the repo default to `ribbon` after the soak). Full plan: `overhaul.md` (the 🚧 STATUS banner).
 
 **2026-06-29 — PHASE 1 MODULARIZATION DONE + on-glass verified (server-only, smoke 24/25, NO APK):**
 The DE/WM overhaul's Phase 1 (see `overhaul.md`): the 15 windows were split out of the old 8,555-line
