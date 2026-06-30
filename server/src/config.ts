@@ -63,6 +63,19 @@ export interface G2CCConfig {
      *  Case-insensitive substring match against BOTH title and body. */
     blockTitles: string[]
   }
+  /** DE shell config (Phase 2 overhaul.md — the ribbon DE/WM). */
+  de: {
+    /** Root navigation shell. 'menu' = the proven Main category-launcher (the
+     *  DEFAULT + the instant fallback); 'ribbon' = the MRU recents ribbon. Flip
+     *  to 'ribbon' only AFTER the on-glass hardening soak (overhaul.md §2.2.8 —
+     *  the cutover). Built flag-gated so menu stays a one-line revert. */
+    rootNav: 'menu' | 'ribbon'
+    /** Recents depth — how many MRU windows stay in the hot ribbon before the
+     *  rest spill to the 'All ▸' drawer (Adam 2026-06-30: 6). Kept small enough
+     *  that the bottom-bar strip never overflows its region (a strip that
+     *  overflows loses the zero-range scroll → no per-notch focus events). */
+    recentsDepth: number
+  }
 }
 
 const CONFIG_DIR = join(homedir(), '.g2cc')
@@ -126,6 +139,12 @@ function defaultConfig(): G2CCConfig {
       // Drop noisy/privacy notifications outright (Adam 2026-06-14).
       blockTitles: ['Device ID accessed'],
     },
+    de: {
+      // Default to the proven menu shell; the ribbon is opt-in until its
+      // on-glass soak is done (overhaul.md Phase 2 — the cutover flips this).
+      rootNav: 'menu',
+      recentsDepth: 6,
+    },
   }
 }
 
@@ -159,6 +178,7 @@ export function loadConfig(): G2CCConfig {
     stt: { ...defaults.stt, ...(saved.stt ?? {}) },
     claude: { ...defaults.claude, ...(saved.claude ?? {}) },
     notifications: { ...defaults.notifications, ...(saved.notifications ?? {}) },
+    de: { ...defaults.de, ...(saved.de ?? {}) },
   }
 
   // authToken stability (review 2026-06-11b): defaultConfig() mints a FRESH
@@ -182,6 +202,16 @@ export function loadConfig(): G2CCConfig {
   if (!Array.isArray(merged.notifications.blockTitles) || merged.notifications.blockTitles.some((t) => typeof t !== 'string')) {
     console.error('[config] notifications.blockTitles is not a string array — using defaults')
     merged.notifications.blockTitles = defaults.notifications.blockTitles
+  }
+  // de.rootNav must be one of the two shells; anything else falls back to the
+  // proven menu (an unknown shell would otherwise silently brick the root nav).
+  if (merged.de.rootNav !== 'menu' && merged.de.rootNav !== 'ribbon') {
+    console.error(`[config] de.rootNav '${merged.de.rootNav}' is not 'menu'|'ribbon' — using 'menu'`)
+    merged.de.rootNav = 'menu'
+  }
+  if (typeof merged.de.recentsDepth !== 'number' || !Number.isFinite(merged.de.recentsDepth) || merged.de.recentsDepth < 1) {
+    console.error('[config] de.recentsDepth is not a positive number — using the default 6')
+    merged.de.recentsDepth = defaults.de.recentsDepth
   }
   return merged
 }

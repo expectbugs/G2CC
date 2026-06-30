@@ -40,6 +40,7 @@ import { ReaderWindow } from './windows/reader.js'
 import { SmsWindow } from './windows/sms.js'
 import { MediaWindow } from './windows/media.js'
 import { NoticesWindow } from './windows/notices.js'
+import { RibbonShell } from './ribbon.js'
 
 /** How long a notification FLASH holds a BLANKED screen before auto-returning
  *  to blank. 10 s → 5 s (Adam 2026-06-12, Phase 2: "i use blank mode when
@@ -435,6 +436,23 @@ export class WindowManager {
   private useCounter = 0
   private lastUsed = new Map<string, number>()
 
+  // ---- Phase 2 (overhaul.md §2.2): the ribbon root-nav shell ----
+  /** Root-nav shell: 'menu' = the proven Main launcher (DEFAULT + the instant
+   *  fallback), 'ribbon' = the MRU recents ribbon. Read once from config. */
+  private readonly rootNav: 'menu' | 'ribbon'
+  /** The ribbon shell (ribbon mode only; null in menu mode). */
+  private readonly ribbon: RibbonShell | null
+  /** Ribbon mode: true while the ribbon (root selector) is on screen, false
+   *  while inside a window. Always false in menu mode. */
+  private atRibbon = false
+  /** The active window's onDeactivate already ran (it is parked at the ribbon),
+   *  so the next switchTo must not double-deactivate it. */
+  private parked = false
+  /** Ribbon render conflation — its own serialized sender (atRibbon XOR
+   *  in-window, so it never races the window render loop). */
+  private ribbonRendering = false
+  private ribbonRenderQueued = false
+
   constructor(private ctx: WmContext) {
     // Each window's requestRender only fires while it IS the active window — a
     // background session's tool_use stream otherwise recomposes (and re-sends)
@@ -455,6 +473,23 @@ export class WindowManager {
       ...WINDOW_FACTORIES.map((factory) => mk((rr) => factory(ctx, rr))),
     ]
     this.active = main
+    // Phase 2 (overhaul.md §2.2): pick the root-nav shell from config — default
+    // 'menu' is byte-for-byte the proven behaviour; 'ribbon' engages the new
+    // shell (the 14 modular windows are reused unchanged, only re-selected).
+    this.rootNav = this.ctx.config?.de?.rootNav === 'ribbon' ? 'ribbon' : 'menu'
+    if (this.rootNav === 'ribbon') {
+      this.ribbon = new RibbonShell(
+        () => this.mruWindows(),                                               // recents: non-Main, MRU
+        () => this.windows,                                                     // all: incl Main (drawer/Info)
+        () => Math.max(1, Math.floor(this.ctx.config?.de?.recentsDepth ?? 6)),  // recents depth (Adam: 6)
+        () => this.unseen,
+      )
+      this.atRibbon = true
+      this.parked = true   // nothing is displayed yet — the initial main must not be onDeactivated
+      this.ctx.log('[os] root-nav: RIBBON (Phase 2; the menu shell stays the instant fallback)')
+    } else {
+      this.ribbon = null
+    }
     // Phase 4: subscribe to the global notification hub (dispose() detaches on
     // ws close) and load the durable unseen/flash chrome state.
     notifyHub.on('notification', this.onHubNotification)
@@ -464,7 +499,11 @@ export class WindowManager {
     // Phase 5: the dashboard re-render pacer — ONLY while Main is on screen
     // (a pacing cadence, not an event bus; B3-sanctioned category).
     this.dashboardPacer = setInterval(() => {
-      if (this.active.id === 'main' && !this.blanked && !this.activeOverlay) this.requestRender()
+      if (this.blanked || this.activeOverlay) return
+      // Ribbon mode keeps the on-screen ribbon's previews live; menu mode keeps
+      // Main's dashboard live. Both are sanctioned pacing, not an event bus.
+      if (this.rootNav === 'ribbon' && this.atRibbon) this.renderRibbon()
+      else if (this.active.id === 'main') this.requestRender()
     }, 30_000)
   }
 
@@ -613,7 +652,7 @@ export class WindowManager {
     }
     if (action === 'Main') {
       this.blanked = false
-      this.switchTo('main')
+      this.goHome()
       return
     }
     // Dismiss: a blanked popup returns to blank; an awake overlay returns to
@@ -638,6 +677,13 @@ export class WindowManager {
       // still takes precedence for its window, then nav resumes.
       if (this.blankFlash) return
       this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
+      return
+    }
+    // Phase 2: the ribbon root has its own conflated sender (it composes its own
+    // scene, not active.view()). An active overlay still composes via the window
+    // path below (the overlay IS the screen); clearing it returns here → ribbon.
+    if (this.rootNav === 'ribbon' && this.atRibbon && !this.activeOverlay) {
+      this.renderRibbon()
       return
     }
     if (this.rendering) { this.renderQueued = true; return }
@@ -725,6 +771,57 @@ export class WindowManager {
     })()
   }
 
+  /** Ribbon-root render — its own conflated sender (separate from the window
+   *  render loop; atRibbon XOR in-window so they never overlap). Fetches the
+   *  preview text then sends the shell's scene. */
+  private renderRibbon(): void {
+    if (!this.ribbon) return
+    if (this.ribbonRendering) { this.ribbonRenderQueued = true; return }
+    this.ribbonRendering = true
+    void (async () => {
+      try {
+        do {
+          this.ribbonRenderQueued = false
+          const preview = await this.ribbonPreview()
+          // A blank / overlay / leave-ribbon during the await supersedes this render.
+          if (this.blanked || this.activeOverlay || !this.atRibbon) {
+            this.ctx.log('[ribbon] render superseded (blank/overlay/left) — discarded')
+            continue
+          }
+          let scene: WireScene
+          try {
+            scene = this.ribbon!.scene(preview)
+          } catch (e) {
+            this.ctx.log(`[ribbon] scene compose failed: ${(e as Error).message}`)
+            try { scene = this.ribbon!.scene('(preview unavailable)') }
+            catch { this.ctx.send(blankScene()); continue }
+          }
+          this.lastView = null   // the ribbon has no menu/browse list — taps are tap=enter, scroll=focus
+          this.ctx.send(scene)
+        } while (this.ribbonRenderQueued)
+      } catch (e) {
+        this.ctx.log(`[ribbon] render loop threw: ${(e as Error).message}`)
+      } finally {
+        this.ribbonRendering = false
+      }
+    })()
+  }
+
+  /** The preview text for the highlighted ribbon item (light tier = the
+   *  window's summary()). Failure-isolated — a down summary can't blank it. */
+  private async ribbonPreview(): Promise<string> {
+    if (!this.ribbon) return ''
+    const id = this.ribbon.highlightedWindowId()
+    if (!id) return this.ribbon.pseudoPreview()
+    const w = this.windowById(id)
+    if (!w) return ''
+    try { return `${w.tab}\n\n${await w.summary()}` }
+    catch (e) {
+      this.ctx.log(`[ribbon] preview summary failed (${id}): ${(e as Error).message}`)
+      return `${w.tab}\n\n(summary unavailable — see log)`
+    }
+  }
+
   private statusLeft(): string {
     // Battery cluster at the RIGHT END of the status bar (Adam 2026-06-12,
     // corrected from his first ask — "my bad!"): right-aligned by measured
@@ -746,13 +843,15 @@ export class WindowManager {
   switchTo(id: string): void {
     const w = this.windows.find((x) => x.id === id)
     if (!w) { this.ctx.log(`[os] switchTo unknown window '${id}'`); return }
-    if (w !== this.active) {
+    if (w !== this.active && !this.parked) {
       try {
         this.active.onDeactivate?.()   // mic OFF etc. — focus must not leak
       } catch (e) {
         this.ctx.log(`[os] onDeactivate failed (${this.active.id}): ${(e as Error).message}`)
       }
     }
+    this.parked = false                                    // Phase 2: entering a window un-parks it…
+    if (this.rootNav === 'ribbon') this.atRibbon = false   // …and leaves the ribbon
     this.active = w
     if (id !== 'main') this.lastUsed.set(id, ++this.useCounter)   // Phase 11 MRU (monotonic, distinct)
     else (w as MainWindow).resetToRoot()                          // Phase 11: Main returns to its launcher root
@@ -834,10 +933,14 @@ export class WindowManager {
           return
         }
         switch (label) {
-          case 'Main': this.switchTo('main'); return
+          case 'Main': this.goHome(); return
           case 'Reload': this.reload(); return
           case 'Retry': this.requestRender(); return
-          case 'Back': await this.onBackGesture(); return
+          case 'Back':
+            // Ribbon mode: 'Back' pops the window's OWN level (granular);
+            // double-tap is the straight-to-ribbon gesture instead.
+            if (this.rootNav === 'ribbon' && !this.atRibbon) { await this.popWindowLevel(); return }
+            await this.onBackGesture(); return
         }
         await this.active.onMenuSelect(label)
       } else if (region === 'browse') {
@@ -891,6 +994,15 @@ export class WindowManager {
       this.ctx.log('[os] tap ignored — screen is blanked (double-tap wakes)')
       return
     }
+    // Phase 2: at the ribbon root a tap = enter the highlighted window (or
+    // descend the drawer). The ribbon strip is a scroll=true antenna, so its
+    // tap arrives here as a sys tap (not a hub_select index).
+    if (this.rootNav === 'ribbon' && this.atRibbon && !this.activeOverlay && this.ribbon) {
+      const act = this.ribbon.select()
+      if (act.kind === 'enter') { this.switchTo(act.windowId); return }   // switchTo clears atRibbon
+      if (act.kind === 'recompose') this.renderRibbon()
+      return
+    }
     this.ctx.log(`[os] sys tap on ${this.active.id} — no consumer (antenna retired), ignored`)
   }
 
@@ -931,6 +1043,25 @@ export class WindowManager {
       this.requestRender()
       return
     }
+    // Phase 2 ribbon mode: double-tap is the straight-to-ribbon gesture (Adam
+    // 2026-06-30 — NOT pop-one-level). At the ribbon root it pops the drawer
+    // level then blanks; inside a window it parks the window and shows the
+    // ribbon (landing on the previous window). Granular back lives on 'Back'.
+    if (this.rootNav === 'ribbon') {
+      if (this.atRibbon) {
+        const act = this.ribbon!.back()
+        if (act.kind === 'recompose') { this.renderRibbon(); return }
+        if (act.kind === 'blank') {
+          this.blanked = true
+          this.ctx.log('[os] screen BLANK (double-tap at ribbon root) — double-tap again to wake')
+          this.ctx.send(blankScene())
+          return
+        }
+        return
+      }
+      this.toRibbon(true)   // inside a window → ribbon, land on the previous window
+      return
+    }
     try {
       const consumed = await this.active.onBack()
       if (consumed) return
@@ -941,6 +1072,49 @@ export class WindowManager {
         return
       }
       this.switchTo('main')
+    } catch (e) {
+      this.ctx.log(`[os] back handler failed (${this.active.id}): ${(e as Error).message}`)
+      this.requestRender()
+    }
+  }
+
+  /** Antenna scroll (ribbon root). f3 direction routed from ws-handler. No-op in
+   *  menu mode / inside a window / blanked (the focus event has no consumer). */
+  async onScroll(dir: 'up' | 'down'): Promise<void> {
+    if (this.rootNav !== 'ribbon' || !this.atRibbon || this.blanked || this.activeOverlay || !this.ribbon) return
+    const act = this.ribbon.scroll(dir)
+    if (act.kind === 'recompose') this.renderRibbon()
+  }
+
+  /** Park the active window (focus must not leak — stop its mic etc.) and show
+   *  the ribbon. fromWindow → land on the previous window (alt-tab); else the
+   *  recents root (the home action). */
+  private toRibbon(fromWindow: boolean): void {
+    if (!this.ribbon) return
+    if (!this.atRibbon) {
+      try { this.active.onDeactivate?.() } catch (e) { this.ctx.log(`[os] onDeactivate failed (${this.active.id}): ${(e as Error).message}`) }
+      this.parked = true
+    }
+    this.atRibbon = true
+    if (fromWindow) this.ribbon.enterFromWindow()
+    else this.ribbon.enterRoot()
+    this.renderRibbon()
+  }
+
+  /** The 'Main' / home action: menu mode → the Main launcher window; ribbon
+   *  mode → the ribbon root (the ribbon IS home). */
+  private goHome(): void {
+    if (this.rootNav === 'ribbon') this.toRibbon(false)
+    else this.switchTo('main')
+  }
+
+  /** Ribbon mode 'Back' menu item: pop the window's OWN internal level
+   *  (granular). At the window root, exit to the ribbon (land on previous). */
+  private async popWindowLevel(): Promise<void> {
+    try {
+      const consumed = await this.active.onBack()
+      if (consumed) return
+      this.toRibbon(true)
     } catch (e) {
       this.ctx.log(`[os] back handler failed (${this.active.id}): ${(e as Error).message}`)
       this.requestRender()
@@ -1029,7 +1203,7 @@ export class WindowManager {
    *  SwitchTo handling as a real tap (so voice paging/confirm behave identically). */
   private async invokeMenu(label: string): Promise<void> {
     switch (label) {
-      case 'Main': this.switchTo('main'); return
+      case 'Main': this.goHome(); return
       case 'Reload': this.reload(); return
       case 'Back': await this.onBackGesture(); return
     }

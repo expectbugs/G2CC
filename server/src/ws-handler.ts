@@ -1063,8 +1063,17 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         } else if (msg.event === 'tap') {
           // Sys tap — no DE consumer since the Files antenna revert (2026-06-11);
           // the WM keeps the blanked guard + loud no-op log (the blank scene's
-          // wake antenna still produces these).
+          // wake antenna still produces these). Phase 2: at the ribbon root a tap
+          // = enter the highlighted window (wm.onTapGesture routes it).
           await wm.onTapGesture()
+        } else if (msg.event === 'focus') {
+          // Phase 2: the ribbon strip is a scroll=true antenna — each scroll notch
+          // fires a focus event carrying the f3 DIRECTION (1=up, 2=down; confirmed
+          // 2026-06-10, docs/G2_BLE_PROTOCOL.md §6.6). The WM moves the ribbon
+          // cursor; it is a no-op in menu mode / inside a window / blanked.
+          if (msg.value === 1) await wm.onScroll('up')
+          else if (msg.value === 2) await wm.onScroll('down')
+          else console.log(`[ws] DE focus unknown f3=${msg.value} — not scrolling`)
         } else {
           // Firmware-list scrolls move the on-glass ring silently; nothing to do
           // server-side until a tap reports the chosen index.
