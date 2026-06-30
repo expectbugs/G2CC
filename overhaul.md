@@ -23,6 +23,42 @@ build the new ribbon-based DE/WM on that modular foundation, flag-gated and reve
 > environmental* red — aria's Google OAuth token has no refresh_token (`google_auth.py`; live
 > Calendar/Deliveries sync affected too), NOT a regression. Gate: 24/25 with phase10 the ONLY red.
 
+> ## 🚧 STATUS — Phase 2 (the ribbon) IN PROGRESS (2026-06-30), behind the `de.rootNav` flag
+> **Adam gave the explicit Phase-2 go on 2026-06-30** (he opted past the soak wait — the whole thing is
+> flag-gated, so the proven menu shell stays his daily driver until the on-glass cutover). Done +
+> smoke-verified OFF-GLASS on branch **`phase2-ribbon`** (NOT merged; server NOT restarted — Adam holds
+> the restart):
+> - **Blackjack re-applied** (the pre-Phase-2 step) onto `windows/games.ts` — `BlackjackController` +
+>   the additive `'hands'` compose mode; smoke 25/26 → **26/27**, scene_to_png OK. (tile sizes / thin "J"
+>   / the `⏳`+`…` placeholder glyphs are Adam's on-glass tuning.)
+> - **§2.2.1 / 2.2.2 / 2.2.4 — the ribbon root-nav** (NEW `server/src/ribbon.ts` = `RibbonShell`): flag
+>   `de.rootNav: 'menu'|'ribbon'` (default `menu`); an antenna-driven MRU recents strip (scroll moves a
+>   server-drawn cursor, tap enters, double-tap is **straight-to-ribbon** landing on the **previous**
+>   window, double-tap at the root blanks); the categorized **`All>` drawer** (CATEGORY_ORDER); reclaimed
+>   root chrome (full-width preview, no bars). **Menu mode is byte-for-byte unchanged** (smoke-proven).
+> - **§2.2.3 — tiered live preview**: LIGHT `summary()` per notch, RICH `view()` projection on settle
+>   (debounced ~`EVENT_DEBOUNCE_MS`, cached per window; `projectView()`).
+> - **§2.2.6 — lossless persistence**: verified — window objects persist; `toRibbon` stops only transients
+>   (the mic), never resets navigation. Only Games resets-on-activate (intentional).
+> - Wire/host touchpoints: `window-manager.ts` (atRibbon state + mode-branched gestures, the `parked`
+>   double-deactivate guard, a separate conflated ribbon sender), `ws-handler.ts` (DE `focus` → `onScroll`),
+>   `config.ts` (the flag + validation). `os-compose.ts` was **not** touched (the ribbon builds its own
+>   scene like `os-menu.ts`/`blankScene`). Full smoke **26/27** (phase10 the only red).
+>
+> **The on-glass-gated remainder (needs Adam's glasses — this session has none):**
+> - **§2.2.5 (in-window full-bleed) — DEFERRED for on-glass co-design.** It redesigns the *in-window*
+>   surface (where the action menu lives once the pinned left column is gone — a bottom antenna? a float?),
+>   and the doc itself pairs it with on-glass checks. Doing it blind would likely produce a wrong in-window
+>   interaction. The ribbon ROOT already reclaims its chrome; the in-window reclaim is the deferred polish.
+> - **§2.2.7 (on-glass hardening)** — antenna feel, settle latency, scrollbar artifacts at the tight bottom
+>   bar, fast-scroll coalescing on real BLE. Inherently on-glass ("expect days"). The OFF-glass robustness
+>   (conflated render senders, estimator/wall guards, strip windowing to stay zero-range, the settle
+>   debounce) is in and smoke/scene_to_png-verified.
+> - **§2.2.8 (cutover)** — flipping the default to `'ribbon'` waits for the §2.2.7 soak; flipping it blind
+>   would make an unverified shell the daily driver. **To try the ribbon on glass NOW: set
+>   `"de": { "rootNav": "ribbon" }` in `~/.g2cc/config.json` and restart the server** (the phone
+>   auto-reconnects; revert to `"menu"` to fall back instantly).
+
 > **Name clash — read this first.** Elsewhere in this repo a **bare** `overhaul.md §N` (e.g. §5.16,
 > §10, §22/§23/§24) refers to the *separate* `/home/user/aria2/overhaul.md` (the ARIA swarm overhaul) —
 > **not** this file. **This** document is the **G2CC DE/WM overhaul** (Phase 1 modularization → Phase 2
@@ -369,7 +405,8 @@ The "easily referenced design and API" Adam wants. Contents:
 # ============================== CLEAN STOP — PHASE 1 GATE ==============================
 
 **Do not begin Phase 2 until ALL of the following hold and Adam explicitly says go.**
-**Progress (2026-06-29): 1 ✅ · 2 ✅ · 3 ⏳ soaking · 4 ⏳ pending.**
+**Progress: 1 ✅ · 2 ✅ · 3 ✅ soaked clean · 4 ✅ Adam gave the explicit Phase-2 go 2026-06-30.**
+**(Phase 2 is now in progress behind the flag — see the 🚧 STATUS banner at the top.)**
 
 1. ✅ Phase 1 acceptance criteria (§1.7) met; server restarted on the modularized build (live on :7300).
 2. ✅ **On-glass parity pass:** Adam tested on real glasses — "works like a charm" (2026-06-29). The phone

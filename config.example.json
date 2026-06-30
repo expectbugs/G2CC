@@ -33,5 +33,10 @@
       "com.android.messaging": "sms",
       "com.google.android.gm": "email"
     }
+  },
+  "de": {
+    "//": "DE shell (Phase 2 overhaul). rootNav 'menu' = the proven category launcher (default); 'ribbon' = the MRU recents ribbon — flip to 'ribbon' + restart the server to try it on glass. recentsDepth = hot windows before the 'All' drawer (keep small so the bottom strip never overflows).",
+    "rootNav": "menu",
+    "recentsDepth": 6
   }
 }

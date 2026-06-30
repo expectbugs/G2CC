@@ -6,6 +6,23 @@ Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI
 `UPGRADE_PROGRESS.md` records the v1 phases incl. Adam's gate answers; `CHANGELOG.md` r3–r18
 carries the WHY of everything.
 
+**2026-06-30 — PHASE 2 RIBBON IN PROGRESS (server-only, behind the `de.rootNav` flag, smoke 26/27 — NO
+APK):** Adam gave the explicit Phase-2 go; built flag-gated on branch **`phase2-ribbon`** (NOT merged;
+server NOT restarted — Adam holds the restart). **Blackjack re-applied** onto `windows/games.ts` first
+(`BlackjackController` + the additive `'hands'` compose mode; smoke 25/26 → 26/27). **The ribbon root-nav**
+(NEW `server/src/ribbon.ts` = `RibbonShell`): `de.rootNav: 'menu'|'ribbon'` (default `menu` = the proven
+launcher, **byte-for-byte unchanged** + the instant fallback). Antenna-driven MRU recents strip (scroll =
+a server-drawn cursor, tap = enter, double-tap = **straight-to-ribbon** landing on the PREVIOUS window,
+double-tap-at-root = blank), the categorized **`All>` drawer**, **tiered preview** (light `summary()` per
+notch, rich `view()` projection on settle + per-window cache), lossless persistence. The 15 windows are
+reused UNCHANGED. `composeScene` NOT touched (the ribbon builds its own scene like `os-menu`/`blankScene`).
+Host touch: `window-manager.ts` (atRibbon + mode-branched gestures), `ws-handler.ts` (DE `focus`→`onScroll`),
+`config.ts` (flag). **Remaining = on-glass-gated (needs Adam's glasses):** §2.2.5 in-window full-bleed
+(DEFERRED — on-glass co-design of where the menu lives once the pinned column is gone), §2.2.7 on-glass
+hardening (the antenna feel/latency), §2.2.8 cutover (flip the default after the soak). **Try it on glass:
+set `"de":{"rootNav":"ribbon"}` in `~/.g2cc/config.json` + restart the server.** Full plan + the on-glass
+remainder: `overhaul.md` (the 🚧 STATUS banner).
+
 **2026-06-29 — PHASE 1 MODULARIZATION DONE + on-glass verified (server-only, smoke 24/25, NO APK):**
 The DE/WM overhaul's Phase 1 (see `overhaul.md`): the 15 windows were split out of the old 8,555-line
 `os-windows.ts` into **`server/src/windows/`** (one window per file) behind the FROZEN
