@@ -122,6 +122,30 @@ function collapseRules(text: string): string {
     return ch.repeat(Math.min(line.trim().length, TERM_RULE_COLS))
   }).join('\n')
 }
+
+// Claude Code's REPL draws its input PROMPT as a rounded box at the BOTTOM of the
+// pane (╭──╮ / │ > … │ / ╰──╯) followed by a status footer (the permission-mode line
+// ⏵⏵, the token/context count, the version). On the tiny G2 surface that fixed chrome
+// is pure waste — only the live transcript ABOVE it matters (Adam 2026-06-30: "remove
+// the input box and everything below it"). Drop the input box AND everything below it
+// by cutting from the LAST box-TOP border to the end. The input box is always the
+// bottommost box (the prompt), so live tool-result boxes ABOVE it survive. Guarded by a
+// '│ >' prompt check below the border so a NON-CC pane (a plain shell whose tail just
+// happens to end in a box) is left untouched — fail-safe: no match → no change.
+function stripCcInputBox(text: string): string {
+  const lines = text.split('\n')
+  let cut = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim()
+    // a rounded/square box TOP border: starts ╭/┌, ends ╮/┐, every char a rule glyph.
+    if (t.length >= 3 && /^[╭┌].*[╮┐]$/u.test(t) && [...t].every((ch) => RULE_CHARS.has(ch))) { cut = i; break }
+  }
+  if (cut < 0) return text
+  // Only strip when what follows actually looks like CC's prompt box (a '│ >' line) —
+  // otherwise a stray trailing box in some other TUI would be eaten.
+  if (!/[│|]\s*>/.test(lines.slice(cut).join('\n'))) return text
+  return lines.slice(0, cut).join('\n').replace(/\n+$/u, '')
+}
 const QUICK_KEYS: { label: string; keys: string[] }[] = [
   { label: 'Enter', keys: ['Enter'] },
   { label: 'Ctrl-C', keys: ['C-c'] },
@@ -181,9 +205,9 @@ function cleanSessionName(raw: string): { name: string } | { error: string } {
  *  command list, and dictation — all send-and-RUN (literal + Enter) on confirm;
  *  keys reach ONE focused session. */
 export class TerminalWindow implements OsWindow {
-  readonly id = 'term'
-  readonly tab = 'Term'
-  readonly label = 'Terminal'
+  readonly id = 'term'          // STABLE store/smoke key — display renamed to Tmux, id unchanged (§3.4)
+  readonly tab = 'Tmux'
+  readonly label = 'Tmux'
   readonly category = 'Tools' as const
   private level: 'sessions' | 'view' | 'keys' | 'kbd' | 'slash' = 'sessions'
   private sessions: TmuxSession[] = []
@@ -289,30 +313,30 @@ export class TerminalWindow implements OsWindow {
     if (this.level === 'sessions') {
       if (this.dictating()) return this.dictView()
       try { this.sessions = await tmuxList(); this.lastError = null } catch (e) { this.lastError = (e as Error).message }
-      if (this.lastError) return errorView('Term · error', this.lastError)
+      if (this.lastError) return errorView('Tmux · error', this.lastError)
       const rows = this.sessions.map((s) => `${s.attached ? '● ' : ''}${s.name} (${s.windows}w)`)
       rows.push('+ New session')
       const { items } = browsePageItems(rows, this.sessOffset)
-      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: 'Term · sessions', menu: ['Reload', 'Main'], items }
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: 'Tmux · sessions', menu: ['Reload', 'Main'], items }
     }
     if (this.level === 'keys') {
       // The input hub: full keyboard + slash-commands lead, then the quick keys.
       const items = ['⌨ Keyboard', '/ Slash cmd', ...QUICK_KEYS.map((k) => k.label)]
-      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Term · ${this.session} · keys`, menu: ['Back', 'Reload', 'Main'], items }
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Tmux · ${this.session} · keys`, menu: ['Back', 'Reload', 'Main'], items }
     }
     if (this.level === 'kbd') {
       const { items } = browsePageItems(this.kbdModel().items, this.kbdOffset)
       const buf = this.kbdBuf || ' '
-      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Term · ⌨ ${buf}▏`, menu: ['Back', 'Reload', 'Main'], items }
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Tmux · ⌨ ${buf}▏`, menu: ['Back', 'Reload', 'Main'], items }
     }
     if (this.level === 'slash') {
       const { items } = browsePageItems([...TERM_SLASH_COMMANDS, '‹ Done'], this.kbdOffset)
-      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Term · ${this.session} · slash`, menu: ['Back', 'Reload', 'Main'], items }
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Tmux · ${this.session} · slash`, menu: ['Back', 'Reload', 'Main'], items }
     }
     // view level
     if (this.dictating()) return this.dictView()
     if (this.mode === 'grid') {
-      const title = `Term · ${this.session} · grid`
+      const title = `Tmux · ${this.session} · grid`
       const menu = ['Keys', 'Dictate', 'Tail', 'Terms', 'Reload', 'Main']
       if (this.gridImg) return { mode: 'tiles', tilesRect: { w: this.gridImg.w, h: this.gridImg.h }, title, menu, tiles: this.gridImg.tiles }
       return { mode: 'text', title, menu, text: this.gridFailed ? `grid render FAILED:\n${this.gridFailed}` : '⏳ rendering 80×22…' }
@@ -324,11 +348,11 @@ export class TerminalWindow implements OsWindow {
     // the pane (TERM_PAGE_ROWS) under the byte budget — no overflow scrollbar.
     // (The old fixed-44-col '›' cut made wide lines unreadable — Adam 2026-06-14;
     // the old 13-row tail overflowed — Adam 2026-06-15.) Grid shows the 80 cols.
-    const rows = wrapLinesPx(collapseRules(this.content), undefined, termTextWidth)
+    const rows = wrapLinesPx(collapseRules(stripCcInputBox(this.content)), undefined, termTextWidth)
     while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
     const tail = bottomRows(rows, TERM_PAGE_ROWS, TERM_TAIL_MAX_BYTES).join('\n')
     return {
-      mode: 'text', title: `Term · ${this.session} · tail`,
+      mode: 'text', title: `Tmux · ${this.session} · tail`,
       menu: ['Keys', 'Dictate', 'Grid', 'Focus', 'Terms', 'Reload', 'Main'],
       text: tail || '(no output yet)',
     }
@@ -345,7 +369,7 @@ export class TerminalWindow implements OsWindow {
     const at = total <= 1 ? '' : this.scrollPage === 0 ? ' (top)' : this.scrollPage >= total - 1 ? ' (live)' : ''
     return {
       mode: 'text',
-      title: `Term · ${this.session} · scroll ${this.scrollPage + 1}/${total}${at}`,
+      title: `Tmux · ${this.session} · scroll ${this.scrollPage + 1}/${total}${at}`,
       menu: ['Up', 'Down', 'Live', 'Reload', 'Main'],
       text: pages[this.scrollPage] || '(no scrollback)',
     }
@@ -353,10 +377,10 @@ export class TerminalWindow implements OsWindow {
 
   private dictView(): WinView {
     const ses = this.dictPurpose === 'newSession' ? 'new session' : `→ ${this.session}`
-    if (this.listening) return { mode: 'text', title: `Term · ${ses} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: `Listening — speak the ${this.dictPurpose === 'newSession' ? 'session name' : 'text to type'}, then Done.` }
-    if (this.transcribing) return { mode: 'text', title: `Term · ${ses} · transcribing…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
+    if (this.listening) return { mode: 'text', title: `Tmux · ${ses} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: `Listening — speak the ${this.dictPurpose === 'newSession' ? 'session name' : 'text to type'}, then Done.` }
+    if (this.transcribing) return { mode: 'text', title: `Tmux · ${ses} · transcribing…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
     const verb = this.dictPurpose === 'newSession' ? 'New session' : 'Type (sent + RUN on Confirm)'
-    return { mode: 'text', title: `Term · ${ses} · confirm?`, menu: ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main'], text: `${verb}:\n${'─'.repeat(20)}\n${clampConfirmBody(this.pendingText ?? '')}\n${'─'.repeat(20)}\nConfirm · Re-record · Cancel` }
+    return { mode: 'text', title: `Tmux · ${ses} · confirm?`, menu: ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main'], text: `${verb}:\n${'─'.repeat(20)}\n${clampConfirmBody(this.pendingText ?? '')}\n${'─'.repeat(20)}\nConfirm · Re-record · Cancel` }
   }
 
   // ---- input ----
@@ -519,7 +543,7 @@ export class TerminalWindow implements OsWindow {
     try {
       const out = await tmuxCaptureScrollback(this.session, TERM_SCROLLBACK_LINES)
       if (seq !== this.scrollSeq) return   // Live/Back/switch fired mid-capture — don't resurrect scroll mode
-      const rows = wrapLinesPx(collapseRules(out), undefined, termTextWidth)   // rule-collapse + box-aware wrap so paging is row-accurate + readable
+      const rows = wrapLinesPx(collapseRules(stripCcInputBox(out)), undefined, termTextWidth)   // strip CC's input box+footer, rule-collapse, box-aware wrap (§3.4)
       while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
       this.scrollPages = rows.length ? paginateRows(rows, TERM_PAGE_ROWS, TERM_TAIL_MAX_BYTES) : ['(no scrollback)']
       this.scrollPage = this.scrollPages.length - 1   // start at the live edge (newest page — where the tail left off)
