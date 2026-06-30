@@ -493,7 +493,7 @@ export class WindowManager {
     this.fullBleed = this.rootNav === 'ribbon' && this.ctx.config?.de?.fullBleed === true
     if (this.rootNav === 'ribbon') {
       this.ribbon = new RibbonShell(
-        () => this.windows.find((w) => w.id === 'main') ?? this.windows[0],     // slot 0 — Main/Stats (fixed)
+        () => this.windows.find((w) => w.id === 'main') ?? this.windows[0],     // slot 0 — Main (fixed)
         () => this.mruWindows(),                                               // active + recents: non-Main, MRU
         () => this.windows,                                                     // all: incl Main (drawer/Info)
         () => Math.max(1, Math.floor(this.ctx.config?.de?.recentsDepth ?? 4)),  // MRU windows shown (active + recents; §3.1)

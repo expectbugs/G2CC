@@ -60,7 +60,7 @@ build the new ribbon-based DE/WM on that modular foundation, flag-gated and reve
 >
 > **➡ SUPERSEDED BY PHASE 3 (2026-06-30) — full plan in PART 3 below.** The in-window remainder (§2.2.5
 > left-menu reclaim) + the ribbon polish are now folded into a scoped **Phase 3 refinement pass** Adam
-> specced this session. In one line: a FIXED ribbon order `[Main/Stats][active][recent×3][frequent][All]`,
+> specced this session. In one line: a FIXED ribbon order `[Main][active][recent×3][frequent][All]`,
 > **persisted recents** (fix the per-connection reset), **borderless full-width windows** with the action
 > menu moved INTO the title/ribbon bar (a single underline under the bar, content expands, status bar only
 > where useful with a top rule not a box), **`Main`+`Reload` removed from in-app menus**, a **per-app
@@ -451,7 +451,7 @@ the visual target.
 - **Double-tap semantics:** DECIDED — reading windows go straight-to-ribbon; browse windows navigate
   hierarchically (own `onBack`: flip→pop→exit-at-root). Not the single uniform rule first recommended.
 - **Ribbon lands on previous (alt-tab):** DECIDED — lands on the previous window. *Phase 3 confirmed:*
-  with Main/Stats at slot 0 + active at slot 1, "previous" = **slot 2** (§3.1).
+  with Main at slot 0 + active at slot 1, "previous" = **slot 2** (§3.1).
 - **Recents depth:** DECIDED — `de.recentsDepth` default 6. *Phase 3 replaces the pure-depth model with the
   fixed-role order (§3.1).*
 - **Drawer ordering:** DECIDED — categories (`CATEGORY_ORDER`).
@@ -517,7 +517,7 @@ the visual target.
 
 **Created 2026-06-30 (Adam's scoped tweak list).** Phase 2 shipped the ribbon root-nav and it's live +
 loved. Phase 3 is the refinement pass: finish reclaiming the in-window real estate (the pinned 96px left
-menu + the region borders), promote a fixed **Main/Stats** + a **frequent** slot into the ribbon order,
+menu + the region borders), promote a fixed **Main** + a **frequent** slot into the ribbon order,
 **persist** recents, then redesign **every window's** layout for the new full-width surface. Still
 flag-gated on `de.rootNav: 'ribbon'`; `'menu'` stays the byte-for-byte fallback until the §2.2.8 cutover.
 Several items touch the proven `os-compose.ts` — the sanctioned, gated, `scene_to_png`-+-on-glass-verified
@@ -529,7 +529,7 @@ exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, s
 > - ✅ **§3.2 persisted recents + frequency** — `window-usage.ts` (a `window_usage` table); the WM loads
 >   on construct + persists on switchTo. Survives the per-connection WM rebuild (the "resets too often"
 >   cause). New per-window activation COUNT drives the frequent slot.
-> - ✅ **§3.1 ribbon order** — `[Main/Stats][active][recent×N][frequent][All]`; Main promoted to fixed
+> - ✅ **§3.1 ribbon order** — `[Main][active][recent×N][frequent][All]`; Main promoted to fixed
 >   slot 0, the frequent slot, cursor lands on slot 2. `de.recentsDepth` default → 4.
 > - ✅ **§3.4 Tmux** — Term→Tmux (display only; id kept) + `stripCcInputBox` drops Claude Code's input
 >   box AND the footer below it (tokens/permissions/version) from the tail/scrollback.
@@ -555,11 +555,11 @@ exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, s
 The recents strip becomes a FIXED-role layout, left → right:
 
 ```
-[ Main/Stats ] [ active ] [ recent ] [ recent ] [ recent ] [ frequent* ] [ All ]
+[ Main ] [ active ] [ recent ] [ recent ] [ recent ] [ frequent* ] [ All ]
     slot 0       MRU0       MRU1       MRU2       MRU3        frecency      drawer
 ```
 
-- **Slot 0 — Main/Stats (always leftmost, fixed).** A real ribbon window (no longer buried under
+- **Slot 0 — Main (always leftmost, fixed).** A real ribbon window (no longer buried under
   `All>Info`): the global glance — host/pool, battery states (G2 / phone / R1 / hat), unseen count, next
   timer, **+ a recently-active-windows summary** (the per-window lines today's Main dashboard already
   shows). This is today's Main dashboard + the Stats level, repurposed as the fixed slot-0 entry.
@@ -634,7 +634,7 @@ Phase 1 — and the §3.3 focus model (reading vs browse) resolved per window.
   is fixed chrome that wastes rows; only the live transcript above the input box matters on glass (extends
   the existing `collapseRules`/`termTextWidth` box-drawing handling to DROP, not just collapse). Detect the
   input-box top border and discard from there down.
-- (…the other 13 windows + Main/Stats redesigned as the pass proceeds — enumerate per commit.)
+- (…the other 13 windows + Main redesigned as the pass proceeds — enumerate per commit.)
 
 ## 3.5 Firmware-native content scroll + auto page-advance (FUTURE — "eventually," #4)
 
@@ -667,7 +667,7 @@ don't promise a fix.**
 
 Suggested order (each flag-gated, smoke-green, `scene_to_png`-checked, then on-glass):
 1. **§3.2 persistence** — pure server, no UI risk, fixes a daily annoyance. **First.**
-2. **§3.1 ribbon order** + Main/Stats slot-0 window + the frequency counter.
+2. **§3.1 ribbon order** + Main slot-0 window + the frequency counter.
 3. **§3.3 chrome reclaim** — the compose-layer touch (borders, menu→title, content expand, Main/Reload
    removal). Riskiest build step; Open Q (a)/(b) now settled — only (e) ribbon-width is on-glass tuning.
 4. **§3.4 per-app pass** — window-by-window (incl. the Tmux rename + CC-box strip).

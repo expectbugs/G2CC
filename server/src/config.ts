@@ -70,7 +70,7 @@ export interface G2CCConfig {
      *  to 'ribbon' only AFTER the on-glass hardening soak (overhaul.md §2.2.8 —
      *  the cutover). Built flag-gated so menu stays a one-line revert. */
     rootNav: 'menu' | 'ribbon'
-    /** MRU windows shown in the ribbon AFTER the fixed Main/Stats slot (active +
+    /** MRU windows shown in the ribbon AFTER the fixed Main slot (active +
      *  recents) and BEFORE the 'frequent' + 'All>' slots — Phase 3 §3.1. Adam's
      *  spec is active + 3 recents = 4. Kept small so the top strip never overflows
      *  its region (an overflowing strip loses the zero-range scroll → no per-notch

@@ -46,7 +46,7 @@ export class RibbonShell {
   private selectedCategory: WindowCategory | null = null
 
   constructor(
-    /** Main/Stats — the FIXED leftmost ribbon slot (Phase 3 §3.1). */
+    /** Main — the FIXED leftmost ribbon slot (Phase 3 §3.1). */
     private mainWindow: () => OsWindow,
     /** Non-Main windows, MRU-ordered (most-recent first) — the active + recents slots. */
     private recents: () => OsWindow[],
@@ -66,10 +66,10 @@ export class RibbonShell {
   // ----------------------------------------------------- the current item list
 
   private recentsItems(): RibbonItem[] {
-    // §3.1 fixed-role order: [Main/Stats] [active=MRU0] [recent×N] [frequent] [All].
+    // §3.1 fixed-role order: [Main] [active=MRU0] [recent×N] [frequent] [All].
     const items: RibbonItem[] = []
     const main = this.mainWindow()
-    items.push({ label: main.tab, windowId: main.id })                          // slot 0 — Main/Stats (fixed)
+    items.push({ label: main.tab, windowId: main.id })                          // slot 0 — Main (fixed)
     for (const w of this.recents().slice(0, Math.max(1, Math.floor(this.depth())))) {
       items.push({ label: w.tab, windowId: w.id })                             // active + recents (MRU)
     }
