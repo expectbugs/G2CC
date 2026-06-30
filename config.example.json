@@ -35,8 +35,9 @@
     }
   },
   "de": {
-    "//": "DE shell (Phase 2 overhaul). rootNav 'menu' = the proven category launcher (default); 'ribbon' = the MRU recents ribbon — flip to 'ribbon' + restart the server to try it on glass. recentsDepth = hot windows before the 'All' drawer (keep small so the bottom strip never overflows).",
+    "//": "DE shell (overhaul.md). rootNav 'menu' = the proven category launcher (default); 'ribbon' = the MRU recents ribbon (flip + restart to try on glass). recentsDepth = MRU windows shown after the fixed Main/Stats slot, before the 'frequent'+'All>' slots (Adam's spec: active + 3 = 4; keep small so the top strip never overflows). fullBleed (Phase 3 §3.3 staging, ribbon-only): true = borderless full-width windows with the action menu in a 3-cell top-bar scroller (the 96px left column reclaimed); false = the proven in-window chrome. Flip on glass to test.",
     "rootNav": "menu",
-    "recentsDepth": 6
+    "recentsDepth": 4,
+    "fullBleed": false
   }
 }

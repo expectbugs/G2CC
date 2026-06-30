@@ -523,6 +523,33 @@ flag-gated on `de.rootNav: 'ribbon'`; `'menu'` stays the byte-for-byte fallback 
 Several items touch the proven `os-compose.ts` — the sanctioned, gated, `scene_to_png`-+-on-glass-verified
 exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, smoke-green + on-glass.**
 
+> ## 🛠 STATUS — Phase 3 BUILT off-glass on branch `phase3-ribbon-refinement` (2026-06-30, smoke 27/28)
+> Adam said "batch the whole thing… do it all." Built server-only, each a smoke-green commit on the branch
+> (NOT merged to master — his live ribbon is untouched until he reviews). Menu mode stays byte-for-byte.
+> - ✅ **§3.2 persisted recents + frequency** — `window-usage.ts` (a `window_usage` table); the WM loads
+>   on construct + persists on switchTo. Survives the per-connection WM rebuild (the "resets too often"
+>   cause). New per-window activation COUNT drives the frequent slot.
+> - ✅ **§3.1 ribbon order** — `[Main/Stats][active][recent×N][frequent][All]`; Main promoted to fixed
+>   slot 0, the frequent slot, cursor lands on slot 2. `de.recentsDepth` default → 4.
+> - ✅ **§3.4 Tmux** — Term→Tmux (display only; id kept) + `stripCcInputBox` drops Claude Code's input
+>   box AND the footer below it (tokens/permissions/version) from the tail/scrollback.
+> - ✅ **§3.3 chrome reclaim** behind a NEW **`de.fullBleed`** staging flag (default OFF, ribbon-only):
+>   `composeFullBleedScene` — borderless, full-width content (96px left column reclaimed), the action menu
+>   in a 3-cell `[prev][current][next]` top-bar scroller, status bar only with a live phase, **Main/Reload
+>   removed**. WM routes scroll→menu cursor / tap→centre cell; browse windows keep content-capture + flip.
+>   Verified via `scene_to_png` + a new `phase-fullbleed` smoke. **Needs on-glass for feel/correctness.**
+> - ⏭ **§3.4 per-app pass** — the generic compositor handles every window's text/browse/twocol/image
+>   frames, so most windows work under fullBleed unchanged. NOT yet done per-window: full-WIDTH text
+>   RE-pagination (text still wraps at the 456px width → right margin; the windows paginate, so each needs
+>   `TEXT_PAGE_PX` widened in fullBleed), per-window action-list pruning for the 3-cell reach, and the
+>   pure single-underline / "line above the status bar" (the wire has no per-side rule — a subtle box
+>   approximates it). Image-mode frames keep the proven tile geometry (left 96px just blank).
+> - ⏸ **§3.5 firmware-scroll** + **§3.6 End-Feature popup** — investigations, on-glass-gated, NOT built.
+>
+> **To try it on glass:** merge the branch (or cherry-pick), `npm run build -w server`, restart; set
+> `"de": { "rootNav": "ribbon", "fullBleed": true }` in `~/.g2cc/config.json` (fullBleed:false = the
+> current ribbon; rootNav:menu = the proven fallback). Each of the §3.x build steps is a separate commit.
+
 ## 3.1 The ribbon order, finalized (supersedes §2.2.2's pure-MRU strip)
 
 The recents strip becomes a FIXED-role layout, left → right:
