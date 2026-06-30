@@ -41,6 +41,7 @@ import { SmsWindow } from './windows/sms.js'
 import { MediaWindow } from './windows/media.js'
 import { NoticesWindow } from './windows/notices.js'
 import { RibbonShell } from './ribbon.js'
+import { loadWindowUsage, persistWindowUsage } from './window-usage.js'
 
 /** How long a notification FLASH holds a BLANKED screen before auto-returning
  *  to blank. 10 s → 5 s (Adam 2026-06-12, Phase 2: "i use blank mode when
@@ -435,6 +436,9 @@ export class WindowManager {
    *  dashboard orders by it). Counter (not Date.now) → always-distinct stamps. */
   private useCounter = 0
   private lastUsed = new Map<string, number>()
+  /** Cumulative per-window activation count (Phase 3 §3.1) — drives the ribbon's
+   *  'frequent' slot. Persisted alongside lastUsed via window-usage.ts. */
+  private useCount = new Map<string, number>()
 
   // ---- Phase 2 (overhaul.md §2.2): the ribbon root-nav shell ----
   /** Root-nav shell: 'menu' = the proven Main launcher (DEFAULT + the instant
@@ -479,9 +483,11 @@ export class WindowManager {
     this.rootNav = this.ctx.config?.de?.rootNav === 'ribbon' ? 'ribbon' : 'menu'
     if (this.rootNav === 'ribbon') {
       this.ribbon = new RibbonShell(
-        () => this.mruWindows(),                                               // recents: non-Main, MRU
+        () => this.windows.find((w) => w.id === 'main') ?? this.windows[0],     // slot 0 — Main/Stats (fixed)
+        () => this.mruWindows(),                                               // active + recents: non-Main, MRU
         () => this.windows,                                                     // all: incl Main (drawer/Info)
-        () => Math.max(1, Math.floor(this.ctx.config?.de?.recentsDepth ?? 6)),  // recents depth (Adam: 6)
+        () => Math.max(1, Math.floor(this.ctx.config?.de?.recentsDepth ?? 4)),  // MRU windows shown (active + recents; §3.1)
+        (exclude) => this.mostFrequentExcluding(exclude),                       // the 'frequent' slot
         () => this.unseen,
       )
       this.atRibbon = true
@@ -496,6 +502,24 @@ export class WindowManager {
     notifyHub.on('seen', this.onHubSeen)
     notifyHub.on('dismissPhone', this.onHubDismissPhone)
     this.refreshNotifyChrome()
+    // Phase 3 §3.2: restore the persisted MRU recency + activation counts so the
+    // ribbon's recents survive this connection's predecessor (the WM is rebuilt
+    // per WS connect). Fire-and-forget; a down DB just leaves the fresh in-memory
+    // order, logged. Re-render once loaded so the restored order shows.
+    void loadWindowUsage().then((usage) => {
+      let maxStamp = 0
+      for (const [id, u] of usage) {
+        if (!this.windows.some((w) => w.id === id)) continue   // ignore retired ids
+        this.lastUsed.set(id, u.lastUsed)
+        this.useCount.set(id, u.useCount)
+        if (u.lastUsed > maxStamp) maxStamp = u.lastUsed
+      }
+      // Keep new stamps monotonic ABOVE every restored one (they are ordering
+      // tokens, not a clock — a fresh switchTo must still sort newest).
+      if (this.useCounter < maxStamp) this.useCounter = maxStamp
+      if (this.rootNav === 'ribbon' && this.atRibbon) this.renderRibbon()
+      else this.requestRender()
+    }).catch((e: unknown) => this.ctx.log(`[os] window-usage load failed (in-memory order kept): ${e instanceof Error ? e.message : String(e)}`))
     // Phase 5: the dashboard re-render pacer — ONLY while Main is on screen
     // (a pacing cadence, not an event bus; B3-sanctioned category).
     this.dashboardPacer = setInterval(() => {
@@ -892,8 +916,14 @@ export class WindowManager {
     this.parked = false                                    // Phase 2: entering a window un-parks it…
     if (this.rootNav === 'ribbon') this.atRibbon = false   // …and leaves the ribbon
     this.active = w
-    if (id !== 'main') this.lastUsed.set(id, ++this.useCounter)   // Phase 11 MRU (monotonic, distinct)
-    else (w as MainWindow).resetToRoot()                          // Phase 11: Main returns to its launcher root
+    if (id !== 'main') {
+      this.lastUsed.set(id, ++this.useCounter)                    // Phase 11 MRU (monotonic, distinct)
+      const n = (this.useCount.get(id) ?? 0) + 1                  // Phase 3 §3.1 frequency
+      this.useCount.set(id, n)
+      // Persist (capture path — fire-and-forget; a down DB keeps the in-memory order).
+      void persistWindowUsage(id, this.useCounter, n).catch((e: unknown) =>
+        this.ctx.log(`[os] persist window-usage(${id}) failed: ${e instanceof Error ? e.message : String(e)}`))
+    } else (w as MainWindow).resetToRoot()                        // Phase 11: Main returns to its launcher root
     w.onActivate?.()                                              // launcher-style reset (Games → games list)
     this.requestRender()
   }
@@ -906,6 +936,21 @@ export class WindowManager {
       .map((w, i) => ({ w, i }))
       .sort((a, b) => (this.lastUsed.get(b.w.id) ?? 0) - (this.lastUsed.get(a.w.id) ?? 0) || a.i - b.i)
       .map((x) => x.w)
+  }
+
+  /** The most-FREQUENTLY-activated window not already shown (the ribbon's
+   *  'frequent' slot, Phase 3 §3.1). Excludes Main (it is fixed slot 0) and any
+   *  id in `exclude` (the MRU windows already on the strip). Returns null when
+   *  nothing qualifies (no window has been activated yet) → the slot is dropped. */
+  private mostFrequentExcluding(exclude: Set<string>): OsWindow | null {
+    let best: OsWindow | null = null
+    let bestN = 0
+    for (const w of this.windows) {
+      if (w.id === 'main' || exclude.has(w.id)) continue
+      const n = this.useCount.get(w.id) ?? 0
+      if (n > bestN) { bestN = n; best = w }
+    }
+    return best
   }
 
   /** The Reload action (any window, any state): tell the client to abort +

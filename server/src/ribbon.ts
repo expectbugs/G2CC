@@ -46,13 +46,19 @@ export class RibbonShell {
   private selectedCategory: WindowCategory | null = null
 
   constructor(
-    /** Non-Main windows, MRU-ordered (most-recent first) — the hot recents strip. */
+    /** Main/Stats — the FIXED leftmost ribbon slot (Phase 3 §3.1). */
+    private mainWindow: () => OsWindow,
+    /** Non-Main windows, MRU-ordered (most-recent first) — the active + recents slots. */
     private recents: () => OsWindow[],
     /** ALL windows incl. Main — the drawer's category source (so Main's
      *  dashboard + Stats stay reachable under Info even in ribbon mode). */
     private all: () => OsWindow[],
-    /** Recents depth — MRU windows shown before the 'All' drawer (Adam: 6). */
+    /** MRU windows shown after Main (active + recents) before the 'frequent'
+     *  slot — Adam's spec is active + 3 recents = 4 (de.recentsDepth, default 4). */
     private depth: () => number,
+    /** The most-FREQUENTLY-used window NOT already on the strip (the 'frequent'
+     *  slot, §3.1); null → the slot is omitted. `exclude` = ids already shown. */
+    private frequent: (exclude: Set<string>) => OsWindow | null,
     /** Unseen-notification count (folds into the breadcrumb badge). */
     private unseen: () => number,
   ) {}
@@ -60,9 +66,17 @@ export class RibbonShell {
   // ----------------------------------------------------- the current item list
 
   private recentsItems(): RibbonItem[] {
-    const wins = this.recents().slice(0, Math.max(1, Math.floor(this.depth())))
-    const items: RibbonItem[] = wins.map((w) => ({ label: w.tab, windowId: w.id }))
-    items.push({ label: ALL_ENTRY, windowId: null })   // always present → every window reachable
+    // §3.1 fixed-role order: [Main/Stats] [active=MRU0] [recent×N] [frequent] [All].
+    const items: RibbonItem[] = []
+    const main = this.mainWindow()
+    items.push({ label: main.tab, windowId: main.id })                          // slot 0 — Main/Stats (fixed)
+    for (const w of this.recents().slice(0, Math.max(1, Math.floor(this.depth())))) {
+      items.push({ label: w.tab, windowId: w.id })                             // active + recents (MRU)
+    }
+    const shown = new Set(items.map((i) => i.windowId).filter((id): id is string => id !== null))
+    const freq = this.frequent(shown)
+    if (freq) items.push({ label: freq.tab, windowId: freq.id })               // the 'frequent' slot (omitted if none)
+    items.push({ label: ALL_ENTRY, windowId: null })                           // the drawer — every window reachable
     return items
   }
   private presentCategories(): WindowCategory[] {
@@ -88,11 +102,14 @@ export class RibbonShell {
   enterFromWindow(): void {
     this.level = 'recents'
     this.selectedCategory = null
-    // Land on the previous WINDOW (index 1) — but only if recents holds ≥2
-    // windows. At depth 1 the strip is [window, All>], so index 1 is the drawer
-    // entry, not a window; land on 0 there.
-    const winCount = Math.min(Math.max(1, Math.floor(this.depth())), this.recents().length)
-    this.cursor = winCount > 1 ? 1 : 0
+    // §3.1 order is [Main(0), active=MRU0(1), previous=MRU1(2), …]. Land on the
+    // PREVIOUS window (slot 2) for alt-tab — "one to the right of active" (Adam
+    // 2026-06-30). The landable slot depends on how many MRU windows are SHOWN
+    // (min of depth and available): ≥2 → slot 2 (previous); 1 → slot 1 (active);
+    // 0 → slot 0 (Main). Using the SHOWN count (not the full recents length) keeps
+    // a small depth from landing the cursor past the windows onto frequent/All.
+    const shownMru = Math.min(Math.max(1, Math.floor(this.depth())), this.recents().length)
+    this.cursor = shownMru >= 2 ? 2 : (shownMru === 1 ? 1 : 0)
   }
   /** Entering the ribbon as "home" (the Main label / boot / blank-wake): the
    *  recents root, cursor on the most-recent window. */

@@ -70,11 +70,18 @@ export interface G2CCConfig {
      *  to 'ribbon' only AFTER the on-glass hardening soak (overhaul.md §2.2.8 —
      *  the cutover). Built flag-gated so menu stays a one-line revert. */
     rootNav: 'menu' | 'ribbon'
-    /** Recents depth — how many MRU windows stay in the hot ribbon before the
-     *  rest spill to the 'All>' drawer (Adam 2026-06-30: 6). Kept small enough
-     *  that the bottom-bar strip never overflows its region (a strip that
-     *  overflows loses the zero-range scroll → no per-notch focus events). */
+    /** MRU windows shown in the ribbon AFTER the fixed Main/Stats slot (active +
+     *  recents) and BEFORE the 'frequent' + 'All>' slots — Phase 3 §3.1. Adam's
+     *  spec is active + 3 recents = 4. Kept small so the top strip never overflows
+     *  its region (an overflowing strip loses the zero-range scroll → no per-notch
+     *  focus events). The full order is [Main][active][recent…][frequent][All]. */
     recentsDepth: number
+    /** Phase 3 §3.3 STAGING flag (default false): the borderless full-width
+     *  in-window layout — the left menu column reclaimed, the action menu moved to
+     *  a 3-cell title-bar scroller. Off = the proven in-window chrome (the current
+     *  ribbon). Flip on glass to test; collapsed into the default at the §2.2.8
+     *  cutover. Ribbon-mode only (no effect when rootNav==='menu'). */
+    fullBleed: boolean
   }
 }
 
@@ -143,7 +150,8 @@ function defaultConfig(): G2CCConfig {
       // Default to the proven menu shell; the ribbon is opt-in until its
       // on-glass soak is done (overhaul.md Phase 2 — the cutover flips this).
       rootNav: 'menu',
-      recentsDepth: 6,
+      recentsDepth: 4,
+      fullBleed: false,
     },
   }
 }
@@ -210,8 +218,12 @@ export function loadConfig(): G2CCConfig {
     merged.de.rootNav = 'menu'
   }
   if (typeof merged.de.recentsDepth !== 'number' || !Number.isFinite(merged.de.recentsDepth) || merged.de.recentsDepth < 1) {
-    console.error('[config] de.recentsDepth is not a positive number — using the default 6')
+    console.error('[config] de.recentsDepth is not a positive number — using the default 4')
     merged.de.recentsDepth = defaults.de.recentsDepth
+  }
+  if (typeof merged.de.fullBleed !== 'boolean') {
+    console.error('[config] de.fullBleed is not a boolean — using the default false')
+    merged.de.fullBleed = defaults.de.fullBleed
   }
   return merged
 }

@@ -58,23 +58,17 @@ build the new ribbon-based DE/WM on that modular foundation, flag-gated and reve
 >   `config.ts` (the flag + validation). `os-compose.ts` was **not** touched (the ribbon builds its own
 >   scene like `os-menu.ts`/`blankScene`). Full smoke **26/27** (phase10 the only red).
 >
-> **The on-glass-gated remainder (needs Adam's glasses — this session has none):**
-> - **§2.2.5 — chrome reclaim PARTLY DONE; the in-window LEFT-MENU reclaim DEFERRED for on-glass co-design.**
->   The bottom status bar is gone + the battery folded into the top (Adam's design pass) — that chrome is
->   reclaimed. What REMAINS is dropping the pinned 96px LEFT menu and relocating a window's action menu.
->   Discussed with Adam: the one-capture / one-scroll-axis hardware rule means the menu needs a focus-toggle
->   home (reading windows could use a bottom action strip like the ribbon root; browse windows are
->   constrained because their content list must capture). Doing it blind would likely break the in-window
->   interaction — it needs on-glass co-design. NOT built.
-> - **§2.2.7 (on-glass hardening)** — antenna feel + latency (the strip is now at the TOP, the proven
->   os-menu antenna location), the ~415px strip-width tightness (`All>` just off the right at depth 6 — drop
->   `recentsDepth` or shave the battery), fast-scroll coalescing on real BLE. Inherently on-glass ("expect
->   days"). The OFF-glass robustness (conflated render senders, estimator/wall guards, strip windowing to
->   stay zero-range, the F2 fast-scroll coalescing skip) is in and smoke/scene_to_png-verified.
-> - **§2.2.8 (cutover)** — flipping the default to `'ribbon'` waits for the §2.2.7 soak; flipping it blind
->   would make an unverified shell the daily driver. **To try the ribbon on glass NOW: set
->   `"de": { "rootNav": "ribbon" }` in `~/.g2cc/config.json` and restart the server** (the phone
->   auto-reconnects; revert to `"menu"` to fall back instantly).
+> **➡ SUPERSEDED BY PHASE 3 (2026-06-30) — full plan in PART 3 below.** The in-window remainder (§2.2.5
+> left-menu reclaim) + the ribbon polish are now folded into a scoped **Phase 3 refinement pass** Adam
+> specced this session. In one line: a FIXED ribbon order `[Main/Stats][active][recent×3][frequent][All]`,
+> **persisted recents** (fix the per-connection reset), **borderless full-width windows** with the action
+> menu moved INTO the title/ribbon bar (a single underline under the bar, content expands, status bar only
+> where useful with a top rule not a box), **`Main`+`Reload` removed from in-app menus**, a **per-app
+> layout redesign** pass, the **Term→Tmux** rename (+ strip CC's input box/`─` rules in its tail), and two
+> investigations (firmware-native content scroll w/ auto page-advance; mitigating the long-press "End
+> Feature?" popup when blanked). §2.2.7 (on-glass antenna hardening) + §2.2.8 (cutover — flip the default
+> to `'ribbon'` after the soak) still stand. **To run the ribbon on glass NOW: `"de": { "rootNav":
+> "ribbon" }` in `~/.g2cc/config.json` + restart (revert to `"menu"` to fall back instantly).**
 
 > **Name clash — read this first.** Elsewhere in this repo a **bare** `overhaul.md §N` (e.g. §5.16,
 > §10, §22/§23/§24) refers to the *separate* `/home/user/aria2/overhaul.md` (the ARIA swarm overhaul) —
@@ -205,8 +199,11 @@ work for a wearable.
      real firmware behaviour for the list widget, not a code choice.
   2. **The antenna** (a `scroll=true` text region as the event-capture): **every scroll notch fires a
      `focus` event carrying direction** (`f3`: 1=up, 2=down, hardware-confirmed). The server re-renders
-     content **live, no tap.** The OS menu screen already does this (`os-menu.ts` antenna + `ws-handler`
-     focus handler). **A per-notch live preview was built for the Files locations level and reverted
+     content **live, no tap.** (Mechanism — Adam 2026-06-30: the firmware sends **scroll-BOUNDARY events,
+     not per-position scroll**; the antenna is single-line/zero-range *so every notch instantly hits the
+     boundary* and fires. A MULTI-line `scroll=true` region instead scrolls locally and fires only at its
+     top/bottom edges — the basis for the §3.5 auto-page-advance.) The OS menu screen already does this
+     (`os-menu.ts` antenna + `ws-handler` focus handler). **A per-notch live preview was built for the Files locations level and reverted
      2026-06-11 because it "felt janky" — pulled for UX, not capability** (`os-windows.ts` ~:2545).
 - Implication: live "preview-as-you-scroll" is achievable via the antenna, but the server owns the cursor
   and redraws each notch; combine with debounce + caching (see Phase 2 §2.2.3 and the latency verdict
@@ -449,16 +446,17 @@ mandatory chrome). Built **behind a config flag** so the proven menu shell stays
 entire time. See §0.9 for rationale and `sdk-demo/src/mockup.ts` (`ribA/ribB/ribcat/ribwin/winsample`) for
 the visual target.
 
-## 2.1 Decisions to lock before coding (Adam)
+## 2.1 Decisions — DECIDED in the Phase 2 build (kept for lineage; Phase 3 reopens some)
 
-- **Double-tap semantics:** pop-one-level-then-exit-at-root (consistent with today, supports persistence)
-  vs straight-exit-to-ribbon (faster switch; relies on persistence for lossless re-entry). *Recommend
-  pop-one-level.*
-- **Ribbon lands on previous (index 1) vs current (index 0)** when you back out. *Recommend previous.*
-- **Recents depth** before windows spill to the drawer (5–8 is the phone-tested sweet spot).
-- **Drawer ordering:** categories (most discoverable) vs frecency vs alphabetical.
-- **Settle-preview feel:** confirm on glass whether ~150 ms rich-preview-on-settle reads as responsive
-  (the one thing the sim/latency-trace can't settle — a ~2-minute on-glass test).
+- **Double-tap semantics:** DECIDED — reading windows go straight-to-ribbon; browse windows navigate
+  hierarchically (own `onBack`: flip→pop→exit-at-root). Not the single uniform rule first recommended.
+- **Ribbon lands on previous (alt-tab):** DECIDED — lands on the previous window. *Phase 3 confirmed:*
+  with Main/Stats at slot 0 + active at slot 1, "previous" = **slot 2** (§3.1).
+- **Recents depth:** DECIDED — `de.recentsDepth` default 6. *Phase 3 replaces the pure-depth model with the
+  fixed-role order (§3.1).*
+- **Drawer ordering:** DECIDED — categories (`CATEGORY_ORDER`).
+- **Settle-preview feel:** DROPPED — there is no settle tier; the per-notch preview is `summary()` / a
+  cheap read-only `preview()` (no `view()`, no debounce), so no settle latency to tune.
 
 ## 2.2 Sub-phases (each flag-gated and independently testable)
 
@@ -482,6 +480,8 @@ the visual target.
   on-glass checks): no pinned left menu, optional window-drawn title/status, **micro-status (battery/
   unseen) folded into the clock line**. Each window keeps its `view()` (menu + content); the compositor
   places them full-width. Migrate windows one at a time under the flag.
+  **➡ Phase 2 did the chrome HALF (battery folded into the top, bottom bar dropped); the in-window
+  left-menu reclaim + borderless full-width windows are now the Phase 3 plan — see §3.3 / §3.4.**
 - **2.2.6 — Lossless persistence across switches.** Windows already persist (resume positions, live
   sessions tick in the background). Formalize: switching away never loses a window's full view
   stack/selection/scroll; re-entry restores exactly. Verify per window (Reader resume is the model).
@@ -510,6 +510,150 @@ the visual target.
 - Acceptance for cutover: ribbon stable as daily driver for a soak period, no regressions vs the menu
   shell, latency feels right on glass, byte budgets safe on every window's ribbon/preview/full-bleed
   frames.
+
+---
+
+# PART 3 — Phase 3: Ribbon refinement + the per-app redesign ("sovereign windows," finished)
+
+**Created 2026-06-30 (Adam's scoped tweak list).** Phase 2 shipped the ribbon root-nav and it's live +
+loved. Phase 3 is the refinement pass: finish reclaiming the in-window real estate (the pinned 96px left
+menu + the region borders), promote a fixed **Main/Stats** + a **frequent** slot into the ribbon order,
+**persist** recents, then redesign **every window's** layout for the new full-width surface. Still
+flag-gated on `de.rootNav: 'ribbon'`; `'menu'` stays the byte-for-byte fallback until the §2.2.8 cutover.
+Several items touch the proven `os-compose.ts` — the sanctioned, gated, `scene_to_png`-+-on-glass-verified
+exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, smoke-green + on-glass.**
+
+## 3.1 The ribbon order, finalized (supersedes §2.2.2's pure-MRU strip)
+
+The recents strip becomes a FIXED-role layout, left → right:
+
+```
+[ Main/Stats ] [ active ] [ recent ] [ recent ] [ recent ] [ frequent* ] [ All ]
+    slot 0       MRU0       MRU1       MRU2       MRU3        frecency      drawer
+```
+
+- **Slot 0 — Main/Stats (always leftmost, fixed).** A real ribbon window (no longer buried under
+  `All>Info`): the global glance — host/pool, battery states (G2 / phone / R1 / hat), unseen count, next
+  timer, **+ a recently-active-windows summary** (the per-window lines today's Main dashboard already
+  shows). This is today's Main dashboard + the Stats level, repurposed as the fixed slot-0 entry.
+- **Slot 1 — active** = the window you were just in (MRU[0]); the alt-tab target sits next to Main.
+- **Slots 2-4 — recents** in recency order (MRU[1..3]).
+- **Slot 5 — frequent\*** = the most-FREQUENTLY-used window NOT already in slots 1-4. **Needs a NEW
+  per-window activation COUNTER** — today only recency (`lastUsed`) exists, no frequency count (verified).
+- **Slot 6 — All** = the categorized drawer (category → window), unchanged.
+
+  ✅ **DECIDED (c) — cursor landing:** lands on **slot 2** — the most-recent-but-not-active window (one
+  right of the active slot), classic alt-tab (Adam 2026-06-30).
+  ⚠ **Open Q (e) — width:** the strip is already ~415px tight at 6 cells; 7 fixed cells may overflow the
+  zero-range budget. The windowing math hides off-cursor cells behind `<`/`>` (functional), but Main +
+  All should ideally stay glanceable — consider short/icon labels. On-glass tune.
+
+## 3.2 Persisted recents — fix the "resets too often" (#8; root cause verified)
+
+**Root cause (verified): `WindowManager` is constructed PER WebSocket connection** (`ws-handler.ts`
+`client.wm = new WindowManager(...)`) and the MRU (`lastUsed` Map + `useCounter`) is **in-memory**. Every
+reconnect — frequent at the factory with BLE drops — builds a fresh WM → recents reset to registration
+order. **Fix:** persist the MRU recency + the new frequency counter (§3.1) to the store (a small
+`window_usage` table or a `store` key), restore on construct → survives reconnects + restarts. *Verify
+there is no SECOND reset path (an `onActivate`, a filter) before assuming persistence alone fixes it —
+the Ten-Explanations habit.* Pure server, no UI risk → **do this first.**
+
+## 3.3 Chrome reclaim — borders, menus, content (supersedes the old §2.2.5 "deferred")
+
+The in-window real-estate finish. Flag-gated; `scene_to_png`-+-on-glass checked; the sanctioned touch of
+the proven compose layer.
+
+- **Remove per-region borders.** Drop the `BORDER_WIDTH=1` boxes. Keep exactly ONE rule: an **underline
+  beneath the title/ribbon bar**. ⚠ The 33px-bar overflow-scrollbar gremlin (padding inside a short bar
+  dropped the vertical room below the firmware threshold, 2026-06-10) means border/padding edits are
+  touchy — on-glass verify the bars don't sprout the firmware scrollbar.
+- **Move the in-app action menu OFF the left column and INTO the title/ribbon bar** → windows get the
+  full 576px width (reclaims the pinned 96px).
+  **Open Q (a) — THE central design question, in TWO regimes (one capture + one scroll axis):**
+  - **NOW (content is PAGED, not ring-scrolled) — RESOLVED:** today's reading windows already drive the
+    MENU with the ring (scroll = move selection, tap = act); content is paged by `Next`/`Prev`, never
+    ring-scrolled. So the menu RELOCATES to the title bar as a **fixed 3-cell `[prev] [current] [next]`
+    horizontal scroller** (Adam 2026-06-30) — scroll moves the window, the **center** cell is the live
+    selection, tap acts, **double-tap stays "back to ribbon."** No focus-flip; straight-to-ribbon
+    PRESERVED; the 96px column reclaimed; clamps at the list ends (no wrap, like the ribbon). Capacity is a
+    non-issue (only 3 ever show); the only cost is REACH-DISTANCE to a far action — trimmed by removing
+    `Main`/`Reload` + per-window tuning (§3.4).
+  - **FUTURE (content firmware-scrolls, §3.5):** once the ring scrolls CONTENT, it can no longer also
+    drive the title menu — then the rare actions need a **double-tap focus-flip** to the title strip, and
+    auto-page-advance (§3.5) removes `Next`/`Prev` from the menu entirely. This is the regime that trades
+    against straight-to-ribbon; gate it behind the §3.5 probe.
+- **Expand the content area** into the reclaimed menu width + the dropped status row (`DE_CONTENT_*` grow;
+  ribbon-mode `DE_CONTENT_H_FULL=255` already reclaims the bottom row — extend it leftward).
+- **Status bar only where useful** (CC/Aria live phase, Media position…). When present it gets a **top
+  rule (a line above), not a full border**; windows that don't need it reclaim the row.
+- **Remove `Main` and `Reload` from in-app menus (#7).**
+  - `Main` → redundant (it's ribbon slot 0 + double-tap-out). Drop the per-window row; the host handler stays.
+  - `Reload` → ✅ **REMOVED ENTIRELY** (Adam 2026-06-30: "never actually needed it"). Drop the reserved
+    label + every window's use of it. Transients already clear on navigation (`onDeactivate`/`onBack`), so
+    no manual escape is lost. **Keep the `displayReload()` capability DORMANT in the WM** as the hook for a
+    future **APK-harness button** if a wedged display ever needs the BLE re-takeover — it is no longer a
+    glass-side UI action.
+
+## 3.4 Per-app redesign pass (#9 — the bulk of the labor)
+
+Go window-by-window; rework each `view()` for: no left menu (actions in the top bar per §3.3), no borders,
+full-width content, status bar only where it earns its row. **Each window = its own commit + smoke**, like
+Phase 1 — and the §3.3 focus model (reading vs browse) resolved per window.
+
+- **Tmux (renamed from "Term" — #5):** `tab`/`label` `Term`/`Terminal` → **`Tmux`** (keep `id='term'` — it
+  keys the store + smoke; display-only rename). In a Claude-Code pane's tail view, **strip CC's own input
+  box AND everything below it** — the prompt box, plus the footer line(s) under it (**token/context count,
+  the permission-mode hint, the version string**) — and the useless full-width `─` rule lines. All of it
+  is fixed chrome that wastes rows; only the live transcript above the input box matters on glass (extends
+  the existing `collapseRules`/`termTextWidth` box-drawing handling to DROP, not just collapse). Detect the
+  input-box top border and discard from there down.
+- (…the other 13 windows + Main/Stats redesigned as the pass proceeds — enumerate per commit.)
+
+## 3.5 Firmware-native content scroll + auto page-advance (FUTURE — "eventually," #4)
+
+**Mechanism — corrected by Adam 2026-06-30 (I had it backwards):** the firmware sends us **scroll-BOUNDARY
+events ONLY** — never per-position scroll. The antenna is single-line/zero-range *precisely so* every notch
+instantly hits the boundary and fires (that IS the "per-notch focus" the menu/ribbon rely on). So for #4:
+make a large-content window's region a **MULTI-line `scroll=true` capture** — the firmware then scrolls the
+text **locally** within the region (no events mid-page), and when the scroll reaches the **top/bottom edge
+it fires the directional boundary event** → the server **auto-advances to the prev/next page.** "Auto-page
+at the end of the scrollable page" IS exactly the boundary event we already receive — so the mechanism is
+*understood + proven in principle* (the antenna is the single-line special case of it), not the unknown I
+first called it.
+
+⚠ **Still needs an on-glass confirmation (narrower than a blind probe):** that a **multi-line CAPTURED text
+region** (a) scrolls locally and (b) fires the directional boundary event at **both** the top and bottom
+edges (the antenna proves directional single-line; multi-line local-scroll is the new bit). Confirm, then
+wire auto-advance. Note the regime trade (§3.3 Open Q a): once content takes the ring this way, the
+title-bar action menu needs the double-tap focus-flip — but auto-advance also removes `Next`/`Prev` from
+that menu entirely. FUTURE phase, after the §3.3/§3.4 pass.
+
+## 3.6 Mitigate the accidental long-press "End Feature?" popup when blanked (#10 — investigate)
+
+A long-press while blanked triggers the FIRMWARE's native "End Feature?" / exit popup (kin to the `f1=9`
+shutDown/exitMode the keepalive notes say never to send). It's firmware-local, so suppression may not be
+in our gift. Investigate: does keeping a minimal non-exit "feature" context alive (vs a full blank) change
+the long-press behavior? Is there an input we can swallow? **Low-confidence — scope the investigation,
+don't promise a fix.**
+
+## 3.7 Sequencing + the review agenda
+
+Suggested order (each flag-gated, smoke-green, `scene_to_png`-checked, then on-glass):
+1. **§3.2 persistence** — pure server, no UI risk, fixes a daily annoyance. **First.**
+2. **§3.1 ribbon order** + Main/Stats slot-0 window + the frequency counter.
+3. **§3.3 chrome reclaim** — the compose-layer touch (borders, menu→title, content expand, Main/Reload
+   removal). Riskiest build step; Open Q (a)/(b) now settled — only (e) ribbon-width is on-glass tuning.
+4. **§3.4 per-app pass** — window-by-window (incl. the Tmux rename + CC-box strip).
+5. **§3.5 / §3.6** — investigations / future.
+
+**Open questions — settled 2026-06-30 except (d)/(e):**
+- ✅ **(a)** Menu-in-title (NOW) = a **fixed 3-cell `[prev][current][next]` horizontal scroller** (scroll
+  like the ribbon, center = live, tap acts, double-tap → ribbon). FUTURE firmware-scroll regime flips for
+  rare actions (§3.5).
+- ✅ **(b)** Reload **removed entirely** (future APK-harness button if ever needed).
+- ✅ **(c)** Cursor lands on **slot 2** (most-recent-not-active).
+- **(d)** "Frequent" = activation COUNT (the working default — cheap, persisted). Flag if you want dwell.
+- **(e)** Ribbon width: 7 fixed cells vs ~415px — on-glass tune (short/icon labels if it overflows).
 
 ---
 
