@@ -6,7 +6,7 @@
 // blank). Part 3 asserts menu mode (the default) is byte-for-byte unchanged.
 import './_env.mjs'   // MUST be first — DB isolation
 import { strict as assert } from 'node:assert'
-import { RibbonShell } from '../dist/ribbon.js'
+import { RibbonShell, projectView } from '../dist/ribbon.js'
 import { WindowManager } from '../dist/window-manager.js'
 import { estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
 
@@ -79,7 +79,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   // a pathological preview is clamped, never thrown past the wall.
   const big = r.scene('x'.repeat(5000))
   assert.ok(estimateLayoutFrameBytes(big.regions) <= LAYOUT_FRAME_BUDGET_BYTES, 'huge preview clamped under the wall')
-  console.error('  1. RibbonShell: depth+All>, clamp-scroll, lands-on-previous, drawer, blank, 1-capture, wall ✓')
+
+  // projectView (the rich settle tier) — each WinView mode → bounded preview text.
+  assert.match(projectView({ mode: 'text', text: 'a\nb\nc' }), /a\nb\nc/, 'text projection')
+  assert.match(projectView({ mode: 'browse', items: ['x', 'y'] }), /x\ny/, 'browse projection')
+  assert.match(projectView({ mode: 'twocol', textLeft: 'L', textRight: 'R' }), /L\nR/, 'twocol projection')
+  assert.match(projectView({ mode: 'tiles' }), /image — enter to view/, 'image modes → a text note')
+  assert.equal(projectView({ mode: 'text', text: Array.from({ length: 50 }, (_, i) => i).join('\n') }).split('\n').length, 6, 'projection bounded to ~6 rows')
+  console.error('  1. RibbonShell: depth+All>, clamp-scroll, lands-on-previous, drawer, blank, 1-capture, wall, projectView ✓')
 }
 
 // =========================================================== WM harness helpers
@@ -129,6 +136,14 @@ const settle = async (last, pred, what, ms = 15000) => {
     assert.notEqual(second, first, `scroll moved cursor [${first}] → [${second}]`)
     console.error(`  3. scroll moves the server-drawn cursor [${first}] → [${second}] ✓`)
 
+    // 3b. rich settle: the LIGHT preview renders now; after the debounce a RICH
+    // view() projection renders (never per-notch — the §2.3 jank guard).
+    const beforeRich = scenes.length
+    await sleep(450)   // > EVENT_DEBOUNCE_MS (300)
+    assert.ok(scenes.length > beforeRich, 'a rich settle render fired after the debounce')
+    assert.ok(hasRegion(last(), 'strip'), 'still the ribbon after the settle')
+    console.error('  3b. rich preview settles after the debounce (cached per window) ✓')
+
     // tap → ENTER that window (the scene becomes a real window view: a menu list).
     await wm.onTapGesture()
     sc = await settle(last, (x) => !hasRegion(x, 'strip') && (hasRegion(x, 'menu') || hasRegion(x, 'browse')), 'entered a window')
@@ -142,6 +157,18 @@ const settle = async (last, pred, what, ms = 15000) => {
     const landed = bracket(sc)
     assert.equal(landed, first, `double-tap → ribbon lands on the PREVIOUS window [${first}] (was just in [${second}])`)
     console.error(`  5. double-tap → ribbon, lands on previous [${landed}] (alt-tab) ✓`)
+
+    // 5b. persistence (§2.2.6): re-entering a window restores it — the window
+    // objects persist across ribbon switches (toRibbon stops transients, never
+    // resets navigation). Re-enter the window we were just in; it's still itself.
+    await wm.onScroll('up')   // cursor → the prior window (recents[0] after the switch)
+    await settle(last, (x) => bracket(x) === second, 'cursor back on the prior window')
+    await wm.onTapGesture()
+    sc = await settle(last, (x) => !hasRegion(x, 'strip') && hasRegion(x, 'browse'), 're-entered the prior window')
+    assert.ok(hasRegion(sc, 'browse'), 're-entry restores the window’s own view (persisted, not reset)')
+    await wm.onBackGesture()
+    await settle(last, (x) => hasRegion(x, 'strip'), 'back to ribbon')
+    console.error('  5b. re-entering a window restores it (lossless persistence) ✓')
 
     // scroll to All> and tap → the categorized drawer.
     for (let i = 0; i < 8; i++) { await wm.onScroll('down') }   // clamps at All>

@@ -14,7 +14,7 @@
 // Sessions live in the per-client SessionPool; window/session state survives
 // window switches (each window object persists for the client's lifetime).
 
-import { DE_CONTENT_W, DE_CONTENT_H, SCREEN_WIDTH } from '@g2cc/shared'
+import { DE_CONTENT_W, DE_CONTENT_H, SCREEN_WIDTH, EVENT_DEBOUNCE_MS } from '@g2cc/shared'
 import type { WireScene, MediaState, SmsThread, SmsMessage } from '@g2cc/shared'
 import { renderChart, type RenderedImage } from './os-content.js'
 import {
@@ -40,7 +40,7 @@ import { ReaderWindow } from './windows/reader.js'
 import { SmsWindow } from './windows/sms.js'
 import { MediaWindow } from './windows/media.js'
 import { NoticesWindow } from './windows/notices.js'
-import { RibbonShell } from './ribbon.js'
+import { RibbonShell, projectView } from './ribbon.js'
 
 /** How long a notification FLASH holds a BLANKED screen before auto-returning
  *  to blank. 10 s → 5 s (Adam 2026-06-12, Phase 2: "i use blank mode when
@@ -452,6 +452,16 @@ export class WindowManager {
    *  in-window, so it never races the window render loop). */
   private ribbonRendering = false
   private ribbonRenderQueued = false
+  /** Which preview tier the next ribbon render uses (§2.2.3): false = the LIGHT
+   *  per-notch summary() (~100 ms); true = the RICH settle projection of view(). */
+  private ribbonWantRich = false
+  /** Rich-preview cache (windowId → projected text) so revisiting is instant.
+   *  Invalidated when that window is entered (its state may change). */
+  private ribbonRich = new Map<string, string>()
+  /** Settle debounce: scroll renders the LIGHT preview now, then this fires the
+   *  RICH preview once scrolling stops (never per-notch — that is the Files jank,
+   *  §2.3). A sanctioned UI debounce, not an I/O timeout. */
+  private ribbonSettleTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(private ctx: WmContext) {
     // Each window's requestRender only fires while it IS the active window — a
@@ -514,6 +524,7 @@ export class WindowManager {
     notifyHub.off('seen', this.onHubSeen)
     notifyHub.off('dismissPhone', this.onHubDismissPhone)
     this.clearPopupTimer()
+    if (this.ribbonSettleTimer) { clearTimeout(this.ribbonSettleTimer); this.ribbonSettleTimer = null }
     if (this.dashboardPacer) { clearInterval(this.dashboardPacer); this.dashboardPacer = null }
     // Release any window-held resource (e.g. the Terminal capture poll).
     for (const w of this.windows) {
@@ -774,15 +785,16 @@ export class WindowManager {
   /** Ribbon-root render — its own conflated sender (separate from the window
    *  render loop; atRibbon XOR in-window so they never overlap). Fetches the
    *  preview text then sends the shell's scene. */
-  private renderRibbon(): void {
+  private renderRibbon(rich = false): void {
     if (!this.ribbon) return
+    this.ribbonWantRich = rich   // the loop reads this each pass — a new scroll resets it to light
     if (this.ribbonRendering) { this.ribbonRenderQueued = true; return }
     this.ribbonRendering = true
     void (async () => {
       try {
         do {
           this.ribbonRenderQueued = false
-          const preview = await this.ribbonPreview()
+          const preview = await this.ribbonPreview(this.ribbonWantRich)
           // A blank / overlay / leave-ribbon during the await supersedes this render.
           if (this.blanked || this.activeOverlay || !this.atRibbon) {
             this.ctx.log('[ribbon] render superseded (blank/overlay/left) — discarded')
@@ -809,12 +821,25 @@ export class WindowManager {
 
   /** The preview text for the highlighted ribbon item (light tier = the
    *  window's summary()). Failure-isolated — a down summary can't blank it. */
-  private async ribbonPreview(): Promise<string> {
+  private async ribbonPreview(rich: boolean): Promise<string> {
     if (!this.ribbon) return ''
     const id = this.ribbon.highlightedWindowId()
     if (!id) return this.ribbon.pseudoPreview()
     const w = this.windowById(id)
     if (!w) return ''
+    // Rich tier (settle): a cached, read-only projection of the window's view().
+    if (rich) {
+      const cached = this.ribbonRich.get(id)
+      if (cached !== undefined) return cached
+      try {
+        const proj = `${w.tab}\n\n${projectView(await w.view())}`
+        this.ribbonRich.set(id, proj)
+        return proj
+      } catch (e) {
+        this.ctx.log(`[ribbon] rich preview failed (${id}): ${(e as Error).message}`)
+        // fall through to the light summary below
+      }
+    }
     try { return `${w.tab}\n\n${await w.summary()}` }
     catch (e) {
       this.ctx.log(`[ribbon] preview summary failed (${id}): ${(e as Error).message}`)
@@ -851,7 +876,11 @@ export class WindowManager {
       }
     }
     this.parked = false                                    // Phase 2: entering a window un-parks it…
-    if (this.rootNav === 'ribbon') this.atRibbon = false   // …and leaves the ribbon
+    if (this.rootNav === 'ribbon') {
+      this.atRibbon = false                                // …and leaves the ribbon
+      this.ribbonRich.delete(id)                           // its state may change — drop the stale preview cache
+      if (this.ribbonSettleTimer) { clearTimeout(this.ribbonSettleTimer); this.ribbonSettleTimer = null }
+    }
     this.active = w
     if (id !== 'main') this.lastUsed.set(id, ++this.useCounter)   // Phase 11 MRU (monotonic, distinct)
     else (w as MainWindow).resetToRoot()                          // Phase 11: Main returns to its launcher root
@@ -1083,7 +1112,17 @@ export class WindowManager {
   async onScroll(dir: 'up' | 'down'): Promise<void> {
     if (this.rootNav !== 'ribbon' || !this.atRibbon || this.blanked || this.activeOverlay || !this.ribbon) return
     const act = this.ribbon.scroll(dir)
-    if (act.kind === 'recompose') this.renderRibbon()
+    if (act.kind === 'recompose') { this.renderRibbon(false); this.armRibbonSettle() }
+  }
+
+  /** Arm the rich-preview settle (§2.2.3): a window's RICH view() projection
+   *  renders only once scrolling stops (~EVENT_DEBOUNCE_MS), never per-notch. */
+  private armRibbonSettle(): void {
+    if (this.ribbonSettleTimer) clearTimeout(this.ribbonSettleTimer)
+    this.ribbonSettleTimer = setTimeout(() => {
+      this.ribbonSettleTimer = null
+      if (this.rootNav === 'ribbon' && this.atRibbon && !this.blanked && !this.activeOverlay) this.renderRibbon(true)
+    }, EVENT_DEBOUNCE_MS)
   }
 
   /** Park the active window (focus must not leak — stop its mic etc.) and show
@@ -1099,6 +1138,7 @@ export class WindowManager {
     if (fromWindow) this.ribbon.enterFromWindow()
     else this.ribbon.enterRoot()
     this.renderRibbon()
+    this.armRibbonSettle()   // the landed window settles to its rich preview after a beat
   }
 
   /** The 'Main' / home action: menu mode → the Main launcher window; ribbon

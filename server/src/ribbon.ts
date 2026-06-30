@@ -17,8 +17,26 @@
 
 import { SCREEN_WIDTH, SCREEN_HEIGHT, DE_BAR_H, DE_TITLE_W, DE_CONTENT_H, DE_REGION_IDS } from '@g2cc/shared'
 import type { WireScene, SceneRegion } from '@g2cc/shared'
-import { fwTextWidth, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from './os-compose.js'
+import { fwTextWidth, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES, type WinView } from './os-compose.js'
 import { CATEGORY_ORDER, type OsWindow, type WindowCategory } from './windows/types.js'
+
+/** Project a window's WinView to read-only PREVIEW text (the rich settle tier —
+ *  §2.2.3). Image content previews as a text note (§2.3: image previews aren't
+ *  viable as a scroll preview — seconds per tile). Bounded to a few lines (the
+ *  ribbon content pane is ~6 rows); the WM caches the result per window. */
+export function projectView(v: WinView): string {
+  const cap = (s: string, n = 6): string => s.split('\n').slice(0, n).join('\n')
+  switch (v.mode) {
+    case 'text': return cap(v.text ?? '')
+    case 'browse': return cap((v.items ?? []).join('\n'))
+    case 'twocol': return cap([v.textLeft, v.textRight].filter((x): x is string => !!x).join('\n'))
+    case 'tiles': case 'tile': case 'hands': {
+      const note = '[image — enter to view]'
+      return v.text ? `${note}\n${cap(v.text, 5)}` : note
+    }
+    default: return ''
+  }
+}
 
 /** A tap or double-tap on the ribbon resolves to one of these; the WM runs it. */
 export type RibbonAction =
