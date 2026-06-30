@@ -14,12 +14,15 @@
 // wire the Board API per upgrades.md Phase 11 when he mints a token.
 
 import { execFile } from 'node:child_process'
-import { splitGray4Tiles, type RenderedImage } from './os-content.js'
+import { splitGray4Tiles, encodeGray4Single, type RenderedImage, type RenderedTile } from './os-content.js'
+import { query, registerMigration } from './store.js'
+import type { BlackjackState } from './blackjack.js'
 
 const PY = '/home/user/G2CC/audio/venv/bin/python'
 const RPG_BIN = '/usr/bin/rpg-cli'
 const CHESS_SCRIPT = '/home/user/G2CC/scripts/chess_move.py'
 const BOARD_SCRIPT = '/home/user/G2CC/scripts/render_board.py'
+const HAND_SCRIPT = '/home/user/G2CC/scripts/render_hand.py'
 
 /** Dungeon root (Adam, gate A3.7): the whole home dir. The window never
  *  navigates above it. */
@@ -115,4 +118,58 @@ export function renderBoard(fen: string, w: number, h: number): Promise<Rendered
     boardCache.delete(oldest)
   }
   return p
+}
+
+// ---------------------------------------------------------------- blackjack
+
+/** A card to render: rank + suit, optionally face-DOWN (the dealer's hole). */
+export interface HandCard { rank: string; suit: string; down?: boolean }
+
+/** Render ONE blackjack hand to a single small gray4 tile (render_hand.py →
+ *  encodeGray4Single). NOT cached: a hand re-renders only when it actually
+ *  changed (a hit / a reveal), so a cache would always miss. The tile is sized
+ *  to its content by the caller — keep it small (the G2 image-cost rule). */
+export function renderHand(cards: HandCard[], w: number, h: number): Promise<RenderedTile> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(PY, [HAND_SCRIPT], { encoding: 'buffer', maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) { reject(new Error(`render_hand failed: ${err.message}${stderr?.length ? ' :: ' + stderr.toString() : ''}`)); return }
+        try {
+          resolve(encodeGray4Single(stdout as Buffer, 'render_hand'))
+        } catch (e) {
+          reject(e instanceof Error ? e : new Error(String(e)))
+        }
+      })
+    child.stdin?.on('error', (e: Error) => console.error(`[games] render_hand stdin: ${e.message}`))
+    child.stdin?.end(JSON.stringify({ cards, width: w, height: h }))
+  })
+}
+
+// Blackjack bankroll + in-progress hand persistence (single-row table). The
+// SHOE is deliberately not persisted — a reconnect reshuffles; card-counting
+// across a server restart isn't a goal, and the in-progress hand's cards are
+// restored exactly so totals/render stay faithful. Same fire-and-forget save
+// policy as paperclips_save.
+registerMigration('2026-06-29-blackjack-save', `CREATE TABLE IF NOT EXISTS blackjack_save (
+  id int PRIMARY KEY DEFAULT 1,
+  state jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT blackjack_singleton CHECK (id = 1)
+)`)
+
+/** Upsert the single blackjack save row. Rejects loudly on a DB error (the
+ *  controller logs it; the game keeps running in memory). */
+export function saveBlackjack(state: BlackjackState): Promise<unknown> {
+  return query(
+    `INSERT INTO blackjack_save (id, state, updated_at) VALUES (1, $1, now())
+     ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = now()`,
+    [JSON.stringify(state)],
+  )
+}
+
+/** Read the saved blackjack state, or null if none. */
+export async function loadBlackjack(): Promise<BlackjackState | null> {
+  const r = await query<{ state: BlackjackState }>('SELECT state FROM blackjack_save WHERE id = 1')
+  const s = r.rows[0]?.state
+  return s && typeof s === 'object' ? s : null
 }

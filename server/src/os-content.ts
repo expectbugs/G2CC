@@ -265,6 +265,27 @@ export function splitGray4Tiles(raw: Buffer, what: string): RenderedImage {
   return { w, h, tiles: tiles as [string, string, string, string] }
 }
 
+/** A single small gray4 image as ONE region — NOT split into a 2×2 grid. Used
+ *  for the blackjack hand tiles, where the cost model demands the smallest
+ *  possible independent image (a full tile is ~10 s on the G2; a small one is
+ *  exponentially quicker — memory g2-image-tile-cost). */
+export interface RenderedTile { w: number; h: number; bmpBase64: string }
+
+/** Same payload contract as splitGray4Tiles (u16-LE w, u16-LE h, then w*h gray4
+ *  bytes) but encoded as ONE BMP region. Applies the ALL-BLACK GUARD (an
+ *  all-black tile hard-kills the firmware slot). */
+export function encodeGray4Single(raw: Buffer, what: string): RenderedTile {
+  if (raw.length < 4) throw new Error(`${what} output too short (${raw.length}B)`)
+  const w = raw.readUInt16LE(0)
+  const h = raw.readUInt16LE(2)
+  if (raw.length !== 4 + w * h || w % 2 || h % 2) {
+    throw new Error(`${what} output ${raw.length}B for ${w}x${h} — malformed`)
+  }
+  const px = Buffer.from(raw.subarray(4, 4 + w * h))
+  if (!px.some((v) => v !== 0)) px[0] = 1   // all-black guard
+  return { w, h, bmpBase64: encodeGray4Bmp(w, h, px).toString('base64') }
+}
+
 export function renderImageFile(path: string, maxW: number, maxH: number): Promise<RenderedImage> {
   return new Promise((resolve, reject) => {
     execFile(PY, [IMAGE_SCRIPT, path, String(maxW), String(maxH)],
