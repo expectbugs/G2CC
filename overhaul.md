@@ -36,10 +36,20 @@ build the new ribbon-based DE/WM on that modular foundation, flag-gated and reve
 >   server-drawn cursor, tap enters, double-tap is **straight-to-ribbon** landing on the **previous**
 >   window, double-tap at the root blanks); the categorized **`All>` drawer** (CATEGORY_ORDER); reclaimed
 >   root chrome (full-width preview, no bars). **Menu mode is byte-for-byte unchanged** (smoke-proven).
-> - **§2.2.3 — tiered live preview**: LIGHT `summary()` per notch, RICH `view()` projection on settle
->   (debounced ~`EVENT_DEBOUNCE_MS`, cached per window; `projectView()`).
+> - **§2.2.3 — live preview**: a cheap per-notch preview — the highlighted window's `summary()` (the
+>   default) or its optional READ-ONLY `preview()` hook (rich opt-in). `view()` is deliberately NOT called
+>   on a hovered window — it spawns CC / hits the phone for some windows (a review fix; the settle
+>   debounce/cache were removed with it, since a cheap source needs no debounce).
 > - **§2.2.6 — lossless persistence**: verified — window objects persist; `toRibbon` stops only transients
 >   (the mic), never resets navigation. Only Games resets-on-activate (intentional).
+> - **Review-hardened (3-agent adversarial + own pass, every finding verified):** fixed a HIGH render-race
+>   (a slow window `view()` could paint over the ribbon), the `view()`-on-hover side-effect (above), the
+>   browse-window menu reachability (browse windows now navigate hierarchically on double-tap — flip → pop
+>   → exit-at-root — so Files/Mail/history stay usable; reading windows keep straight-to-ribbon), a
+>   multibyte wall-clamp, the strip's scroll-capture id (dedicated antenna id 50), + Blackjack legibility
+>   (numbersText fits ≤6 rows, glyph safety, tile cap-check). Reviewers CONFIRMED CLEAN: the state machine,
+>   index bounds, the parked/atRibbon invariant, menu-mode-byte-for-byte-unchanged, no-timeouts/truncation,
+>   config validation, resource teardown, hands-mode geometry/single-capture.
 > - Wire/host touchpoints: `window-manager.ts` (atRibbon state + mode-branched gestures, the `parked`
 >   double-deactivate guard, a separate conflated ribbon sender), `ws-handler.ts` (DE `focus` → `onScroll`),
 >   `config.ts` (the flag + validation). `os-compose.ts` was **not** touched (the ribbon builds its own

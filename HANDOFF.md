@@ -13,11 +13,17 @@ server NOT restarted — Adam holds the restart). **Blackjack re-applied** onto 
 (NEW `server/src/ribbon.ts` = `RibbonShell`): `de.rootNav: 'menu'|'ribbon'` (default `menu` = the proven
 launcher, **byte-for-byte unchanged** + the instant fallback). Antenna-driven MRU recents strip (scroll =
 a server-drawn cursor, tap = enter, double-tap = **straight-to-ribbon** landing on the PREVIOUS window,
-double-tap-at-root = blank), the categorized **`All>` drawer**, **tiered preview** (light `summary()` per
-notch, rich `view()` projection on settle + per-window cache), lossless persistence. The 15 windows are
-reused UNCHANGED. `composeScene` NOT touched (the ribbon builds its own scene like `os-menu`/`blankScene`).
+double-tap-at-root = blank — **but BROWSE windows navigate hierarchically on double-tap** (flip→pop→exit-
+at-root, so Files/Mail/history stay usable; review fix), the categorized **`All>` drawer**, a **cheap
+per-notch preview** (`summary()` or an optional read-only `preview()` hook — `view()` is NOT called on a
+hovered window, it would spawn CC / hit the phone), lossless persistence. The 15 windows are reused
+UNCHANGED. `composeScene` NOT touched (the ribbon builds its own scene like `os-menu`/`blankScene`).
 Host touch: `window-manager.ts` (atRibbon + mode-branched gestures), `ws-handler.ts` (DE `focus`→`onScroll`),
-`config.ts` (flag). **Remaining = on-glass-gated (needs Adam's glasses):** §2.2.5 in-window full-bleed
+`config.ts` (flag). **3-agent adversarial review + own pass, every finding verified** (fixed: a HIGH
+render-race painting over the ribbon, the view()-on-hover side-effect, browse-menu reachability, a
+multibyte wall-clamp, the strip scroll-capture id, Blackjack numbersText fit/glyphs/cap; CONFIRMED CLEAN:
+state machine, menu-mode-unchanged, no-timeouts/truncation, leaks). **Remaining = on-glass-gated (needs
+Adam's glasses):** §2.2.5 in-window full-bleed
 (DEFERRED — on-glass co-design of where the menu lives once the pinned column is gone), §2.2.7 on-glass
 hardening (the antenna feel/latency), §2.2.8 cutover (flip the default after the soak). **Try it on glass:
 set `"de":{"rootNav":"ribbon"}` in `~/.g2cc/config.json` + restart the server.** Full plan + the on-glass
