@@ -89,6 +89,13 @@ const CHROME: RegionStyle = { borderWidth: 1, borderColor: 6 }
 /** Title bar pops slightly (Adam 2026-06-11): one step thicker than the rest. */
 const TITLE_CHROME: RegionStyle = { borderWidth: 2, borderColor: 6 }
 
+/** Phase 3 §3.3: the in-window menu ANTENNA's dedicated scroll-capture id (the
+ *  fullBleed top-bar menu when it holds focus). A DEDICATED id — never the passive
+ *  title id 2 — because the client caches the scroll flag per id (same rule as the
+ *  ribbon strip's id 50; a passive-bar id reused as a capture risks the client not
+ *  flipping it). Distinct from the ribbon strip (50) though they never co-exist. */
+export const FULLBLEED_MENU_ID = 51
+
 // Measured G2 firmware glyph widths (docs/SIM_TOOLING.md): upper ≈11.4-11.9,
 // lower ≈9.6, digit ≈11.0, W/M ≈15.8 — close enough to right-align the tabs.
 export function fwTextWidth(s: string): number {
@@ -400,6 +407,157 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string,
   // and logs LOUDLY in the can't-happen case that a paged list alone overflows.
   fitFrameToBudget(regions, title)
   return { regions }
+}
+
+/** Phase 3 §3.3 — the BORDERLESS, FULL-WIDTH in-window layout (de.fullBleed). The
+ *  pinned left menu COLUMN is reclaimed: the window's action menu moves into the TOP
+ *  bar as a fixed 3-cell [prev][current][next] horizontal scroller (the ribbon's
+ *  antenna mechanism — Adam 2026-06-30), content spans the full 576 px, and the
+ *  bottom status bar shows ONLY when a live phase is present (else content reclaims
+ *  the row). Borderless except the top bar's frame — the single "underline" Adam
+ *  wants. A SEPARATE function so the proven composeScene stays byte-for-byte for menu
+ *  mode + the classic ribbon chrome.
+ *
+ *  `menu` is ALREADY stripped of the reserved Main/Reload by the WM (so lastView's
+ *  tap-resolution matches what renders). `menuCursor` is the WM-tracked selection
+ *  (the centre cell). The top bar is the scroll=true CAPTURE iff the menu holds focus
+ *  (any reading mode, or a browse window flipped to its menu); else the content list
+ *  captures and the bar is a passive title (a different id — see FULLBLEED_MENU_ID). */
+export function composeFullBleedScene(
+  view: WinView, battery: string, statusLine: string | null, menu: string[], menuCursor: number,
+): WireScene {
+  const regions: SceneRegion[] = []
+  const barW = DE_TITLE_W - DE_BATT_W
+  const menuCaptures = view.mode !== 'browse' || (view.menuMode ?? 'passive') === 'capture'
+  const hasStatus = statusLine !== null
+  const contentH = hasStatus ? DE_CONTENT_H : DE_CONTENT_H_FULL
+
+  // The top bar: a short title-context prefix + the 3-cell menu scroller. The 33 px
+  // row can't hold the full title beside the menu, so the title is clamped to a short
+  // prefix (page numbers etc. still live in the title's head). The centre cell is the
+  // live selection; '‹'/'›' mark hidden actions either side.
+  const cur = menu.length ? Math.max(0, Math.min(menu.length - 1, menuCursor)) : 0
+  const cell = (i: number): string => (i === cur ? `[${menu[i]}]` : menu[i])
+  const cells: string[] = []
+  if (menu.length) {
+    if (cur - 1 >= 0) cells.push(cell(cur - 1))
+    cells.push(cell(cur))
+    if (cur + 1 < menu.length) cells.push(cell(cur + 1))
+  }
+  let menuStr = cells.join('  ')
+  if (menu.length) {
+    if (cur - 1 >= 1) menuStr = '‹ ' + menuStr
+    if (cur + 1 < menu.length - 1) menuStr = menuStr + ' ›'
+  }
+  const menuPx = menu.length ? fwTextWidth(menuStr) : 0
+  const prefixBudget = menu.length ? Math.max(40, barW - menuPx - 24) : barW - 14
+  const prefix = clampPx(view.title, prefixBudget, 'fb-title')
+  const barText = menu.length ? `${prefix}  ${menuStr}` : prefix
+  // Dedicated antenna id when the menu captures; the passive title id otherwise (the
+  // per-id scroll-flag cache rule — see FULLBLEED_MENU_ID).
+  regions.push({
+    id: menuCaptures ? FULLBLEED_MENU_ID : DE_REGION_IDS.title, name: 'menu', x: 0, y: 0, w: barW, h: DE_BAR_H,
+    kind: 'text', style: TITLE_CHROME,
+    content: { kind: 'text', text: ' ' + barText, scroll: menuCaptures },
+  })
+  // Glasses battery, top-right (left of the client clock cutout).
+  regions.push({
+    id: DE_REGION_IDS.battery, name: 'battery', x: barW, y: 0, w: DE_BATT_W, h: DE_BAR_H,
+    kind: 'text', style: TITLE_CHROME,
+    content: { kind: 'text', text: clampPx(' ' + battery, DE_BATT_W - 6, 'battery') },
+  })
+
+  // Content — full width (x=0, w=576), BORDERLESS. Image modes keep their existing
+  // pane geometry (the reclaimed left 96 px just goes blank); text/browse/twocol span
+  // the screen so they reclaim the width too.
+  const contentCaptures = !menuCaptures   // browse content-focus: the list captures
+  if (view.mode === 'browse') {
+    const items = (view.items ?? []).map((s) => clampLabel(s, 'browse', BROWSE_ROW_MAX_BYTES))
+    const rows = items.length ? items : ['(empty)']
+    regions.push({
+      id: DE_REGION_IDS.browse, name: 'browse', x: 0, y: DE_BAR_H, w: SCREEN_WIDTH, h: contentH,
+      kind: 'list', content: { kind: 'list', items: rows, selectBorder: contentCaptures, eventCapture: contentCaptures },
+    })
+  } else if (view.mode === 'twocol') {
+    const colW = Math.floor((SCREEN_WIDTH - 6) / 2)   // 285
+    const clampCol = (text: string, what: string): string =>
+      (text ?? '').split('\n').map((l) => clampPx(l, colW - 10, what)).join('\n')
+    regions.push({
+      id: DE_REGION_IDS.contentText, name: 'content', x: 0, y: DE_BAR_H, w: colW, h: contentH,
+      kind: 'text', content: { kind: 'text', text: clampCol(view.textLeft ?? '', 'fb-twocol-left') },
+    })
+    regions.push({
+      id: DE_REGION_IDS.contentRight, name: 'content2', x: colW + 6, y: DE_BAR_H, w: colW, h: contentH,
+      kind: 'text', content: { kind: 'text', text: clampCol(view.textRight ?? '', 'fb-twocol-right') },
+    })
+  } else if (view.mode === 'tiles' || view.mode === 'tile' || view.mode === 'hands') {
+    // Image modes keep the proven tile geometry (DE_CONTENT_*-relative); only the
+    // menu/chrome reclaim applies. Delegate to the classic placement by reusing the
+    // same rects the proven path uses (the left 96 px is simply unused now).
+    placeImageRegions(view, regions)
+  } else {
+    regions.push({
+      id: DE_REGION_IDS.contentText, name: 'content', x: 0, y: DE_BAR_H, w: SCREEN_WIDTH, h: contentH,
+      kind: 'text', content: { kind: 'text', text: view.text ?? '' },
+    })
+  }
+
+  // Bottom status bar — ONLY when a live phase is present (else content reclaimed the
+  // row). A bordered bar (the "line above" — the wire has no per-side rule; a subtle
+  // box reads as separation, an on-glass tuning point).
+  if (hasStatus) {
+    regions.push({
+      id: DE_REGION_IDS.status, name: 'status', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: SCREEN_WIDTH, h: DE_BAR_H,
+      kind: 'text', style: CHROME,
+      content: { kind: 'text', text: clampPx(' ' + (statusLine ?? ''), SCREEN_WIDTH - 12, 'fb-status') },
+    })
+  }
+  fitFrameToBudget(regions, view.title)
+  return { regions }
+}
+
+/** Place the image regions for tiles/tile/hands modes at the PROVEN pane geometry
+ *  (shared by the fullBleed path so image layouts stay identical — only the chrome
+ *  around them changes). Throws the same way the classic path does on a missing tile. */
+function placeImageRegions(view: WinView, regions: SceneRegion[]): void {
+  if (view.mode === 'tiles') {
+    const tiles = view.tiles
+    if (!tiles) throw new Error(`compose: '${view.title}' is tiles mode but has no tiles`)
+    const fullW = view.tilesRect?.w ?? DE_CONTENT_W
+    const fullH = view.tilesRect?.h ?? DE_CONTENT_H
+    if (fullW > DE_CONTENT_W || fullH > DE_CONTENT_H || fullW % 2 || fullH % 2) {
+      throw new Error(`compose: '${view.title}' tilesRect ${fullW}x${fullH} invalid (≤${DE_CONTENT_W}x${DE_CONTENT_H}, even)`)
+    }
+    const tw = fullW / 2, th = fullH / 2
+    const ox = DE_CONTENT_X + ((DE_CONTENT_W - fullW) >> 1)
+    const oy = DE_CONTENT_Y + ((DE_CONTENT_H - fullH) >> 1)
+    const grid = [{ x: ox, y: oy }, { x: ox + tw, y: oy }, { x: ox, y: oy + th }, { x: ox + tw, y: oy + th }]
+    grid.forEach((g, i) => regions.push({
+      id: DE_REGION_IDS.tile0 + i, name: `t${i}`, x: g.x, y: g.y, w: tw, h: th,
+      kind: 'image', content: { kind: 'image', bmpBase64: tiles[i] },
+    }))
+  } else if (view.mode === 'tile') {
+    const tile = view.tile
+    if (!tile) throw new Error(`compose: '${view.title}' is tile mode but has no tile`)
+    regions.push({
+      id: DE_REGION_IDS.tile0, name: 't0',
+      x: DE_CONTENT_X + ((DE_CONTENT_W - SINGLE_TILE_W) >> 1), y: DE_CONTENT_Y + ((DE_CONTENT_H - SINGLE_TILE_H) >> 1),
+      w: SINGLE_TILE_W, h: SINGLE_TILE_H, kind: 'image', content: { kind: 'image', bmpBase64: tile },
+    })
+  } else {   // hands
+    if (view.dealerTile) regions.push({
+      id: DE_REGION_IDS.tile0, name: 't0', x: BJ_DEALER_RECT.x, y: BJ_DEALER_RECT.y, w: BJ_DEALER_RECT.w, h: BJ_DEALER_RECT.h,
+      kind: 'image', content: { kind: 'image', bmpBase64: view.dealerTile },
+    })
+    if (view.playerTile) regions.push({
+      id: DE_REGION_IDS.tile2, name: 't2', x: BJ_PLAYER_RECT.x, y: BJ_PLAYER_RECT.y, w: BJ_PLAYER_RECT.w, h: BJ_PLAYER_RECT.h,
+      kind: 'image', content: { kind: 'image', bmpBase64: view.playerTile },
+    })
+    regions.push({
+      id: DE_REGION_IDS.contentText, name: 'content', x: BJ_TEXT_RECT.x, y: BJ_TEXT_RECT.y, w: BJ_TEXT_RECT.w, h: BJ_TEXT_RECT.h,
+      kind: 'text', content: { kind: 'text', text: view.text ?? '' },
+    })
+  }
 }
 
 /** Trim a TEXT region's content by ~`bytesToCut`, code-point-safe, with a '…'

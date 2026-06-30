@@ -18,7 +18,7 @@ import { DE_CONTENT_W, DE_CONTENT_H, SCREEN_WIDTH } from '@g2cc/shared'
 import type { WireScene, MediaState, SmsThread, SmsMessage } from '@g2cc/shared'
 import { renderChart, type RenderedImage } from './os-content.js'
 import {
-  composeScene, paginateText, errorView, blankScene, blankFlashScene, fwTextWidth,
+  composeScene, composeFullBleedScene, paginateText, errorView, blankScene, blankFlashScene, fwTextWidth,
   DEFAULT_BROWSE_MENU, type WinView, type RibbonChrome,
 } from './os-compose.js'
 import { parseVoiceCommand, type VoiceCommand } from './voice.js'
@@ -456,6 +456,13 @@ export class WindowManager {
    *  in-window, so it never races the window render loop). */
   private ribbonRendering = false
   private ribbonRenderQueued = false
+  /** Phase 3 §3.3 staging flag (ribbon mode only): the borderless full-width
+   *  in-window layout with the action menu in the top bar. Read once from config. */
+  private fullBleed = false
+  /** §3.3: the in-window top-bar menu selection (the 3-cell scroller's centre cell),
+   *  in fullBleed mode. Server-drawn (the menu is an antenna, not a native list).
+   *  Reset on switchTo; clamped each render to the rendered menu length. */
+  private winMenuCursor = 0
 
   constructor(private ctx: WmContext) {
     // Each window's requestRender only fires while it IS the active window — a
@@ -481,6 +488,9 @@ export class WindowManager {
     // 'menu' is byte-for-byte the proven behaviour; 'ribbon' engages the new
     // shell (the 14 modular windows are reused unchanged, only re-selected).
     this.rootNav = this.ctx.config?.de?.rootNav === 'ribbon' ? 'ribbon' : 'menu'
+    // Phase 3 §3.3: fullBleed (the borderless full-width in-window layout) is a
+    // ribbon-mode staging flag — no effect in menu mode (the proven fallback).
+    this.fullBleed = this.rootNav === 'ribbon' && this.ctx.config?.de?.fullBleed === true
     if (this.rootNav === 'ribbon') {
       this.ribbon = new RibbonShell(
         () => this.windows.find((w) => w.id === 'main') ?? this.windows[0],     // slot 0 — Main/Stats (fixed)
@@ -517,8 +527,12 @@ export class WindowManager {
       // Keep new stamps monotonic ABOVE every restored one (they are ordering
       // tokens, not a clock — a fresh switchTo must still sort newest).
       if (this.useCounter < maxStamp) this.useCounter = maxStamp
+      // Re-render ONLY at the ribbon root (where the restored order shows at once +
+      // the atRibbon guard means we're not inside a window). Elsewhere the restored
+      // MRU surfaces on the next natural render (the dashboard pacer / any
+      // interaction) — never a spurious render injected mid-interaction (which could
+      // race an in-flight tile-byte comparison or a confirm step).
       if (this.rootNav === 'ribbon' && this.atRibbon) this.renderRibbon()
-      else this.requestRender()
     }).catch((e: unknown) => this.ctx.log(`[os] window-usage load failed (in-memory order kept): ${e instanceof Error ? e.message : String(e)}`))
     // Phase 5: the dashboard re-render pacer — ONLY while Main is on screen
     // (a pacing cadence, not an event bus; B3-sanctioned category).
@@ -749,19 +763,38 @@ export class WindowManager {
           // battery region top-right, the bottom status bar DROPPED (content
           // reclaims the row) unless the active window has a live session phase.
           // Menu mode (undefined) composes the proven layout, byte-for-byte.
-          const chrome: RibbonChrome | undefined = this.rootNav === 'ribbon'
+          // Phase 3 (§3.3) fullBleed goes further than the §2.2.5 chrome: a borderless
+          // full-width layout with the action menu in the top bar. The overlay always
+          // uses the classic path (a transient full-screen takeover).
+          const useFullBleed = this.fullBleed && !this.activeOverlay
+          // The menu the user SEES + that taps resolve against. fullBleed strips the
+          // reserved Main/Reload (Adam: removed; Main is ribbon slot 0). Classic browse
+          // normalizes to DEFAULT_BROWSE_MENU so compose + tap agree (review 2026-06-11).
+          let renderedMenu: string[] | undefined = useFullBleed
+            ? (view.menu ?? []).filter((m) => m !== 'Main' && m !== 'Reload')
+            : (view.mode === 'browse' ? (view.menu ?? [...DEFAULT_BROWSE_MENU]) : view.menu)
+          const ribbonChrome = (): RibbonChrome | undefined => this.rootNav === 'ribbon'
             ? { battery: this.g2BatteryText(), bottomBar: this.active.statusLine?.() ?? null }
             : undefined
           let scene: WireScene
           try {
-            scene = composeScene(view, [], this.statusLeft(), chrome)
+            if (useFullBleed) {
+              this.winMenuCursor = Math.max(0, Math.min(Math.max(0, renderedMenu!.length - 1), this.winMenuCursor))
+              scene = composeFullBleedScene(view, this.g2BatteryText(), this.active.statusLine?.() ?? null, renderedMenu!, this.winMenuCursor)
+            } else {
+              scene = composeScene(view, [], this.statusLeft(), ribbonChrome())
+            }
           } catch (e) {
-            // A compose failure must NEVER escape (it used to crash the whole
-            // server as an unhandled rejection — review 2026-06-10). errorView
-            // composes by construction: text mode + a non-empty menu.
+            // A compose failure must NEVER escape (it used to crash the whole server
+            // — review 2026-06-10). errorView composes by construction, and ALWAYS via
+            // the classic path: its Retry/Reload/Main menu is the recovery surface
+            // (fullBleed would strip Reload/Main, and a native menu list is the safe
+            // recovery input even when the antenna model is on).
             this.ctx.log(`[os] compose failed for ${this.active.id}: ${(e as Error).message}`)
             view = errorView(`${this.active.label} · error`, (e as Error).message)
-            scene = composeScene(view, [], this.statusLeft(), chrome)
+            renderedMenu = view.menu
+            scene = composeScene(view, [], this.statusLeft(),
+              this.rootNav === 'ribbon' ? { battery: this.g2BatteryText(), bottomBar: null } : undefined)
           }
           // Re-check the blank state AFTER the awaits: a double-tap blank, the
           // popup auto-re-blank, or an overlay Dismiss-from-blank may have sent
@@ -780,10 +813,10 @@ export class WindowManager {
             this.ctx.log('[os] render completed after a blank / ribbon switch — discarded')
             continue
           }
-          // Normalize the menu the user actually SEES — MUST match compose's own
-          // browse default exactly (they diverged: compose rendered Reload/Main
-          // while taps resolved Back/Main — index-0 misroute; review 2026-06-11).
-          this.lastView = { ...view, menu: view.mode === 'browse' ? (view.menu ?? [...DEFAULT_BROWSE_MENU]) : view.menu }
+          // lastView carries the EXACT menu rendered (classic-normalized, or the
+          // fullBleed-stripped one) — taps resolve against it (index for the native
+          // list; winMenuCursor for the fullBleed antenna), so they must agree.
+          this.lastView = { ...view, menu: renderedMenu }
           if (this.activeOverlay && view === this.activeOverlay) this.overlayRendered = true
           this.ctx.send(scene)
           // Phase 4 queue flush: promote ONE pending overlay once nothing
@@ -915,6 +948,7 @@ export class WindowManager {
     }
     this.parked = false                                    // Phase 2: entering a window un-parks it…
     if (this.rootNav === 'ribbon') this.atRibbon = false   // …and leaves the ribbon
+    this.winMenuCursor = 0                                 // §3.3: the new window's menu starts at cell 0
     this.active = w
     if (id !== 'main') {
       this.lastUsed.set(id, ++this.useCounter)                    // Phase 11 MRU (monotonic, distinct)
@@ -1038,32 +1072,65 @@ export class WindowManager {
         this.ctx.log(`[os] select on unknown region '${region}' idx=${index} — ignored`)
       }
     } catch (e) {
-      if (e instanceof SwitchTo) {
-        this.switchTo(e.windowId)
-        if (e.menuLabel) {
-          // Main's `Ask` (Phase 6): invoke the target's OWN menu action so the
-          // existing dictation path runs verbatim — same queue/busy semantics.
-          try {
-            await this.active.onMenuSelect(e.menuLabel)
-          } catch (err) {
-            this.ctx.log(`[os] post-switch menu '${e.menuLabel}' failed (${this.active.id}): ${(err as Error).message}`)
-            this.requestRender()
-          }
-        }
-        if (e.open) {
-          // Phase 12: Search hands a specific item to the target window.
-          try {
-            await this.active.onOpen?.(e.open)
-          } catch (err) {
-            this.ctx.log(`[os] post-switch open '${e.open.kind}' failed (${this.active.id}): ${(err as Error).message}`)
-            this.requestRender()
-          }
-        }
-        return
-      }
+      if (e instanceof SwitchTo) { await this.handleSwitchTo(e); return }
       this.ctx.log(`[os] select handler failed (${this.active.id}/${region}/${index}): ${(e as Error).message}`)
       this.requestRender()   // view() surfaces the error state; never a dead screen
     }
+  }
+
+  /** A window handler threw SwitchTo (Search/voice/Ask hand-off) — switch + invoke
+   *  the target's menu label / onOpen. Shared by onSelect + the fullBleed menu tap. */
+  private async handleSwitchTo(e: SwitchTo): Promise<void> {
+    this.switchTo(e.windowId)
+    if (e.menuLabel) {
+      // Main's `Ask` (Phase 6): invoke the target's OWN menu action so the existing
+      // dictation path runs verbatim — same queue/busy semantics.
+      try {
+        await this.active.onMenuSelect(e.menuLabel)
+      } catch (err) {
+        this.ctx.log(`[os] post-switch menu '${e.menuLabel}' failed (${this.active.id}): ${(err as Error).message}`)
+        this.requestRender()
+      }
+    }
+    if (e.open) {
+      // Phase 12: Search hands a specific item to the target window.
+      try {
+        await this.active.onOpen?.(e.open)
+      } catch (err) {
+        this.ctx.log(`[os] post-switch open '${e.open.kind}' failed (${this.active.id}): ${(err as Error).message}`)
+        this.requestRender()
+      }
+    }
+  }
+
+  /** Run a window MENU label — the reserved labels first (Main/Reload/Retry/Back),
+   *  else delegate to the window, catching SwitchTo. Shared by the fullBleed top-bar
+   *  antenna tap (§3.3) and mirroring onSelect's menu branch so both paths agree. */
+  private async runWindowMenu(label: string): Promise<void> {
+    switch (label) {
+      case 'Main': this.goHome(); return
+      case 'Reload': this.reload(); return
+      case 'Retry': this.requestRender(); return
+      case 'Back':
+        if (this.rootNav === 'ribbon' && !this.atRibbon) { await this.popWindowLevel(); return }
+        await this.onBackGesture(); return
+    }
+    try {
+      await this.active.onMenuSelect(label)
+    } catch (e) {
+      if (e instanceof SwitchTo) { await this.handleSwitchTo(e); return }
+      this.ctx.log(`[os] menu '${label}' failed (${this.active.id}): ${(e as Error).message}`)
+      this.requestRender()
+    }
+  }
+
+  /** §3.3: does the fullBleed top-bar menu hold focus right now (vs the content
+   *  list)? Reading windows: always. Browse windows: only when flipped to 'capture'.
+   *  Mirrors composeFullBleedScene's menuCaptures so scroll/tap route to one region. */
+  private fullBleedMenuCaptures(): boolean {
+    const v = this.lastView
+    if (!v) return false
+    return v.mode !== 'browse' || v.menuMode === 'capture'
   }
 
   /** Sys tap. No DE surface consumes these since the Files antenna revert
@@ -1085,6 +1152,15 @@ export class WindowManager {
       const act = this.ribbon.select()
       if (act.kind === 'enter') { this.switchTo(act.windowId); return }   // switchTo clears atRibbon
       if (act.kind === 'recompose') this.renderRibbon()
+      return
+    }
+    // §3.3 fullBleed in-window: a sys tap on the top-bar menu antenna = select the
+    // centre (current) cell. (When the content list captures, taps arrive as
+    // hub_select → onSelect; this branch only fires when the menu antenna captures.)
+    if (this.rootNav === 'ribbon' && this.fullBleed && !this.atRibbon && !this.activeOverlay && this.fullBleedMenuCaptures()) {
+      const label = this.lastView?.menu?.[this.winMenuCursor]
+      if (label === undefined) { this.ctx.log('[os] fullBleed menu tap — empty/out-of-range, resyncing'); this.requestRender(); return }
+      await this.runWindowMenu(label)
       return
     }
     this.ctx.log(`[os] sys tap on ${this.active.id} — no consumer (antenna retired), ignored`)
@@ -1181,9 +1257,23 @@ export class WindowManager {
   /** Antenna scroll (ribbon root). f3 direction routed from ws-handler. No-op in
    *  menu mode / inside a window / blanked (the focus event has no consumer). */
   async onScroll(dir: 'up' | 'down'): Promise<void> {
-    if (this.rootNav !== 'ribbon' || !this.atRibbon || this.blanked || this.activeOverlay || !this.ribbon) return
-    const act = this.ribbon.scroll(dir)
-    if (act.kind === 'recompose') this.renderRibbon()
+    if (this.rootNav !== 'ribbon' || this.blanked || this.activeOverlay) return
+    if (this.atRibbon) {
+      if (!this.ribbon) return
+      const act = this.ribbon.scroll(dir)
+      if (act.kind === 'recompose') this.renderRibbon()
+      return
+    }
+    // §3.3 fullBleed in-window: the top-bar menu antenna captures (a reading window,
+    // or a browse window flipped to its menu) → scroll moves the 3-cell selection.
+    if (this.fullBleed && this.fullBleedMenuCaptures()) {
+      const menu = this.lastView?.menu ?? []
+      if (menu.length === 0) return
+      const next = Math.max(0, Math.min(menu.length - 1, dir === 'down' ? this.winMenuCursor + 1 : this.winMenuCursor - 1))
+      if (next === this.winMenuCursor) return
+      this.winMenuCursor = next
+      this.requestRender()
+    }
   }
 
   /** Park the active window (focus must not leak — stop its mic etc.) and show
