@@ -76,6 +76,13 @@ export interface OsWindow {
    *  "Timers: none pending" beside a live next-timer line until the window
    *  was first visited; review 2026-06-11b). Main isolates failures per row. */
   summary(): string | Promise<string>
+  /** A richer, READ-ONLY, in-memory preview for the ribbon's rich tier (Phase 2
+   *  §2.2.3). MUST be cheap + side-effect-free — NO I/O, NO subprocess spawn, NO
+   *  phone request — because it is called for a merely-HIGHLIGHTED ribbon window,
+   *  not the active one. Absent → the ribbon falls back to summary(). (view() is
+   *  deliberately NOT used for previews: aria/cc spawn the CC subprocess and
+   *  sms/mail/reader hit the phone/disk on view() — hovering must not do that.) */
+  preview?(): string | null
   /** Live activity phase for the bottom status bar (g2aria-style: listening →
    *  transcribing → confirm → thinking → tool → writing). null = idle. */
   statusLine?(): string | null

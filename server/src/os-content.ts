@@ -281,6 +281,7 @@ export function encodeGray4Single(raw: Buffer, what: string): RenderedTile {
   if (raw.length !== 4 + w * h || w % 2 || h % 2) {
     throw new Error(`${what} output ${raw.length}B for ${w}x${h} — malformed`)
   }
+  if (w > 288 || h > 129) throw new Error(`${what} tile ${w}x${h} exceeds the 288x129 client cap`)
   const px = Buffer.from(raw.subarray(4, 4 + w * h))
   if (!px.some((v) => v !== 0)) px[0] = 1   // all-black guard
   return { w, h, bmpBase64: encodeGray4Bmp(w, h, px).toString('base64') }

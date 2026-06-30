@@ -17,26 +17,8 @@
 
 import { SCREEN_WIDTH, SCREEN_HEIGHT, DE_BAR_H, DE_TITLE_W, DE_CONTENT_H, DE_REGION_IDS } from '@g2cc/shared'
 import type { WireScene, SceneRegion } from '@g2cc/shared'
-import { fwTextWidth, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES, type WinView } from './os-compose.js'
+import { fwTextWidth, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from './os-compose.js'
 import { CATEGORY_ORDER, type OsWindow, type WindowCategory } from './windows/types.js'
-
-/** Project a window's WinView to read-only PREVIEW text (the rich settle tier —
- *  §2.2.3). Image content previews as a text note (§2.3: image previews aren't
- *  viable as a scroll preview — seconds per tile). Bounded to a few lines (the
- *  ribbon content pane is ~6 rows); the WM caches the result per window. */
-export function projectView(v: WinView): string {
-  const cap = (s: string, n = 6): string => s.split('\n').slice(0, n).join('\n')
-  switch (v.mode) {
-    case 'text': return cap(v.text ?? '')
-    case 'browse': return cap((v.items ?? []).join('\n'))
-    case 'twocol': return cap([v.textLeft, v.textRight].filter((x): x is string => !!x).join('\n'))
-    case 'tiles': case 'tile': case 'hands': {
-      const note = '[image — enter to view]'
-      return v.text ? `${note}\n${cap(v.text, 5)}` : note
-    }
-    default: return ''
-  }
-}
 
 /** A tap or double-tap on the ribbon resolves to one of these; the WM runs it. */
 export type RibbonAction =
@@ -47,6 +29,13 @@ export type RibbonAction =
 
 /** The drawer entry in the recents strip. '▸' does NOT render (Appendix B) — ASCII '>'. */
 const ALL_ENTRY = 'All>'
+
+/** The strip's container id — a DEDICATED scroll-antenna id (the proven pattern:
+ *  blankScene's 'wake' and os-menu's 'ant' both use 50), NEVER a passive-bar id.
+ *  The client caches the scroll flag per id, so reusing a passive bar id (e.g.
+ *  status=4) as a scroll-capture risks the client not flipping it to capture on
+ *  entry; a fresh id is always added as a capture region. */
+const RIBBON_STRIP_ID = 50
 
 type RibbonLevel = 'recents' | 'cats' | 'cat-wins'
 interface RibbonItem { label: string; windowId: string | null }
@@ -99,7 +88,11 @@ export class RibbonShell {
   enterFromWindow(): void {
     this.level = 'recents'
     this.selectedCategory = null
-    this.cursor = this.recentsItems().length > 1 ? 1 : 0
+    // Land on the previous WINDOW (index 1) — but only if recents holds ≥2
+    // windows. At depth 1 the strip is [window, All>], so index 1 is the drawer
+    // entry, not a window; land on 0 there.
+    const winCount = Math.min(Math.max(1, Math.floor(this.depth())), this.recents().length)
+    this.cursor = winCount > 1 ? 1 : 0
   }
   /** Entering the ribbon as "home" (the Main label / boot / blank-wake): the
    *  recents root, cursor on the most-recent window. */
@@ -174,7 +167,10 @@ export class RibbonShell {
     const cell = (i: number): string => (i === cur ? `[${items[i].label}]` : items[i].label)
     const SEP = '  '
     const sepW = fwTextWidth(SEP)
-    const budget = SCREEN_WIDTH - 16 - 28   // bar inset + room for the '<'/'>' markers
+    // Reserve room so the strip stays ZERO-RANGE (fits its region → each scroll
+    // fires a per-notch focus event instead of internally scrolling): ~16 px inset
+    // + ~6 px for scene()'s leading space + ~30 px for the two '<'/'>' markers.
+    const budget = SCREEN_WIDTH - 16 - 6 - 30
     let lo = cur, hi = cur
     let width = fwTextWidth(cell(cur))
     let grow = true
@@ -222,17 +218,27 @@ export class RibbonShell {
       },
       {
         // The bottom-bar strip — the antenna (scroll=true) and the sole capture.
-        id: DE_REGION_IDS.status, name: 'strip', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: SCREEN_WIDTH, h: DE_BAR_H,
+        // RIBBON_STRIP_ID is a DEDICATED scroll-antenna id, NOT the passive status
+        // bar id (the client caches the scroll flag per id — see the const above).
+        id: RIBBON_STRIP_ID, name: 'strip', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: SCREEN_WIDTH, h: DE_BAR_H,
         kind: 'text', content: { kind: 'text', text: ' ' + this.stripText(), scroll: true },
       },
     ]
     let regions = build(previewText)
-    let est = estimateLayoutFrameBytes(regions)
-    if (est > LAYOUT_FRAME_BUDGET_BYTES) {
-      // The preview is the only unbounded part — clamp hard and retry once.
-      regions = build(previewText.slice(0, 360))
-      est = estimateLayoutFrameBytes(regions)
-      if (est > LAYOUT_FRAME_BUDGET_BYTES) throw new Error(`ribbonScene ≈${est}B over the ${LAYOUT_FRAME_BUDGET_BYTES}B wall`)
+    if (estimateLayoutFrameBytes(regions) > LAYOUT_FRAME_BUDGET_BYTES) {
+      // The preview is the only unbounded part. Clamp it to the longest prefix
+      // that fits the BYTE budget — estimateLayoutFrameBytes counts UTF-8 bytes,
+      // so a char-count slice would defeat the wall for a multibyte (CJK) preview.
+      // Binary-search the prefix length; keeps as much as fits.
+      let lo = 0, hi = previewText.length
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2)
+        if (estimateLayoutFrameBytes(build(previewText.slice(0, mid))) <= LAYOUT_FRAME_BUDGET_BYTES) lo = mid
+        else hi = mid - 1
+      }
+      regions = build(previewText.slice(0, lo))
+      const est = estimateLayoutFrameBytes(regions)
+      if (est > LAYOUT_FRAME_BUDGET_BYTES) throw new Error(`ribbonScene ≈${est}B over the ${LAYOUT_FRAME_BUDGET_BYTES}B wall (breadcrumb+strip alone)`)
     }
     return { regions }
   }

@@ -6,7 +6,7 @@
 // blank). Part 3 asserts menu mode (the default) is byte-for-byte unchanged.
 import './_env.mjs'   // MUST be first — DB isolation
 import { strict as assert } from 'node:assert'
-import { RibbonShell, projectView } from '../dist/ribbon.js'
+import { RibbonShell } from '../dist/ribbon.js'
 import { WindowManager } from '../dist/window-manager.js'
 import { estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
 
@@ -78,15 +78,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   assert.ok(est <= LAYOUT_FRAME_BUDGET_BYTES, `ribbon scene ${est}B under the ${LAYOUT_FRAME_BUDGET_BYTES}B wall`)
   // a pathological preview is clamped, never thrown past the wall.
   const big = r.scene('x'.repeat(5000))
-  assert.ok(estimateLayoutFrameBytes(big.regions) <= LAYOUT_FRAME_BUDGET_BYTES, 'huge preview clamped under the wall')
-
-  // projectView (the rich settle tier) — each WinView mode → bounded preview text.
-  assert.match(projectView({ mode: 'text', text: 'a\nb\nc' }), /a\nb\nc/, 'text projection')
-  assert.match(projectView({ mode: 'browse', items: ['x', 'y'] }), /x\ny/, 'browse projection')
-  assert.match(projectView({ mode: 'twocol', textLeft: 'L', textRight: 'R' }), /L\nR/, 'twocol projection')
-  assert.match(projectView({ mode: 'tiles' }), /image — enter to view/, 'image modes → a text note')
-  assert.equal(projectView({ mode: 'text', text: Array.from({ length: 50 }, (_, i) => i).join('\n') }).split('\n').length, 6, 'projection bounded to ~6 rows')
-  console.error('  1. RibbonShell: depth+All>, clamp-scroll, lands-on-previous, drawer, blank, 1-capture, wall, projectView ✓')
+  assert.ok(estimateLayoutFrameBytes(big.regions) <= LAYOUT_FRAME_BUDGET_BYTES, 'huge preview clamped under the wall (byte-aware)')
+  // multibyte preview must ALSO clamp under the byte wall (char-slice would not).
+  const cjk = r.scene('あ'.repeat(2000))
+  assert.ok(estimateLayoutFrameBytes(cjk.regions) <= LAYOUT_FRAME_BUDGET_BYTES, 'multibyte preview clamped under the byte wall')
+  // depth-1 alt-tab lands on the single window (index 0), never the 'All>' entry.
+  const r1 = new RibbonShell(() => mru, () => all, () => 1, () => 0)
+  r1.enterFromWindow()
+  assert.equal(r1.highlightedWindowId(), mru[0].id, 'depth-1 alt-tab lands on the window, not All>')
+  console.error('  1. RibbonShell: depth+All>, clamp-scroll, lands-on-previous, drawer, blank, 1-capture, byte-wall, depth-1 ✓')
 }
 
 // =========================================================== WM harness helpers
@@ -136,14 +136,6 @@ const settle = async (last, pred, what, ms = 15000) => {
     assert.notEqual(second, first, `scroll moved cursor [${first}] → [${second}]`)
     console.error(`  3. scroll moves the server-drawn cursor [${first}] → [${second}] ✓`)
 
-    // 3b. rich settle: the LIGHT preview renders now; after the debounce a RICH
-    // view() projection renders (never per-notch — the §2.3 jank guard).
-    const beforeRich = scenes.length
-    await sleep(450)   // > EVENT_DEBOUNCE_MS (300)
-    assert.ok(scenes.length > beforeRich, 'a rich settle render fired after the debounce')
-    assert.ok(hasRegion(last(), 'strip'), 'still the ribbon after the settle')
-    console.error('  3b. rich preview settles after the debounce (cached per window) ✓')
-
     // tap → ENTER that window (the scene becomes a real window view: a menu list).
     await wm.onTapGesture()
     sc = await settle(last, (x) => !hasRegion(x, 'strip') && (hasRegion(x, 'menu') || hasRegion(x, 'browse')), 'entered a window')
@@ -151,23 +143,32 @@ const settle = async (last, pred, what, ms = 15000) => {
     assert.ok(['menu', 'browse'].includes(captureName(sc)), `inside a window a window-list captures (got ${captureName(sc)})`)
     console.error(`  4. tap entered [${second}] → a real window (${captureName(sc)} captures) ✓`)
 
-    // double-tap → straight back to the ribbon, landing on the PREVIOUS window.
-    await wm.onBackGesture()
-    sc = await settle(last, (x) => hasRegion(x, 'strip'), 'back to ribbon')
-    const landed = bracket(sc)
-    assert.equal(landed, first, `double-tap → ribbon lands on the PREVIOUS window [${first}] (was just in [${second}])`)
-    console.error(`  5. double-tap → ribbon, lands on previous [${landed}] (alt-tab) ✓`)
+    // 5. exit a BROWSE window back to the ribbon. Browse windows navigate
+    // hierarchically: double-tap drives the window's own onBack (flip focus to the
+    // menu so Reload/actions stay reachable, then pop levels); at the browse ROOT
+    // it exits to the ribbon, landing on the PREVIOUS window.
+    const exitToRibbon = async (what) => {
+      let flipped = false
+      for (let i = 0; i < 5 && !hasRegion(last(), 'strip'); i++) {
+        await wm.onBackGesture(); await sleep(60)
+        if (!hasRegion(last(), 'strip') && captureName(last()) === 'menu') flipped = true
+      }
+      await settle(last, (x) => hasRegion(x, 'strip'), what)
+      return flipped
+    }
+    const flipped = await exitToRibbon('browse window exits to the ribbon')
+    assert.ok(flipped, 'a browse double-tap first flipped focus to the window menu (actions stay reachable)')
+    assert.equal(bracket(last()), first, `browse exit → ribbon lands on the PREVIOUS window [${first}]`)
+    console.error(`  5. browse back: flip to menu (actions reachable) → ribbon, lands on previous [${first}] ✓`)
 
-    // 5b. persistence (§2.2.6): re-entering a window restores it — the window
-    // objects persist across ribbon switches (toRibbon stops transients, never
-    // resets navigation). Re-enter the window we were just in; it's still itself.
-    await wm.onScroll('up')   // cursor → the prior window (recents[0] after the switch)
+    // 5b. persistence (§2.2.6): re-entering a window restores it — window objects
+    // persist across ribbon switches (toRibbon stops transients, never resets nav).
+    await wm.onScroll('up')   // cursor → the window we were just in (recents[0])
     await settle(last, (x) => bracket(x) === second, 'cursor back on the prior window')
     await wm.onTapGesture()
     sc = await settle(last, (x) => !hasRegion(x, 'strip') && hasRegion(x, 'browse'), 're-entered the prior window')
     assert.ok(hasRegion(sc, 'browse'), 're-entry restores the window’s own view (persisted, not reset)')
-    await wm.onBackGesture()
-    await settle(last, (x) => hasRegion(x, 'strip'), 'back to ribbon')
+    await exitToRibbon('back to ribbon after re-entry')
     console.error('  5b. re-entering a window restores it (lossless persistence) ✓')
 
     // scroll to All> and tap → the categorized drawer.

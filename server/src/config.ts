@@ -71,7 +71,7 @@ export interface G2CCConfig {
      *  the cutover). Built flag-gated so menu stays a one-line revert. */
     rootNav: 'menu' | 'ribbon'
     /** Recents depth — how many MRU windows stay in the hot ribbon before the
-     *  rest spill to the 'All ▸' drawer (Adam 2026-06-30: 6). Kept small enough
+     *  rest spill to the 'All>' drawer (Adam 2026-06-30: 6). Kept small enough
      *  that the bottom-bar strip never overflows its region (a strip that
      *  overflows loses the zero-range scroll → no per-notch focus events). */
     recentsDepth: number

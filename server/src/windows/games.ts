@@ -689,7 +689,7 @@ class BlackjackController {
     // on a hit/stand; a stale bmp just shows for the render's ~hundred ms).
     if (!hasHand) return { mode: 'text', title, menu, text }
     if (!this.dealerBmp || !this.playerBmp) {
-      const why = (this.dealerFailed || this.playerFailed) ? 'card render FAILED — Reload retries' : '⏳ dealing…'
+      const why = (this.dealerFailed || this.playerFailed) ? 'card render FAILED — Reload retries' : 'dealing...'
       return { mode: 'text', title, menu, text: `${why}\n\n${text}` }
     }
     return { mode: 'hands', title, menu, dealerTile: this.dealerBmp, playerTile: this.playerBmp, text }
@@ -703,18 +703,18 @@ class BlackjackController {
 
   private numbersText(): string {
     const g = this.game
+    // ≤6 rows for the content pane — the menu captures, so this text can't scroll
+    // (review 2026-06-30: the old divider + blank spacers clipped Shoe% off the
+    // bottom). DEALER / YOU / Bet+Bank / Shoe / result-or-hint.
     const lines: string[] = []
     lines.push(g.dealer().length
-      ? `DEALER  ${g.dealerRevealed() ? g.dealerShownTotal() : `${g.dealerShownTotal()}+?`}`
-      : 'DEALER  -')
-    lines.push('────────')
-    lines.push(g.player().length ? `YOU     ${g.playerTotal()}` : 'YOU     -')
-    lines.push('')
-    lines.push(`Bet   $${bjMoney(g.bet())}`)
-    lines.push(`Bank  $${bjMoney(g.bankroll())}`)
-    lines.push(`Shoe  ${Math.round(100 * g.shoeRemaining() / g.shoeFull())}%`)
-    if (g.phase() === 'settled') { lines.push(''); lines.push(this.resultLine()) }
-    else if (g.player().length === 0) { lines.push(''); lines.push('Deal to play.') }
+      ? `DEALER ${g.dealerRevealed() ? g.dealerShownTotal() : `${g.dealerShownTotal()}+?`}`
+      : 'DEALER -')
+    lines.push(g.player().length ? `YOU    ${g.playerTotal()}` : 'YOU    -')
+    lines.push(`Bet $${bjMoney(g.bet())}   Bank $${bjMoney(g.bankroll())}`)
+    lines.push(`Shoe ${Math.round(100 * g.shoeRemaining() / g.shoeFull())}%`)
+    if (g.phase() === 'settled') lines.push(this.resultLine())
+    else if (g.player().length === 0) lines.push('Deal to play.')
     return lines.join('\n')
   }
 

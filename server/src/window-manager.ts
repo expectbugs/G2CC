@@ -14,7 +14,7 @@
 // Sessions live in the per-client SessionPool; window/session state survives
 // window switches (each window object persists for the client's lifetime).
 
-import { DE_CONTENT_W, DE_CONTENT_H, SCREEN_WIDTH, EVENT_DEBOUNCE_MS } from '@g2cc/shared'
+import { DE_CONTENT_W, DE_CONTENT_H, SCREEN_WIDTH } from '@g2cc/shared'
 import type { WireScene, MediaState, SmsThread, SmsMessage } from '@g2cc/shared'
 import { renderChart, type RenderedImage } from './os-content.js'
 import {
@@ -40,7 +40,7 @@ import { ReaderWindow } from './windows/reader.js'
 import { SmsWindow } from './windows/sms.js'
 import { MediaWindow } from './windows/media.js'
 import { NoticesWindow } from './windows/notices.js'
-import { RibbonShell, projectView } from './ribbon.js'
+import { RibbonShell } from './ribbon.js'
 
 /** How long a notification FLASH holds a BLANKED screen before auto-returning
  *  to blank. 10 s → 5 s (Adam 2026-06-12, Phase 2: "i use blank mode when
@@ -452,16 +452,6 @@ export class WindowManager {
    *  in-window, so it never races the window render loop). */
   private ribbonRendering = false
   private ribbonRenderQueued = false
-  /** Which preview tier the next ribbon render uses (§2.2.3): false = the LIGHT
-   *  per-notch summary() (~100 ms); true = the RICH settle projection of view(). */
-  private ribbonWantRich = false
-  /** Rich-preview cache (windowId → projected text) so revisiting is instant.
-   *  Invalidated when that window is entered (its state may change). */
-  private ribbonRich = new Map<string, string>()
-  /** Settle debounce: scroll renders the LIGHT preview now, then this fires the
-   *  RICH preview once scrolling stops (never per-notch — that is the Files jank,
-   *  §2.3). A sanctioned UI debounce, not an I/O timeout. */
-  private ribbonSettleTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(private ctx: WmContext) {
     // Each window's requestRender only fires while it IS the active window — a
@@ -524,7 +514,6 @@ export class WindowManager {
     notifyHub.off('seen', this.onHubSeen)
     notifyHub.off('dismissPhone', this.onHubDismissPhone)
     this.clearPopupTimer()
-    if (this.ribbonSettleTimer) { clearTimeout(this.ribbonSettleTimer); this.ribbonSettleTimer = null }
     if (this.dashboardPacer) { clearInterval(this.dashboardPacer); this.dashboardPacer = null }
     // Release any window-held resource (e.g. the Terminal capture poll).
     for (const w of this.windows) {
@@ -748,8 +737,12 @@ export class WindowManager {
           // ignores every tap (review 2026-06-11b). Skip the send; lastView
           // stays at the pre-blank view, which is fine — taps are ignored
           // while blanked and the wake render recomposes everything.
-          if (this.blanked && !this.activeOverlay) {
-            this.ctx.log('[os] render completed after blank — discarded (screen stays dark)')
+          // Skip the send if the screen went dark OR we transitioned to the ribbon
+          // while view() was in flight (a slow view resolving must not paint over
+          // the ribbon / pollute lastView — the symmetric guard to renderRibbon's
+          // !atRibbon re-check). An active overlay still composes via this path.
+          if ((this.blanked || (this.rootNav === 'ribbon' && this.atRibbon)) && !this.activeOverlay) {
+            this.ctx.log('[os] render completed after a blank / ribbon switch — discarded')
             continue
           }
           // Normalize the menu the user actually SEES — MUST match compose's own
@@ -785,28 +778,38 @@ export class WindowManager {
   /** Ribbon-root render — its own conflated sender (separate from the window
    *  render loop; atRibbon XOR in-window so they never overlap). Fetches the
    *  preview text then sends the shell's scene. */
-  private renderRibbon(rich = false): void {
+  private renderRibbon(): void {
     if (!this.ribbon) return
-    this.ribbonWantRich = rich   // the loop reads this each pass — a new scroll resets it to light
     if (this.ribbonRendering) { this.ribbonRenderQueued = true; return }
     this.ribbonRendering = true
     void (async () => {
       try {
         do {
           this.ribbonRenderQueued = false
-          const preview = await this.ribbonPreview(this.ribbonWantRich)
+          const preview = await this.ribbonPreview()
           // A blank / overlay / leave-ribbon during the await supersedes this render.
           if (this.blanked || this.activeOverlay || !this.atRibbon) {
             this.ctx.log('[ribbon] render superseded (blank/overlay/left) — discarded')
             continue
           }
+          // A newer render was queued while we awaited the preview (a scroll moved
+          // the cursor) — skip this now-stale send and let the queued pass derive
+          // for the CURRENT cursor. Also coalesces fast scrolling: intermediate
+          // previews drop, only the settled cursor renders (no ack-gated stale frames).
+          if (this.ribbonRenderQueued) continue
           let scene: WireScene
           try {
             scene = this.ribbon!.scene(preview)
           } catch (e) {
             this.ctx.log(`[ribbon] scene compose failed: ${(e as Error).message}`)
-            try { scene = this.ribbon!.scene('(preview unavailable)') }
-            catch { this.ctx.send(blankScene()); continue }
+            try {
+              scene = this.ribbon!.scene('(preview unavailable)')
+            } catch (e2) {
+              // Even the minimal strip+breadcrumb overflowed (≈never) — log and
+              // stay on the prior frame; do NOT blank (atRibbon is still true).
+              this.ctx.log(`[ribbon] fallback scene also failed: ${(e2 as Error).message} — keeping the prior frame`)
+              continue
+            }
           }
           this.lastView = null   // the ribbon has no menu/browse list — taps are tap=enter, scroll=focus
           this.ctx.send(scene)
@@ -819,31 +822,24 @@ export class WindowManager {
     })()
   }
 
-  /** The preview text for the highlighted ribbon item (light tier = the
-   *  window's summary()). Failure-isolated — a down summary can't blank it. */
-  private async ribbonPreview(rich: boolean): Promise<string> {
+  /** The preview text for the highlighted ribbon item: a window's optional cheap,
+   *  read-only preview() (the rich tier), else its summary() (the light default).
+   *  BOTH must be cheap → safe per-notch (no settle/debounce needed). view() is
+   *  deliberately NOT called here — it spawns CC / pings the phone for some
+   *  windows, and the highlighted window is not the active one. Failure-isolated. */
+  private async ribbonPreview(): Promise<string> {
     if (!this.ribbon) return ''
     const id = this.ribbon.highlightedWindowId()
     if (!id) return this.ribbon.pseudoPreview()
     const w = this.windowById(id)
     if (!w) return ''
-    // Rich tier (settle): a cached, read-only projection of the window's view().
-    if (rich) {
-      const cached = this.ribbonRich.get(id)
-      if (cached !== undefined) return cached
-      try {
-        const proj = `${w.tab}\n\n${projectView(await w.view())}`
-        this.ribbonRich.set(id, proj)
-        return proj
-      } catch (e) {
-        this.ctx.log(`[ribbon] rich preview failed (${id}): ${(e as Error).message}`)
-        // fall through to the light summary below
-      }
-    }
-    try { return `${w.tab}\n\n${await w.summary()}` }
-    catch (e) {
-      this.ctx.log(`[ribbon] preview summary failed (${id}): ${(e as Error).message}`)
-      return `${w.tab}\n\n(summary unavailable — see log)`
+    try {
+      const rich = w.preview?.()
+      if (rich != null) return `${w.tab}\n\n${rich}`
+      return `${w.tab}\n\n${await w.summary()}`
+    } catch (e) {
+      this.ctx.log(`[ribbon] preview failed (${id}): ${(e as Error).message}`)
+      return `${w.tab}\n\n(preview unavailable — see log)`
     }
   }
 
@@ -867,7 +863,7 @@ export class WindowManager {
 
   switchTo(id: string): void {
     const w = this.windows.find((x) => x.id === id)
-    if (!w) { this.ctx.log(`[os] switchTo unknown window '${id}'`); return }
+    if (!w) { this.ctx.log(`[os] switchTo unknown window '${id}'`); this.requestRender(); return }
     if (w !== this.active && !this.parked) {
       try {
         this.active.onDeactivate?.()   // mic OFF etc. — focus must not leak
@@ -876,11 +872,7 @@ export class WindowManager {
       }
     }
     this.parked = false                                    // Phase 2: entering a window un-parks it…
-    if (this.rootNav === 'ribbon') {
-      this.atRibbon = false                                // …and leaves the ribbon
-      this.ribbonRich.delete(id)                           // its state may change — drop the stale preview cache
-      if (this.ribbonSettleTimer) { clearTimeout(this.ribbonSettleTimer); this.ribbonSettleTimer = null }
-    }
+    if (this.rootNav === 'ribbon') this.atRibbon = false   // …and leaves the ribbon
     this.active = w
     if (id !== 'main') this.lastUsed.set(id, ++this.useCounter)   // Phase 11 MRU (monotonic, distinct)
     else (w as MainWindow).resetToRoot()                          // Phase 11: Main returns to its launcher root
@@ -1072,10 +1064,10 @@ export class WindowManager {
       this.requestRender()
       return
     }
-    // Phase 2 ribbon mode: double-tap is the straight-to-ribbon gesture (Adam
-    // 2026-06-30 — NOT pop-one-level). At the ribbon root it pops the drawer
-    // level then blanks; inside a window it parks the window and shows the
-    // ribbon (landing on the previous window). Granular back lives on 'Back'.
+    // Phase 2 ribbon mode. At the ribbon root, double-tap pops the drawer level
+    // then blanks. Inside a window: READING windows go straight to the ribbon
+    // (landing on the previous window — Adam's straight-to-ribbon); BROWSE windows
+    // navigate hierarchically via their own onBack and exit to the ribbon at root.
     if (this.rootNav === 'ribbon') {
       if (this.atRibbon) {
         const act = this.ribbon!.back()
@@ -1088,7 +1080,23 @@ export class WindowManager {
         }
         return
       }
-      this.toRibbon(true)   // inside a window → ribbon, land on the previous window
+      // Inside a window. BROWSE windows are hierarchical navigators (the content
+      // list captures; their menu + parent levels are reached only via the
+      // window's own onBack — flip focus to the menu, then pop levels). So in
+      // ribbon mode double-tap DRIVES that onBack: the browse window stays fully
+      // navigable and its menu/actions (Reload, Files' dir ops, Aria's history)
+      // stay reachable; only at the browse ROOT (onBack returns false) does it
+      // exit to the ribbon. READING windows (the menu already captures, actions
+      // directly tappable; their own sub-levels exit via menu Cancel/Back) go
+      // STRAIGHT to the ribbon — Adam's straight-to-ribbon, the common case.
+      if (this.lastView?.mode === 'browse') {
+        try {
+          if (await this.active.onBack()) return
+        } catch (e) {
+          this.ctx.log(`[os] ribbon browse-back failed (${this.active.id}): ${(e as Error).message}`)
+        }
+      }
+      this.toRibbon(true)   // reading window, or a browse window at its root → ribbon
       return
     }
     try {
@@ -1112,17 +1120,7 @@ export class WindowManager {
   async onScroll(dir: 'up' | 'down'): Promise<void> {
     if (this.rootNav !== 'ribbon' || !this.atRibbon || this.blanked || this.activeOverlay || !this.ribbon) return
     const act = this.ribbon.scroll(dir)
-    if (act.kind === 'recompose') { this.renderRibbon(false); this.armRibbonSettle() }
-  }
-
-  /** Arm the rich-preview settle (§2.2.3): a window's RICH view() projection
-   *  renders only once scrolling stops (~EVENT_DEBOUNCE_MS), never per-notch. */
-  private armRibbonSettle(): void {
-    if (this.ribbonSettleTimer) clearTimeout(this.ribbonSettleTimer)
-    this.ribbonSettleTimer = setTimeout(() => {
-      this.ribbonSettleTimer = null
-      if (this.rootNav === 'ribbon' && this.atRibbon && !this.blanked && !this.activeOverlay) this.renderRibbon(true)
-    }, EVENT_DEBOUNCE_MS)
+    if (act.kind === 'recompose') this.renderRibbon()
   }
 
   /** Park the active window (focus must not leak — stop its mic etc.) and show
@@ -1138,7 +1136,6 @@ export class WindowManager {
     if (fromWindow) this.ribbon.enterFromWindow()
     else this.ribbon.enterRoot()
     this.renderRibbon()
-    this.armRibbonSettle()   // the landed window settles to its rich preview after a beat
   }
 
   /** The 'Main' / home action: menu mode → the Main launcher window; ribbon
