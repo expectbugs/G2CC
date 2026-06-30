@@ -107,6 +107,29 @@ export class ReaderWindow implements OsWindow {
     return this.voiceOn ? 'voice ▲' : null
   }
 
+  /** Ribbon preview (READ-ONLY, in-memory): the open book with its absolute
+   *  page/percent + chapter from the cached resume state, or the library
+   *  location. Same in-memory fields summary() reads — NO DB read, NO EPUB
+   *  subprocess, NO mutation. */
+  preview(): string | null {
+    if (this.level === 'library') {
+      return this.cwd ? `Library · /${oneLine(this.cwd, 26)}` : null   // → 'library'
+    }
+    if (!this.bookPath) return null   // (no book open yet) → summary 'library'
+    const lines = [oneLine(this.bookTitle, 28)]
+    if (this.chapterTitle) lines.push(`ch · ${oneLine(this.chapterTitle, 22)}`)
+    if (this.pageMap && this.pageMap.total > 0) {
+      const g = localToGlobal(this.pageMap.counts, this.chapter, this.page)
+      lines.push(`p. ${g} / ${this.pageMap.total} · ${Math.round((g / this.pageMap.total) * 100)}%`)
+    } else {
+      lines.push(`ch ${this.chapter + 1} · p ${this.page + 1}/${this.pages.length}${this.pageMapPending ? ' · …' : ''}`)
+    }
+    if (this.level !== 'read') lines.push(`(${this.level})`)
+    if (this.voiceOn) lines.push('voice ▲')
+    if (this.saveFailed) lines.push('⚠ unsaved')
+    return lines.join('\n')
+  }
+
   /** Toggle handsfree voice-paging (Phase 9a). Starts/stops the continuous mic. */
   private setVoice(on: boolean): void {
     if (this.voiceOn === on) return

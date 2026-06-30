@@ -3,7 +3,7 @@
 
 import { type OsWindow, type WmContext, type WinView, SwitchTo } from './types.js'
 import { browsePageItems } from './_browse.js'
-import { clampConfirmBody } from './_util.js'
+import { clampConfirmBody, oneLine } from './_util.js'
 import { paginateText } from '../os-compose.js'
 import { searchAll, type SearchHit } from '../search.js'
 import { getTurn } from '../history.js'
@@ -51,6 +51,25 @@ export class SearchWindow implements OsWindow {
     if (this.pendingQuery !== null) return 'confirm?'
     if (this.searching) return 'searching…'
     return null
+  }
+
+  /** Ribbon preview (READ-ONLY): the last query + per-source hit counts from the
+   *  in-memory results. NEVER re-runs the search (no searchAll), never touches
+   *  the phone — pure reads of this.query/this.hits/this.searching. */
+  preview(): string | null {
+    if (this.searching) return `Search · searching…\n"${oneLine(this.query, 30)}"`
+    if (this.lastError) return `Search · error\n${oneLine(this.lastError, 38)}`
+    if (!this.query && this.level !== 'results') return null   // → 'dictate a query'
+    const by: Partial<Record<SearchHit['source'], number>> = {}
+    for (const h of this.hits) by[h.source] = (by[h.source] ?? 0) + 1
+    const lines = [
+      `Search · "${oneLine(this.query, 26)}"`,
+      `${this.hits.length} hit${this.hits.length === 1 ? '' : 's'}`,
+    ]
+    for (const src of ['mail', 'file', 'history', 'note', 'error'] as SearchHit['source'][]) {
+      if (by[src]) lines.push(`${this.emoji(src)} ${src} · ${by[src]}`)
+    }
+    return lines.join('\n')
   }
 
   private emoji(s: SearchHit['source']): string {

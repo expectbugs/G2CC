@@ -28,6 +28,23 @@ export class DeliveriesWindow implements OsWindow {
     try { return await deliveriesSummary() } catch (e) { this.ctx.log(`[os] deliveries: summary failed: ${(e as Error).message}`); return '(down — log)' }
   }
 
+  /** Ribbon preview (READ-ONLY): the active tracked shipments via the SAME fast
+   *  listDeliveries() read view() uses — never mutating this.rows. A DB error
+   *  logs LOUD and falls back to summary() (which surfaces '(down — log)'). */
+  async preview(): Promise<string | null> {
+    let rows: DeliveryRow[]
+    try { rows = await listDeliveries(12) }
+    catch (e) { this.ctx.log(`[os] deliveries: preview read failed: ${(e as Error).message}`); return null }
+    if (!rows.length) return null   // → deliveriesSummary()
+    const active = rows.filter((d) => !d.delivered)
+    const show = (active.length ? active : rows).slice(0, 5)
+    const lines = [`${rows.length} tracked${active.length ? ` · ${active.length} active` : ''}`]
+    for (const d of show) {
+      lines.push(`${d.delivered ? '✓ ' : ''}${d.carrier} · ${oneLine(d.status, 22)}`)
+    }
+    return lines.join('\n')
+  }
+
   private label1(d: DeliveryRow): string {
     return `${d.delivered ? '✓ ' : ''}${d.carrier} · ${d.status} · ${oneLine(d.subject ?? '', 26)}`
   }

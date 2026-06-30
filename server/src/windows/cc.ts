@@ -44,6 +44,33 @@ export class CcWindow implements OsWindow {
     return `${basename(c.projectPath)} · ${state}`
   }
 
+  /** Ribbon preview (READ-ONLY, in-memory): the picked session's cwd, model/
+   *  effort, live phase, context-window %, and page position — or, at the
+   *  picker, the config defaults + how many sessions are already open. NEVER
+   *  opens or spawns a session (precisely why view() is unsafe for hover). */
+  preview(): string | null {
+    const c = this.current
+    if (!c || this.level === 'picker') {
+      const model = this.ctx.config.claude.model ?? 'opus'
+      const effort = this.ctx.config.claude.effort ?? 'max'
+      const n = this.sessions.size
+      return [
+        'Claude Code · pick a directory',
+        `model ${model} · effort ${effort}`,
+        n ? `${n} session${n === 1 ? '' : 's'} open` : 'no sessions open yet',
+      ].join('\n')
+    }
+    const status = c.phase() ?? (c.alive() ? 'idle' : 'closed')
+    const lines = [
+      `${basename(c.projectPath)} · ${status}`,
+      `model ${c.opts.model} · effort ${c.opts.effort}`,
+    ]
+    if (c.entry) lines.push(`context ${c.entry.contextPct}%`)
+    if (c.pages.length > 1) lines.push(`page ${c.page + 1}/${c.pages.length}`)
+    if (this.level !== 'session') lines.push(`(${this.level})`)
+    return lines.join('\n')
+  }
+
   async view(): Promise<WinView> {
     const menuMode = this.focus === 'menu' ? 'capture' as const : 'passive' as const
     if (this.level === 'picker') {

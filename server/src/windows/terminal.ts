@@ -231,6 +231,29 @@ export class TerminalWindow implements OsWindow {
     return this.session
   }
 
+  /** Ribbon preview (READ-ONLY, in-memory): the focused session + mode and a few
+   *  lines of the CACHED tail (whatever the last poll left in this.content) — NO
+   *  new tmuxCapture/tmuxList, NO poll start, NO spawn. No session → the cached
+   *  session list. */
+  preview(): string | null {
+    if (this.session) {
+      const lines = [`${this.session} · ${this.mode}`]
+      if (this.scrollPages) lines.push(`scroll ${this.scrollPage + 1}/${this.scrollPages.length}`)
+      if (this.content) {
+        const rows = this.content.split('\n')
+        while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
+        for (const r of rows.slice(-4)) lines.push(r.length > 40 ? r.slice(0, 39) + '…' : r)
+      }
+      return lines.join('\n')
+    }
+    if (this.sessions.length) {
+      const lines = [`tmux · ${this.sessions.length} session${this.sessions.length === 1 ? '' : 's'}`]
+      for (const s of this.sessions.slice(0, 5)) lines.push(`${s.attached ? '● ' : ''}${s.name} (${s.windows}w)`)
+      return lines.join('\n')
+    }
+    return null   // nothing cached yet → summary 'tmux'
+  }
+
   private dictating(): boolean { return this.listening || this.transcribing || this.pendingText !== null }
 
   // ---- paced capture poll (tail mode) ----

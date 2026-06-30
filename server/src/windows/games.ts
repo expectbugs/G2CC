@@ -146,6 +146,24 @@ class PaperclipsController {
     return msg ? msg.slice(0, 46) : null
   }
 
+  /** Ribbon preview (READ-ONLY): the live snapshot — phase, clips, unused wire,
+   *  funds, projects, and the game's latest readout. status()/snapshot() are the
+   *  SAME cheap in-memory reads summary()/statusLine() use; nothing ticks here. */
+  preview(): string | null {
+    const st = paperclips.status()
+    if (!st.running) return st.loadError ? `Paperclips\n⚠ ${st.loadError.slice(0, 38)}` : null
+    const s = paperclips.snapshot()
+    const lines = [
+      `Paperclips · ${PHASE_LABEL[s.phase]}`,
+      `Clips ${pcNum(s.clips)}`,
+      `Wire ${pcNum(s.wire)} @ $${pcNum(s.wireCost)}`,
+      `Funds $${pcNum(s.funds)}`,
+      `Proj ${pcNum(s.projectsAvail)}${s.projectsAfford ? ` ●${pcNum(s.projectsAfford)}` : ''}`,
+    ]
+    if (s.message) lines.push(s.message.slice(0, 40))
+    return lines.join('\n')
+  }
+
   // ------------------------------------------------ verbs (label↔action, drift-free)
 
   /** The menu verbs for the CURRENT level. view() renders the labels; onMenuSelect
@@ -677,6 +695,26 @@ class BlackjackController {
     return null
   }
 
+  /** Ribbon preview (READ-ONLY): bankroll, bet, shoe, and the in-progress hand
+   *  totals straight from the pure in-memory engine — NO render, NO save (no
+   *  renderHand subprocess, no saveBlackjack), NO mutation. */
+  preview(): string | null {
+    const g = this.game
+    const lines = [
+      `Blackjack · $${bjMoney(g.bankroll())}`,
+      `Bet $${bjMoney(g.bet())} · Shoe ${Math.round(100 * g.shoeRemaining() / g.shoeFull())}%`,
+    ]
+    if (g.player().length) {
+      lines.push(`YOU ${g.playerTotal()}`)
+      lines.push(`DEALER ${g.dealerRevealed() ? g.dealerShownTotal() : `${g.dealerShownTotal()}+?`}`)
+      if (g.phase() === 'settled') lines.push(this.resultLine())
+      else if (g.phase() === 'player') lines.push('your move')
+    } else {
+      lines.push('no hand — Deal to play')
+    }
+    return lines.join('\n')
+  }
+
   view(): WinView {
     const g = this.game
     const phase = g.phase()
@@ -868,6 +906,36 @@ export class GamesWindow implements OsWindow {
     if (this.level === 'pc') return this.pc.statusLine()
     if (this.level === 'bj') return this.bj.statusLine()
     return null
+  }
+
+  /** Ribbon preview (READ-ONLY, in-memory): delegate to the live controller for
+   *  Paperclips/Blackjack, summarize the chess position (skill / title / whose
+   *  move / last engine move) or rpg location, or — idle — the games list with
+   *  each game's live state. NO subprocess (rpg/chess/render), NO mutation. */
+  preview(): string | null {
+    if (this.level === 'pc') return this.pc.preview()
+    if (this.level === 'bj') return this.bj.preview()
+    if (this.level === 'chess' || this.level === 'chess-pieces' || this.level === 'chess-moves' || this.level === 'chess-confirm') {
+      const lines = [`Chess · skill ${this.skill}`, this.fen ? this.chessTitle : 'no game — New game to start']
+      if (this.moveInFlight) lines.push('Stockfish thinking…')
+      else if (this.fen && !this.gameOver) lines.push('your move (white)')
+      const info = this.chessInfo.split('\n').map((l) => l.trim()).find(Boolean)
+      if (info) lines.push(info.length > 40 ? info.slice(0, 39) + '…' : info)
+      return lines.join('\n')
+    }
+    if (this.level === 'rpg' || this.level === 'rpg-out') {
+      const lines = ['rpg-cli', `@ ${clampMid(this.cwd)}`]
+      if (this.rpgBusy) lines.push('running…')
+      return lines.join('\n')
+    }
+    // idle (games menu) — the list, annotated with each game's live state.
+    return [
+      'Games',
+      `rpg · ${this.cwd === DUNGEON_ROOT ? 'dungeon root' : clampMid(this.cwd)}`,
+      `chess · ${this.fen && !this.gameOver ? this.chessTitle : 'no game'}`,
+      this.pc.summary(),
+      this.bj.summary(),
+    ].join('\n')
   }
 
   onDeactivate(): void {

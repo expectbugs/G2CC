@@ -43,6 +43,24 @@ export class CalendarWindow implements OsWindow {
     return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${oneLine(n.title, 22)}`
   }
 
+  /** Ribbon preview (READ-ONLY): the next few upcoming events — the SAME fast
+   *  listUpcoming() read summary() uses. Never touches this.rows. */
+  async preview(): Promise<string | null> {
+    const events = await listUpcoming()
+    if (!events.length) return null   // → summary 'no events / 14d'
+    const now = Date.now()
+    const upcoming = events.filter((e) => e.startsAt.getTime() >= now)
+    const show = (upcoming.length ? upcoming : events).slice(0, 5)
+    const lines = [`${events.length} event${events.length === 1 ? '' : 's'} / 14d`]
+    for (const e of show) {
+      const d = e.startsAt
+      const md = `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
+      const time = e.allDay ? 'all-day' : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      lines.push(`${md} ${time} ${oneLine(e.title, 18)}`)
+    }
+    return lines.join('\n')
+  }
+
   private dayHeader(d: Date): string {
     return `— ${DAY_NAMES[d.getDay()]} ${MONTH_NAMES[d.getMonth()]} ${d.getDate()} —`
   }

@@ -51,6 +51,22 @@ export class AriaWindow implements OsWindow {
     return s.pendingPermissionId ? 'permission' : s.busy ? 'working' : s.alive() ? 'ready' : 'idle'
   }
 
+  /** Ribbon preview (READ-ONLY, in-memory): Aria's session phase, model/effort,
+   *  cwd (~/aria), context-window %, and page position. NEVER opens/spawns the
+   *  session — open() is lazy on view(), so hover must never reach it. */
+  preview(): string | null {
+    const s = this.session
+    const status = s.phase() ?? (s.alive() ? 'ready' : this.opened ? 'closed' : 'idle')
+    const lines = [
+      `Aria · ~/aria · ${status}`,
+      `model ${s.opts.model} · effort ${s.opts.effort}`,
+    ]
+    if (s.entry) lines.push(`context ${s.entry.contextPct}%`)
+    if (s.pages.length > 1) lines.push(`page ${s.page + 1}/${s.pages.length}`)
+    if (this.level !== 'session') lines.push(`(${this.level})`)
+    return lines.join('\n')
+  }
+
   /** options-level focus: content rows ⇄ menu list (double-tap). */
   private focus: 'content' | 'menu' = 'content'
 

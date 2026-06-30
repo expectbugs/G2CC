@@ -59,6 +59,19 @@ export class MediaWindow implements OsWindow {
     return `${this.state.playing ? '▶' : '❚❚'} ${oneLine(this.state.title ?? '(unknown)', 22)}`
   }
 
+  /** Ribbon preview (READ-ONLY): the now-playing snapshot the window already
+   *  holds — track / artist / album, the play-pause glyph, and the
+   *  server-extrapolated position bar. NO subscribe, NO media_cmd, NO mutation. */
+  preview(): string | null {
+    const s = this.state
+    if (!s || (!s.title && !s.artist)) return null   // → summary 'nothing playing'
+    const lines = [`${s.playing ? '▶ playing' : '❚❚ paused'}`, oneLine(s.title ?? '(unknown title)', 28)]
+    if (s.artist) lines.push(oneLine(s.artist, 30))
+    if (s.album) lines.push(oneLine(s.album, 30))
+    lines.push(this.posBar())   // pure: reads this.state + extrapolates from Date.now()
+    return lines.join('\n')
+  }
+
   statusLine(): string | null { return this.lyricsLoading ? 'lyrics…' : null }
 
   private trackKey(): string { return `${this.state?.artist ?? ''}|${this.state?.title ?? ''}|${this.state?.album ?? ''}` }

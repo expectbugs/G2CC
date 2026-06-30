@@ -109,6 +109,31 @@ export class FilesWindow implements OsWindow {
     return this.level === 'locations' ? 'locations' : this.cwd()
   }
 
+  /** Ribbon preview (READ-ONLY, in-memory): the current location/cwd + a few
+   *  CACHED directory entries from the last view() listing. NO readdir, NO du,
+   *  NO subprocess — empty cache falls back to just the cwd. */
+  preview(): string | null {
+    if (this.level === 'locations') {
+      if (!this.locs.length) return null   // never listed → summary 'locations'
+      return ['Files · locations', ...this.locs.slice(0, 5).map((l) => `${l.label} — ${l.path}`)].join('\n')
+    }
+    const cwd = this.cwd()
+    const where = cwd.length > 36 ? '…' + cwd.slice(-35) : cwd
+    const lines = [`Files · ${where}`]
+    if (this.entries.length) {
+      const dirs = this.entries.filter((e) => e.isDir).length
+      const files = this.entries.length - dirs
+      lines.push(`${dirs} dir${dirs === 1 ? '' : 's'} · ${files} file${files === 1 ? '' : 's'}`)
+      for (const e of this.entries.slice(0, 4)) {
+        const name = e.name.length > 34 ? e.name.slice(0, 33) + '…' : e.name
+        lines.push(e.isDir ? `${name}/` : name)
+      }
+    } else {
+      lines.push('(open to list its contents)')
+    }
+    return lines.join('\n')
+  }
+
   private cwd(): string { return this.stack[this.stack.length - 1] ?? FILES_ROOT }
   private destCwd(): string | null { return this.destStack[this.destStack.length - 1] ?? null }
 

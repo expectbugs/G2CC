@@ -846,7 +846,7 @@ export class WindowManager {
     const w = this.windowById(id)
     if (!w) return ''
     try {
-      const rich = w.preview?.()
+      const rich = await w.preview?.()
       if (rich != null) return `${w.tab}\n\n${rich}`
       return `${w.tab}\n\n${await w.summary()}`
     } catch (e) {

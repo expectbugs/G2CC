@@ -34,6 +34,19 @@ export class TimersWindow implements OsWindow {
     return `⏱ ${fmtRemaining(next.firesAt)}${next.label ? ` · ${oneLine(next.label, 20)}` : ''}`
   }
 
+  /** Ribbon preview (READ-ONLY): the next few pending timers + remaining time —
+   *  the SAME fast listPending() read summary() uses. Never mutates `pending`
+   *  (taps resolve against what view() rendered). */
+  async preview(): Promise<string | null> {
+    const pending = await listPending()
+    if (!pending.length) return null   // → summary 'none pending'
+    const lines = [`${pending.length} pending`]
+    for (const t of pending.slice(0, 5)) {
+      lines.push(`⏱ ${fmtRemaining(t.firesAt)}${t.label ? ` · ${oneLine(t.label, 22)}` : ''}`)
+    }
+    return lines.join('\n')
+  }
+
   /** The list rows — pending timers then the quick-create rows. Shared by
    *  view() and the tap handler so byte-aware pagination computes IDENTICAL
    *  page boundaries in both (review 2026-06-13: the tap used to paginate an

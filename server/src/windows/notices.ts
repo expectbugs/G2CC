@@ -45,6 +45,20 @@ export class NoticesWindow implements OsWindow {
     return n ? `${n} unseen` : 'quiet'
   }
 
+  /** Ribbon preview (READ-ONLY): the most-recent notification titles via a fast
+   *  listNotifications() read — NOT markSeen (hovering must never mark anything
+   *  seen) and never mutating this.rows/this.total (view() owns those). */
+  async preview(): Promise<string | null> {
+    const { total, unseen, rows } = await listNotifications(6, 0)
+    if (!total) return null   // → summary 'quiet'
+    const P: Record<string, string> = { call: 'C', timer: 'T', sms: 'S', email: 'E', info: 'i' }
+    const lines = [`${total} total${unseen ? ` · ${unseen} unseen` : ''}`]
+    for (const r of rows.slice(0, 5)) {
+      lines.push(`${r.seen ? '' : '● '}${P[r.priority] ?? '?'} ${oneLine(r.title, 24)}`)
+    }
+    return lines.join('\n')
+  }
+
   async view(): Promise<WinView> {
     if (this.level === 'read') {
       if (this.replyStage !== 'idle') return this.replyView()
