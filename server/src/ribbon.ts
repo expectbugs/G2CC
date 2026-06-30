@@ -15,7 +15,7 @@
 // The WM owns the async PREVIEW text (summary/projection) + the latency tiering
 // and hands it to scene(); keeping scene() sync keeps the shell unit-testable.
 
-import { SCREEN_WIDTH, SCREEN_HEIGHT, DE_BAR_H, DE_TITLE_W, DE_CONTENT_H, DE_REGION_IDS } from '@g2cc/shared'
+import { SCREEN_WIDTH, DE_BAR_H, DE_TITLE_W, DE_BATT_W, DE_CONTENT_H_FULL, DE_REGION_IDS } from '@g2cc/shared'
 import type { WireScene, SceneRegion } from '@g2cc/shared'
 import { fwTextWidth, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from './os-compose.js'
 import { CATEGORY_ORDER, type OsWindow, type WindowCategory } from './windows/types.js'
@@ -138,11 +138,15 @@ export class RibbonShell {
 
   // ----------------------------------------------------- the root-screen scene
 
-  private breadcrumb(): string {
-    const badge = this.unseen() > 0 ? ` · !${this.unseen()}` : ''
-    if (this.level === 'recents') return `Recents${badge}`
-    if (this.level === 'cats') return `All${badge}`
-    return `All > ${this.selectedCategory ?? '?'}${badge}`
+  /** The strip's fixed left prefix: the unseen badge + the level context (the
+   *  breadcrumb, folded into the strip now that the top bar IS the strip). At
+   *  recents it's just the badge (the window names are self-evident); the drawer
+   *  levels name where you are. */
+  private stripPrefix(): string {
+    const badge = this.unseen() > 0 ? `!${this.unseen()} ` : ''
+    if (this.level === 'recents') return badge
+    if (this.level === 'cats') return `${badge}All `
+    return `${badge}${this.selectedCategory ?? '?'} `
   }
 
   /** A hint shown as the preview when the cursor is on a pseudo-entry (the WM
@@ -161,16 +165,18 @@ export class RibbonShell {
    *  windowed around the cursor to FIT the bar (an overflowing strip loses the
    *  zero-range scroll → no per-notch focus events; '<'/'>' mark hidden items). */
   private stripText(): string {
+    const prefix = this.stripPrefix()
     const items = this.items()
-    if (items.length === 0) return ' '
+    if (items.length === 0) return prefix || ' '
     const cur = Math.max(0, Math.min(items.length - 1, this.cursor))
     const cell = (i: number): string => (i === cur ? `[${items[i].label}]` : items[i].label)
     const SEP = '  '
     const sepW = fwTextWidth(SEP)
-    // Reserve room so the strip stays ZERO-RANGE (fits its region → each scroll
-    // fires a per-notch focus event instead of internally scrolling): ~16 px inset
-    // + ~6 px for scene()'s leading space + ~30 px for the two '<'/'>' markers.
-    const budget = SCREEN_WIDTH - 16 - 6 - 30
+    // The strip shares the top bar with the battery region, so its width is
+    // DE_TITLE_W - DE_BATT_W. Reserve the prefix + scene()'s leading space (~6 px)
+    // + the two '<'/'>' markers (~30 px) so it stays ZERO-RANGE (fits its region →
+    // each scroll fires a per-notch focus event instead of internally scrolling).
+    const budget = (DE_TITLE_W - DE_BATT_W) - fwTextWidth(prefix) - 6 - 30
     let lo = cur, hi = cur
     let width = fwTextWidth(cell(cur))
     let grow = true
@@ -190,7 +196,7 @@ export class RibbonShell {
     let s = parts.join(SEP)
     if (lo > 0) s = '< ' + s
     if (hi < items.length - 1) s = s + ' >'
-    return s
+    return prefix + s
   }
 
   /** A single-line px-clamp (mirrors os-compose's clampPx; kept local so the
@@ -203,25 +209,30 @@ export class RibbonShell {
   }
 
   /** Build the ribbon WireScene. previewText (the highlighted window's summary,
-   *  or a settle-rendered projection — the WM decides) fills the content pane.
-   *  The strip is the SOLE event-capture (scroll=true text); the client overlays
-   *  the clock cutout. Estimator-guarded against the multi-packet wall. */
-  scene(previewText: string): WireScene {
+   *  or a preview() projection — the WM decides) fills the full content area (the
+   *  bottom status bar is gone). `battery` is the glasses-battery text. The strip
+   *  is at the TOP and is the SOLE event-capture (scroll=true text); the client
+   *  overlays the clock cutout. Estimator-guarded against the multi-packet wall. */
+  scene(previewText: string, battery: string): WireScene {
+    const STRIP_W = DE_TITLE_W - DE_BATT_W
     const build = (preview: string): SceneRegion[] => [
       {
-        id: DE_REGION_IDS.title, name: 'title', x: 0, y: 0, w: DE_TITLE_W, h: DE_BAR_H,
-        kind: 'text', content: { kind: 'text', text: ' ' + this.clampOne(this.breadcrumb(), DE_TITLE_W - 14) },
-      },
-      {
-        id: DE_REGION_IDS.contentText, name: 'content', x: 0, y: DE_BAR_H, w: SCREEN_WIDTH, h: DE_CONTENT_H,
-        kind: 'text', content: { kind: 'text', text: preview },
-      },
-      {
-        // The bottom-bar strip — the antenna (scroll=true) and the sole capture.
-        // RIBBON_STRIP_ID is a DEDICATED scroll-antenna id, NOT the passive status
-        // bar id (the client caches the scroll flag per id — see the const above).
-        id: RIBBON_STRIP_ID, name: 'strip', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: SCREEN_WIDTH, h: DE_BAR_H,
+        // The strip — the antenna (scroll=true) and the sole capture — at the TOP
+        // (Adam 2026-06-30: ribbon at top; the proven os-menu antenna location).
+        // RIBBON_STRIP_ID is a DEDICATED scroll-antenna id, not a passive-bar id
+        // (the client caches the scroll flag per id — see the const above).
+        id: RIBBON_STRIP_ID, name: 'strip', x: 0, y: 0, w: STRIP_W, h: DE_BAR_H,
         kind: 'text', content: { kind: 'text', text: ' ' + this.stripText(), scroll: true },
+      },
+      {
+        // Glasses battery, between the strip and the client clock cutout (§2.2.5).
+        id: DE_REGION_IDS.battery, name: 'battery', x: STRIP_W, y: 0, w: DE_BATT_W, h: DE_BAR_H,
+        kind: 'text', content: { kind: 'text', text: this.clampOne(' ' + battery, DE_BATT_W - 6) },
+      },
+      {
+        // Full-height preview — the bottom status bar is gone (§2.2.5).
+        id: DE_REGION_IDS.contentText, name: 'content', x: 0, y: DE_BAR_H, w: SCREEN_WIDTH, h: DE_CONTENT_H_FULL,
+        kind: 'text', content: { kind: 'text', text: preview },
       },
     ]
     let regions = build(previewText)

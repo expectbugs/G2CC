@@ -68,19 +68,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
   // scene invariants: exactly one scroll=true capture (the strip), under the wall.
   r.enterRoot()
-  const scene = r.scene('Aria\n\nidle · 1 cc')
+  const scene = r.scene('Aria\n\nidle · 1 cc', '58%')
   const caps = scene.regions.filter((x) => x.content?.kind === 'text' && x.content.scroll === true)
   assert.equal(caps.length, 1, 'exactly one scroll=true capture region')
-  assert.equal(caps[0].name, 'strip', 'the capture is the bottom strip')
-  assert.ok(scene.regions.some((x) => x.name === 'title'), 'has a breadcrumb title region')
+  assert.equal(caps[0].name, 'strip', 'the capture is the top strip')
+  assert.equal(caps[0].y, 0, 'the strip is at the TOP (y=0)')
+  assert.ok(scene.regions.some((x) => x.name === 'battery'), 'has a glasses-battery region')
   assert.ok(scene.regions.some((x) => x.name === 'content'), 'has a preview content region')
   const est = estimateLayoutFrameBytes(scene.regions)
   assert.ok(est <= LAYOUT_FRAME_BUDGET_BYTES, `ribbon scene ${est}B under the ${LAYOUT_FRAME_BUDGET_BYTES}B wall`)
   // a pathological preview is clamped, never thrown past the wall.
-  const big = r.scene('x'.repeat(5000))
+  const big = r.scene('x'.repeat(5000), '58%')
   assert.ok(estimateLayoutFrameBytes(big.regions) <= LAYOUT_FRAME_BUDGET_BYTES, 'huge preview clamped under the wall (byte-aware)')
   // multibyte preview must ALSO clamp under the byte wall (char-slice would not).
-  const cjk = r.scene('あ'.repeat(2000))
+  const cjk = r.scene('あ'.repeat(2000), '58%')
   assert.ok(estimateLayoutFrameBytes(cjk.regions) <= LAYOUT_FRAME_BUDGET_BYTES, 'multibyte preview clamped under the byte wall')
   // depth-1 alt-tab lands on the single window (index 0), never the 'All>' entry.
   const r1 = new RibbonShell(() => mru, () => all, () => 1, () => 0)
@@ -124,10 +125,11 @@ const settle = async (last, pred, what, ms = 15000) => {
     wm.requestRender()   // simulates os_attach's initial render
     let sc = await settle(last, (x) => hasRegion(x, 'strip'), 'initial ribbon render')
     assert.equal(captureName(sc), 'strip', 'the ribbon strip is the sole capture')
-    assert.match(textOf(sc, 'title'), /Recents/, 'breadcrumb = Recents')
+    assert.equal(region(sc, 'strip').y, 0, 'the strip is at the TOP (y=0)')
+    assert.ok(hasRegion(sc, 'battery'), 'a glasses-battery region rides the top bar')
     const first = bracket(sc)
     assert.ok(first, 'a window is bracketed (the cursor)')
-    console.error(`  2. ribbon renders: capture=strip, breadcrumb=Recents, cursor=[${first}] ✓`)
+    console.error(`  2. ribbon renders: top strip (capture), battery, cursor=[${first}] ✓`)
 
     // scroll down → the bracketed (cursor) window changes.
     await wm.onScroll('down')
@@ -174,13 +176,13 @@ const settle = async (last, pred, what, ms = 15000) => {
     // scroll to All> and tap → the categorized drawer.
     for (let i = 0; i < 8; i++) { await wm.onScroll('down') }   // clamps at All>
     await wm.onTapGesture()
-    sc = await settle(last, (x) => hasRegion(x, 'strip') && /All/.test(textOf(x, 'title')) && !/>/.test(textOf(x, 'title')), 'drawer cats')
-    assert.match(textOf(sc, 'title'), /^ ?All/, 'breadcrumb = All (the drawer)')
-    console.error('  6. All> → the categorized drawer (breadcrumb All) ✓')
+    sc = await settle(last, (x) => textOf(x, 'strip').startsWith(' All '), 'drawer cats')
+    assert.ok(textOf(sc, 'strip').startsWith(' All '), 'the strip prefix shows the All drawer')
+    console.error('  6. All> → the categorized drawer (strip prefix = All) ✓')
 
     // double-tap pops drawer → recents; double-tap at recents root → BLANK.
     await wm.onBackGesture()
-    await settle(last, (x) => hasRegion(x, 'strip') && /Recents/.test(textOf(x, 'title')), 'back to recents')
+    await settle(last, (x) => hasRegion(x, 'strip') && !textOf(x, 'strip').startsWith(' All '), 'back to recents')
     await wm.onBackGesture()
     sc = await settle(last, (x) => x.regions.length === 1 && region(x, 'wake'), 'blank at recents root')
     assert.equal(sc.regions.length, 1, 'blank scene = just the wake antenna')

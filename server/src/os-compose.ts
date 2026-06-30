@@ -13,8 +13,8 @@
 
 import {
   SCREEN_WIDTH, SCREEN_HEIGHT,
-  DE_BAR_H, DE_MENU_W, DE_CONTENT_X, DE_CONTENT_Y, DE_CONTENT_W, DE_CONTENT_H,
-  DE_TITLE_W, DE_REGION_IDS, DE_TAB_RIGHT_TRIM,
+  DE_BAR_H, DE_MENU_W, DE_CONTENT_X, DE_CONTENT_Y, DE_CONTENT_W, DE_CONTENT_H, DE_CONTENT_H_FULL,
+  DE_TITLE_W, DE_BATT_W, DE_REGION_IDS, DE_TAB_RIGHT_TRIM,
   MAX_ITEM_NAME_LENGTH,
 } from '@g2cc/shared'
 import type { WireScene, SceneRegion, RegionStyle } from '@g2cc/shared'
@@ -199,22 +199,49 @@ function clampLabel(s: string, what: string, maxBytes: number = MAX_ITEM_NAME_LE
   return out + '…'
 }
 
-/** Compose the full screen for the active window. */
-export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string): WireScene {
-  const regions: SceneRegion[] = []
+/** Phase 2 ribbon chrome (overhaul.md §2.2.5). Supplied ONLY in ribbon mode —
+ *  when present, the title bar shrinks to make room for a glasses-battery region
+ *  at the top-right (left of the clock), the bottom status bar is dropped and the
+ *  content reclaims its row UNLESS `bottomBar` carries a window's live phase. When
+ *  absent (menu mode), the layout is the proven one, byte-for-byte. */
+export interface RibbonChrome {
+  /** Glasses battery text ('58%' / '--'), drawn at the top-right, left of the clock. */
+  battery: string
+  /** A thin bottom bar's text (a window's live session phase), or null = no bottom
+   *  bar (the content reclaims the full height). */
+  bottomBar: string | null
+}
 
-  // Title bar — ends at the client-owned clock cutout (469px, CLOCK_X). The
-  // leading space nudges the text ~5px right (Adam cal 2026-06-10) without
-  // raising paddingLength, which would also eat VERTICAL room in the 33px bar.
-  // Middle-ellipsized to the bar's px budget: an unclamped deep Files cwd both
-  // wrapped the 33px bar AND pushed rebuild frames past the 1000 B wall
-  // (review 2026-06-11).
-  const title = clampPxMiddle(view.title, DE_TITLE_W - 14, 'title')
+/** Compose the full screen for the active window. */
+export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string, chrome?: RibbonChrome): WireScene {
+  const regions: SceneRegion[] = []
+  // Ribbon chrome (§2.2.5) reshapes the bars; menu mode (chrome === undefined) is
+  // the proven layout, untouched.
+  const ribbon = chrome !== undefined
+  const titleW = ribbon ? DE_TITLE_W - DE_BATT_W : DE_TITLE_W    // shrink for the battery region
+  const hasBottom = ribbon ? (chrome.bottomBar !== null) : true  // menu mode always shows the status bar
+  const contentH = hasBottom ? DE_CONTENT_H : DE_CONTENT_H_FULL   // reclaim the dropped bar's row
+
+  // Title bar — ends at the clock cutout (menu mode) or the battery region
+  // (ribbon mode). The leading space nudges the text ~5px right (Adam cal
+  // 2026-06-10) without raising paddingLength, which would also eat VERTICAL room
+  // in the 33px bar. Middle-ellipsized to the bar's px budget: an unclamped deep
+  // Files cwd both wrapped the 33px bar AND pushed rebuild frames past the 1000 B
+  // wall (review 2026-06-11).
+  const title = clampPxMiddle(view.title, titleW - 14, 'title')
   regions.push({
-    id: DE_REGION_IDS.title, name: 'title', x: 0, y: 0, w: DE_TITLE_W, h: DE_BAR_H,
+    id: DE_REGION_IDS.title, name: 'title', x: 0, y: 0, w: titleW, h: DE_BAR_H,
     kind: 'text', style: TITLE_CHROME,
     content: { kind: 'text', text: ' ' + title },
   })
+  if (ribbon) {
+    // Glasses battery (§2.2.5), between the title and the client clock cutout.
+    regions.push({
+      id: DE_REGION_IDS.battery, name: 'battery', x: titleW, y: 0, w: DE_BATT_W, h: DE_BAR_H,
+      kind: 'text', style: TITLE_CHROME,
+      content: { kind: 'text', text: clampPx(' ' + chrome.battery, DE_BATT_W - 6, 'battery') },
+    })
+  }
 
   // Menu slot — ALWAYS a real menu (Adam 2026-06-10). Reading/tiles/text
   // windows: the action list, the page's single focus region. Browse windows:
@@ -224,7 +251,7 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
   if (menu.length === 0) throw new Error(`compose: '${view.title}' has no menu items`)
   const capture = menuMode === 'capture'
   regions.push({
-    id: DE_REGION_IDS.menu, name: 'menu', x: 0, y: DE_BAR_H, w: DE_MENU_W, h: DE_CONTENT_H,
+    id: DE_REGION_IDS.menu, name: 'menu', x: 0, y: DE_BAR_H, w: DE_MENU_W, h: contentH,
     kind: 'list', style: { ...CHROME, padding: 3 },
     content: { kind: 'list', items: menu, selectBorder: capture, eventCapture: capture },
   })
@@ -273,7 +300,7 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
     // the screen away (and a capture list must have ≥1 row).
     const rows = items.length ? items : ['(empty)']
     regions.push({
-      id: DE_REGION_IDS.browse, name: 'browse', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: DE_CONTENT_W, h: DE_CONTENT_H,
+      id: DE_REGION_IDS.browse, name: 'browse', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: DE_CONTENT_W, h: contentH,
       kind: 'list', style: { ...CHROME, padding: 4 },
       content: { kind: 'list', items: rows, selectBorder: contentCaptures, eventCapture: contentCaptures },
     })
@@ -286,12 +313,12 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
     const clampCol = (text: string, what: string): string =>
       (text ?? '').split('\n').map((l) => clampPx(l, colW - 14, what)).join('\n')
     regions.push({
-      id: DE_REGION_IDS.contentText, name: 'content', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: colW, h: DE_CONTENT_H,
+      id: DE_REGION_IDS.contentText, name: 'content', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: colW, h: contentH,
       kind: 'text', style: { ...CHROME, padding: 6 },
       content: { kind: 'text', text: clampCol(view.textLeft ?? '', 'twocol-left') },
     })
     regions.push({
-      id: DE_REGION_IDS.contentRight, name: 'content2', x: DE_CONTENT_X + colW + 6, y: DE_CONTENT_Y, w: colW, h: DE_CONTENT_H,
+      id: DE_REGION_IDS.contentRight, name: 'content2', x: DE_CONTENT_X + colW + 6, y: DE_CONTENT_Y, w: colW, h: contentH,
       kind: 'text', style: { ...CHROME, padding: 6 },
       content: { kind: 'text', text: clampCol(view.textRight ?? '', 'twocol-right') },
     })
@@ -322,7 +349,7 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
     })
   } else {
     regions.push({
-      id: DE_REGION_IDS.contentText, name: 'content', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: DE_CONTENT_W, h: DE_CONTENT_H,
+      id: DE_REGION_IDS.contentText, name: 'content', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: DE_CONTENT_W, h: contentH,
       kind: 'text', style: { ...CHROME, padding: 6 },
       content: { kind: 'text', text: view.text ?? '' },
     })
@@ -341,14 +368,19 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string)
     ? Math.min(Math.max(40, fwTextWidth(tabText) + 12 - DE_TAB_RIGHT_TRIM + 5), SCREEN_WIDTH - 120)
     : 0
   const tabX = SCREEN_WIDTH - tabW
-  regions.push({
-    id: DE_REGION_IDS.status, name: 'status', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: tabX, h: DE_BAR_H,
-    kind: 'text', style: CHROME,
-    // px-clamped: a long MCP tool name in the phase slot (`● tool mcp__…`)
-    // wrapped the 33px bar — the exact firmware-scrollbar trigger from Adam's
-    // 2026-06-10 cal (review 2026-06-11).
-    content: { kind: 'text', text: clampPx(statusLeft, tabX - 12, 'status') },
-  })
+  // The bottom bar: menu mode = the status line; ribbon mode = a window's live
+  // phase ONLY when present (§2.2.5 — else the content reclaimed the row).
+  if (hasBottom) {
+    const bottomText = ribbon ? (chrome.bottomBar ?? '') : statusLeft
+    regions.push({
+      id: DE_REGION_IDS.status, name: 'status', x: 0, y: SCREEN_HEIGHT - DE_BAR_H, w: tabX, h: DE_BAR_H,
+      kind: 'text', style: CHROME,
+      // px-clamped: a long MCP tool name in the phase slot (`● tool mcp__…`)
+      // wrapped the 33px bar — the exact firmware-scrollbar trigger from Adam's
+      // 2026-06-10 cal (review 2026-06-11).
+      content: { kind: 'text', text: clampPx(bottomText, tabX - 12, 'status') },
+    })
+  }
   if (hasTabs) {
     regions.push({
       id: DE_REGION_IDS.tabs, name: 'tabs', x: tabX, y: SCREEN_HEIGHT - DE_BAR_H, w: tabW, h: DE_BAR_H,

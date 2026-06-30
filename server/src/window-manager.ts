@@ -19,7 +19,7 @@ import type { WireScene, MediaState, SmsThread, SmsMessage } from '@g2cc/shared'
 import { renderChart, type RenderedImage } from './os-content.js'
 import {
   composeScene, paginateText, errorView, blankScene, blankFlashScene, fwTextWidth,
-  DEFAULT_BROWSE_MENU, type WinView,
+  DEFAULT_BROWSE_MENU, type WinView, type RibbonChrome,
 } from './os-compose.js'
 import { parseVoiceCommand, type VoiceCommand } from './voice.js'
 import {
@@ -713,20 +713,31 @@ export class WindowManager {
             // Phase 6: a live nav line rides the awake title bar too (the
             // px middle-clamp keeps the window title head + the nav tail).
             if (this.navLine) view = { ...view, title: `${view.title} · ▲ ${this.navLine}` }
+            // Phase 2 ribbon: the unseen badge rides the title (the bottom status
+            // bar that carried it is gone in ribbon mode). The flash already shows
+            // the latest one, so only add the count when there is no flash.
+            if (this.rootNav === 'ribbon' && this.unseen > 0 && !this.titleFlash) view = { ...view, title: `${view.title} · !${this.unseen}` }
           }
           // Tab strip RETIRED (Phase 5, 2026-06-11): the Main dashboard carries
           // the window states now; the status slot takes the full bottom bar.
           // (The first-letter mapping died with it.)
+          // Phase 2 (§2.2.5): in ribbon mode, reshape the chrome — a glasses-
+          // battery region top-right, the bottom status bar DROPPED (content
+          // reclaims the row) unless the active window has a live session phase.
+          // Menu mode (undefined) composes the proven layout, byte-for-byte.
+          const chrome: RibbonChrome | undefined = this.rootNav === 'ribbon'
+            ? { battery: this.g2BatteryText(), bottomBar: this.active.statusLine?.() ?? null }
+            : undefined
           let scene: WireScene
           try {
-            scene = composeScene(view, [], this.statusLeft())
+            scene = composeScene(view, [], this.statusLeft(), chrome)
           } catch (e) {
             // A compose failure must NEVER escape (it used to crash the whole
             // server as an unhandled rejection — review 2026-06-10). errorView
             // composes by construction: text mode + a non-empty menu.
             this.ctx.log(`[os] compose failed for ${this.active.id}: ${(e as Error).message}`)
             view = errorView(`${this.active.label} · error`, (e as Error).message)
-            scene = composeScene(view, [], this.statusLeft())
+            scene = composeScene(view, [], this.statusLeft(), chrome)
           }
           // Re-check the blank state AFTER the awaits: a double-tap blank, the
           // popup auto-re-blank, or an overlay Dismiss-from-blank may have sent
@@ -798,12 +809,13 @@ export class WindowManager {
           // previews drop, only the settled cursor renders (no ack-gated stale frames).
           if (this.ribbonRenderQueued) continue
           let scene: WireScene
+          const battery = this.g2BatteryText()
           try {
-            scene = this.ribbon!.scene(preview)
+            scene = this.ribbon!.scene(preview, battery)
           } catch (e) {
             this.ctx.log(`[ribbon] scene compose failed: ${(e as Error).message}`)
             try {
-              scene = this.ribbon!.scene('(preview unavailable)')
+              scene = this.ribbon!.scene('(preview unavailable)', battery)
             } catch (e2) {
               // Even the minimal strip+breadcrumb overflowed (≈never) — log and
               // stay on the prior frame; do NOT blank (atRibbon is still true).
@@ -841,6 +853,12 @@ export class WindowManager {
       this.ctx.log(`[ribbon] preview failed (${id}): ${(e as Error).message}`)
       return `${w.tab}\n\n(preview unavailable — see log)`
     }
+  }
+
+  /** The glasses battery for the ribbon's top-right ('58%' / '--' until reported). */
+  private g2BatteryText(): string {
+    const b = this.ctx.g2Battery?.()
+    return typeof b === 'number' ? `${b}%` : '--'
   }
 
   private statusLeft(): string {

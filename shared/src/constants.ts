@@ -65,7 +65,13 @@ export const DE_MENU_W = 96                                 // left action-menu 
 export const DE_CONTENT_X = DE_MENU_W                       // 96
 export const DE_CONTENT_Y = DE_BAR_H                        // 33
 export const DE_CONTENT_W = SCREEN_WIDTH - DE_MENU_W        // 480
-export const DE_CONTENT_H = SCREEN_HEIGHT - 2 * DE_BAR_H    // 222
+export const DE_CONTENT_H = SCREEN_HEIGHT - 2 * DE_BAR_H    // 222 (with both bars)
+/** Phase 2 ribbon chrome: content height when the bottom bar is dropped (the
+ *  status bar is gone unless a session window needs it) — reclaims one bar. */
+export const DE_CONTENT_H_FULL = SCREEN_HEIGHT - DE_BAR_H   // 255 (top bar only)
+/** Phase 2 ribbon chrome: width of the glasses-battery text region at the top
+ *  right (left of the clock cutout). "100%" ≈ 44px + inset. */
+export const DE_BATT_W = 54
 export const DE_TILE_W = DE_CONTENT_W / 2                   // 240 (≤288 cap ✓)
 export const DE_TILE_H = DE_CONTENT_H / 2                   // 111 (≤129 cap ✓)
 export const DE_TITLE_W = SCREEN_WIDTH - CLOCK_WIDTH        // 469 (title ends at the clock cutout)
@@ -76,6 +82,9 @@ export const DE_TAB_RIGHT_TRIM = 30
 /** Stable container ids — identical across windows (docs/DE_DESIGN.md §1). */
 export const DE_REGION_IDS = {
   title: 2, menu: 3, status: 4, tabs: 5, browse: 6, contentText: 7,
+  /** Phase 2 ribbon chrome: the glasses-battery text at the top-right, just left
+   *  of the client clock cutout (server-rendered; menu mode never uses it). */
+  battery: 8,
   tile0: 10, tile1: 11, tile2: 12, tile3: 13,
   /** twocol mode (Adam 2026-06-12 — the one-page Main dashboard): the RIGHT
    *  column; the left column reuses contentText(7). 14 was previously unused. */
