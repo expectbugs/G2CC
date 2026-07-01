@@ -5,7 +5,7 @@
 import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
 import { strict as assert } from 'node:assert'
 import { copyFile, writeFile, unlink, mkdir, rm } from 'node:fs/promises'
-import { listChapters, readChapter, savePosition, getPosition, getLastPosition } from '../dist/reader.js'
+import { listChapters, readChapter, savePosition, getPosition, getLastPosition, listBookmarks } from '../dist/reader.js'
 import { composeScene, paginateText, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
 import { query, getPool } from '../dist/store.js'
 
@@ -21,10 +21,16 @@ try {
   const meta = await listChapters(BOOK)
   assert.ok(meta.title.toLowerCase().includes('frankenstein'))
   assert.ok(meta.chapters.length > 10, `expected many chapters, got ${meta.chapters.length}`)
-  const ch = await readChapter(BOOK, 4)
-  assert.ok(ch.text.length > 1000, 'chapter text substantial')
+  // Find a SUBSTANTIAL chapter — the sovereign-chapters TOC split (2026-07-01) leads with
+  // short front matter, so a fixed index isn't reliably a real chapter.
+  let ch = null
+  for (let i = 0; i < meta.chapters.length; i++) {
+    const c = await readChapter(BOOK, i)
+    if (c.text.length > 1000) { ch = c; break }
+  }
+  assert.ok(ch, 'at least one chapter has substantial text')
   assert.ok(!/<[a-z]+[^>]*>/i.test(ch.text.slice(0, 2000)), 'no html tags leak into text')
-  console.error(`  1. real EPUB: ${meta.chapters.length} chapters, ch4 "${ch.chapterTitle}" ${ch.text.length} chars ✓`)
+  console.error(`  1. real EPUB: ${meta.chapters.length} chapters, "${ch.chapterTitle}" ${ch.text.length} chars ✓`)
 
   // --- 2. resume position round-trip + upsert ---
   assert.equal(await getPosition(BOOK), null, 'fresh book has no position')
@@ -42,7 +48,7 @@ try {
 
   // --- 4. both levels compose under budget ---
   const TABS = []
-  const chapterItems = ['— prev —', ...meta.chapters.slice(0, 14).map((c) => `${c.idx + 1}. ${c.title}`.slice(0, 34)), '— more —']
+  const chapterItems = ['— prev —', ...meta.chapters.slice(0, 14).map((c) => c.title.slice(0, 36)), '— more —']
   const chaptersScene = composeScene({
     mode: 'browse', menuMode: 'passive',
     title: 'Reader · Frankenstein; or, the m… · 31 sections',
@@ -73,10 +79,12 @@ try {
   })
   try {
     const reader = wm.windows.find((w) => w.id === 'reader')
-    // Reader now OPENS to the root content menu (Adam 2026-06-30): Last/Select Book/Bookmarks/Options.
+    // Reader now OPENS to the root content menu: Last/Bookmark Last/Select Book/Bookmarks/Options
+    // ('Bookmark Last' added 2026-07-01 — the one-tap anchor for full-bleed scroll-reading,
+    // which has no while-reading menu).
     let v = await reader.view()
     assert.equal(reader.level, 'menu', 'Reader opens to the root content menu')
-    assert.deepEqual(v.items, ['Last', 'Select Book', 'Bookmarks', 'Options'], 'root menu = Last/Select Book/Bookmarks/Options')
+    assert.deepEqual(v.items, ['Last', 'Bookmark Last', 'Select Book', 'Bookmarks', 'Options'], 'root menu = Last/Bookmark Last/Select Book/Bookmarks/Options')
     // Select Book → the library (subfolder browser).
     await reader.onBrowseSelect(v.items.indexOf('Select Book'))
     v = await reader.view()
@@ -104,7 +112,16 @@ try {
     await reader.onBrowseSelect(0)   // tap Last
     assert.ok(reader.bookPath.endsWith('/RootBook.epub'), 'Last resumed the most-recently-read book')
     assert.equal(reader.level, 'read', 'Last resumed straight into the saved page')
-    console.error('  5. root menu → Select Book → subfolder nav + Last resume ✓')
+    // Bookmark Last (2026-07-01): from the root menu, one tap anchors the last-read spot
+    // (the open book's live page). No while-reading menu exists in full-bleed scroll-reading.
+    reader.level = 'menu'
+    v = await reader.view()
+    assert.ok(v.items.includes('Bookmark Last'), 'root menu has Bookmark Last')
+    await reader.onBrowseSelect(v.items.indexOf('Bookmark Last'))
+    const bms = await listBookmarks(`${SANDBOX}/RootBook.epub`)
+    assert.ok(bms.some((b) => b.chapter === reader.chapter && b.page === reader.page),
+      'Bookmark Last dropped an anchor at the last-read (chapter,page)')
+    console.error('  5. root menu → Select Book → subfolder nav + Last resume + Bookmark Last ✓')
   } finally { wm.dispose() }
 
   // --- 6. full-bleed scroll-reading (Adam 2026-06-30): no menu, scroll turns pages ---
@@ -117,17 +134,25 @@ try {
     })
     try {
       const reader = wm2.windows.find((w) => w.id === 'reader')
-      await reader.openBook(`${SANDBOX}/RootBook.epub`)
-      await reader.openChapter(4, 1)   // a long chapter, page 1 (room to scroll both ways)
+      await reader.openBook(BOOK)   // Frankenstein — real chapters, some spanning multiple scroll pages
+      // Find a chapter that spans >= 2 big scroll pages (short front matter is one page now — 2026-07-01).
+      let multi = -1
+      for (let i = 0; i < reader.chapters.length; i++) {
+        await reader.openChapter(i, 0)
+        if (reader.pages.length >= 2) { multi = i; break }
+      }
+      assert.ok(multi >= 0, 'a chapter spans multiple scroll pages')
+      await reader.openChapter(multi, 0)
       const v = await reader.view()
       assert.equal(v.scrollContent, true, 'full-bleed reading sets scrollContent (the content captures)')
       assert.deepEqual(v.menu, [], 'NO menu while reading in full-bleed')
       assert.ok(v.text.split('\n').length >= 7, 'the page is padded to fill the reading region')
+      assert.equal(reader.page, 0, 'start at page 0 of the chapter')
       await reader.onContentScroll('down')
-      assert.equal(reader.page, 2, 'scroll down → next page (p1 → p2)')
+      assert.equal(reader.page, 1, 'scroll down → next page (p0 → p1)')
       await reader.onContentScroll('up')
-      assert.equal(reader.page, 1, 'scroll up → previous page (p2 → p1)')
-      console.error('  6. full-bleed: scrollContent reading, no menu, scroll turns pages ✓')
+      assert.equal(reader.page, 0, 'scroll up → previous page (p1 → p0)')
+      console.error('  6. full-bleed: scrollContent reading, no menu, scroll turns big pages ✓')
     } finally { wm2.dispose() }
   }
 

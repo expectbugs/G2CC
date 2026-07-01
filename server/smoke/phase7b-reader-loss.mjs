@@ -60,14 +60,17 @@ try {
     await reader.onBrowseSelect(v.items.indexOf(BOOK_REL))
     assert.equal(reader.level, 'chapters', 'tapping a book with no position → chapter list')
     const map = await waitForMap(reader)
-    assert.equal(map.total, 6365, `moby absolute total 6365, got ${map.total}`)
+    assert.ok(map.total > 1000, `moby page map built (total ${map.total} over ${map.counts.length} chapters)`)
     console.error(`  1. open → chapters; background page map = ${map.total} pages over ${map.counts.length} chapters ✓`)
 
     // --- 2. CHAPTER PICK IS GATED — a tap does NOT jump or overwrite position ---
     assert.equal(await getPosition(BOOK), null, 'no saved position yet')
     v = await reader.view()                       // chapters list
-    const chapterRow = v.items.findIndex((s) => /^10\./.test(s))   // chapter 10
-    assert.ok(chapterRow >= 0, 'found a chapter row to tap')
+    // Pick the first REAL (multi-page) chapter — robust to the sovereign-chapters model
+    // (short front matter leads; at offset 0 the browse row index == the chapter index). 2026-07-01.
+    const ci = map.counts.findIndex((n) => n >= 2)
+    assert.ok(ci >= 0 && ci < 13, `a real chapter sits in the first browse page (ci=${ci})`)
+    const chapterRow = ci
     await reader.onBrowseSelect(chapterRow)
     assert.equal(reader.level, 'confirm', 'chapter tap → Confirm gate (NOT an instant jump)')
     v = await reader.view()
@@ -86,9 +89,9 @@ try {
     assert.equal(reader.level, 'read', 'Confirm navigates into the page')
     await settle()
     const posAfter = await getPosition(BOOK)
-    assert.ok(posAfter && posAfter.chapter === 9 && posAfter.page === 0, `landed at ch10 p1, got ${JSON.stringify(posAfter)}`)
+    assert.ok(posAfter && posAfter.chapter === ci && posAfter.page === 0, `landed at chapter ${ci} p1, got ${JSON.stringify(posAfter)}`)
     v = await reader.view()
-    assert.ok(/p\.\d+\/6365 · \d+%/.test(v.title), `read title shows absolute page + %, got "${v.title}"`)
+    assert.ok(/p\.\d+\/\d+ · \d+%/.test(v.title), `read title shows chapter-relative page + %, got "${v.title}"`)
     console.error(`  3. Confirm → read; title "${v.title.replace(/^.*· /, '… ')}" ✓`)
 
     // --- 4. the move is UNDOABLE (the safety net) ---
@@ -108,7 +111,7 @@ try {
     await tap('0'); await tap('0')           // 15000 — out of range
     await tap('Go')
     assert.equal(reader.level, 'jump', 'out-of-range Go is REJECTED (stays on the pad — no silent clamp)')
-    assert.ok(/max is 6365/.test(reader.jumpError ?? ''), `loud max error, got "${reader.jumpError}"`)
+    assert.ok((reader.jumpError ?? '').includes(`max is ${map.total}`), `loud max error (max ${map.total}), got "${reader.jumpError}"`)
     // clear the buffer to empty (⌫ to nothing), then type a valid page
     for (let i = 0; i < 6; i++) await tap('⌫')
     assert.equal(reader.jumpBuf, '', 'backspace clears to empty')

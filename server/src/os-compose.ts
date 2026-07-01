@@ -626,16 +626,20 @@ function fitFrameToBudget(regions: SceneRegion[], title: string): void {
   let over = estimateLayoutFrameBytes(regions) - LAYOUT_FRAME_BUDGET_BYTES
   if (over <= 0) return
   console.warn(`[os-compose] '${title.slice(0, 40)}' ≈${over}B over the ${LAYOUT_FRAME_BUDGET_BYTES}B wall — trimming text/chrome to fit (was the errorView throw)`)
-  // content body first (the variable bulk), then the title, then the status.
-  // (browse views have no 'content' region, so only title/status are trimmable
-  // there — their rows are byte-paged upstream, the real safety net.)
-  for (const name of ['content', 'content2', 'title', 'status']) {
+  // The scroll-reading PAGE (id FULLBLEED_READ_ID) is NEVER trimmed — dropping rows there
+  // would be content SKIPPED on the firmware's auto-advance = truncation (review 2026-07-01).
+  // So a reading frame that a dense multi-byte TITLE (Devanagari/Thai/… ≈124 B at the 401px
+  // clamp) pushes over the wall trims the passive TOP BAR first, sparing the prose. A CAPTURE
+  // menu antenna is never trimmed (taps resolve against its exact text); a browse LIST isn't
+  // 'text' so it's skipped here (its rows are byte-paged upstream, the real safety net).
+  for (const name of ['menu', 'content', 'content2', 'title', 'status']) {
     if (over <= 0) break
     const r = regions.find((x) => x.name === name)
-    if (r?.content?.kind === 'text') {
-      trimTextRegionBy(r, over + 8)
-      over = estimateLayoutFrameBytes(regions) - LAYOUT_FRAME_BUDGET_BYTES
-    }
+    if (!r || r.content?.kind !== 'text') continue
+    if (r.id === FULLBLEED_READ_ID) continue                       // the reading page — never
+    if (r.name === 'menu' && r.content.scroll === true) continue   // a capture antenna — never
+    trimTextRegionBy(r, over + 8)
+    over = estimateLayoutFrameBytes(regions) - LAYOUT_FRAME_BUDGET_BYTES
   }
   if (over > 0) {
     // Only a pathological browse/menu LIST (its rows are byte-paged upstream, so
@@ -729,7 +733,17 @@ export const TEXT_PAGE_MAX_BYTES = 560   // page UTF-8 ceiling (rebuild frame he
  *  per-app reading views (calendar/files/mail/notices/search/sms/media/cc/aria) all
  *  page at THIS width so a widened page never disagrees with what renders. */
 export const FB_TEXT_PAGE_PX = 552       // the 576 pane − a 24px safety margin (mirrors TEXT_PAGE_PX's inset)
-export const FB_READ_PAGE_ROWS = 7       // scroll-reading ONLY (no status bar → the full 255px height). Menu-driven fullBleed reading keeps TEXT_PAGE_ROWS (a status bar may show → 222px).
+export const FB_READ_PAGE_ROWS = 7       // the VISIBLE rows in the 255px pane — the padPage fill target (a short page fills the screen; a big scroll page overflows past it).
+/** §3.5 sovereign-chapters (2026-07-01): a full-bleed SCROLL-reading page fills toward
+ *  the ~960 B layout-frame wall so the firmware scrolls a big chunk then auto-advances
+ *  (proven on glass: no scroll ceiling < ~100 rows). 660 B ≈ ~11 dense prose rows (vs the
+ *  old 7). Sized to leave headroom for a dense multi-byte chapter TITLE — a 30-char
+ *  Devanagari/Thai title clamps to ~124 B at the 401 px bar (review 2026-07-01), and
+ *  660 + 124 + chrome stays under 960 — so the composed frame never overflows for ANY
+ *  script and a reading page is never trimmed (that would skip rows on auto-advance =
+ *  truncation; fitFrameToBudget also refuses to trim it, sparing the prose). */
+export const FB_READ_MAX_BYTES = 660
+export const FB_READ_ROW_CAP = 30        // row cap for sparse content (poetry/lists) so a page can't scroll absurdly far; the byte cap binds first for prose.
 
 /** Greedy px-measured word-wrap of multi-line text into display ROWS (each
  *  ≤ maxPx by `widthFn`), hard-splitting a single overlong token (URL/base64/

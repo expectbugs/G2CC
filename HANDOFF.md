@@ -6,6 +6,35 @@ Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI
 `UPGRADE_PROGRESS.md` records the v1 phases incl. Adam's gate answers; `CHANGELOG.md` r3–r18
 carries the WHY of everything.
 
+**2026-07-01 (latest) — READER "SOVEREIGN CHAPTERS" REMODEL + §3.5 firmware-scroll PROVEN — DEPLOYED (live),
+committed + pushed (server-only + a `scripts/read_epub.py` rewrite, smoke 27/28, NO APK).** The §3.5 probe
+resolved on glass: a multi-line `scroll=true` captured text region DOES locally-scroll, then fires the boundary
+event at the edge → the server auto-advances, seamlessly (no rows skipped), with NO firmware scroll ceiling
+< ~100 rows (the ~960 B layout wall is the only cap). So Reader was remodelled to read a book's OWN structure:
+- **REAL chapters** — `read_epub.py` splits each spine document at its **TOC anchor points** into the book's
+  real chapters (general; degrades to spine items for a coarse TOC). The Black Company omnibus → 127 real
+  chapters (was 9 blobs); "chapter 33 of Shadows Linger" = `33. Juniper: The Encounter`. `read <idx>` text
+  === `pages[idx]` text (the server relies on it).
+- **Chapter-relative page numbers** (`33. Juniper: The Encounter · p.2/28 · 63%`) — the `%` still rides the
+  absolute page map.
+- **Big firmware-scroll pages** — a full-bleed reading page fills toward the wall (`FB_READ_MAX_BYTES` in
+  `os-compose.ts`, ~11 prose rows vs the old 7 — sized to leave headroom for a dense multi-byte title so the
+  frame stays under the wall for any script; `fitFrameToBudget` also never trims a reading page); the firmware
+  scrolls the chunk then auto-advances.
+  `paginateText` + `buildPageMap` now take `maxBytes` (in the pagemap FINGERPRINT → a geometry change
+  re-indexes). New constants: `FB_READ_MAX_BYTES`, `FB_READ_ROW_CAP`, `FB_READ_PAGE_ROWS` (padPage display-fill).
+  Config knob `de.readerScrollRows` (scroll row cap, default 30). Menu-mode reading is byte-identical (456/6/560).
+- **Book-faithful format** — scene breaks → `·  ·  ·` dividers detected by LINE CONTENT (a symbols-only line),
+  NEVER by class (a class-based version ate the first prose paragraph of every scene — caught in review + fixed,
+  re-verified at **0.000% prose loss**; italics/bold flatten — the words are kept). **`Bookmark Last`** added to
+  the root menu (the one-tap anchor, since full-bleed reading has no while-reading menu).
+- **Adam's Shadows Linger place was migrated PRECISELY** — old spine-ch5 blob p.1265 @ 552×7 (= abs p.3240) →
+  the new `33. Juniper: The Encounter` (idx 47, page 0): his page-1265 text is that chapter's opening line.
+  `reader_positions` + the bookmark (id 1) updated; the stale pagemap cleared to re-derive.
+- **3-agent + own adversarial review, lossless verified** (287,279 = 287,279 words; 0 dropped/reordered
+  regions; 182 dividers = 182 ornaments). Reader smokes made ROBUST (compute from the live page map, not
+  hardcoded counts). **On-glass-gated:** the feel/latency of big-page scrolling on real glass.
+
 **2026-07-01 — PHASE 3: ribbon refinement + the borderless full-width DE + per-app WIDTH pass + Reader
 redesign + #11 Main — DEPLOYED (live), committed + pushed (server-only, smoke 27/28, NO APK).** Behind
 `de.rootNav:'ribbon'` + `de.fullBleed:true` (both in Adam's config; menu mode is the byte-for-byte fallback).

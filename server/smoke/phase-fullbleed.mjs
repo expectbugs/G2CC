@@ -7,7 +7,7 @@
 import './_env.mjs'
 import { strict as assert } from 'node:assert'
 import { WindowManager } from '../dist/window-manager.js'
-import { composeFullBleedScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
+import { composeFullBleedScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES, paginateText, FB_TEXT_PAGE_PX, FB_READ_ROW_CAP, FB_READ_MAX_BYTES } from '../dist/os-compose.js'
 import { query } from '../dist/store.js'
 
 const SCREEN_W = 576, MENU_COL_X = 96   // DE constants (the classic content pane starts at x=96)
@@ -66,6 +66,19 @@ const menuBracket = (sc) => (reg(sc, 'menu')?.content?.text?.match(/\[([^\]]+)\]
   // wall budget: a pathological page still composes under the wall (fitFrameToBudget).
   const big = composeFullBleedScene({ mode: 'text', title: 'x', menu: ['Next'], text: 'y'.repeat(5000) }, '58%', null, ['Next'], 0)
   assert.ok(estimateLayoutFrameBytes(big.regions) <= LAYOUT_FRAME_BUDGET_BYTES, 'big page trimmed under the wall')
+  // §3.5 (2026-07-01): a SCROLL-reading page at the max byte budget + a DENSE multi-byte
+  // title (Devanagari falls in fwTextWidth's 9.6px bucket → ~124 B at the 401px bar) must
+  // stay under the wall, and fitFrameToBudget must NEVER trim the reading page (that would
+  // skip rows on auto-advance = truncation). The regression guard for FB_READ_MAX_BYTES.
+  {
+    const denseTitle = 'अध्याय तेतीस जुनिपर द एनकाउंटर बहुत लंबा शीर्षक · p.12/149 · 63%'
+    const bigPage = paginateText('कखगघङ चछजझञ टठडढण तथदधन पफबभम '.repeat(60), FB_TEXT_PAGE_PX, FB_READ_ROW_CAP, FB_READ_MAX_BYTES)[0]
+    const rs = composeFullBleedScene({ mode: 'text', scrollContent: true, title: denseTitle, menu: [], text: bigPage }, '58%', null, [], 0)
+    const rbytes = estimateLayoutFrameBytes(rs.regions)
+    assert.ok(rbytes <= LAYOUT_FRAME_BUDGET_BYTES, `scroll page + dense multi-byte title under the ${LAYOUT_FRAME_BUDGET_BYTES}B wall (got ${rbytes})`)
+    assert.ok(!reg(rs, 'content').content.text.endsWith('…'), 'the scroll-reading page content is NOT trimmed (would be skipped on auto-advance = truncation)')
+    console.error(`  1b. §3.5 scroll page (${Buffer.byteLength(bigPage)}B) + dense multi-byte title → ${rbytes}B ≤ wall, content untrimmed ✓`)
+  }
   console.error('  1. composeFullBleedScene: full-width content, top-bar 3-cell menu, capture routing, status, wall ✓')
 }
 

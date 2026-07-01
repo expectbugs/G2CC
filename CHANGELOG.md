@@ -4,6 +4,69 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-01 — **Reader: §3.5 firmware-scroll PROVEN + the "sovereign chapters" remodel**
+
+The §3.5 firmware-scroll probe resolved on glass, then Reader was remodelled around the result. Server-only
+(+ a live `scripts/read_epub.py` rewrite); smoke 27/28.
+
+**§3.5 probe (on-glass, Adam):** a MULTI-line `scroll=true` captured text region **DOES** locally-scroll on the
+G2, then fires the directional boundary event at the bottom edge → the server auto-advances to the next page,
+seamlessly (no rows skipped: it scrolled r01→r73 = the whole page, resumed cleanly at r74). A follow-up 99-row
+page confirmed **no firmware scroll ceiling below ~100 rows** — the ~960 B layout-frame wall is the only cap.
+A config knob `de.readerScrollRows` + a numbered probe book (`~/books/scroll-probe.epub`) drove it; the knob
+survives as the scroll-page row cap (default `FB_READ_ROW_CAP`=30; the ~660 B byte budget binds first for prose).
+
+**The remodel — Reader now reads a book's OWN structure:**
+- **Real chapters (`scripts/read_epub.py` rewrite).** Chapters were the epub's spine documents (an omnibus =
+  3 giant blobs). Now each spine doc is SPLIT at its TOC anchor points into the book's real chapters — general
+  (the book's own declared structure; degrades to spine items for a coarse TOC), so "Chapter 33 of Shadows
+  Linger" is the actual `33. Juniper: The Encounter` (127 chapters for the Black Company omnibus vs 9; 149 for
+  Moby). `read <idx>` text === `pages[idx]` text (the server relies on it for page-map consistency).
+- **Chapter-relative page numbers** (`33. Juniper: The Encounter · p.2/28 · 63%`) — meaningful + stable
+  (anchored to the chapter, not our reflow); the whole-book % rides along from the absolute page map.
+- **Big scroll pages** — a full-bleed reading page fills toward the wall (`FB_READ_MAX_BYTES`=660 ≈ ~11 prose
+  rows, vs the old 7) so the firmware scrolls a whole chunk then auto-advances — far fewer page flips.
+  `paginateText` + `buildPageMap` take `maxBytes` now; the pagemap FINGERPRINT includes it (a layout change
+  re-indexes rather than mis-mapping Jump). The cap leaves headroom for a dense multi-byte chapter TITLE so the
+  composed frame stays under the 960 B wall for ANY script; `fitFrameToBudget` also NEVER trims the reading
+  page (it trims the passive title instead — trimming reading rows would skip content on auto-advance).
+- **Book-faithful format** — scene breaks render as a `·  ·  ·` divider, detected by LINE CONTENT (a
+  symbols-only line) — NEVER by class, so a prose paragraph can't be mistaken for a break and dropped.
+  Chapter headings + paragraph flow preserved; italics/bold flatten (a mono display has no faces — the words
+  are kept). **Zero prose loss** verified (concatenated-chapter char stream identical to the old extractor).
+- **`Bookmark Last`** root-menu shortcut — the one-tap anchor now that full-bleed reading has no
+  while-reading menu.
+- **Position migration** — Adam's live Shadows Linger spot (old spine-ch5 blob, page 1265 @ 552×7 = abs
+  p.3240) was migrated PRECISELY: his page-1265 text ("Things changed after the Captain's visit…") anchors to
+  the opening of the new `33. Juniper: The Encounter` (idx 47, page 0) — a unique match confirming his stated
+  "chapter 33". reader_positions + the bookmark updated; the stale pagemap cleared to re-derive.
+
+**Review (3 adversarial agents + own pass, every finding verified):** the extractor is lossless (287,279 vs
+287,279 words, 0 dropped/reordered regions; 182 dividers = 182 ornaments). **A truncation bug was caught +
+fixed mid-build**: class-based scene detection put `class="sb"` on the PROSE paragraph after the ornament, so
+suppressing by class ate the first paragraph of every scene (−2.79% of prose) → switched to content-based,
+re-verified at 0.000% loss. **A second, HIGH truncation path was caught + fixed**: a dense multi-byte chapter
+TITLE (Devanagari/Thai ~124 B at the 401 px bar) plus a near-cap page pushed the composed frame over the wall
+→ `fitFrameToBudget` trimmed the reading CONTENT → rows skipped on auto-advance. Fixed: the scroll-reading page
+is now EXEMPT from trimming (the passive title trims instead), `FB_READ_MAX_BYTES` lowered 700→660 so any
+script stays under the wall, and a `phase-fullbleed` smoke guards it (923 B ≤ 960, content untrimmed). Latin/
+CJK/Cyrillic never tripped it (Adam's library is Latin), but it was a real latent regression. Low-cosmetic
+extractor fixes too (a lone `...` no longer misreads as a divider; wider dinkuses caught; a missing-anchor
+fallback reuses the TOC title). The reader smokes were made ROBUST (compute from the live page map, not
+hardcoded Moby/Frankenstein counts).
+
+**Lessons / decisions:**
+- **Class-based scene-break detection is unsafe** — CONTENT-based (a symbols-only line) is the only rule that
+  can't eat prose.
+- **No print-page numbers exist in a reflowable epub** unless it's print-linked (this one isn't) — so
+  "page numbers matching the physical book" isn't literally possible; chapter-relative numbers are the
+  faithful, stable equivalent.
+
+**NOT done / on-glass:** feel/latency of the big-page scrolling on real glass; whether to grade the scroll
+page size; per-novel grouping in the (now long) chapter list.
+
+---
+
 ## (unstamped) — 2026-07-01 — **Phase 3: ribbon refinement + the borderless full-width DE + Reader redesign**
 
 Executed most of `overhaul.md` Phase 3 (Adam's 2026-06-30 tweak list). **`overhaul.md` §3.0 is the source-of-

@@ -523,7 +523,7 @@ flag-gated on `de.rootNav: 'ribbon'`; `'menu'` stays the byte-for-byte fallback 
 Several items touch the proven `os-compose.ts` — the sanctioned, gated, `scene_to_png`-+-on-glass-verified
 exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, smoke-green + on-glass.**
 
-> ## 🛠 STATUS — Phase 3 (updated 2026-07-01). Three waves + deploy + review; menu mode byte-for-byte.
+> ## 🛠 STATUS — Phase 3 (updated 2026-07-01). Three waves + the Reader sovereign-chapters remodel; menu mode byte-for-byte.
 > All server-only, gated behind `de.rootNav:'ribbon'` (+ the in-window layout behind `de.fullBleed`).
 > **Adam runs it LIVE** (`rootNav:'ribbon', fullBleed:true, recentsDepth:4` in `~/.g2cc/config.json`;
 > backups `config.json.bak-pre-ribbon` + `config.json.bak-pre-phase3`).
@@ -594,8 +594,23 @@ exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, s
 >   clamped + Undo-able); the `⚠ unsaved`/`voice ▲` statusLine is suppressed during full-bleed scroll-reading
 >   (the page forces no status bar — still logs loudly, and shows in the menu levels).
 >
+> ### ✅ DONE — Reader "sovereign chapters" remodel + §3.5 firmware-scroll PROVEN (2026-07-01)
+> - **§3.5 firmware-scroll PROVEN on glass** (Adam): a multi-line `scroll=true` captured text region DOES
+>   locally-scroll, then fires the directional boundary event at the edge → the server auto-advances,
+>   seamlessly (no rows skipped: r01→r73 = the whole page, resumed clean at r74); NO firmware ceiling < ~100
+>   rows (the ~960 B layout-frame wall is the only cap). Probe knob `de.readerScrollRows` + `~/books/scroll-probe.epub`.
+> - **Reader remodel** (server-only + the `scripts/read_epub.py` rewrite): REAL chapters (split at the book's
+>   TOC anchors — "33. Juniper: The Encounter"; 127 for the Black Company omnibus vs 9); chapter-relative page
+>   numbers (`· p.2/28 · 63%`); big firmware-scroll pages (`FB_READ_MAX_BYTES`≈660, ~11 prose rows vs 7);
+>   book-faithful format (scene-break `·  ·  ·` dividers, detected by CONTENT not class — a class-based bug
+>   that ate the first paragraph of every scene was caught in review + fixed, re-verified 0.000% prose loss);
+>   `Bookmark Last` root-menu shortcut; Adam's Shadows Linger place migrated PRECISELY to the new ch33 start
+>   (idx 47, p0). 3-agent + own review, lossless verified. Smoke 27/28. Full detail: the CHANGELOG 2026-07-01
+>   Reader entry.
+>
 > ### ❌ STILL NOT DONE (on-glass / deferred)
-> - **§3.5 firmware-scroll for non-Reader large content** — future; needs the on-glass overflow-scroll probe.
+> - **§3.5 for the OTHER large-content windows** — Reader now uses firmware-scroll (above); extending it to
+>   file previews / calendar-event / notices-detail is future (the mechanism is proven, just not applied yet).
 > - **§3.6 End-Feature long-press popup (#10)** — NOT investigated to a conclusion (see §3.6).
 > - **Games width** — deliberately NOT widened (the Blackjack embargo — the last item). rpg/paperclips/confirm
 >   pages still page at 456 in full-bleed (narrow but functional). **Do NOT touch Blackjack** — its smoke has a

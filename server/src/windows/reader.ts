@@ -6,7 +6,7 @@ import { join, basename, resolve as resolvePath } from 'node:path'
 import type { OsWindow, WmContext, WinView } from './types.js'
 import { browsePageItems } from './_browse.js'
 import { oneLine } from './_util.js'
-import { paginateText, errorView, FB_TEXT_PAGE_PX, TEXT_PAGE_PX, FB_READ_PAGE_ROWS, TEXT_PAGE_ROWS } from '../os-compose.js'
+import { paginateText, errorView, FB_TEXT_PAGE_PX, TEXT_PAGE_PX, FB_READ_PAGE_ROWS, TEXT_PAGE_ROWS, FB_READ_MAX_BYTES, FB_READ_ROW_CAP, TEXT_PAGE_MAX_BYTES } from '../os-compose.js'
 import {
   savePosition, getPosition, getLastPosition, listChapters, readChapter,
   pushHistory, popHistory, peekHistory, listHistory,
@@ -103,8 +103,21 @@ export class ReaderWindow implements OsWindow {
   }
   /** Reading page width px: full-bleed 552px pane vs the classic 456px (shared constants). */
   private get pagePx(): number { return this.fbActive ? FB_TEXT_PAGE_PX : TEXT_PAGE_PX }
-  /** Reading page rows: full-bleed scroll-reading reclaims the status row (7) vs the classic 6. */
-  private get pageRows(): number { return this.fbActive ? FB_READ_PAGE_ROWS : TEXT_PAGE_ROWS }
+  /** Reading page ROWS. Full-bleed = the sovereign-chapters SCROLL page: a big row cap
+   *  (`de.readerScrollRows` override, else FB_READ_ROW_CAP) so a whole ~700 B chunk fills one
+   *  page and the firmware scrolls it, then the boundary event auto-advances (proven on glass:
+   *  no scroll ceiling < ~100 rows). The byte cap (maxBytes) binds first for prose (~12 rows),
+   *  the row cap only for sparse content. Classic (menu) reading: 6. buildPageMap uses this
+   *  SAME geometry → the map + the reading always agree. */
+  private get pageRows(): number {
+    return this.fbActive ? (this.ctx.config?.de?.readerScrollRows ?? FB_READ_ROW_CAP) : TEXT_PAGE_ROWS
+  }
+  /** Per-page UTF-8 byte budget: full-bleed scroll pages fill toward the wall (FB_READ_MAX_BYTES,
+   *  ~12 prose rows) vs the classic 560. The pagemap fingerprints on it, so a change re-indexes. */
+  private get maxBytes(): number { return this.fbActive ? FB_READ_MAX_BYTES : TEXT_PAGE_MAX_BYTES }
+  /** The DISPLAY row count (what fits the 255px pane) — the padPage fill target, held at
+   *  FB_READ_PAGE_ROWS even when a scroll page is much bigger (don't pad blanks into the overflow). */
+  private get displayRows(): number { return FB_READ_PAGE_ROWS }
   /** Pad a page to `rows` lines so the scroll-reading region fills consistently (a
    *  short page otherwise leaves a big scroll gap). Full-bleed reading only. */
   private padPage(s: string, rows: number): string {
@@ -229,7 +242,7 @@ export class ReaderWindow implements OsWindow {
       this.ctx.log(`[reader] open ${name} failed: ${(e as Error).message}`)
       this.bookTitle = name
       this.chapters = []
-      this.pages = paginateText(`ERROR opening ${name}:\n\n${(e as Error).message}`, this.pagePx, this.pageRows)
+      this.pages = paginateText(`ERROR opening ${name}:\n\n${(e as Error).message}`, this.pagePx, this.pageRows, this.maxBytes)
       this.page = 0
       this.chapterTitle = '(error)'
       this.level = 'read'
@@ -265,7 +278,7 @@ export class ReaderWindow implements OsWindow {
     if (this.pageMap || this.pageMapPending || !this.bookPath) return
     const p = this.bookPath
     this.pageMapPending = true
-    buildPageMap(p, this.pagePx, this.pageRows)
+    buildPageMap(p, this.pagePx, this.pageRows, this.maxBytes)
       .then((m) => { if (this.bookPath === p) { this.pageMap = m; this.pageMapPending = false; this.requestRender() } })
       .catch((e: unknown) => {
         if (this.bookPath === p) { this.pageMapPending = false; this.requestRender() }
@@ -318,9 +331,33 @@ export class ReaderWindow implements OsWindow {
   }
 
   /** The root content menu (Adam 2026-06-30) — Last/Select Book/Bookmarks/Options. */
-  private menuItems(): string[] { return ['Last', 'Select Book', 'Bookmarks', 'Options'] }
+  private menuItems(): string[] { return ['Last', 'Bookmark Last', 'Select Book', 'Bookmarks', 'Options'] }
   /** The Options submenu — the reading tools (act on the current/last book). */
   private optionsItems(): string[] { return [this.voiceOn ? 'Voice off' : 'Voice on', 'Jump', 'Mark', 'Recent', 'Chapters'] }
+
+  /** Bookmark the LAST-read spot from the ROOT menu (Adam 2026-07-01). Full-bleed
+   *  scroll-reading has NO while-reading menu, so this is the one-tap way to drop an
+   *  anchor: it uses the OPEN book's live page if one is loaded, else the PERSISTED
+   *  last-read position (getLastPosition) — so it works both mid-session and after a
+   *  reconnect (fresh WM, nothing in memory). A ✓ shows in the menu title. */
+  private async bookmarkLast(): Promise<void> {
+    let target: { path: string; chapter: number; page: number; label: string } | null = null
+    if (this.bookPath && this.pages.length) {
+      target = { path: this.bookPath, chapter: this.chapter, page: this.page, label: this.currentLabel() }
+    } else {
+      try {
+        const last = await getLastPosition()
+        if (last) target = { path: last.bookPath, chapter: last.chapter, page: last.page, label: '' }
+      } catch (e) { this.ctx.log(`[reader] Bookmark Last: last-position load failed: ${(e as Error).message}`) }
+    }
+    if (!target) { this.ctx.log('[reader] Bookmark Last: no last-read book to bookmark'); this.requestRender(); return }
+    try {
+      await addBookmark(target.path, target.chapter, target.page, target.label)   // idempotent on the exact spot
+      this.markedNote = true
+      this.ctx.log(`[reader] Bookmark Last -> ${basename(target.path)} ch${target.chapter + 1} p${target.page + 1}`)
+    } catch (e) { this.ctx.log(`[reader] Bookmark Last failed: ${(e as Error).message}`) }
+    this.requestRender()
+  }
 
   /** Page forward / back one page, crossing chapter boundaries — shared by the
    *  full-bleed scroll-reading (onContentScroll) and the classic Next/Prev menu. */
@@ -385,13 +422,13 @@ export class ReaderWindow implements OsWindow {
       const r = await readChapter(p, idx)
       this.chapter = idx
       this.chapterTitle = r.chapterTitle
-      this.pages = paginateText(r.text, this.pagePx, this.pageRows)
+      this.pages = paginateText(r.text, this.pagePx, this.pageRows, this.maxBytes)
       this.page = page === -1 ? this.pages.length - 1 : Math.min(Math.max(0, page), this.pages.length - 1)
       this.level = 'read'
       this.persist()
     } catch (e) {
       this.ctx.log(`[reader] read chapter ${idx} failed: ${(e as Error).message}`)
-      this.pages = paginateText(`ERROR reading chapter ${idx + 1}:\n\n${(e as Error).message}`, this.pagePx, this.pageRows)
+      this.pages = paginateText(`ERROR reading chapter ${idx + 1}:\n\n${(e as Error).message}`, this.pagePx, this.pageRows, this.maxBytes)
       this.page = 0
       this.chapterTitle = '(error)'
       this.level = 'read'
@@ -400,30 +437,28 @@ export class ReaderWindow implements OsWindow {
 
   async view(): Promise<WinView> {
     if (this.level === 'read') {
-      // Absolute whole-book page + progress % once the map is ready; per-chapter
-      // p/N (with a '…' indexing hint) until then. The note rides between the
-      // chapter title and the page tail so the firmware middle-clamp keeps both.
-      let pageSuffix = ` · ${this.page + 1}/${this.pages.length}`
-      if (this.pageMap && this.pageMap.total > 0) {
-        const g = localToGlobal(this.pageMap.counts, this.chapter, this.page)
-        pageSuffix = ` · p.${g}/${this.pageMap.total} · ${Math.round((g / this.pageMap.total) * 100)}%`
-      } else if (this.pageMapPending) {
-        pageSuffix = ` · ${this.page + 1}/${this.pages.length} · …`
-      }
+      // CHAPTER-RELATIVE page (matches the real book: "33. Juniper: The Encounter · p.2/4"),
+      // with the whole-book % as a secondary progress cue from the absolute page map. The
+      // chapter title already carries the number, so it IS the "where am I". '…' while indexing.
       const note = this.markedNote ? ' ✓ marked' : ''
-      const title = `${oneLine(this.bookTitle, 16)} · ${oneLine(this.chapterTitle, 12)}${note}${pageSuffix}`
+      const pct = this.pageMap && this.pageMap.total > 0
+        ? ` · ${Math.round((localToGlobal(this.pageMap.counts, this.chapter, this.page) / this.pageMap.total) * 100)}%`
+        : (this.pageMapPending ? ' · …' : '')
+      const title = `${oneLine(this.chapterTitle, 30)}${note} · p.${this.page + 1}/${this.pages.length}${pct}`
       const page = this.pages[this.page] ?? ''
       if (this.fbActive) {
-        // Full-bleed: NO menu (Adam 2026-06-30) — the page IS the scroll capture, each
-        // notch turns a page (onContentScroll), double-tap → ribbon. Padded to fill.
-        return { mode: 'text', scrollContent: true, title, menu: [], text: this.padPage(page, this.pageRows) }
+        // Full-bleed = the sovereign-chapters scroll page: NO menu — the page IS the scroll
+        // capture; the firmware scrolls the big chunk, then the boundary event auto-advances
+        // (onContentScroll), double-tap → ribbon. Padded to the DISPLAY rows (7) so a short
+        // chapter tail fills the screen WITHOUT padding blanks into the scroll overflow.
+        return { mode: 'text', scrollContent: true, title, menu: [], text: this.padPage(page, this.displayRows) }
       }
       return { mode: 'text', title, menu: this.readMenu(), text: page }   // classic: the Next/Prev menu
     }
     if (this.level === 'menu') {   // the root content menu (Adam 2026-06-30)
       return {
         mode: 'browse', menuMode: 'passive', menu: [],
-        title: this.bookPath ? `Reader · ${oneLine(this.bookTitle, 22)}` : 'Reader',
+        title: (this.bookPath ? `Reader · ${oneLine(this.bookTitle, 22)}` : 'Reader') + (this.markedNote ? ' · ✓ bookmarked' : ''),
         items: this.menuItems(),
       }
     }
@@ -471,7 +506,7 @@ export class ReaderWindow implements OsWindow {
       }
     }
     if (this.level === 'chapters' && this.bookPath) {
-      const labels = this.chapters.map((c) => `${c.idx + 1}. ${oneLine(c.title, 30)}`)
+      const labels = this.chapters.map((c) => oneLine(c.title, 36))
       const paged = browsePageItems(labels, this.chapOffset)
       return {
         mode: 'browse',
@@ -506,13 +541,16 @@ export class ReaderWindow implements OsWindow {
 
   async onBrowseSelect(index: number): Promise<void> {
     if (this.level === 'menu') {   // the root content menu (Adam 2026-06-30)
-      switch (this.menuItems()[index]) {
+      const sel = this.menuItems()[index]
+      if (sel !== 'Bookmark Last') this.markedNote = false   // clear a lingering ✓ once you move on
+      switch (sel) {
         case 'Last': {
           const last = await this.loadLast()
           if (last) await this.openBook(last.path)
           else { this.ctx.log('[reader] Last: no last-read book'); this.requestRender() }
           return
         }
+        case 'Bookmark Last': await this.bookmarkLast(); return
         case 'Select Book': this.level = 'library'; this.libOffset = 0; this.lastBookLoaded = false; this.requestRender(); return
         case 'Bookmarks':
           this.markKind = 'bookmarks'
@@ -559,7 +597,7 @@ export class ReaderWindow implements OsWindow {
       return
     }
     if (this.level === 'chapters') {
-      const labels = this.chapters.map((c) => `${c.idx + 1}. ${oneLine(c.title, 30)}`)
+      const labels = this.chapters.map((c) => oneLine(c.title, 36))
       const { map, prevOffset, nextOffset } = browsePageItems(labels, this.chapOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[os] reader: chapter index ${index} out of range`); return }

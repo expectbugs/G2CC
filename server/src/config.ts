@@ -82,6 +82,13 @@ export interface G2CCConfig {
      *  ribbon). Flip on glass to test; collapsed into the default at the §2.2.8
      *  cutover. Ribbon-mode only (no effect when rootNav==='menu'). */
     fullBleed: boolean
+    /** Phase 3 §3.5 (Adam 2026-07-01): the ROW CAP for a full-bleed Reader scroll-reading
+     *  page — the "sovereign chapters" model. A page fills toward the ~960 B layout wall so
+     *  the firmware scrolls the whole chunk then auto-advances at the boundary (proven on
+     *  glass: no scroll ceiling < ~100 rows). Omitted = FB_READ_ROW_CAP (30); the ~700 B byte
+     *  budget binds first for prose (~12 rows), so this only caps SPARSE content (poetry /
+     *  lists / short lines). Ribbon+fullBleed only. Clamped 1–100. */
+    readerScrollRows?: number
   }
 }
 
@@ -224,6 +231,13 @@ export function loadConfig(): G2CCConfig {
   if (typeof merged.de.fullBleed !== 'boolean') {
     console.error('[config] de.fullBleed is not a boolean — using the default false')
     merged.de.fullBleed = defaults.de.fullBleed
+  }
+  // §3.5 probe knob — optional; a garbage value is ignored (falls back to 7), never throws.
+  if (merged.de.readerScrollRows !== undefined
+      && (typeof merged.de.readerScrollRows !== 'number' || !Number.isFinite(merged.de.readerScrollRows)
+          || merged.de.readerScrollRows < 1 || merged.de.readerScrollRows > 100)) {
+    console.error('[config] de.readerScrollRows must be a number 1–100 (or omitted) — ignoring')
+    merged.de.readerScrollRows = undefined
   }
   return merged
 }

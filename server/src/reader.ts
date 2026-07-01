@@ -14,7 +14,7 @@
 import { execFile } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { query, registerMigration } from './store.js'
-import { paginateText, TEXT_PAGE_PX, TEXT_PAGE_ROWS } from './os-compose.js'
+import { paginateText, TEXT_PAGE_PX, TEXT_PAGE_ROWS, TEXT_PAGE_MAX_BYTES } from './os-compose.js'
 
 const PY = '/home/user/G2CC/audio/venv/bin/python'
 const EPUB_SCRIPT = '/home/user/G2CC/scripts/read_epub.py'
@@ -191,16 +191,16 @@ function fingerprintOf(bookPath: string): string {
  *  so the counts match what reading shows exactly. Cached by fingerprint. The
  *  one-parse `pages` subprocess avoids re-reading the whole epub per chapter. */
 export async function buildPageMap(
-  bookPath: string, pagePx: number = TEXT_PAGE_PX, pageRows: number = TEXT_PAGE_ROWS,
+  bookPath: string, pagePx: number = TEXT_PAGE_PX, pageRows: number = TEXT_PAGE_ROWS, maxBytes: number = TEXT_PAGE_MAX_BYTES,
 ): Promise<PageMap> {
-  // The page GEOMETRY is in the fingerprint (Phase 3 §3.4): fullBleed pages at a
-  // wider width → different counts, so a layout change re-derives the map rather than
-  // returning a stale one (which would land Jump on the wrong page).
-  const fingerprint = `${fingerprintOf(bookPath)}:${pagePx}x${pageRows}`
+  // The full page GEOMETRY is in the fingerprint (width × rows × byteCap): a layout
+  // change (fullBleed width, the bigger scroll-reading byte budget) re-derives the map
+  // rather than returning a stale one (which would land Jump on the wrong page).
+  const fingerprint = `${fingerprintOf(bookPath)}:${pagePx}x${pageRows}x${maxBytes}`
   const cached = await getCachedPageMap(bookPath)
   if (cached && cached.fingerprint === fingerprint) return cached
   const data = JSON.parse(await runEpub(['pages', bookPath])) as { chapters: { idx: number; text: string }[] }
-  const counts = data.chapters.map((c) => paginateText(c.text, pagePx, pageRows).length)
+  const counts = data.chapters.map((c) => paginateText(c.text, pagePx, pageRows, maxBytes).length)
   const total = counts.reduce((a, b) => a + b, 0)
   const map: PageMap = { fingerprint, counts, total }
   await savePageMap(bookPath, map)
