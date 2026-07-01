@@ -7,6 +7,7 @@ import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
 import type { OsWindow, WmContext, WinView, WindowOpen } from './types.js'
 import { browsePageItems, BROWSE_PAGE, MORE_ROW, PREV_ROW } from './_browse.js'
 import { paginateText, errorView } from '../os-compose.js'
+import { fbPagePx } from './_util.js'
 import { renderImageFile, type RenderedImage } from '../os-content.js'
 
 const PY = '/home/user/G2CC/audio/venv/bin/python'
@@ -175,7 +176,7 @@ export class MailWindow implements OsWindow {
       // PAGINATE the body (review 2026-06-13): an unpaginated email body blew
       // the 960 B wall → composeScene throws → errorView with no Confirm → the
       // body was lost + unsendable. Now it pages; the full text always sends.
-      const pages = paginateText(`To: ${to}\n${'─'.repeat(20)}\n${this.pendingText}\n${'─'.repeat(20)}\nConfirm · Re-record · Cancel`)
+      const pages = paginateText(`To: ${to}\n${'─'.repeat(20)}\n${this.pendingText}\n${'─'.repeat(20)}\nConfirm · Re-record · Cancel`, fbPagePx(this.ctx))
       if (this.composePage >= pages.length) this.composePage = Math.max(0, pages.length - 1)
       const suffix = pages.length > 1 ? ` · ${this.composePage + 1}/${pages.length}` : ''
       const menu = pages.length > 1
@@ -229,7 +230,7 @@ export class MailWindow implements OsWindow {
       if (seq !== this.readSeq) return true   // superseded by a newer open
       const imgs = m.images ?? []
       const imgNote = imgs.length ? `\n[${imgs.length} image${imgs.length === 1 ? '' : 's'} — see later page${imgs.length === 1 ? '' : 's'}]` : ''
-      const pages: MailPage[] = paginateText(`From: ${m.from}\nDate: ${m.date}\nSubject: ${m.subject}${imgNote}\n\n${m.body}`)
+      const pages: MailPage[] = paginateText(`From: ${m.from}\nDate: ${m.date}\nSubject: ${m.subject}${imgNote}\n\n${m.body}`, fbPagePx(this.ctx))
       for (const img of imgs) {
         const pageObj: MailPage = { kind: 'image', img: null, failed: null }
         pages.push(pageObj)
@@ -256,7 +257,7 @@ export class MailWindow implements OsWindow {
     } catch (e) {
       if (seq !== this.readSeq) return false
       this.ctx.log(`[os] mail: read ${key} failed: ${(e as Error).message}`)
-      this.pages = paginateText(`ERROR reading message:\n\n${(e as Error).message}`)
+      this.pages = paginateText(`ERROR reading message:\n\n${(e as Error).message}`, fbPagePx(this.ctx))
       this.page = 0
       this.readSubject = '(error)'
       this.readKey = key
@@ -350,7 +351,7 @@ export class MailWindow implements OsWindow {
       // may want to Del it after replying); COMPOSE has no message, so → list
       // (NOT a stale readKey, which would let Reply/Del act on a phantom message).
       this.level = (mode === 'compose' || !this.readKey) ? 'list' : 'read'
-      this.pages = paginateText(`✓ ${mode === 'reply' ? 'Reply' : mode === 'reply-all' ? 'Reply all' : mode === 'forward' ? 'Forward' : 'Message'} sent to ${r.to}.`)
+      this.pages = paginateText(`✓ ${mode === 'reply' ? 'Reply' : mode === 'reply-all' ? 'Reply all' : mode === 'forward' ? 'Forward' : 'Message'} sent to ${r.to}.`, fbPagePx(this.ctx))
       this.page = 0
       this.readSubject = 'sent'
       this.requestRender()
@@ -362,7 +363,7 @@ export class MailWindow implements OsWindow {
       // failure here means it did NOT hand off to the server.)
       this.stopCompose('send failed')
       this.level = this.readKey ? 'read' : 'list'
-      this.pages = paginateText(`SEND FAILED:\n\n${(e as Error).message}\n\nNothing was sent — try again.`)
+      this.pages = paginateText(`SEND FAILED:\n\n${(e as Error).message}\n\nNothing was sent — try again.`, fbPagePx(this.ctx))
       this.page = 0
       this.readSubject = '(send failed)'
       this.requestRender()
@@ -386,7 +387,7 @@ export class MailWindow implements OsWindow {
           this.level = 'list'; this.focus = 'content'; this.offset = 0
         } catch (e) {
           this.ctx.log(`[os] mail: delete ${this.readKey} FAILED: ${(e as Error).message}`)
-          this.pages = paginateText(`DELETE FAILED:\n\n${(e as Error).message}`)
+          this.pages = paginateText(`DELETE FAILED:\n\n${(e as Error).message}`, fbPagePx(this.ctx))
           this.page = 0; this.readSubject = '(delete failed)'; this.level = 'read'
         }
         this.requestRender()

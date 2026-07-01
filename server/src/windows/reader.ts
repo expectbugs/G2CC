@@ -6,7 +6,7 @@ import { join, basename, resolve as resolvePath } from 'node:path'
 import type { OsWindow, WmContext, WinView } from './types.js'
 import { browsePageItems } from './_browse.js'
 import { oneLine } from './_util.js'
-import { paginateText, errorView } from '../os-compose.js'
+import { paginateText, errorView, FB_TEXT_PAGE_PX, TEXT_PAGE_PX, FB_READ_PAGE_ROWS, TEXT_PAGE_ROWS } from '../os-compose.js'
 import {
   savePosition, getPosition, getLastPosition, listChapters, readChapter,
   pushHistory, popHistory, peekHistory, listHistory,
@@ -101,10 +101,10 @@ export class ReaderWindow implements OsWindow {
   private get fbActive(): boolean {
     return this.ctx.config?.de?.rootNav === 'ribbon' && this.ctx.config?.de?.fullBleed === true
   }
-  /** Reading page width px: full-bleed 576px pane (−padding) vs the classic 480px. */
-  private get pagePx(): number { return this.fbActive ? 552 : 456 }
-  /** Reading page rows: full-bleed reclaims the status row (~7) vs the classic 6. */
-  private get pageRows(): number { return this.fbActive ? 7 : 6 }
+  /** Reading page width px: full-bleed 552px pane vs the classic 456px (shared constants). */
+  private get pagePx(): number { return this.fbActive ? FB_TEXT_PAGE_PX : TEXT_PAGE_PX }
+  /** Reading page rows: full-bleed scroll-reading reclaims the status row (7) vs the classic 6. */
+  private get pageRows(): number { return this.fbActive ? FB_READ_PAGE_ROWS : TEXT_PAGE_ROWS }
   /** Pad a page to `rows` lines so the scroll-reading region fills consistently (a
    *  short page otherwise leaves a big scroll gap). Full-bleed reading only. */
   private padPage(s: string, rows: number): string {

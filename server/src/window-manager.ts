@@ -27,13 +27,13 @@ import {
   OVERLAY_PRIORITIES, PRIORITY_RANK, type NotifyEvent,
 } from './os-notify.js'
 import { nextPending, fmtRemaining } from './timers.js'
-import { overviewText, chartSpecs, readStorage, readTopProcs, storageText } from './stats.js'
+import { overviewText, chartSpecs, readStorage, readTopProcs, storageText, samples } from './stats.js'
 import { hostname } from 'node:os'
 // Phase 1 (overhaul.md §1.1): contracts + shared helpers extracted into windows/.
 import {
   type OsWindow, type WmContext, type WindowCategory, CATEGORY_ORDER, SwitchTo,
 } from './windows/types.js'
-import { oneLine } from './windows/_util.js'
+import { oneLine, fbActive } from './windows/_util.js'
 // Extracted window modules (Phase 1 §1.2+ — one import per window as it leaves this file):
 import { WINDOW_FACTORIES } from './windows/registry.js'
 import { ReaderWindow } from './windows/reader.js'
@@ -129,9 +129,33 @@ class MainWindow implements OsWindow {
     return this.others().filter((w) => w.category === cat)
   }
 
-  /** Column-width clamp for the two-column dashboard (~23 ASCII chars per
-   *  237 px column; compose px-clamps each line as the logged backstop). */
-  private colLine(s: string): string { return oneLine(s, 23) }
+  /** Column-width clamp for the two-column dashboard: ~23 ASCII chars per 237 px
+   *  classic column, ~28 per the 285 px full-bleed column (#11 — Main reclaims the
+   *  width like every other window). Compose px-clamps each line as the logged backstop. */
+  private colLine(s: string): string { return oneLine(s, fbActive(this.ctx) ? 28 : 23) }
+
+  /** #11 (§3.1): the leftmost ribbon window's GLOBAL GLANCE — battery states
+   *  (G2 / phone / R1 / hat) + the host / CC-pool + a light system pulse (CPU/GPU
+   *  from the cheap 10 s sampler ring, never a live /proc read). Rides the TOP of the
+   *  dashboard content, above the recently-active-window summaries — the "global info
+   *  + battery states" half of Adam's spec (the summaries are the recent-window half).
+   *  R1/hat are '--' placeholders (no signal yet); G2 is '--' until the client decodes
+   *  a device-info frame — same honesty as the status-bar cluster. */
+  private globalGlance(): string[] {
+    const pct = (v: number | null | undefined): string => (typeof v === 'number' ? `${v}%` : '--')
+    const battery = `Batt G${pct(this.ctx.g2Battery?.())} P${pct(this.ctx.phoneBattery?.())} R-- H--`
+    const ring = samples()
+    const s = ring[ring.length - 1]
+    const host = `${hostname()} · ${this.ctx.pool.count}cc`
+    // The CPU/GPU pulse is a reclaimed-width BONUS — shown only in full-bleed (the
+    // 28-char column fits `host · Cxxx Gyyy` even at 100/100); the narrow 23-char menu
+    // column shows just host/pool so a 3-digit value can never truncate off the GPU
+    // reading (the full pulse is one tap away in Stats). (review 2026-07-01)
+    const sys = s && fbActive(this.ctx)
+      ? `${host} · C${s.cpuPct ?? '--'} G${s.gpuPct ?? '--'}`
+      : host
+    return [battery, sys]
+  }
 
   async view(): Promise<WinView> {
     if (this.level === 'stats') return this.statsView()
@@ -167,12 +191,15 @@ class MainWindow implements OsWindow {
       this.ctx.log(`[os] main: next-timer query failed: ${(e as Error).message}`)
       timerLine = '⏱ (timers down — log)'
     }
-    // MRU dashboard — as many recent windows as fit ONE page (~12 across two
-    // columns; minus the lead timer/unseen lines). Never paginates.
-    const lead = (timerLine ? 1 : 0) + (unseen ? 1 : 0)
+    // MRU dashboard — the global glance (#11) + as many recent windows as fit ONE
+    // page (~12 across two columns; minus the glance + lead timer/unseen lines).
+    // Never paginates.
+    const glance = this.globalGlance()
+    const lead = glance.length + (timerLine ? 1 : 0) + (unseen ? 1 : 0)
     const recent = this.mru().slice(0, Math.max(2, 12 - lead))
     const summaries = await this.summarize(recent)
     const lines = [
+      ...glance,
       ...(timerLine ? [timerLine] : []),
       ...(unseen ? [`! ${unseen} unseen`] : []),
       ...summaries,

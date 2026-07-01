@@ -3,7 +3,7 @@
 
 import type { MediaState } from '@g2cc/shared'
 import type { OsWindow, WmContext, WinView } from './types.js'
-import { oneLine } from './_util.js'
+import { oneLine, fbPagePx } from './_util.js'
 import { renderImageB64 } from './_image.js'
 import { paginateText } from '../os-compose.js'
 import type { RenderedImage } from '../os-content.js'
@@ -183,12 +183,12 @@ export class MediaWindow implements OsWindow {
       if (seq !== this.lyricsSeq) return
       this.lyricsLoading = false
       if (r.synced) this.lrc = parseLrc(r.synced)
-      else if (r.plain) this.plainPages = paginateText(r.plain)
+      else if (r.plain) this.plainPages = paginateText(r.plain, fbPagePx(this.ctx))
       else this.plainPages = ['No lyrics found for this track.']
     } catch (e) {
       if (seq !== this.lyricsSeq) return
       this.lyricsLoading = false
-      this.plainPages = paginateText(`Lyrics lookup failed:\n${(e as Error).message}`)
+      this.plainPages = paginateText(`Lyrics lookup failed:\n${(e as Error).message}`, fbPagePx(this.ctx))
     }
     this.requestRender()
   }

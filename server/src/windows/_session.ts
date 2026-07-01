@@ -7,7 +7,7 @@ import { basename } from 'node:path'
 import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
 import type { WmContext, WinView } from './types.js'
 import { BROWSE_PAGE, MORE_ROW, PREV_ROW } from './_browse.js'
-import { cycleNext, fmtStamp, oneLine } from './_util.js'
+import { cycleNext, fmtStamp, oneLine, fbPagePx } from './_util.js'
 import { paginateText } from '../os-compose.js'
 import { parseMarkdown, renderChart, splitDocForPages, type Block, type RenderedImage } from '../os-content.js'
 import {
@@ -179,8 +179,13 @@ class SessionLevel {
       { t: 'heading', text: who, meta: basename(projectPath) },
       { t: 'para', text: `Ready. Menu → ${verb} to prompt; responses render here.` },
     ]
-    this.pages = paginateText(blocksToText(this.doc))   // text mode renders synchronously
+    this.pages = this.paginate(blocksToText(this.doc))   // text mode renders synchronously
   }
+
+  /** §3.4: paginate at the full-bleed reading width (552 px) when the borderless
+   *  layout is live, else the classic 456 px — ONE place so every session page (the
+   *  live transcript, permission/confirm/suggestion cards, errors) agrees on width. */
+  private paginate(text: string): string[] { return paginateText(text, fbPagePx(this.ctx)) }
 
   /** Spawn (or resume) the subprocess and wire events. Loud-throws on failure.
    *  Concurrent calls share one in-flight spawn (rapid double-taps on the
@@ -346,7 +351,7 @@ class SessionLevel {
   private renderPermDoc(): void {
     const head = this.pendingPermissions[0]
     if (!head) return
-    this.pages = paginateText(blocksToText(head.doc))
+    this.pages = this.paginate(blocksToText(head.doc))
     this.page = 0
     this.requestRender()
   }
@@ -396,7 +401,7 @@ class SessionLevel {
    *  (cached by spec hash, so re-renders and page flips are free). */
   private assemblePages(): void {
     const { textBlocks, chartSpecs } = splitDocForPages(this.doc)
-    const pages: SessionPage[] = paginateText(blocksToText(textBlocks))
+    const pages: SessionPage[] = this.paginate(blocksToText(textBlocks))
     for (const spec of chartSpecs) {
       const pageObj: SessionPage = { kind: 'image', img: null, caption: 'chart' }
       pages.push(pageObj)
@@ -418,7 +423,7 @@ class SessionLevel {
       this.ctx.log(`[os] ${this.who}: chart render failed: ${msg}`)
       const i = this.pages.indexOf(pageObj)
       if (i !== -1) {
-        const bounded = paginateText(`CHART RENDER FAILED\n\n${msg}`)
+        const bounded = this.paginate(`CHART RENDER FAILED\n\n${msg}`)
         this.pages[i] = bounded.length > 1
           ? bounded[0].split('\n').slice(0, -1).join('\n') + '\n… (full error in the server log)'
           : bounded[0]
@@ -491,7 +496,7 @@ class SessionLevel {
    *  doc is untouched; the next successful action repaints it. */
   showError(message: string, hint: string): void {
     this.lastError = message
-    this.pages = paginateText(blocksToText([
+    this.pages = this.paginate(blocksToText([
       { t: 'heading', text: 'Error', meta: this.who },
       { t: 'para', text: message },
       { t: 'rule' },
@@ -896,7 +901,7 @@ class SessionLevel {
       }
       this.suggesting = false
       this.pendingSuggestion = text
-      this.pages = paginateText(blocksToText([
+      this.pages = this.paginate(blocksToText([
         { t: 'heading', text: 'Suggested', meta: 'confirm?' },
         { t: 'para', text },
         { t: 'rule' },
@@ -923,7 +928,7 @@ class SessionLevel {
     // and wait for Confirm / Retry (re-record) / Cancel — Parakeet mangles
     // words, and nothing should reach CC unread.
     this.pendingStt = text
-    this.pages = paginateText(blocksToText([
+    this.pages = this.paginate(blocksToText([
       { t: 'heading', text: 'You said', meta: 'confirm?' },
       { t: 'para', text },
       { t: 'rule' },
@@ -1203,7 +1208,12 @@ class HistoryLevel {
     private projectPath: string,
     private who: string,
     private log: (m: string) => void,
+    /** §3.4: the full-bleed reading width (config-static per session — a number, not
+     *  a thunk). A past turn's text pages at the same width the live session does. */
+    private pagePx: number,
   ) {}
+
+  private paginate(text: string): string[] { return paginateText(text, this.pagePx) }
 
   async view(menuMode: 'passive' | 'capture'): Promise<WinView> {
     if (this.stage === 'read') {
@@ -1282,13 +1292,13 @@ class HistoryLevel {
         if (!t) throw new Error(`turn ${sel.id} not found (deleted?)`)
         const head = `${t.kind.toUpperCase()} · ${fmtStamp(t.createdAt)}${t.model ? ` · ${t.model}/${t.effort ?? '?'}` : ''}`
         const tools = t.toolCalls.length ? `\n[tools: ${t.toolCalls.join(', ')}]` : ''
-        this.pages = paginateText(`${head}${tools}\n\n${t.text}`)
+        this.pages = this.paginate(`${head}${tools}\n\n${t.text}`)
         this.readTitle = `${t.kind} ${fmtStamp(t.createdAt)}`
       } catch (e) {
         // Mail's read-level error pattern: the failure RENDERS as the read
         // page (parking it in a flag would get eaten by the next list refresh).
         this.log(`[os] history: read turn failed: ${(e as Error).message}`)
-        this.pages = paginateText(`ERROR reading turn:\n\n${(e as Error).message}`)
+        this.pages = this.paginate(`ERROR reading turn:\n\n${(e as Error).message}`)
         this.readTitle = '(error)'
       }
       this.page = 0

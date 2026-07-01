@@ -1,5 +1,30 @@
 // windows/_util.ts — shared pure formatters (Phase 1, overhaul.md §1.1).
 // Moved verbatim out of os-windows.ts. No I/O, no state — safe to share.
+// Phase 3 §3.4 adds the full-bleed geometry helpers (pure reads of ctx.config).
+
+import type { WmContext } from './types.js'
+import type { G2CCConfig } from '../config.js'
+import { TEXT_PAGE_PX, FB_TEXT_PAGE_PX } from '../os-compose.js'
+
+/** True when the borderless full-width layout (ribbon root-nav + de.fullBleed) is
+ *  live — read from the config directly. Mirrors the WM's private `fullBleed` flag
+ *  EXACTLY (both derive from the same config keys) so a window's page width can never
+ *  disagree with the chrome the WM composes around it. Pure (no I/O). */
+export function fbActiveCfg(cfg: G2CCConfig | undefined): boolean {
+  return cfg?.de?.rootNav === 'ribbon' && cfg?.de?.fullBleed === true
+}
+/** ctx convenience — the common case (a window holding the full WmContext). */
+export function fbActive(ctx: WmContext): boolean { return fbActiveCfg(ctx.config) }
+
+/** The reading-page WIDTH to pass paginateText: the full-bleed 552 px pane vs the
+ *  classic 456 px. Rows stay at the paginateText default (6) for menu-driven
+ *  reading — a status bar may show (the 222 px content height), so the reclaimed
+ *  7th row is scroll-reading-only (Reader; see FB_READ_PAGE_ROWS). The one call
+ *  every per-app reading view makes so the width fix stays a one-liner. */
+export function fbPagePxCfg(cfg: G2CCConfig | undefined): number {
+  return fbActiveCfg(cfg) ? FB_TEXT_PAGE_PX : TEXT_PAGE_PX
+}
+export function fbPagePx(ctx: WmContext): number { return fbPagePxCfg(ctx.config) }
 
 /** Bound a single-region confirm-card body so a pathologically long dictation
  *  can't blow the 960 B multi-packet wall (→ errorView, which loses the input).

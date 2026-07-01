@@ -523,7 +523,7 @@ flag-gated on `de.rootNav: 'ribbon'`; `'menu'` stays the byte-for-byte fallback 
 Several items touch the proven `os-compose.ts` — the sanctioned, gated, `scene_to_png`-+-on-glass-verified
 exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, smoke-green + on-glass.**
 
-> ## 🛠 STATUS — Phase 3 (updated 2026-07-01 for a clean handoff). Two waves; menu mode byte-for-byte.
+> ## 🛠 STATUS — Phase 3 (updated 2026-07-01). Three waves + deploy + review; menu mode byte-for-byte.
 > All server-only, gated behind `de.rootNav:'ribbon'` (+ the in-window layout behind `de.fullBleed`).
 > **Adam runs it LIVE** (`rootNav:'ribbon', fullBleed:true, recentsDepth:4` in `~/.g2cc/config.json`;
 > backups `config.json.bak-pre-ribbon` + `config.json.bak-pre-phase3`).
@@ -566,33 +566,48 @@ exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, s
 > regions, switch Reader's page to overflow + boundary-advance (§3.5). The one behaviour that may not match
 > Adam's mental model.
 >
-> ### ❌ NOT DONE (the resume list)
-> - **§3.4 per-app pass for the OTHER windows** — ONLY Reader got the deep treatment. Main, CC, Aria, Mail,
->   Files, Timers, Calendar, Games, Notices, Search, Deliveries, Media, SMS render via the GENERIC fullBleed
->   compositor (full-width, borderless, menu-in-titlebar — functional, all verified to render one-capture/
->   no-overlap/under-wall earlier) but are NOT individually tuned. Scroll-reading candidates like Reader: file
->   preview, calendar event, notices detail (mail body has actions). Each needs its own view()/onContentScroll
->   + smoke.
-> - **#11 Main slot-0 content** — Main IS the fixed slot 0 and its existing twocol dashboard (host/pool/
->   battery/unseen/next-timer + per-window summaries) renders in fullBleed, but was NOT reworked to Adam's
->   "global info + recently-active-window info + battery states" spec, nor visually verified in fullBleed. TODO.
+> ### ✅ DONE — wave 3 (2026-07-01): deploy + the per-app WIDTH pass + #11 Main (committed + pushed)
+> - **Wave 2 DEPLOYED** — rebuilt + restarted the live server; the phone auto-reconnected on wave 2.
+> - **§3.4 per-app pass — full-WIDTH re-pagination for EVERY reading window (DONE).** All menu-driven reading
+>   windows now paginate at the full-bleed page WIDTH (552 px, shared `FB_TEXT_PAGE_PX`) via `fbPagePx(ctx)` /
+>   `fbPagePxCfg(cfg)` (`windows/_util.ts`): Calendar, Files (preview + file/dir stats), Mail (body + compose +
+>   all read/result/error pages), Media (lyrics), Notices, Search, SMS, CC/Aria (live transcript + permission/
+>   confirm/suggestion/error cards via `SessionLevel.paginate`; history via a `HistoryLevel` pagePx). Tmux tail +
+>   focus-scrollback widened too (box-aware `wrapLinesPx`). Rows stay 6 (a status bar may show → 222 px); only
+>   Reader's scroll-reading uses the 7th row. Reader swapped its 552/7 literals for the shared constants (values
+>   unchanged → page maps unaffected). Menu mode / classic ribbon **byte-for-byte unchanged** (fbPagePx→456).
+>   Smoke 27/28; `scene_to_png`-verified (full-width mail read + Main dashboard).
+> - **#11 Main slot-0 content (DONE).** A GLOBAL GLANCE leads the dashboard: battery states
+>   (`Batt G-- P82% R-- H--`) + host/CC-pool + a light CPU/GPU pulse (full-bleed only — the narrow menu column
+>   omits it, so no value truncates) — above the recently-active-window summaries. `colLine` reclaims the
+>   full-bleed column (28 vs 23). Line-count still capped at one page. `scene_to_png`-verified.
+> - **Scroll-reading stays Reader-ONLY by design (decision).** The candidate list (file preview / calendar event
+>   / notices detail) was re-analysed: those are browse→leaf windows where in-view "Back to parent" is essential,
+>   and scroll-reading (double-tap → ribbon) would REGRESS it. Reader's shape (sustained read of a large doc,
+>   continuous page-flow across chapters, rare library nav) is the only fit. The WIDTH win applies to all; the
+>   scroll-reading model does not. Adam can override on glass.
+> - **3-agent + own adversarial review, every finding verified + fixed:** clean (no regressions; byte-wall +
+>   truncation + menu-parity intact). Fixed 6 cross-window consistency misses (mail/files secondary read pages
+>   at 456) + 1 menu-mode cosmetic (Main sys line dropping the GPU value at CPU=100 → pulse now full-bleed-only).
+>   TWO **pre-existing** Reader edges FLAGGED (not fixed — on-glass-gated flagship, Adam's call): `reader_positions`
+>   isn't geometry-fingerprinted (a rare fullBleed on↔off flip resumes a slightly-off intra-chapter page,
+>   clamped + Undo-able); the `⚠ unsaved`/`voice ▲` statusLine is suppressed during full-bleed scroll-reading
+>   (the page forces no status bar — still logs loudly, and shows in the menu levels).
+>
+> ### ❌ STILL NOT DONE (on-glass / deferred)
 > - **§3.5 firmware-scroll for non-Reader large content** — future; needs the on-glass overflow-scroll probe.
 > - **§3.6 End-Feature long-press popup (#10)** — NOT investigated to a conclusion (see §3.6).
-> - **On-glass validation of ALL of Phase 3** — feel/latency of ribbon + menu-in-titlebar + scroll-reading,
->   and whether the 3px bordered `ruleRegion` reads as a clean hairline underline on REAL glass (unverified).
->
-> ### 📍 WHERE I LEFT OFF (2026-07-01)
-> Wave 2 is committed + pushed (this handoff). It is **built + smoke-green for every touched file** but the
-> LIVE server (pid on :7300) is still running WAVE 1 — **a fresh instance must `npm run build -w server` +
-> restart to deploy wave 2** (restart proc in HANDOFF.md). Then, in order: **(1)** #11 Main slot-0 content;
-> **(2)** the per-app pass, window-by-window (Reader is the template); **(3)** §3.6 investigation; **(4)** the
-> on-glass validation. **Do NOT touch Blackjack** — it is the deliberately-LAST item; its smoke has a
-> pre-existing random-deal flake (the engine is fine) which I already hardened, don't chase it further.
+> - **Games width** — deliberately NOT widened (the Blackjack embargo — the last item). rpg/paperclips/confirm
+>   pages still page at 456 in full-bleed (narrow but functional). **Do NOT touch Blackjack** — its smoke has a
+>   pre-existing random-deal flake (the engine is fine); don't chase it.
+> - **On-glass validation of ALL of Phase 3** — feel/latency of ribbon + menu-in-titlebar + scroll-reading, the
+>   widened pages + the new Main glance, and whether the 3px `ruleRegion` reads as a clean hairline underline.
 
 ## 3.0 Adam's request ledger — EVERY item he asked for, with status (source of truth; nothing lost)
 
-Legend: ✅ done · ◑ partly done · ❌ not started. "Wave 1" = merged+pushed+live; "wave 2" = committed+
-pushed this handoff, NOT yet deployed to the running server (needs a rebuild+restart).
+Legend: ✅ done · ◑ partly done · ❌ not started. "Wave 1" = the ribbon order/recents/Tmux batch; "wave 2" =
+the borderless/underline + Reader redesign; "wave 3" (2026-07-01) = the per-app WIDTH pass + #11 Main. All
+three are now **merged, pushed, AND deployed live** (wave 2 was rebuilt+restarted as part of wave 3).
 
 1. **Remove app borders; keep ONE underline under the title/ribbon bar.** ✅ wave 2 (§3.3). Borderless bars
    + a carved `ruleRegion` underline (in-window AND the ribbon strip). *On-glass: confirm the 3px hairline
@@ -600,8 +615,8 @@ pushed this handoff, NOT yet deployed to the running server (needs a rebuild+res
 2. **Move inter-app menus into the titlebar/ribbon area (reclaim the 96px column).** ✅ wave 1 — a fixed
    **3-cell `[prev][current][next]`** top-bar scroller (§3.3).
 3. **Expand content into reclaimed menu + status space; status bar only where useful, with a LINE ABOVE it
-   (not a full border).** ✅ full-width content (wave 1) + the line-above status (wave 2, §3.3). ◑ full-WIDTH
-   text RE-pagination is done for Reader ONLY — the other reading windows still wrap at 456px (part of #9).
+   (not a full border).** ✅ full-width content (wave 1) + the line-above status (wave 2, §3.3). ✅ full-WIDTH
+   text RE-pagination now DONE for ALL reading windows (wave 3, §3.4 — Games deferred, Blackjack embargo).
 4. **Firmware scrolling on large content (reader/etc) + auto next/prev page at the scroll boundary.** ◑
    Reader has scroll-turns-pages but **PAGE-PER-NOTCH, not within-page-scroll** (see the CAVEAT in the STATUS
    banner + §3.5). ❌ within-page scroll + applying it to OTHER large-content windows — needs the on-glass
@@ -613,24 +628,26 @@ pushed this handoff, NOT yet deployed to the running server (needs a rebuild+res
 7. **Remove `Main` and `Reload` from in-app menus** (Reload gone entirely; APK-harness button later if ever
    needed). ✅ wave 1 (§3.3).
 8. **Improve ribbon recents persistence (resets too often).** ✅ wave 1 — persisted `window_usage` (§3.2).
-9. **Go through EACH app/feature individually and redesign its layout for the new UI.** ◑ the GENERIC
-   fullBleed layout applies to all 15 (functional); **Reader** is the one DEEP redesign (§3.4). ❌ the other
-   13 (Main, CC, Aria, Mail, Files, Timers, Calendar, Games, Notices, Search, Deliveries, Media, SMS) are NOT
-   individually tuned (full-width re-pagination, scroll-reading where it fits, action pruning). Reader = the
-   template.
+9. **Go through EACH app/feature individually and redesign its layout for the new UI.** ✅ the full-WIDTH
+   re-pagination pass is DONE for every reading window (wave 3, §3.4); **Reader** is the one DEEP redesign
+   (scroll-reading). **Scroll-reading stays Reader-ONLY by design** — the file/calendar/notices candidates are
+   browse→leaf windows where in-view "Back to parent" is essential, so they keep the 3-cell menu (only the
+   width widened). Main/Reload pruning is central (the WM strips them). ❌ Games width deferred (Blackjack
+   embargo). Reader = the template.
 10. **Investigate mitigating the accidental long-press → firmware "End Feature?" popup when blanked.** ❌ not
     investigated to a conclusion (§3.6). Current read: a firmware-local exit gesture; likely only mitigable
     client-side (auto-relaunch after exit).
 11. **Leftmost ribbon window = Main/Stats showing global info + recently-active-window info + battery states.**
-    ◑ Main IS fixed slot 0 (wave 1) and its existing dashboard renders in fullBleed; ❌ NOT reworked to that
-    content spec, nor visually verified in fullBleed.
+    ✅ DONE (wave 3) — a GLOBAL GLANCE (battery states G2/phone/R1/hat + host/CC-pool + a full-bleed-only CPU/GPU
+    pulse) leads the dashboard above the recent-window summaries; `colLine` reclaims the full-bleed column.
+    `scene_to_png`-verified in fullBleed.
 12. **Reader (the 2026-06-30 spec):** start with a content-area menu `Last/Select Book/Bookmarks/Options`;
     Options → `Voice/…`; reading = no menu, scroll turns pages; double-tap → ribbon; re-select Reader → the
     menu if it was just active, else resume the last page (full persistence); **fix the width.** ✅ all of it
     (wave 2, §3.4), with the page-per-notch caveat on the scroll behaviour (#4).
 13. **Process asks:** organize the tweaks into this doc ✅; Main/Stats→"Main" ✅; merge the branch, no more
-    branching ✅ (all on master); activate + make live + commit + push wave 1 ✅. Wave 2 committed+pushed this
-    handoff ✅; **deploying wave 2 to the live server (rebuild+restart) is still TODO.**
+    branching ✅ (all on master); activate + make live + commit + push wave 1 ✅. Wave 2 committed+pushed ✅;
+    **wave 2 DEPLOYED (rebuild+restart) + wave 3 (per-app width + #11) committed + pushed + deployed ✅ (2026-07-01).**
 
 ## 3.1 The ribbon order, finalized (supersedes §2.2.2's pure-MRU strip)
 
@@ -720,12 +737,15 @@ Phase 1 — and the §3.3 focus model (reading vs browse) resolved per window.
   Options`) + Options submenu; scroll-reading (`scrollContent` + `onContentScroll`, page-per-notch);
   re-entry→menu vs switch-in→resume (`onActivate(reentry)`); full-width pagination (`paginateText`/
   `buildPageMap` geometry). See the STATUS banner for the file list + the scroll caveat.
-- **The other 13 windows — ❌ NOT individually tuned** (Main, CC, Aria, Mail, Files, Timers, Calendar, Games,
-  Notices, Search, Deliveries, Media, SMS). They render via the generic fullBleed compositor. The per-window
-  work: widen `paginateText` for their reading views (still 456px), apply Reader-style scroll-reading where a
-  view is pure reading (file preview, calendar event, notices detail — mail body has actions so it keeps the
-  menu), and prune each action list for the 3-cell reach. Reader is the copy-from template. Each = its own
-  commit + smoke.
+- **The other windows — ✅ WIDTH pass DONE (wave 3, 2026-07-01).** Every menu-driven reading window now widens
+  `paginateText` to the full-bleed width (552 px) via `fbPagePx`/`fbPagePxCfg` (`windows/_util.ts`): Calendar,
+  Files (preview + file/dir stats), Mail (body + compose + read/result/error pages), Media (lyrics), Notices,
+  Search, SMS, CC/Aria (transcript + cards + history), Tmux (tail + scrollback via box-aware `wrapLinesPx`).
+  Main got the #11 global glance. **Scroll-reading was deliberately NOT extended** beyond Reader: the candidates
+  (file preview / calendar event / notices detail) are browse→leaf windows where in-view "Back to parent" is
+  essential, so scroll-reading (double-tap → ribbon, no in-view Back) would REGRESS them — they keep the 3-cell
+  top-bar menu (only the width widened). `Main`/`Reload` pruning is already central (the WM strips them from the
+  full-bleed menu). **Games width deferred** (Blackjack embargo). Reader stays the deep template.
 
 ## 3.5 Firmware-native content scroll + auto page-advance (FUTURE — "eventually," #4)
 

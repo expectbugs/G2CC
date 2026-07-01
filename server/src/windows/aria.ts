@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs'
 import type { OsWindow, WmContext, WinView } from './types.js'
 import { browsePageItems } from './_browse.js'
+import { fbPagePxCfg } from './_util.js'
 import { errorView } from '../os-compose.js'
 import { SessionLevel, SessionOptions, HistoryLevel } from './_session.js'
 import type { G2CCConfig } from '../config.js'
@@ -166,7 +167,7 @@ export class AriaWindow implements OsWindow {
       return
     }
     if (r === 'history') {
-      this.history = new HistoryLevel(ARIA_CWD, this.label, this.log)
+      this.history = new HistoryLevel(ARIA_CWD, this.label, this.log, fbPagePxCfg(this.cfg))
       this.level = 'history'
       this.focus = 'content'
       this.requestRender()

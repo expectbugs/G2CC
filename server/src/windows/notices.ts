@@ -4,7 +4,7 @@
 import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
 import type { OsWindow, WmContext, WinView } from './types.js'
 import { BROWSE_PAGE, MORE_ROW, PREV_ROW } from './_browse.js'
-import { oneLine, fmtStamp, clampConfirmBody } from './_util.js'
+import { oneLine, fmtStamp, clampConfirmBody, fbPagePx } from './_util.js'
 import { paginateText } from '../os-compose.js'
 import { renderImageFile, type RenderedImage } from '../os-content.js'
 import { markSeen, markAllSeen, unseenCount, listNotifications, getNotification } from '../os-notify.js'
@@ -112,7 +112,7 @@ export class NoticesWindow implements OsWindow {
     try {
       const n = await getNotification(sel.id)
       if (!n) throw new Error(`notification ${sel.id} not found`)
-      this.pages = paginateText(`${n.title}\n${n.priority} · ${n.source} · ${fmtStamp(n.ts)}\n\n${n.body}`)
+      this.pages = paginateText(`${n.title}\n${n.priority} · ${n.source} · ${fmtStamp(n.ts)}\n\n${n.body}`, fbPagePx(this.ctx))
       this.readTitle = oneLine(n.title, 24)
       // Phase 4a: this post is replyable iff it carried a RemoteInput AND a key
       // (only a still-live phone post can be replied to — the client reports a
@@ -145,7 +145,7 @@ export class NoticesWindow implements OsWindow {
     } catch (e) {
       // Mail's read-level error pattern — the failure renders, never wedges.
       this.ctx.log(`[os] notices: read ${sel.id} failed: ${(e as Error).message}`)
-      this.pages = paginateText(`ERROR reading notification:\n\n${(e as Error).message}`)
+      this.pages = paginateText(`ERROR reading notification:\n\n${(e as Error).message}`, fbPagePx(this.ctx))
       this.readTitle = '(error)'
       this.replyKey = null; this.replyStage = 'idle'
     }

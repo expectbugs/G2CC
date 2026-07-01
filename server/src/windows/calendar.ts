@@ -3,7 +3,7 @@
 
 import type { OsWindow, WmContext, WinView } from './types.js'
 import { browsePageItems } from './_browse.js'
-import { oneLine, fmtStamp } from './_util.js'
+import { oneLine, fmtStamp, fbPagePx } from './_util.js'
 import { paginateText } from '../os-compose.js'
 import { listUpcoming, getEvent } from '../calendar.js'
 
@@ -116,11 +116,11 @@ export class CalendarWindow implements OsWindow {
         ? `${this.dayHeader(e.startsAt).replace(/—/g, '').trim()} · all day`
         : `${fmtStamp(e.startsAt)}${e.endsAt ? ` → ${fmtStamp(e.endsAt)}` : ''}`
       const desc = typeof e.raw.description === 'string' ? `\n\n${e.raw.description}` : ''
-      this.pages = paginateText(`${e.title}\n${span}${e.location ? `\n@ ${e.location}` : ''}${desc}`)
+      this.pages = paginateText(`${e.title}\n${span}${e.location ? `\n@ ${e.location}` : ''}${desc}`, fbPagePx(this.ctx))
       this.readTitle = oneLine(e.title, 24)
     } catch (err) {
       this.ctx.log(`[os] calendar: read ${row.uid} failed: ${(err as Error).message}`)
-      this.pages = paginateText(`ERROR reading event:\n\n${(err as Error).message}`)
+      this.pages = paginateText(`ERROR reading event:\n\n${(err as Error).message}`, fbPagePx(this.ctx))
       this.readTitle = '(error)'
     }
     this.page = 0

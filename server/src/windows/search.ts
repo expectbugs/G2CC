@@ -3,7 +3,7 @@
 
 import { type OsWindow, type WmContext, type WinView, SwitchTo } from './types.js'
 import { browsePageItems } from './_browse.js'
-import { clampConfirmBody, oneLine } from './_util.js'
+import { clampConfirmBody, oneLine, fbPagePx } from './_util.js'
 import { paginateText } from '../os-compose.js'
 import { searchAll, type SearchHit } from '../search.js'
 import { getTurn } from '../history.js'
@@ -229,7 +229,7 @@ export class SearchWindow implements OsWindow {
           const turn = await getTurn(hit.turnId)
           if (!turn) { this.showRead('(history)', 'turn not found (it may have been pruned)'); return }
           const tools = turn.toolCalls.length ? `[tools: ${turn.toolCalls.join(', ')}]\n\n` : ''
-          this.pages = paginateText(`${turn.kind.toUpperCase()}\n\n${tools}${turn.text}`)
+          this.pages = paginateText(`${turn.kind.toUpperCase()}\n\n${tools}${turn.text}`, fbPagePx(this.ctx))
           this.page = 0; this.readTitle = 'history'; this.level = 'read'; this.requestRender()
         } catch (e) {
           this.showRead('(history error)', `read failed: ${(e as Error).message}`)
@@ -246,7 +246,7 @@ export class SearchWindow implements OsWindow {
   }
 
   private showRead(title: string, body: string): void {
-    this.pages = paginateText(body)
+    this.pages = paginateText(body, fbPagePx(this.ctx))
     this.page = 0
     this.readTitle = title
     this.level = 'read'

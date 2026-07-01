@@ -16,7 +16,7 @@ default off). Menu mode stays byte-for-byte the proven fallback.
   `recentsDepth` default 4); §3.4 Term→Tmux + CC input-box/footer strip; §3.3 base fullBleed
   (`composeFullBleedScene` — full-width content, 3-cell top-bar menu, Main/Reload stripped). Config
   `fullBleed:true` deployed live.
-- **Wave 2 (committed + pushed THIS handoff; NOT yet deployed — needs `npm run build -w server` + restart):**
+- **Wave 2 (committed + pushed; DEPLOYED as part of wave 3 below):**
   §3.3 borders/underline FINISHED (wave 1 wrongly KEPT boxes → now borderless bars + one carved `ruleRegion`
   underline + a status "line above", not a box); §3.4 Tmux now DROPS the `─` bars in CC panes (was collapsing);
   §3.4 **Reader fully redesigned** — root content menu (Last/Select Book/Bookmarks/Options) + Options submenu;
@@ -36,10 +36,34 @@ default off). Menu mode stays byte-for-byte the proven fallback.
   deterministic MRU. **Blackjack's smoke has a PRE-EXISTING random-deal flake (the engine is fine) — it is the
   deliberately-LAST item; do not chase it.**
 
-**NOT done (resume list — `overhaul.md` §3.0 / STATUS):** the per-app pass for the other 13 windows (only
-Reader deep-done); #11 Main slot-0 content; §3.5 firmware-scroll for non-Reader content; §3.6 the End-Feature
-long-press popup investigation; and the on-glass validation of all of Phase 3 — including DEPLOYING wave 2 to
-the running server (rebuild + restart).
+- **Wave 3 (this session — deployed + committed + pushed):** wave 2 was DEPLOYED (rebuild + restart; the phone
+  auto-reconnected on wave 2). Then the per-app WIDTH pass (§3.4 #9): EVERY menu-driven reading window now
+  paginates at the full-bleed width (552 px, shared `FB_TEXT_PAGE_PX`; `fbPagePx`/`fbPagePxCfg` in
+  `windows/_util.ts`) — Calendar, Files (preview + file/dir stats), Mail (body + compose + all read/result/error
+  pages), Media, Notices, Search, SMS, CC/Aria (via a `SessionLevel`/`HistoryLevel` `paginate()`), and Tmux tail
+  + focus-scrollback (box-aware `wrapLinesPx`). Rows stay 6 (a status bar may show → the 222 px height); only
+  Reader's scroll-reading keeps the 7th row (no status bar → 255 px). Reader swapped its 552/7 literals for the
+  shared constants (values unchanged → page maps unaffected). **#11 Main slot-0**: a GLOBAL GLANCE (battery
+  states `Batt G-- P82% R-- H--` + host/CC-pool + a full-bleed-ONLY CPU/GPU pulse from the cheap sampler ring)
+  now leads the dashboard, above the recent-window summaries; `colLine` reclaims the full-bleed column (28 vs
+  23). Menu mode / classic ribbon **byte-for-byte unchanged** (`fbPagePx`→456). Smoke 27/28; `scene_to_png`
+  verified (full-width mail read + the Main dashboard render clean, one capture, under the wall).
+- **Review (3 adversarial agents + own pass, every finding verified against the code):** the diff is clean — NO
+  regressions; byte-wall (560 B/page cap is width-independent) + no-truncation + menu-mode parity all intact.
+  Fixed 6 cross-window consistency misses (mail/files SECONDARY read pages left at 456) + 1 menu-mode cosmetic
+  (the Main sys line dropped the GPU value at CPU=100 in the 23-char column → the CPU/GPU pulse is now
+  full-bleed-only). **TWO PRE-EXISTING Reader edges FLAGGED, deliberately NOT fixed** (they touch the
+  on-glass-gated flagship — Adam's call): (1) `reader_positions` isn't geometry-fingerprinted (only the pagemap
+  is), so a RARE `fullBleed` on↔off flip resumes a slightly-off intra-chapter page (clamped + Undo-able); (2)
+  the `⚠ unsaved`/`voice ▲` statusLine is suppressed during full-bleed scroll-reading (the page forces no status
+  bar — the failure still LOGS loudly and the ⚠ shows in the menu levels).
+
+**Decisions / STILL open (`overhaul.md` §3.0 / STATUS):** **Scroll-reading stays Reader-ONLY by design** — the
+overhaul's file/calendar/notices candidates are browse→leaf windows where in-view "Back to parent" is essential,
+and scroll-reading (double-tap→ribbon) would REGRESS it; only Reader's sustained-large-doc shape fits (Adam can
+override on glass). Still open: §3.5 firmware-scroll for non-Reader content; §3.6 the End-Feature long-press
+popup; **Games width** (deliberately deferred — the Blackjack embargo); and the on-glass validation of all of
+Phase 3 (feel/latency, the widened pages, the new Main glance, the hairline underline).
 
 ---
 

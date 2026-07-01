@@ -4,7 +4,7 @@
 import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
 import type { OsWindow, WmContext, WinView } from './types.js'
 import { browsePageItems } from './_browse.js'
-import { clampConfirmBody } from './_util.js'
+import { clampConfirmBody, fbPagePx } from './_util.js'
 import { errorView, fwTextWidth, wrapLinesPx } from '../os-compose.js'
 import type { RenderedImage } from '../os-content.js'
 import {
@@ -352,7 +352,7 @@ export class TerminalWindow implements OsWindow {
     // the pane (TERM_PAGE_ROWS) under the byte budget — no overflow scrollbar.
     // (The old fixed-44-col '›' cut made wide lines unreadable — Adam 2026-06-14;
     // the old 13-row tail overflowed — Adam 2026-06-15.) Grid shows the 80 cols.
-    const rows = wrapLinesPx(collapseRules(stripCcInputBox(this.content)), undefined, termTextWidth)
+    const rows = wrapLinesPx(collapseRules(stripCcInputBox(this.content)), fbPagePx(this.ctx), termTextWidth)   // §3.4: full-bleed reclaims the width
     while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
     const tail = bottomRows(rows, TERM_PAGE_ROWS, TERM_TAIL_MAX_BYTES).join('\n')
     return {
@@ -547,7 +547,7 @@ export class TerminalWindow implements OsWindow {
     try {
       const out = await tmuxCaptureScrollback(this.session, TERM_SCROLLBACK_LINES)
       if (seq !== this.scrollSeq) return   // Live/Back/switch fired mid-capture — don't resurrect scroll mode
-      const rows = wrapLinesPx(collapseRules(stripCcInputBox(out)), undefined, termTextWidth)   // strip CC's input box+footer, rule-collapse, box-aware wrap (§3.4)
+      const rows = wrapLinesPx(collapseRules(stripCcInputBox(out)), fbPagePx(this.ctx), termTextWidth)   // strip CC's input box+footer, rule-collapse, box-aware wrap at the full-bleed width (§3.4)
       while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
       this.scrollPages = rows.length ? paginateRows(rows, TERM_PAGE_ROWS, TERM_TAIL_MAX_BYTES) : ['(no scrollback)']
       this.scrollPage = this.scrollPages.length - 1   // start at the live edge (newest page — where the tail left off)

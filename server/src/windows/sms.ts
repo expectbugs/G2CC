@@ -4,7 +4,7 @@
 import type { SmsThread, SmsMessage } from '@g2cc/shared'
 import type { OsWindow, WmContext, WinView, WindowOpen } from './types.js'
 import { BROWSE_PAGE, MORE_ROW, PREV_ROW } from './_browse.js'
-import { oneLine, fmtStamp, clampConfirmBody } from './_util.js'
+import { oneLine, fmtStamp, clampConfirmBody, fbPagePx } from './_util.js'
 import { renderImageB64 } from './_image.js'
 import { paginateText, errorView } from '../os-compose.js'
 import type { RenderedImage } from '../os-content.js'
@@ -201,7 +201,7 @@ export class SmsWindow implements OsWindow {
       const img = m.imageB64 ? ' [image — see later page]' : ''
       return `${who} · ${fmtStamp(new Date(m.tsMs))}\n${m.body || (m.imageB64 ? '(image)' : '')}${img}`
     }).join('\n\n')
-    const pages: SmsPage[] = paginateText(body || '(no messages)')
+    const pages: SmsPage[] = paginateText(body || '(no messages)', fbPagePx(this.ctx))
     for (const m of messages) {
       if (!m.imageB64) continue
       const pageObj: SmsPage = { kind: 'image', img: null, failed: null }

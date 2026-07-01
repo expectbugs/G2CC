@@ -9,6 +9,7 @@ import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
 import type { OsWindow, WmContext, WinView, WindowOpen } from './types.js'
 import { browsePageItems, browseRowBytes } from './_browse.js'
 import { paginateText, errorView } from '../os-compose.js'
+import { fbPagePx } from './_util.js'
 import { renderImageFile, type RenderedImage } from '../os-content.js'
 import { moveToTrash, TRASH_DIR } from '../trash.js'
 
@@ -463,7 +464,7 @@ export class FilesWindow implements OsWindow {
         const banner = size > FILE_PREVIEW_BYTES
           ? `(head preview — first ${FILE_PREVIEW_BYTES} of ${size} bytes; open via CC for the rest)\n\n`
           : ''
-        this.pages = paginateText(banner + text)
+        this.pages = paginateText(banner + text, fbPagePx(this.ctx))
       }
       this.page = 0
       this.readName = name
@@ -630,7 +631,7 @@ export class FilesWindow implements OsWindow {
           `changed:  ${st.ctime.toLocaleString()}`,
           '',
           `in ${this.cwd()}`,
-        ].join('\n'))
+        ].join('\n'), fbPagePx(this.ctx))
       } catch (e) {
         this.pages = [`ERROR statting ${this.actionName}:\n${(e as Error).message}`]
       }
@@ -652,7 +653,7 @@ export class FilesWindow implements OsWindow {
       return
     }
     const seq = ++this.navSeq
-    this.pages = paginateText(`${dir}\n\n${dirs} dir(s) · ${files} file(s) (dotfiles hidden)\n\ntotal size: ⏳ computing (du)…`)
+    this.pages = paginateText(`${dir}\n\n${dirs} dir(s) · ${files} file(s) (dotfiles hidden)\n\ntotal size: ⏳ computing (du)…`, fbPagePx(this.ctx))
     this.page = 0
     this.level = 'stats'
     this.requestRender()
@@ -661,7 +662,7 @@ export class FilesWindow implements OsWindow {
       const total = err
         ? `du FAILED: ${stderr?.toString().split('\n')[0] ?? err.message}`
         : `${fmtBytes(Number(stdout.toString().split('\t')[0]))} (same filesystem; dotfiles included)`
-      this.pages = paginateText(`${dir}\n\n${dirs} dir(s) · ${files} file(s) (dotfiles hidden)\n\ntotal size: ${total}`)
+      this.pages = paginateText(`${dir}\n\n${dirs} dir(s) · ${files} file(s) (dotfiles hidden)\n\ntotal size: ${total}`, fbPagePx(this.ctx))
       this.requestRender()
     })
   }

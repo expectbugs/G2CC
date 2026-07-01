@@ -6,6 +6,22 @@ Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI
 `UPGRADE_PROGRESS.md` records the v1 phases incl. Adam's gate answers; `CHANGELOG.md` r3–r18
 carries the WHY of everything.
 
+**2026-07-01 — PHASE 3: ribbon refinement + the borderless full-width DE + per-app WIDTH pass + Reader
+redesign + #11 Main — DEPLOYED (live), committed + pushed (server-only, smoke 27/28, NO APK).** Behind
+`de.rootNav:'ribbon'` + `de.fullBleed:true` (both in Adam's config; menu mode is the byte-for-byte fallback).
+**Wave 3 (2026-07-01):** every menu-driven reading window now paginates at the full-bleed WIDTH (552 px vs 456;
+`fbPagePx`/`fbPagePxCfg` in `windows/_util.ts` + `FB_TEXT_PAGE_PX`/`FB_READ_PAGE_ROWS` in `os-compose.ts`) —
+Calendar/Files/Mail/Media/Notices/Search/SMS/CC/Aria + Tmux tail+scrollback. **#11 Main** got a global glance
+(battery states + host/CC-pool + a full-bleed-only CPU/GPU pulse). Reader is the deep scroll-reading template;
+**scroll-reading stays Reader-ONLY by design** — the other candidates (file/calendar/notices) are browse→leaf
+windows where in-view "Back to parent" matters, so they keep the 3-cell menu (only the width widened). 3-agent
++ own adversarial review, CLEAN (byte-wall/no-truncation/menu-parity intact); fixed 6 cross-window consistency
+misses + 1 menu-mode cosmetic (Main sys line). **STILL on-glass-gated:** §3.5 firmware-scroll, §3.6 End-Feature
+popup, **Games width** (Blackjack embargo), and the feel/latency validation of all of Phase 3. TWO PRE-EXISTING
+Reader edges flagged (NOT fixed — flagship, Adam's call): `reader_positions` isn't geometry-fingerprinted (rare
+`fullBleed` on↔off flip → slightly-off intra-chapter page, Undo-able); `⚠ unsaved`/`voice` statusLine hidden
+during full-bleed scroll-reading (still LOGS). Full ledger: `overhaul.md` §3.0 + the 🛠 STATUS banner.
+
 **2026-06-30 — PHASE 2 RIBBON: BUILT, MERGED TO MASTER, LIVE behind the `de.rootNav` flag (server-only,
 smoke 26/27 — NO APK). Adam is testing on glass and likes it.** A new root-nav DE, flag-gated
 (`config.de.rootNav: 'menu'|'ribbon'`, default `menu` = the proven launcher, **byte-for-byte unchanged** +

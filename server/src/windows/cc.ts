@@ -4,6 +4,7 @@
 import { basename } from 'node:path'
 import type { OsWindow, WmContext, WinView } from './types.js'
 import { browsePageItems } from './_browse.js'
+import { fbPagePx } from './_util.js'
 import { SessionLevel, SessionOptions, HistoryLevel, type Effort } from './_session.js'
 import { listProjectDirectories } from '../directory-picker.js'
 
@@ -179,7 +180,7 @@ export class CcWindow implements OsWindow {
       if (r === 'history') {
         const cur = this.current
         if (!cur) { this.ctx.log('[os] cc: History tapped without a session — ignored (LOUD)'); return }
-        this.history = new HistoryLevel(cur.projectPath, this.label, this.ctx.log)
+        this.history = new HistoryLevel(cur.projectPath, this.label, this.ctx.log, fbPagePx(this.ctx))
         this.level = 'history'
         this.focus = 'content'
         this.requestRender()

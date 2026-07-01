@@ -722,6 +722,15 @@ export const TEXT_PAGE_ROWS = 6
 export const TEXT_PAGE_PX = 456          // 480 content - 2×6 padding - safety margin
 export const TEXT_PAGE_MAX_BYTES = 560   // page UTF-8 ceiling (rebuild frame headroom)
 
+/** Phase 3 §3.4 — full-bleed (borderless, de.fullBleed) reading geometry. The
+ *  layout reclaims the pinned 96 px menu column, so a page pages at the full pane
+ *  width; scroll-reading additionally reclaims the status row (one more line). The
+ *  SINGLE source of truth for the wider page width — the Reader's page maps and the
+ *  per-app reading views (calendar/files/mail/notices/search/sms/media/cc/aria) all
+ *  page at THIS width so a widened page never disagrees with what renders. */
+export const FB_TEXT_PAGE_PX = 552       // the 576 pane − a 24px safety margin (mirrors TEXT_PAGE_PX's inset)
+export const FB_READ_PAGE_ROWS = 7       // scroll-reading ONLY (no status bar → the full 255px height). Menu-driven fullBleed reading keeps TEXT_PAGE_ROWS (a status bar may show → 222px).
+
 /** Greedy px-measured word-wrap of multi-line text into display ROWS (each
  *  ≤ maxPx by `widthFn`), hard-splitting a single overlong token (URL/base64/
  *  no-space line) at the px boundary. The wrapping half of paginateText, exported
