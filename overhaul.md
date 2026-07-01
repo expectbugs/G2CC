@@ -558,13 +558,13 @@ exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, s
 >   - New contracts: `OsWindow.onActivate(reentry?)`, `OsWindow.onContentScroll(dir)`, `WinView.scrollContent`.
 >     Hierarchical `onBack` (focus-flip removed); `phase7-reader` + `phase7b-reader-loss` updated & green.
 >
-> ### ⚠ CAVEAT — scroll-reading is PAGE-PER-NOTCH, not within-page-scroll (needs Adam's on-glass call)
-> Each scroll notch turns a WHOLE page (full page shown — reliable, no skipped content), NOT "scroll within a
-> page, flip at the bottom" as §3.5 describes. Within-page scroll needs the firmware to locally-scroll an
-> OVERFLOWING captured text region, UNVERIFIED off-glass — and if it can't, an overflow page would SKIP the
-> un-shown rows. Page-per-notch degrades safely. If on glass the firmware DOES locally-scroll overflow
-> regions, switch Reader's page to overflow + boundary-advance (§3.5). The one behaviour that may not match
-> Adam's mental model.
+> ### ✅ RESOLVED (2026-07-01) — scroll-reading is now WITHIN-PAGE firmware scroll (the §3.5 probe proved it)
+> **The wave-2 caveat below is SUPERSEDED by the sovereign-chapters remodel (see the DONE block above).** On
+> glass a multi-line `scroll=true` captured text region DOES locally-scroll, then fires the boundary event at
+> the edge → the server auto-advances, seamlessly (no skipped rows), with no ceiling < ~100 rows. Reader's page
+> is now a BIG overflowing chunk (`FB_READ_MAX_BYTES`) the firmware scrolls, not a display-sized page-per-notch.
+> _(Original wave-2 caveat, kept for lineage: each notch turned a whole 7-row page; within-page scroll was
+> unverified off-glass, and if the firmware couldn't do it an overflow page would skip the un-shown rows.)_
 >
 > ### ✅ DONE — wave 3 (2026-07-01): deploy + the per-app WIDTH pass + #11 Main (committed + pushed)
 > - **Wave 2 DEPLOYED** — rebuilt + restarted the live server; the phone auto-reconnected on wave 2.
@@ -632,10 +632,10 @@ three are now **merged, pushed, AND deployed live** (wave 2 was rebuilt+restarte
 3. **Expand content into reclaimed menu + status space; status bar only where useful, with a LINE ABOVE it
    (not a full border).** ✅ full-width content (wave 1) + the line-above status (wave 2, §3.3). ✅ full-WIDTH
    text RE-pagination now DONE for ALL reading windows (wave 3, §3.4 — Games deferred, Blackjack embargo).
-4. **Firmware scrolling on large content (reader/etc) + auto next/prev page at the scroll boundary.** ◑
-   Reader has scroll-turns-pages but **PAGE-PER-NOTCH, not within-page-scroll** (see the CAVEAT in the STATUS
-   banner + §3.5). ❌ within-page scroll + applying it to OTHER large-content windows — needs the on-glass
-   overflow-scroll probe.
+4. **Firmware scrolling on large content (reader/etc) + auto next/prev page at the scroll boundary.** ✅
+   PROVEN on glass + shipped in Reader (the sovereign-chapters remodel, 2026-07-01): a big overflowing page the
+   firmware scrolls, then auto-advances at the boundary (seamless, no skipped rows). ❌ applying it to the OTHER
+   large-content windows (file preview, calendar event, notices detail) is the remaining future work.
 5. **Rename "Terms"→"Tmux"; in CC-in-Tmux strip the input box, everything below it (token/permission/
    version), and the useless horizontal `─` bars.** ✅ rename + input-box/footer (wave 1); the `─` bars
    dropped (wave 2). §3.4.
@@ -748,10 +748,12 @@ Phase 1 — and the §3.3 focus model (reading vs browse) resolved per window.
   is fixed chrome that wastes rows; only the live transcript above the input box matters on glass (extends
   the existing `collapseRules`/`termTextWidth` box-drawing handling to DROP, not just collapse). Detect the
   input-box top border and discard from there down.
-- **Reader — ✅ DONE (2026-07-01), the deep template.** Root content menu (`Last/Select Book/Bookmarks/
-  Options`) + Options submenu; scroll-reading (`scrollContent` + `onContentScroll`, page-per-notch);
-  re-entry→menu vs switch-in→resume (`onActivate(reentry)`); full-width pagination (`paginateText`/
-  `buildPageMap` geometry). See the STATUS banner for the file list + the scroll caveat.
+- **Reader — ✅ DONE (wave 2), then REMODELLED into "sovereign chapters" (2026-07-01 — see the DONE block in
+  the STATUS banner + the CHANGELOG).** Root content menu (`Last/Bookmark Last/Select Book/Bookmarks/Options`)
+  + Options submenu; scroll-reading (`scrollContent` + `onContentScroll`) — now BIG WITHIN-PAGE firmware-scroll
+  pages the firmware scrolls then auto-advances (NOT the wave-2 page-per-notch); re-entry→menu vs
+  switch-in→resume (`onActivate(reentry)`); REAL chapters (TOC-split in `read_epub.py`) + chapter-relative page
+  numbers; `maxBytes`-fingerprinted page maps.
 - **The other windows — ✅ WIDTH pass DONE (wave 3, 2026-07-01).** Every menu-driven reading window now widens
   `paginateText` to the full-bleed width (552 px) via `fbPagePx`/`fbPagePxCfg` (`windows/_util.ts`): Calendar,
   Files (preview + file/dir stats), Mail (body + compose + read/result/error pages), Media (lyrics), Notices,

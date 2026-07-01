@@ -453,7 +453,7 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
   access row; Test/Server buttons retired) · `intents/IntentReceiver.kt` + `INTENTS.md`
   (PING live; rest deprecated-with-log). Parked, not in manifest: ProbeActivity,
   G2Pipeline, G2CCService, hud/*.
-- **Verification:** `server/smoke/run-all.mjs` — 25 scripts, THE regression suite (**24/25**:
+- **Verification:** `server/smoke/run-all.mjs` — 28 scripts, THE regression suite (**27/28**:
   `phase10-calendar` is a pre-existing external Google-OAuth red — no refresh_token, NOT a
   regression; don't chase it); run it after every server change. **ISOLATED since review #4: everything store-backed runs in
   the `g2cc_smoke` DB + a temp notes file (`server/smoke/_env.mjs` preamble — never the
