@@ -86,6 +86,18 @@ const settle = async (pred, what, ms = 25000) => {
   while (Date.now() - t0 < ms) { const sc = last(); if (sc && pred(sc)) return sc; await sleep(25) }
   throw new Error(`timeout settling: ${what} (last title="${titleOf(last())}", menu=${JSON.stringify(menuOf(last()))})`)
 }
+// The dealer tile renders ASYNC (a placeholder → the BMP; a late re-render can follow
+// the first). Wait until t0 is non-null and UNCHANGED across ~150 ms before capturing
+// it, so a late dealer render doesn't read as a (false) cost-contract violation.
+const stableT0 = async () => {
+  let prev = img(last(), 't0')
+  for (let i = 0; i < 40; i++) {
+    await sleep(150)
+    const cur = img(last(), 't0')
+    if (cur !== null && cur === prev) return
+    prev = cur
+  }
+}
 const MENU_MAX_PX = 90
 function checkScene(sc, where) {
   for (const lbl of menuOf(sc)) assert.ok(fwTextWidth(lbl) <= MENU_MAX_PX, `${where}: menu '${lbl}' ${fwTextWidth(lbl)}px > ${MENU_MAX_PX}px`)
@@ -135,21 +147,30 @@ try {
   checkScene(sc, 'dealt')
   console.error('  4. Deal → 2 small tiles + numbers; frame under wall ✓')
 
-  // --- the COST CONTRACT: Hit re-renders ONLY the player tile ---
+  // --- the COST CONTRACT: Hit re-renders ONLY the player tile (WHILE STILL IN PLAY) ---
   if (menuOf(sc).includes('Hit')) {
+    await stableT0()   // let any late async dealer-tile render land before capturing d0
+    sc = last()
     const d0 = img(sc, 't0'), p0 = img(sc, 't2')
     await games.onMenuSelect('Hit')
-    sc = await settle((x) => img(x, 't2') !== p0, 'player tile re-rendered after Hit')
-    assert.equal(img(sc, 't0'), d0, 'dealer tile UNCHANGED after Hit (only the player hand re-pushes)')
-    checkScene(sc, 'after Hit')
-    console.error('  5. Hit re-renders ONLY the player tile (dealer bytes identical) ✓')
-
-    // --- Stand reveals + re-renders ONLY the dealer tile ---
+    // Wait for a DEFINITIVE state: still in play (player tile re-pushed, Stand offered)
+    // OR the Hit busted → the hand auto-settled (Deal menu). A random Hit can bust.
+    sc = await settle((x) => (img(x, 't2') !== p0 && menuOf(x).includes('Stand')) || menuOf(x).includes('Deal'), 'Hit resolved (in play or busted)')
     if (menuOf(sc).includes('Stand')) {
+      // still in play → the dealer's hole card stays hidden; only the player tile re-pushed.
+      assert.equal(img(sc, 't0'), d0, 'dealer tile UNCHANGED after Hit (only the player hand re-pushes)')
+      checkScene(sc, 'after Hit')
+      console.error('  5. Hit re-renders ONLY the player tile (dealer bytes identical) ✓')
+      // --- Stand reveals + re-renders ONLY the dealer tile ---
       const d1 = img(sc, 't0')
       await games.onMenuSelect('Stand')
       sc = await settle((x) => menuOf(x).includes('Deal') && img(x, 't0') !== d1, 'dealer revealed after Stand')
       console.error('  6. Stand reveals + re-renders the dealer tile ✓')
+    } else {
+      // the Hit BUSTED (random deal) → auto-settle + the dealer reveals (expected, not a
+      // cost-contract violation). The Stand path is moot this run.
+      checkScene(sc, 'after Hit-bust')
+      console.error('  5-6. (Hit busted → auto-settle + dealer reveal; the Stand path is moot this run) ✓')
     }
   } else {
     console.error('  5-6. (dealt a natural — Hit/Stand path skipped this run)')

@@ -109,8 +109,16 @@ export interface OsWindow {
   onDeactivate?(): void
   /** Called when the WM switches TO this window (foregrounds it). A launcher-style
    *  window resets to its root here — e.g. Games always lands on the games list,
-   *  not the last game played (Adam 2026-06-28). Absent = keep prior state. */
-  onActivate?(): void
+   *  not the last game played (Adam 2026-06-28). Absent = keep prior state.
+   *  `reentry` (Phase 3 §3.4) = true when re-selecting the window you JUST parked
+   *  from (it was the active window) vs switching to it from elsewhere — Reader uses
+   *  it to show its menu on re-entry but resume the last page on a switch-in. */
+  onActivate?(reentry?: boolean): void
+  /** §3.4 fullBleed scroll-reading: a scroll-notch focus event while this window's
+   *  CONTENT is the scroll capture (the view set `scrollContent`). dir = the boundary
+   *  direction (down = forward / next page, up = back / previous). Only fires in
+   *  fullBleed for a scrollContent view. Reader turns the page here. */
+  onContentScroll?(dir: 'up' | 'down'): Promise<void>
   /** May a notification OVERLAY repaint this window right now? (Phase 4, B5.)
    *  Session windows answer false while listening/transcribing/pendingStt/
    *  pendingPermission — the confirm step's "nothing reaches CC unread"

@@ -4,6 +4,45 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-01 — **Phase 3: ribbon refinement + the borderless full-width DE + Reader redesign**
+
+Executed most of `overhaul.md` Phase 3 (Adam's 2026-06-30 tweak list). **`overhaul.md` §3.0 is the source-of-
+truth request ledger (every item + status); the STATUS banner has the DONE/NOT-DONE split + the resume list.**
+Two waves, server-only, gated behind `de.rootNav:'ribbon'` (+ the in-window layout behind a NEW `de.fullBleed`,
+default off). Menu mode stays byte-for-byte the proven fallback.
+
+- **Wave 1 (merged to master + pushed + LIVE; commits 822c583…6d3cdb6):** §3.2 persisted recents/frequency
+  (`window-usage.ts`); §3.1 the fixed ribbon order `[Main][active][recent×3][frequent][All]` (cursor→slot 2,
+  `recentsDepth` default 4); §3.4 Term→Tmux + CC input-box/footer strip; §3.3 base fullBleed
+  (`composeFullBleedScene` — full-width content, 3-cell top-bar menu, Main/Reload stripped). Config
+  `fullBleed:true` deployed live.
+- **Wave 2 (committed + pushed THIS handoff; NOT yet deployed — needs `npm run build -w server` + restart):**
+  §3.3 borders/underline FINISHED (wave 1 wrongly KEPT boxes → now borderless bars + one carved `ruleRegion`
+  underline + a status "line above", not a box); §3.4 Tmux now DROPS the `─` bars in CC panes (was collapsing);
+  §3.4 **Reader fully redesigned** — root content menu (Last/Select Book/Bookmarks/Options) + Options submenu;
+  scroll-reading (new `WinView.scrollContent` + `OsWindow.onContentScroll`, PAGE-PER-NOTCH, no menu,
+  double-tap→ribbon); re-entry→menu vs switch-in→resume (new `switchTo` reentry + `OsWindow.onActivate(reentry)`);
+  width fixed (`paginateText`/`buildPageMap` now take page geometry).
+
+**Lessons / decisions:**
+- Scroll-reading is PAGE-PER-NOTCH on purpose — within-page firmware scroll of an OVERFLOWING captured text
+  region is UNVERIFIED off-glass, and if it can't, an overflow page would SKIP un-shown rows. Safe; revisit on
+  glass (§3.5 + the STATUS caveat).
+- The persisted-recents load must NOT force a render off the ribbon root — a spurious `requestRender` on load
+  raced a tile-byte comparison (intermittent phase-blackjack flake). Fixed: re-render only when `atRibbon`.
+- The underline is a 3px bordered region as a hairline (the wire has no per-side border) — UNVERIFIED on real
+  glass; the top rule must stop at `DE_TITLE_W` or it overlaps the clock cutout (caught by `scene_to_png`).
+- `window_usage` persists across smoke runs in `g2cc_smoke` → the ribbon smoke `DELETE`s it for a
+  deterministic MRU. **Blackjack's smoke has a PRE-EXISTING random-deal flake (the engine is fine) — it is the
+  deliberately-LAST item; do not chase it.**
+
+**NOT done (resume list — `overhaul.md` §3.0 / STATUS):** the per-app pass for the other 13 windows (only
+Reader deep-done); #11 Main slot-0 content; §3.5 firmware-scroll for non-Reader content; §3.6 the End-Feature
+long-press popup investigation; and the on-glass validation of all of Phase 3 — including DEPLOYING wave 2 to
+the running server (rebuild + restart).
+
+---
+
 ## (unstamped) — 2026-06-29 — **Phase 1: modularization DONE (the windows/ split), merged + on-glass**
 
 Executed `overhaul.md` Phase 1: split the 15 windows out of the 8,555-line `os-windows.ts` into

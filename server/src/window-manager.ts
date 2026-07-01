@@ -939,6 +939,10 @@ export class WindowManager {
   switchTo(id: string): void {
     const w = this.windows.find((x) => x.id === id)
     if (!w) { this.ctx.log(`[os] switchTo unknown window '${id}'`); this.requestRender(); return }
+    // §3.4 re-entry: re-selecting the SAME window you parked from (it was active at
+    // the ribbon) vs switching in from a different window. Reader shows its menu on
+    // re-entry but resumes the last page on a switch-in.
+    const reentry = w === this.active && this.parked
     if (w !== this.active && !this.parked) {
       try {
         this.active.onDeactivate?.()   // mic OFF etc. — focus must not leak
@@ -958,7 +962,7 @@ export class WindowManager {
       void persistWindowUsage(id, this.useCounter, n).catch((e: unknown) =>
         this.ctx.log(`[os] persist window-usage(${id}) failed: ${e instanceof Error ? e.message : String(e)}`))
     } else (w as MainWindow).resetToRoot()                        // Phase 11: Main returns to its launcher root
-    w.onActivate?.()                                              // launcher-style reset (Games → games list)
+    w.onActivate?.(reentry)                                       // launcher reset (Games→list); reentry → Reader menu
     this.requestRender()
   }
 
@@ -1130,6 +1134,7 @@ export class WindowManager {
   private fullBleedMenuCaptures(): boolean {
     const v = this.lastView
     if (!v) return false
+    if (v.scrollContent) return false   // §3.4: the content captures (scroll-reading), not the menu
     return v.mode !== 'browse' || v.menuMode === 'capture'
   }
 
@@ -1262,6 +1267,13 @@ export class WindowManager {
       if (!this.ribbon) return
       const act = this.ribbon.scroll(dir)
       if (act.kind === 'recompose') this.renderRibbon()
+      return
+    }
+    // §3.4 fullBleed scroll-reading: the CONTENT is the scroll capture (no menu) →
+    // each notch turns a page (down = next, up = prev). Reader does the page math.
+    if (this.fullBleed && this.lastView?.scrollContent) {
+      try { await this.active.onContentScroll?.(dir) }
+      catch (e) { this.ctx.log(`[os] onContentScroll failed (${this.active.id}): ${(e as Error).message}`) }
       return
     }
     // §3.3 fullBleed in-window: the top-bar menu antenna captures (a reading window,

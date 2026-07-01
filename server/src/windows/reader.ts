@@ -44,7 +44,9 @@ export class ReaderWindow implements OsWindow {
   readonly category = 'Media' as const
   // 'confirm' = the Cancel-first jump gate; 'jump' = the numpad; 'marks' = the
   // bookmarks OR recent-spots browse list (markKind picks which).
-  private level: 'library' | 'chapters' | 'read' | 'confirm' | 'jump' | 'marks' = 'library'
+  // 'menu' = the root content menu (Last/Select Book/Bookmarks/Options — Adam
+  // 2026-06-30); 'options' = its submenu (Voice/Jump/Mark/Recent/Chapters).
+  private level: 'menu' | 'options' | 'library' | 'chapters' | 'read' | 'confirm' | 'jump' | 'marks' = 'menu'
   private libOffset = 0
   private cwd = ''   // current subfolder under ~/books ('' = root); navigation persists across switches
   private lastBook: { path: string } | null = null   // the root "Last" shortcut target (most-recently-read)
@@ -92,6 +94,25 @@ export class ReaderWindow implements OsWindow {
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
+  // ---- Phase 3 §3.4: full-bleed page geometry (the width fix) ----
+  /** True when the borderless full-width layout is live (ribbon + fullBleed). Reader
+   *  then pages at the full 576px width + the taller reclaimed height, and the reading
+   *  level is the no-menu scroll page. */
+  private get fbActive(): boolean {
+    return this.ctx.config?.de?.rootNav === 'ribbon' && this.ctx.config?.de?.fullBleed === true
+  }
+  /** Reading page width px: full-bleed 576px pane (−padding) vs the classic 480px. */
+  private get pagePx(): number { return this.fbActive ? 552 : 456 }
+  /** Reading page rows: full-bleed reclaims the status row (~7) vs the classic 6. */
+  private get pageRows(): number { return this.fbActive ? 7 : 6 }
+  /** Pad a page to `rows` lines so the scroll-reading region fills consistently (a
+   *  short page otherwise leaves a big scroll gap). Full-bleed reading only. */
+  private padPage(s: string, rows: number): string {
+    const lines = s.split('\n')
+    while (lines.length < rows) lines.push('')
+    return lines.join('\n')
+  }
+
   summary(): string {
     if (this.bookPath && this.level === 'read') {
       const where = this.pageMap && this.pageMap.total > 0
@@ -99,6 +120,7 @@ export class ReaderWindow implements OsWindow {
         : `ch${this.chapter + 1} p${this.page + 1}`
       return `${oneLine(this.bookTitle, 16)} · ${where}`
     }
+    if (this.level === 'menu' || this.level === 'options') return this.bookPath ? oneLine(this.bookTitle, 20) : 'menu'
     return this.cwd ? `library · /${oneLine(this.cwd, 14)}` : 'library'
   }
 
@@ -207,7 +229,7 @@ export class ReaderWindow implements OsWindow {
       this.ctx.log(`[reader] open ${name} failed: ${(e as Error).message}`)
       this.bookTitle = name
       this.chapters = []
-      this.pages = paginateText(`ERROR opening ${name}:\n\n${(e as Error).message}`)
+      this.pages = paginateText(`ERROR opening ${name}:\n\n${(e as Error).message}`, this.pagePx, this.pageRows)
       this.page = 0
       this.chapterTitle = '(error)'
       this.level = 'read'
@@ -243,7 +265,7 @@ export class ReaderWindow implements OsWindow {
     if (this.pageMap || this.pageMapPending || !this.bookPath) return
     const p = this.bookPath
     this.pageMapPending = true
-    buildPageMap(p)
+    buildPageMap(p, this.pagePx, this.pageRows)
       .then((m) => { if (this.bookPath === p) { this.pageMap = m; this.pageMapPending = false; this.requestRender() } })
       .catch((e: unknown) => {
         if (this.bookPath === p) { this.pageMapPending = false; this.requestRender() }
@@ -295,6 +317,33 @@ export class ReaderWindow implements OsWindow {
     return m
   }
 
+  /** The root content menu (Adam 2026-06-30) — Last/Select Book/Bookmarks/Options. */
+  private menuItems(): string[] { return ['Last', 'Select Book', 'Bookmarks', 'Options'] }
+  /** The Options submenu — the reading tools (act on the current/last book). */
+  private optionsItems(): string[] { return [this.voiceOn ? 'Voice off' : 'Voice on', 'Jump', 'Mark', 'Recent', 'Chapters'] }
+
+  /** Page forward / back one page, crossing chapter boundaries — shared by the
+   *  full-bleed scroll-reading (onContentScroll) and the classic Next/Prev menu. */
+  private async pageForward(): Promise<void> {
+    this.markedNote = false
+    if (this.page < this.pages.length - 1) { this.page++; this.persist(); this.requestRender() }
+    else if (this.chapter < this.chapters.length - 1) { await this.openChapter(this.chapter + 1, 0); this.requestRender() }
+    // else: at the very end of the book — stay put (no-op).
+  }
+  private async pageBackward(): Promise<void> {
+    this.markedNote = false
+    if (this.page > 0) { this.page--; this.persist(); this.requestRender() }
+    else if (this.chapter > 0) { await this.openChapter(this.chapter - 1, -1); this.requestRender() }   // last page of the prev chapter
+  }
+
+  /** §3.4 full-bleed scroll-reading: a scroll-notch boundary event turns a page
+   *  (down = forward, up = back). No menu while reading — this is the only control. */
+  async onContentScroll(dir: 'up' | 'down'): Promise<void> {
+    if (this.level !== 'read') return
+    if (dir === 'down') await this.pageForward()
+    else await this.pageBackward()
+  }
+
   /** Labels for the bookmarks/recent list — recomputed identically by view() and
    *  onBrowseSelect (the libRows pattern; markList is the stable backing array). */
   private markLabels(): string[] {
@@ -336,13 +385,13 @@ export class ReaderWindow implements OsWindow {
       const r = await readChapter(p, idx)
       this.chapter = idx
       this.chapterTitle = r.chapterTitle
-      this.pages = paginateText(r.text)
+      this.pages = paginateText(r.text, this.pagePx, this.pageRows)
       this.page = page === -1 ? this.pages.length - 1 : Math.min(Math.max(0, page), this.pages.length - 1)
       this.level = 'read'
       this.persist()
     } catch (e) {
       this.ctx.log(`[reader] read chapter ${idx} failed: ${(e as Error).message}`)
-      this.pages = paginateText(`ERROR reading chapter ${idx + 1}:\n\n${(e as Error).message}`)
+      this.pages = paginateText(`ERROR reading chapter ${idx + 1}:\n\n${(e as Error).message}`, this.pagePx, this.pageRows)
       this.page = 0
       this.chapterTitle = '(error)'
       this.level = 'read'
@@ -362,12 +411,24 @@ export class ReaderWindow implements OsWindow {
         pageSuffix = ` · ${this.page + 1}/${this.pages.length} · …`
       }
       const note = this.markedNote ? ' ✓ marked' : ''
-      return {
-        mode: 'text',
-        title: `${oneLine(this.bookTitle, 16)} · ${oneLine(this.chapterTitle, 12)}${note}${pageSuffix}`,
-        menu: this.readMenu(),
-        text: this.pages[this.page] ?? '',
+      const title = `${oneLine(this.bookTitle, 16)} · ${oneLine(this.chapterTitle, 12)}${note}${pageSuffix}`
+      const page = this.pages[this.page] ?? ''
+      if (this.fbActive) {
+        // Full-bleed: NO menu (Adam 2026-06-30) — the page IS the scroll capture, each
+        // notch turns a page (onContentScroll), double-tap → ribbon. Padded to fill.
+        return { mode: 'text', scrollContent: true, title, menu: [], text: this.padPage(page, this.pageRows) }
       }
+      return { mode: 'text', title, menu: this.readMenu(), text: page }   // classic: the Next/Prev menu
+    }
+    if (this.level === 'menu') {   // the root content menu (Adam 2026-06-30)
+      return {
+        mode: 'browse', menuMode: 'passive', menu: [],
+        title: this.bookPath ? `Reader · ${oneLine(this.bookTitle, 22)}` : 'Reader',
+        items: this.menuItems(),
+      }
+    }
+    if (this.level === 'options') {
+      return { mode: 'browse', menuMode: 'passive', menu: [], title: 'Reader · Options', items: this.optionsItems() }
     }
     if (this.level === 'confirm' && this.pendingNav) {
       const nav = this.pendingNav
@@ -444,6 +505,45 @@ export class ReaderWindow implements OsWindow {
   }
 
   async onBrowseSelect(index: number): Promise<void> {
+    if (this.level === 'menu') {   // the root content menu (Adam 2026-06-30)
+      switch (this.menuItems()[index]) {
+        case 'Last': {
+          const last = await this.loadLast()
+          if (last) await this.openBook(last.path)
+          else { this.ctx.log('[reader] Last: no last-read book'); this.requestRender() }
+          return
+        }
+        case 'Select Book': this.level = 'library'; this.libOffset = 0; this.lastBookLoaded = false; this.requestRender(); return
+        case 'Bookmarks':
+          this.markKind = 'bookmarks'
+          try { this.markList = this.bookPath ? await listBookmarks(this.bookPath) : [] } catch (e) { this.ctx.log(`[reader] bookmarks load failed: ${(e as Error).message}`); this.markList = [] }
+          this.markOffset = 0; this.level = 'marks'; this.requestRender(); return
+        case 'Options': this.level = 'options'; this.requestRender(); return
+        default: this.ctx.log(`[reader] menu index ${index} out of range — resyncing`); this.requestRender(); return
+      }
+    }
+    if (this.level === 'options') {
+      switch (this.optionsItems()[index]) {
+        case 'Voice on': this.setVoice(true); return
+        case 'Voice off': this.setVoice(false); return
+        case 'Jump':
+          if (!this.bookPath) { this.ctx.log('[reader] Jump: no book open'); this.requestRender(); return }
+          this.jumpBuf = ''; this.jumpError = null; this.level = 'jump'; this.ensurePageMap(); this.requestRender(); return
+        case 'Mark':
+          if (!this.bookPath) { this.ctx.log('[reader] Mark: no book open'); this.requestRender(); return }
+          try { await addBookmark(this.bookPath, this.chapter, this.page, this.currentLabel()); this.markedNote = true; this.ctx.log(`[reader] bookmarked ${basename(this.bookPath)} ch${this.chapter + 1} p${this.page + 1}`) }
+          catch (e) { this.ctx.log(`[reader] bookmark failed: ${(e as Error).message}`) }
+          this.level = 'read'; this.requestRender(); return   // mark, then back to reading
+        case 'Recent':
+          this.markKind = 'recent'
+          try { this.markList = this.bookPath ? await listHistory(this.bookPath, RECENT_VIEW) : [] } catch (e) { this.ctx.log(`[reader] recent load failed: ${(e as Error).message}`); this.markList = [] }
+          this.markOffset = 0; this.level = 'marks'; this.requestRender(); return
+        case 'Chapters':
+          if (!this.bookPath) { this.ctx.log('[reader] Chapters: no book open'); this.requestRender(); return }
+          this.chapOffset = 0; this.level = 'chapters'; this.requestRender(); return
+        default: this.ctx.log(`[reader] options index ${index} out of range — resyncing`); this.requestRender(); return
+      }
+    }
     if (this.level === 'library') {
       const { items, cells } = this.libRows()
       const { map, prevOffset, nextOffset } = browsePageItems(items, this.libOffset)
@@ -560,31 +660,8 @@ export class ReaderWindow implements OsWindow {
       return
     }
     switch (label) {
-      case 'Next': {
-        this.markedNote = false
-        if (this.page < this.pages.length - 1) {
-          this.page++
-          this.persist()
-          this.requestRender()
-        } else if (this.chapter < this.chapters.length - 1) {
-          // Page past the chapter end → next chapter (continuous reading).
-          await this.openChapter(this.chapter + 1, 0)
-          this.requestRender()
-        }
-        return
-      }
-      case 'Prev': {
-        this.markedNote = false
-        if (this.page > 0) {
-          this.page--
-          this.persist()
-          this.requestRender()
-        } else if (this.chapter > 0) {
-          await this.openChapter(this.chapter - 1, -1)   // last page of the previous chapter
-          this.requestRender()
-        }
-        return
-      }
+      case 'Next': await this.pageForward(); return
+      case 'Prev': await this.pageBackward(); return
       case 'Jump':
         this.jumpBuf = ''; this.jumpError = null; this.markedNote = false; this.focus = 'content'; this.level = 'jump'
         this.ensurePageMap()
@@ -633,44 +710,48 @@ export class ReaderWindow implements OsWindow {
     this.lastBookLoaded = false   // refresh "Last" on the next library visit
   }
 
+  /** §3.4 (Adam 2026-06-30): re-selecting Reader while it was the just-active window
+   *  (re-entry) opens the root MENU; switching IN from elsewhere resumes the last page
+   *  (full persistence). A fresh instance with a last-read book resumes it; truly fresh
+   *  → the menu (so "the app starts with a menu"). */
+  onActivate(reentry?: boolean): void {
+    if (reentry) { this.level = 'menu'; this.markedNote = false; this.requestRender(); return }
+    if (this.bookPath && this.pages.length) { this.level = 'read'; this.requestRender(); return }   // already open in memory → resume
+    void this.resumeLastOrMenu()
+  }
+  private async resumeLastOrMenu(): Promise<void> {
+    try {
+      const last = await this.loadLast()
+      if (last) { await this.openBook(last.path); return }   // openBook resumes at the saved page (level='read')
+    } catch (e) { this.ctx.log(`[reader] resume-last failed: ${(e as Error).message}`) }
+    this.level = 'menu'; this.requestRender()
+  }
+
+  /** Pop one level. Hierarchical (the focus-flip is gone — §3.4): the root 'menu'
+   *  returns false (→ ribbon); reading (classic only — full-bleed reading double-taps
+   *  straight to the ribbon via the WM) drops to the menu; the rest pop to their parent
+   *  (Options for the reading tools, the menu for Select Book / Bookmarks). */
   async onBack(): Promise<boolean> {
-    if (this.level === 'read') {
-      this.setVoice(false)   // leaving the page → stop the handsfree mic
-      // Position already persisted on every change — backing out loses nothing.
-      this.level = this.chapters.length ? 'chapters' : 'library'
-      this.focus = 'content'
-      this.requestRender()
-      return true
+    switch (this.level) {
+      case 'menu':
+        return false                                                 // root → exit to the ribbon
+      case 'read':
+        this.setVoice(false); this.level = 'menu'; this.requestRender(); return true
+      case 'options':
+        this.level = 'menu'; this.requestRender(); return true
+      case 'library':
+        if (this.cwd) { this.cwd = this.parentOf(this.cwd); this.libOffset = 0; this.lastBookLoaded = false; this.requestRender(); return true }
+        this.level = 'menu'; this.requestRender(); return true       // at the library root → the menu
+      case 'chapters':
+        this.level = 'options'; this.requestRender(); return true    // Chapters is reached from Options
+      case 'marks':
+        this.level = this.markKind === 'bookmarks' ? 'menu' : 'options'   // Bookmarks from the menu, Recent from Options
+        this.requestRender(); return true
+      case 'jump':
+        this.jumpBuf = ''; this.jumpError = null; this.level = 'options'; this.requestRender(); return true
+      case 'confirm':                                                // double-tap on the gate = Cancel (stay put)
+        this.level = this.pendingNav?.ret ?? 'read'; this.pendingNav = null; this.requestRender(); return true
     }
-    if (this.level === 'confirm') {   // double-tap on the gate = Cancel (stay put)
-      this.level = this.pendingNav?.ret ?? 'read'
-      this.pendingNav = null
-      this.requestRender()
-      return true
-    }
-    if (this.level === 'jump') {       // discard the typed buffer, back to the page
-      this.jumpBuf = ''
-      this.jumpError = null
-      this.level = 'read'
-      this.requestRender()
-      return true
-    }
-    if (this.level === 'marks') {
-      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
-      this.focus = 'content'
-      this.level = 'read'
-      this.requestRender()
-      return true
-    }
-    if (this.level === 'chapters') {
-      if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
-      this.focus = 'content'
-      this.level = 'library'
-      this.requestRender()
-      return true
-    }
-    if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
-    this.focus = 'content'
     return false
   }
 }

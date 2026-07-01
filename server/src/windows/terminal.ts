@@ -144,7 +144,11 @@ function stripCcInputBox(text: string): string {
   // Only strip when what follows actually looks like CC's prompt box (a '│ >' line) —
   // otherwise a stray trailing box in some other TUI would be eaten.
   if (!/[│|]\s*>/.test(lines.slice(cut).join('\n'))) return text
-  return lines.slice(0, cut).join('\n').replace(/\n+$/u, '')
+  // CC pane: cut the input box + everything below it, AND drop the standalone
+  // horizontal RULE lines above it (CC's ─ output separators — Adam 2026-06-30: they
+  // waste whole rows on glass). Only pure-rule lines go; '│ text │' rows stay.
+  const kept = lines.slice(0, cut).filter((l) => ruleChar(l) === null)
+  return kept.join('\n').replace(/\n+$/u, '')
 }
 const QUICK_KEYS: { label: string; keys: string[] }[] = [
   { label: 'Enter', keys: ['Enter'] },

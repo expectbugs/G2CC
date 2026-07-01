@@ -73,16 +73,21 @@ try {
   })
   try {
     const reader = wm.windows.find((w) => w.id === 'reader')
+    // Reader now OPENS to the root content menu (Adam 2026-06-30): Last/Select Book/Bookmarks/Options.
     let v = await reader.view()
+    assert.equal(reader.level, 'menu', 'Reader opens to the root content menu')
+    assert.deepEqual(v.items, ['Last', 'Select Book', 'Bookmarks', 'Options'], 'root menu = Last/Select Book/Bookmarks/Options')
+    // Select Book → the library (subfolder browser).
+    await reader.onBrowseSelect(v.items.indexOf('Select Book'))
+    v = await reader.view()
+    assert.equal(reader.level, 'library', 'Select Book → the library')
     assert.ok(v.items.includes('Sci-Fi/'), 'root lists the subfolder (name/)')
     assert.ok(v.items.includes('RootBook.epub'), 'root lists the root book')
-    assert.ok(!v.menu.includes('Last'), 'no Last shortcut before anything is read')
     // descend into the subfolder
     await reader.onBrowseSelect(v.items.indexOf('Sci-Fi/'))
     v = await reader.view()
     assert.equal(v.items[0], '..', 'subfolder shows .. at row 0')
     assert.ok(v.items.includes('Nested.epub'), 'subfolder lists its book')
-    assert.ok(!v.menu.includes('Last'), 'Last is root-only (absent in a subfolder)')
     // back up via the .. row
     await reader.onBrowseSelect(0)
     v = await reader.view()
@@ -91,16 +96,40 @@ try {
     await reader.onBrowseSelect(v.items.indexOf('RootBook.epub'))
     assert.equal(reader.level, 'chapters', 'tapping a book opens it (chapter list, no resume yet)')
     assert.ok(reader.bookPath.endsWith('/RootBook.epub'), 'opened the right path under cwd')
-    // now simulate having read it, return to the root library → Last appears + resumes
+    // simulate having read it, return to the root MENU → Last resumes the saved page
     await savePosition(`${SANDBOX}/RootBook.epub`, 2, 3)
-    reader.level = 'library'; reader.cwd = ''; reader.lastBookLoaded = false
+    reader.level = 'menu'
     v = await reader.view()
-    assert.ok(v.menu.includes('Last'), 'Last shortcut appears once a book has a saved position')
-    await reader.onMenuSelect('Last')
+    assert.equal(v.items[0], 'Last', 'the root menu leads with Last')
+    await reader.onBrowseSelect(0)   // tap Last
     assert.ok(reader.bookPath.endsWith('/RootBook.epub'), 'Last resumed the most-recently-read book')
     assert.equal(reader.level, 'read', 'Last resumed straight into the saved page')
-    console.error('  5. subfolder nav (folder/.., descend) + root Last shortcut ✓')
+    console.error('  5. root menu → Select Book → subfolder nav + Last resume ✓')
   } finally { wm.dispose() }
+
+  // --- 6. full-bleed scroll-reading (Adam 2026-06-30): no menu, scroll turns pages ---
+  {
+    const { WindowManager } = await import('../dist/window-manager.js')
+    const wm2 = new WindowManager({
+      send: () => {}, audio: () => {}, displayReload: () => {}, log: () => {},
+      pool: { count: 0 }, config: { claude: { model: 'opus', effort: 'max', defaultMode: 'bypassPermissions', quickPrompts: [] }, de: { rootNav: 'ribbon', recentsDepth: 4, fullBleed: true } },
+      registerWatchdog: () => {}, unregisterWatchdog: () => {},
+    })
+    try {
+      const reader = wm2.windows.find((w) => w.id === 'reader')
+      await reader.openBook(`${SANDBOX}/RootBook.epub`)
+      await reader.openChapter(4, 1)   // a long chapter, page 1 (room to scroll both ways)
+      const v = await reader.view()
+      assert.equal(v.scrollContent, true, 'full-bleed reading sets scrollContent (the content captures)')
+      assert.deepEqual(v.menu, [], 'NO menu while reading in full-bleed')
+      assert.ok(v.text.split('\n').length >= 7, 'the page is padded to fill the reading region')
+      await reader.onContentScroll('down')
+      assert.equal(reader.page, 2, 'scroll down → next page (p1 → p2)')
+      await reader.onContentScroll('up')
+      assert.equal(reader.page, 1, 'scroll up → previous page (p2 → p1)')
+      console.error('  6. full-bleed: scrollContent reading, no menu, scroll turns pages ✓')
+    } finally { wm2.dispose() }
+  }
 
   if (process.argv.includes('--emit-scene')) process.stdout.write(JSON.stringify(readScene))
   else console.log('phase7-reader: ALL OK')

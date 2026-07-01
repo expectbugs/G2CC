@@ -17,7 +17,7 @@
 
 import { SCREEN_WIDTH, DE_BAR_H, DE_TITLE_W, DE_BATT_W, DE_CONTENT_H_FULL, DE_REGION_IDS } from '@g2cc/shared'
 import type { WireScene, SceneRegion } from '@g2cc/shared'
-import { fwTextWidth, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from './os-compose.js'
+import { fwTextWidth, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES, ruleRegion, RULE_H } from './os-compose.js'
 import { CATEGORY_ORDER, type OsWindow, type WindowCategory } from './windows/types.js'
 
 /** A tap or double-tap on the ribbon resolves to one of these; the WM runs it. */
@@ -232,20 +232,24 @@ export class RibbonShell {
    *  overlays the clock cutout. Estimator-guarded against the multi-packet wall. */
   scene(previewText: string, battery: string): WireScene {
     const STRIP_W = DE_TITLE_W - DE_BATT_W
+    const barH = DE_BAR_H - RULE_H   // borderless bar, shortened so the underline fits below it
     const build = (preview: string): SceneRegion[] => [
       {
         // The strip — the antenna (scroll=true) and the sole capture — at the TOP
         // (Adam 2026-06-30: ribbon at top; the proven os-menu antenna location).
         // RIBBON_STRIP_ID is a DEDICATED scroll-antenna id, not a passive-bar id
         // (the client caches the scroll flag per id — see the const above).
-        id: RIBBON_STRIP_ID, name: 'strip', x: 0, y: 0, w: STRIP_W, h: DE_BAR_H,
+        id: RIBBON_STRIP_ID, name: 'strip', x: 0, y: 0, w: STRIP_W, h: barH,
         kind: 'text', content: { kind: 'text', text: ' ' + this.stripText(), scroll: true },
       },
       {
         // Glasses battery, between the strip and the client clock cutout (§2.2.5).
-        id: DE_REGION_IDS.battery, name: 'battery', x: STRIP_W, y: 0, w: DE_BATT_W, h: DE_BAR_H,
+        id: DE_REGION_IDS.battery, name: 'battery', x: STRIP_W, y: 0, w: DE_BATT_W, h: barH,
         kind: 'text', content: { kind: 'text', text: this.clampOne(' ' + battery, DE_BATT_W - 6) },
       },
+      // THE single underline under the ribbon strip (Adam 2026-06-30). Stops at
+      // DE_TITLE_W so it never runs under the client clock cutout (x≥469).
+      ruleRegion(9, 'uline', barH, DE_TITLE_W),
       {
         // Full-height preview — the bottom status bar is gone (§2.2.5).
         id: DE_REGION_IDS.contentText, name: 'content', x: 0, y: DE_BAR_H, w: SCREEN_WIDTH, h: DE_CONTENT_H_FULL,

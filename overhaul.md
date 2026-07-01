@@ -523,32 +523,114 @@ flag-gated on `de.rootNav: 'ribbon'`; `'menu'` stays the byte-for-byte fallback 
 Several items touch the proven `os-compose.ts` — the sanctioned, gated, `scene_to_png`-+-on-glass-verified
 exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, smoke-green + on-glass.**
 
-> ## 🛠 STATUS — Phase 3 BUILT off-glass on branch `phase3-ribbon-refinement` (2026-06-30, smoke 27/28)
-> Adam said "batch the whole thing… do it all." Built server-only, each a smoke-green commit on the branch
-> (NOT merged to master — his live ribbon is untouched until he reviews). Menu mode stays byte-for-byte.
-> - ✅ **§3.2 persisted recents + frequency** — `window-usage.ts` (a `window_usage` table); the WM loads
->   on construct + persists on switchTo. Survives the per-connection WM rebuild (the "resets too often"
->   cause). New per-window activation COUNT drives the frequent slot.
-> - ✅ **§3.1 ribbon order** — `[Main][active][recent×N][frequent][All]`; Main promoted to fixed
->   slot 0, the frequent slot, cursor lands on slot 2. `de.recentsDepth` default → 4.
-> - ✅ **§3.4 Tmux** — Term→Tmux (display only; id kept) + `stripCcInputBox` drops Claude Code's input
->   box AND the footer below it (tokens/permissions/version) from the tail/scrollback.
-> - ✅ **§3.3 chrome reclaim** behind a NEW **`de.fullBleed`** staging flag (default OFF, ribbon-only):
->   `composeFullBleedScene` — borderless, full-width content (96px left column reclaimed), the action menu
->   in a 3-cell `[prev][current][next]` top-bar scroller, status bar only with a live phase, **Main/Reload
->   removed**. WM routes scroll→menu cursor / tap→centre cell; browse windows keep content-capture + flip.
->   Verified via `scene_to_png` + a new `phase-fullbleed` smoke. **Needs on-glass for feel/correctness.**
-> - ⏭ **§3.4 per-app pass** — the generic compositor handles every window's text/browse/twocol/image
->   frames, so most windows work under fullBleed unchanged. NOT yet done per-window: full-WIDTH text
->   RE-pagination (text still wraps at the 456px width → right margin; the windows paginate, so each needs
->   `TEXT_PAGE_PX` widened in fullBleed), per-window action-list pruning for the 3-cell reach, and the
->   pure single-underline / "line above the status bar" (the wire has no per-side rule — a subtle box
->   approximates it). Image-mode frames keep the proven tile geometry (left 96px just blank).
-> - ⏸ **§3.5 firmware-scroll** + **§3.6 End-Feature popup** — investigations, on-glass-gated, NOT built.
+> ## 🛠 STATUS — Phase 3 (updated 2026-07-01 for a clean handoff). Two waves; menu mode byte-for-byte.
+> All server-only, gated behind `de.rootNav:'ribbon'` (+ the in-window layout behind `de.fullBleed`).
+> **Adam runs it LIVE** (`rootNav:'ribbon', fullBleed:true, recentsDepth:4` in `~/.g2cc/config.json`;
+> backups `config.json.bak-pre-ribbon` + `config.json.bak-pre-phase3`).
 >
-> **To try it on glass:** merge the branch (or cherry-pick), `npm run build -w server`, restart; set
-> `"de": { "rootNav": "ribbon", "fullBleed": true }` in `~/.g2cc/config.json` (fullBleed:false = the
-> current ribbon; rootNav:menu = the proven fallback). Each of the §3.x build steps is a separate commit.
+> ### ✅ DONE — merged to master + pushed + LIVE (wave 1; commits 822c583…6d3cdb6)
+> - **§3.2 persisted recents + frequency** — `window-usage.ts` (`window_usage` table); WM loads on construct
+>   + persists on switchTo (fixes "resets too often"). New activation COUNT drives the frequent slot.
+> - **§3.1 ribbon order** — `[Main][active][recent×3][frequent][All]`; Main = fixed slot 0; frequent slot;
+>   cursor lands on slot 2. `de.recentsDepth` default 4. (`ribbon.ts`/`window-manager.ts`/`config.ts`.)
+> - **§3.4 Tmux rename** — Term→Tmux (display only; `id='term'` kept). `stripCcInputBox` cuts CC's input box
+>   + footer (tokens/permissions/version).
+> - **§3.3 base fullBleed** (`de.fullBleed`, default OFF) — `composeFullBleedScene`: full-width content,
+>   3-cell top-bar menu, Main/Reload stripped, browse content-capture + flip. `phase-fullbleed` smoke.
+>
+> ### ✅ DONE — BUILT + smoke-green, then COMMITTED+PUSHED at this handoff (wave 2)
+> - **§3.3 borders/underline/status FINISHED** (wave-1 was WRONG — it kept boxes). fullBleed + the ribbon
+>   strip are now **borderless** with ONE **underline** carved under the top bar (`ruleRegion`, a thin
+>   bordered region; width `DE_TITLE_W` so it clears the clock cutout); a kept status bar gets a **line
+>   ABOVE it**, not a box. `scene_to_png`-verified.
+> - **§3.4 Tmux CC bars** — `stripCcInputBox` now ALSO DROPS the standalone `─` rule lines in a CC pane
+>   (was only collapsing). Verified.
+> - **§3.4 READER fully redesigned** (Adam 2026-06-30 — the deep per-app example):
+>   - **Width fixed** — `paginateText(text,pagePx,pageRows)` + `buildPageMap(…,pagePx,pageRows)` (geometry
+>     in the page-map fingerprint); Reader pages 552px×7 rows in fullBleed (was 456×6).
+>   - **Root content menu** (`level:'menu'`): `Last / Select Book / Bookmarks / Options`. **Options submenu**
+>     (`level:'options'`): Voice / Jump / Mark / Recent / Chapters. (Browse lists IN the content, not the ribbon.)
+>   - **Scroll-reading** (`level:'read'`, fullBleed): NO menu — the page is a `scrollContent` capture; each
+>     scroll notch turns a page (`onContentScroll` → pageForward/Backward across chapters); double-tap → ribbon.
+>     Classic mode keeps the Next/Prev menu.
+>   - **Re-entry vs resume** — `onActivate(reentry)`: re-selecting Reader while it was the just-active window →
+>     the root menu; switching in from elsewhere → resume the last page. (New `switchTo` `reentry` flag.)
+>   - New contracts: `OsWindow.onActivate(reentry?)`, `OsWindow.onContentScroll(dir)`, `WinView.scrollContent`.
+>     Hierarchical `onBack` (focus-flip removed); `phase7-reader` + `phase7b-reader-loss` updated & green.
+>
+> ### ⚠ CAVEAT — scroll-reading is PAGE-PER-NOTCH, not within-page-scroll (needs Adam's on-glass call)
+> Each scroll notch turns a WHOLE page (full page shown — reliable, no skipped content), NOT "scroll within a
+> page, flip at the bottom" as §3.5 describes. Within-page scroll needs the firmware to locally-scroll an
+> OVERFLOWING captured text region, UNVERIFIED off-glass — and if it can't, an overflow page would SKIP the
+> un-shown rows. Page-per-notch degrades safely. If on glass the firmware DOES locally-scroll overflow
+> regions, switch Reader's page to overflow + boundary-advance (§3.5). The one behaviour that may not match
+> Adam's mental model.
+>
+> ### ❌ NOT DONE (the resume list)
+> - **§3.4 per-app pass for the OTHER windows** — ONLY Reader got the deep treatment. Main, CC, Aria, Mail,
+>   Files, Timers, Calendar, Games, Notices, Search, Deliveries, Media, SMS render via the GENERIC fullBleed
+>   compositor (full-width, borderless, menu-in-titlebar — functional, all verified to render one-capture/
+>   no-overlap/under-wall earlier) but are NOT individually tuned. Scroll-reading candidates like Reader: file
+>   preview, calendar event, notices detail (mail body has actions). Each needs its own view()/onContentScroll
+>   + smoke.
+> - **#11 Main slot-0 content** — Main IS the fixed slot 0 and its existing twocol dashboard (host/pool/
+>   battery/unseen/next-timer + per-window summaries) renders in fullBleed, but was NOT reworked to Adam's
+>   "global info + recently-active-window info + battery states" spec, nor visually verified in fullBleed. TODO.
+> - **§3.5 firmware-scroll for non-Reader large content** — future; needs the on-glass overflow-scroll probe.
+> - **§3.6 End-Feature long-press popup (#10)** — NOT investigated to a conclusion (see §3.6).
+> - **On-glass validation of ALL of Phase 3** — feel/latency of ribbon + menu-in-titlebar + scroll-reading,
+>   and whether the 3px bordered `ruleRegion` reads as a clean hairline underline on REAL glass (unverified).
+>
+> ### 📍 WHERE I LEFT OFF (2026-07-01)
+> Wave 2 is committed + pushed (this handoff). It is **built + smoke-green for every touched file** but the
+> LIVE server (pid on :7300) is still running WAVE 1 — **a fresh instance must `npm run build -w server` +
+> restart to deploy wave 2** (restart proc in HANDOFF.md). Then, in order: **(1)** #11 Main slot-0 content;
+> **(2)** the per-app pass, window-by-window (Reader is the template); **(3)** §3.6 investigation; **(4)** the
+> on-glass validation. **Do NOT touch Blackjack** — it is the deliberately-LAST item; its smoke has a
+> pre-existing random-deal flake (the engine is fine) which I already hardened, don't chase it further.
+
+## 3.0 Adam's request ledger — EVERY item he asked for, with status (source of truth; nothing lost)
+
+Legend: ✅ done · ◑ partly done · ❌ not started. "Wave 1" = merged+pushed+live; "wave 2" = committed+
+pushed this handoff, NOT yet deployed to the running server (needs a rebuild+restart).
+
+1. **Remove app borders; keep ONE underline under the title/ribbon bar.** ✅ wave 2 (§3.3). Borderless bars
+   + a carved `ruleRegion` underline (in-window AND the ribbon strip). *On-glass: confirm the 3px hairline
+   reads right.*
+2. **Move inter-app menus into the titlebar/ribbon area (reclaim the 96px column).** ✅ wave 1 — a fixed
+   **3-cell `[prev][current][next]`** top-bar scroller (§3.3).
+3. **Expand content into reclaimed menu + status space; status bar only where useful, with a LINE ABOVE it
+   (not a full border).** ✅ full-width content (wave 1) + the line-above status (wave 2, §3.3). ◑ full-WIDTH
+   text RE-pagination is done for Reader ONLY — the other reading windows still wrap at 456px (part of #9).
+4. **Firmware scrolling on large content (reader/etc) + auto next/prev page at the scroll boundary.** ◑
+   Reader has scroll-turns-pages but **PAGE-PER-NOTCH, not within-page-scroll** (see the CAVEAT in the STATUS
+   banner + §3.5). ❌ within-page scroll + applying it to OTHER large-content windows — needs the on-glass
+   overflow-scroll probe.
+5. **Rename "Terms"→"Tmux"; in CC-in-Tmux strip the input box, everything below it (token/permission/
+   version), and the useless horizontal `─` bars.** ✅ rename + input-box/footer (wave 1); the `─` bars
+   dropped (wave 2). §3.4.
+6. **Ribbon order = `[Main][active][recent×3][frequent-not-in-recents][All]`.** ✅ wave 1 (§3.1).
+7. **Remove `Main` and `Reload` from in-app menus** (Reload gone entirely; APK-harness button later if ever
+   needed). ✅ wave 1 (§3.3).
+8. **Improve ribbon recents persistence (resets too often).** ✅ wave 1 — persisted `window_usage` (§3.2).
+9. **Go through EACH app/feature individually and redesign its layout for the new UI.** ◑ the GENERIC
+   fullBleed layout applies to all 15 (functional); **Reader** is the one DEEP redesign (§3.4). ❌ the other
+   13 (Main, CC, Aria, Mail, Files, Timers, Calendar, Games, Notices, Search, Deliveries, Media, SMS) are NOT
+   individually tuned (full-width re-pagination, scroll-reading where it fits, action pruning). Reader = the
+   template.
+10. **Investigate mitigating the accidental long-press → firmware "End Feature?" popup when blanked.** ❌ not
+    investigated to a conclusion (§3.6). Current read: a firmware-local exit gesture; likely only mitigable
+    client-side (auto-relaunch after exit).
+11. **Leftmost ribbon window = Main/Stats showing global info + recently-active-window info + battery states.**
+    ◑ Main IS fixed slot 0 (wave 1) and its existing dashboard renders in fullBleed; ❌ NOT reworked to that
+    content spec, nor visually verified in fullBleed.
+12. **Reader (the 2026-06-30 spec):** start with a content-area menu `Last/Select Book/Bookmarks/Options`;
+    Options → `Voice/…`; reading = no menu, scroll turns pages; double-tap → ribbon; re-select Reader → the
+    menu if it was just active, else resume the last page (full persistence); **fix the width.** ✅ all of it
+    (wave 2, §3.4), with the page-per-notch caveat on the scroll behaviour (#4).
+13. **Process asks:** organize the tweaks into this doc ✅; Main/Stats→"Main" ✅; merge the branch, no more
+    branching ✅ (all on master); activate + make live + commit + push wave 1 ✅. Wave 2 committed+pushed this
+    handoff ✅; **deploying wave 2 to the live server (rebuild+restart) is still TODO.**
 
 ## 3.1 The ribbon order, finalized (supersedes §2.2.2's pure-MRU strip)
 
@@ -634,7 +716,16 @@ Phase 1 — and the §3.3 focus model (reading vs browse) resolved per window.
   is fixed chrome that wastes rows; only the live transcript above the input box matters on glass (extends
   the existing `collapseRules`/`termTextWidth` box-drawing handling to DROP, not just collapse). Detect the
   input-box top border and discard from there down.
-- (…the other 13 windows + Main redesigned as the pass proceeds — enumerate per commit.)
+- **Reader — ✅ DONE (2026-07-01), the deep template.** Root content menu (`Last/Select Book/Bookmarks/
+  Options`) + Options submenu; scroll-reading (`scrollContent` + `onContentScroll`, page-per-notch);
+  re-entry→menu vs switch-in→resume (`onActivate(reentry)`); full-width pagination (`paginateText`/
+  `buildPageMap` geometry). See the STATUS banner for the file list + the scroll caveat.
+- **The other 13 windows — ❌ NOT individually tuned** (Main, CC, Aria, Mail, Files, Timers, Calendar, Games,
+  Notices, Search, Deliveries, Media, SMS). They render via the generic fullBleed compositor. The per-window
+  work: widen `paginateText` for their reading views (still 456px), apply Reader-style scroll-reading where a
+  view is pure reading (file preview, calendar event, notices detail — mail body has actions so it keeps the
+  menu), and prune each action list for the 3-cell reach. Reader is the copy-from template. Each = its own
+  commit + smoke.
 
 ## 3.5 Firmware-native content scroll + auto page-advance (FUTURE — "eventually," #4)
 
@@ -662,6 +753,16 @@ shutDown/exitMode the keepalive notes say never to send). It's firmware-local, s
 in our gift. Investigate: does keeping a minimal non-exit "feature" context alive (vs a full blank) change
 the long-press behavior? Is there an input we can swallow? **Low-confidence — scope the investigation,
 don't promise a fix.**
+
+**❌ STATUS: NOT investigated to a conclusion (2026-07-01).** Best current read (unverified): the "End
+Feature?" popup is the firmware's built-in long-press-to-exit-the-current-feature gesture — the glasses
+firmware handles it locally and offers to exit the EvenHub feature we drive; the server never sees the
+long-press (we only receive tap/double-tap/scroll), so there is likely **nothing to swallow server-side**.
+The two things worth actually TESTING on glass: (a) whether a minimal non-blank scene (vs `blankScene()`)
+changes the long-press behavior at all, and (b) whether, IF the popup fires and exits, the Android client's
+reconnect/auto-relaunch path can silently re-enter the feature (the "heavy auto-recovery" goal) so the
+exit is invisible to Adam — that client-side auto-recovery is the most likely real mitigation. Needs a
+real on-glass session; not started.
 
 ## 3.7 Sequencing + the review agenda
 

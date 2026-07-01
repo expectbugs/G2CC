@@ -52,8 +52,11 @@ try {
     // see it land.
     const settle = () => reader.persistChain
 
-    // --- open the book (no saved position → chapter list) ---
+    // --- open the book (menu → Select Book → library → tap; no position → chapters) ---
     let v = await reader.view()
+    assert.equal(reader.level, 'menu', 'Reader opens to the root content menu (Adam 2026-06-30)')
+    await reader.onBrowseSelect(v.items.indexOf('Select Book'))
+    v = await reader.view()
     await reader.onBrowseSelect(v.items.indexOf(BOOK_REL))
     assert.equal(reader.level, 'chapters', 'tapping a book with no position → chapter list')
     const map = await waitForMap(reader)
@@ -144,26 +147,23 @@ try {
     console.error('  5. bookmarks: Mark → list → gate(+Delete) → removed ✓')
 
     // --- 6. recent-spots breadcrumbs (the undo trail, browsable) ---
-    await reader.onBack(); await reader.onBack()   // marks → read (Recent is a read-level action)
-    assert.equal(reader.level, 'read', 'backed out of bookmarks to read')
-    await reader.onMenuSelect('Recent')
+    reader.level = 'read'   // Section 5 ended in the bookmarks list → back to the page
+    await reader.onMenuSelect('Recent')   // the classic reading menu surfaces Recent
     assert.equal(reader.level, 'marks', 'Recent opens the breadcrumb list')
     assert.equal(reader.markKind, 'recent', 'markKind = recent')
     assert.ok(reader.markList.length >= 1, `recent spots recorded from the jumps, got ${reader.markList.length}`)
-    await reader.onBack()   // content→menu
-    await reader.onBack()   // → read
-    assert.equal(reader.level, 'read', 'back out of recent → read')
+    assert.equal(await reader.onBack(), true, 'back out of recent → Options (hierarchical)')
+    assert.equal(reader.level, 'options', 'Recent backs out to Options')
     console.error(`  6. recent spots: ${reader.markList.length} breadcrumb(s) browsable ✓`)
 
-    // --- 7. double-tapping UP the levels never moves the saved position ---
+    // --- 7. backing UP the levels never moves the saved position (new hierarchy) ---
+    reader.level = 'read'
     const posLocked = await getPosition(BOOK)
-    await reader.onBack()   // read → chapters
-    assert.equal(reader.level, 'chapters', 'double-tap read → chapters')
-    await reader.onBack()   // chapters: content→menu (de-arm reach to menu)
-    await reader.onBack()   // chapters → library
-    assert.equal(reader.level, 'library', 'double-tap up to library')
+    assert.equal(await reader.onBack(), true, 'double-tap read → menu')
+    assert.equal(reader.level, 'menu', 'reading backs out to the root menu')
+    assert.equal(await reader.onBack(), false, 'double-tap at the root menu → exit (false → ribbon)')
     assert.deepEqual(await getPosition(BOOK), posLocked, 'walking UP the levels left the saved position untouched')
-    console.error('  7. double-tapping up read→chapters→library moved nothing ✓')
+    console.error('  7. backing out read→menu→exit moved nothing ✓')
 
     // --- 8. a save failure is LOUD in the status line ---
     assert.equal(reader.statusLine(), null, 'clean status line when saves are fine')
