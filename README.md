@@ -1,8 +1,7 @@
 # G2CC — G2 Control Center
 
 **A custom operating environment for [Even Realities G2](https://www.evenrealities.com/) smart glasses.**
-It replaces the vendor's companion app with a home‑built stack that turns the glasses — normally a simple
-heads‑up teleprompter — into a small, fully windowed computer you drive from your own PC.
+It replaces the vendor's companion app with a home-built stack that turns the glasses into a small, fully windowed computer you drive from your own PC. The vendor app — and the Even Hub store behind it — already offers apps, games, news, and email; G2CC's edge is a different one: cohesiveness, deep customization, PC-powered capabilities, persistent sessions, more robust connectivity, independence from the vendor's decisions and limits, and privacy — nothing in it touches Even Realities' servers or proprietary stack.
 
 The trick is a clean split of responsibilities:
 
