@@ -99,7 +99,7 @@ export class RibbonShell {
   /** Entering the ribbon FROM a window: land on the PREVIOUS window (alt-tab —
    *  Adam 2026-06-30). After switchTo(entered) the MRU is [entered, previous, …],
    *  so the previous window is recents index 1. */
-  enterFromWindow(): void {
+  enterFromWindow(fromMain = false): void {
     this.level = 'recents'
     this.selectedCategory = null
     // §3.1 order is [Main(0), active=MRU0(1), previous=MRU1(2), …]. Land on the
@@ -109,6 +109,13 @@ export class RibbonShell {
     // 0 → slot 0 (Main). Using the SHOWN count (not the full recents length) keeps
     // a small depth from landing the cursor past the windows onto frequent/All.
     const shownMru = Math.min(Math.max(1, Math.floor(this.depth())), this.recents().length)
+    if (fromMain) {
+      // D1 (Adam 2026-07-05): Main gets no MRU stamp, so the just-exited Main
+      // is strip slot 0 and the TRUE previous window is MRU0 = slot 1 — the
+      // plain slot-2 landing skipped it (cursor sat on second-previous).
+      this.cursor = shownMru >= 1 ? 1 : 0
+      return
+    }
     this.cursor = shownMru >= 2 ? 2 : (shownMru === 1 ? 1 : 0)
   }
   /** Entering the ribbon as "home" (the Main label / boot / blank-wake): the

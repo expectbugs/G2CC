@@ -1413,7 +1413,9 @@ export class WindowManager {
     // onDeactivate for a parked window). The parked view is gone from
     // tap-resolution the instant it is parked.
     this.lastView = null
-    if (fromWindow) this.ribbon.enterFromWindow()
+    // D1 (Adam 2026-07-05): Main never stamps the MRU, so exiting Main must
+    // land alt-tab on slot 1 (the true previous), not slot 2 (second-previous).
+    if (fromWindow) this.ribbon.enterFromWindow(this.active.id === 'main')
     else this.ribbon.enterRoot()
     this.renderRibbon()
   }

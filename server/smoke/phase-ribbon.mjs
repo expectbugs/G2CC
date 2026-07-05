@@ -53,6 +53,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   assert.equal(r.inspect().cursor, 2, 'enterFromWindow lands on slot 2 (previous)')
   assert.equal(r.highlightedWindowId(), 'aria', 'slot 2 = the previous window (aria); slot 1 = active (cc)')
 
+  // D1 (Adam 2026-07-05): exiting MAIN (never MRU-stamped) lands slot 1 — the
+  // true previous is MRU0, not MRU1.
+  r.enterFromWindow(true)
+  assert.equal(r.inspect().cursor, 1, 'enterFromWindow(fromMain) lands on slot 1')
+  assert.equal(r.highlightedWindowId(), 'cc', 'fromMain slot 1 = the true previous (MRU0 = cc)')
+
   // enterRoot (home) lands on Main (slot 0).
   r.enterRoot()
   assert.equal(r.inspect().cursor, 0, 'enterRoot (home) → Main slot 0')
