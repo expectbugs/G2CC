@@ -39,7 +39,7 @@ export async function moveToTrash(src: string, now: number): Promise<string> {
  *  plausible epoch-ms (review 2026-07-05: a hand-dropped '2024-report.pdf'
  *  parsed as epoch 2024 → age ≈ forever → purged on the FIRST sweep). Bounds:
  *  2001-09-09 (1e12, the first 13-digit ms) … a day past `now`. */
-function depositStampMs(name: string, now: number): number | null {
+export function depositStampMs(name: string, now: number): number | null {
   const m = /^(\d+)-/.exec(name)
   if (!m) return null
   const ms = Number(m[1])

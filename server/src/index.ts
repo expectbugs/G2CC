@@ -31,6 +31,7 @@ import { startCalendarSync } from './calendar.js'
 import { startDeliveriesSync } from './deliveries.js'
 import { startStatsSampler } from './stats.js'
 import { startTrashPurge } from './trash.js'
+import { startNotifyImgPurge } from './notify-img-purge.js'
 
 const VERSION = '0.0.1'
 
@@ -187,6 +188,8 @@ try {
   startStatsSampler()
   // Files trash daily purge (Phase 17) — drops entries older than 30 days.
   startTrashPurge((m) => console.log(m))
+  // Forwarded-notification image purge (review #6 queue A4) — same 30-day TTL.
+  startNotifyImgPurge((m) => console.log(m))
   // Deliveries: carrier-mail → tracked list, 15-min Gmail sync (Phase 13).
   startDeliveriesSync()
 } catch (err) {
