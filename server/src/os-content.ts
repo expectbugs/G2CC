@@ -156,7 +156,10 @@ const TILE_RECTS = [
 
 // Rendered-content cache: same blocks -> same tiles (paging back/forward is free).
 // Insertion-ordered Map as a simple LRU; ~24 docs ≈ a few MB of base64.
-const cache = new Map<string, { pages: number; tilesB64: string[][] }>()
+// PROMISE-cached (queue B2, the renderChart pattern): two racing events for the
+// same doc share ONE renderer subprocess instead of spawning duplicates.
+// Failures evict so a retry can succeed.
+const cache = new Map<string, Promise<{ pages: number; tilesB64: string[][] }>>()
 const CACHE_MAX = 24
 
 function runRenderer(blocks: Block[], width: number = DE_CONTENT_W, height: number = DE_CONTENT_H,
@@ -182,25 +185,30 @@ export async function renderBlocks(blocks: Block[]): Promise<RenderedContent> {
   const key = createHash('sha256').update(JSON.stringify(blocks)).digest('hex')
   let entry = cache.get(key)
   if (!entry) {
-    const raw = await runRenderer(blocks)
-    if (raw.length < 4) throw new Error(`render_content output too short (${raw.length}B)`)
-    const pages = raw.readUInt32LE(0)
-    const tileBytes = DE_TILE_W * DE_TILE_H
-    const expect = 4 + pages * TILE_RECTS.length * tileBytes
-    if (raw.length !== expect) {
-      throw new Error(`render_content output ${raw.length}B, expected ${expect}B (${pages} pages)`)
-    }
-    const tilesB64: string[][] = []
-    let off = 4
-    for (let p = 0; p < pages; p++) {
-      const row: string[] = []
-      for (const r of TILE_RECTS) {
-        row.push(encodeGray4Bmp(r.w, r.h, raw.subarray(off, off + tileBytes)).toString('base64'))
-        off += tileBytes
+    entry = (async () => {
+      const raw = await runRenderer(blocks)
+      if (raw.length < 4) throw new Error(`render_content output too short (${raw.length}B)`)
+      const pages = raw.readUInt32LE(0)
+      const tileBytes = DE_TILE_W * DE_TILE_H
+      const expect = 4 + pages * TILE_RECTS.length * tileBytes
+      if (raw.length !== expect) {
+        throw new Error(`render_content output ${raw.length}B, expected ${expect}B (${pages} pages)`)
       }
-      tilesB64.push(row)
-    }
-    entry = { pages, tilesB64 }
+      const tilesB64: string[][] = []
+      let off = 4
+      for (let p = 0; p < pages; p++) {
+        const row: string[] = []
+        for (const r of TILE_RECTS) {
+          row.push(encodeGray4Bmp(r.w, r.h, raw.subarray(off, off + tileBytes)).toString('base64'))
+          off += tileBytes
+        }
+        tilesB64.push(row)
+      }
+      return { pages, tilesB64 }
+    })().catch((e: unknown) => {
+      cache.delete(key)   // failed renders don't poison the cache
+      throw e
+    })
     cache.set(key, entry)
     while (cache.size > CACHE_MAX) {
       const oldest = cache.keys().next().value
@@ -212,7 +220,7 @@ export async function renderBlocks(blocks: Block[]): Promise<RenderedContent> {
     cache.delete(key)
     cache.set(key, entry)
   }
-  const e = entry
+  const e = await entry
   return {
     pages: e.pages,
     tiles(page: number): [string, string, string, string] {
