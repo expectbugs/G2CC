@@ -107,14 +107,21 @@ export function chessPreview(fen: string, move: string): Promise<ChessState> {
 
 /** FEN → board tiles (render_image contract via the shared splitter). Tiny
  *  promise cache: page flips and re-renders of the same position are free;
- *  failures evict so a retry can succeed. */
-const boardCache = new Map<string, Promise<RenderedImage>>()
+ *  failures evict so a retry can succeed. B4 (review #6 queue): hits refresh
+ *  recency (a position being flipped BACK to must not be the eviction victim)
+ *  and eviction skips unsettled promises (evicting an in-flight render would
+ *  let a concurrent same-position call spawn a duplicate subprocess). */
+const boardCache = new Map<string, { p: Promise<RenderedImage>; settled: boolean }>()
 const BOARD_CACHE_MAX = 8
 
 export function renderBoard(fen: string, w: number, h: number): Promise<RenderedImage> {
   const key = `${w}x${h}:${fen}`
   const hit = boardCache.get(key)
-  if (hit) return hit
+  if (hit) {
+    boardCache.delete(key)   // refresh LRU position
+    boardCache.set(key, hit)
+    return hit.p
+  }
   const p = new Promise<RenderedImage>((resolve, reject) => {
     const child = execFile(PY, [BOARD_SCRIPT], { encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
@@ -131,11 +138,19 @@ export function renderBoard(fen: string, w: number, h: number): Promise<Rendered
     boardCache.delete(key)
     throw e
   })
-  boardCache.set(key, p)
-  while (boardCache.size > BOARD_CACHE_MAX) {
-    const oldest = boardCache.keys().next().value
-    if (oldest === undefined) break
-    boardCache.delete(oldest)
+  const entry = { p, settled: false }
+  // Two-arg then (NOT .finally) so the marker chain can never become an
+  // unhandled rejection when the render fails.
+  void p.then(() => { entry.settled = true }, () => { entry.settled = true })
+  boardCache.set(key, entry)
+  if (boardCache.size > BOARD_CACHE_MAX) {
+    for (const [k, e] of boardCache) {
+      if (boardCache.size <= BOARD_CACHE_MAX) break
+      if (k === key || !e.settled) continue   // never the fresh entry, never in-flight
+      boardCache.delete(k)
+    }
+    // All others in flight (≈never at cap 8): stay transiently over cap rather
+    // than evict a live render — the next insert sweeps again.
   }
   return p
 }
