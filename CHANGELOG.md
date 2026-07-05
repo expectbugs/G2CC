@@ -4,6 +4,76 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-05 (later) — **The review-#6 improvement queue: all 24 items + APK v1.17**
+
+The 24 improvements catalogued by review #6 (`HANDOFF.md` §4 of that era; curated from 96
+proposals), implemented as **24 commits, one per item, smoke-green after each** (27/28 — the
+known calendar-OAuth red). Gate decisions (Adam): A2 → **(a) Tailscale-only**, D1 → **yes**,
+E1 Android prune → **yes**.
+
+**Hardening:** timing-safe token compares everywhere a secret is checked (SHA-256 +
+`timingSafeEqual`; A1) · `/setup` + `/apk` answer **only on the Tailscale interface** (+
+loopback; per-request re-resolution so a tailscaled restart can't wedge it; the startup banner
+stops advertising URLs that now 403; A2a) · a 30-day daily purge for `~/.g2cc/notify-img`
+(A4) · **BLE MTU-negotiation failure guard** (A3, client): the negotiated MTU is checked
+against `G2Frame.MTU_MIN_FOR_MAX_FRAME` (266 — derived from the frame constants: 8 header +
+253 payload + 2 CRC + 3 ATT), one retry, then the visible Error state. commandMulti sizes
+packets to the constant 512, so a lowball negotiation used to mean silently truncated writes.
+
+**BLE/render efficiency:** the big one is **B1 — blank re-send dedupe**: while blanked, every
+background chrome refresh re-sent an identical `blankScene()` (a full ack-gated rebuild while
+driving). All 10 blank-family sends now route through one `sendBlank()` with the invariant
+*cache non-null ⟺ the last frame on glass was exactly this blank surface* (both non-blank send
+funnels clear it) — behaviorally verified: 5 blanked churn renders → 0 re-sends, nav-line
+changes still send, wake repaints, no stale-dark possible. Plus: renderBlocks in-flight
+promise-dedupe (B2), scrollback pagination cache (B3), chess board cache LRU-on-hit + never
+evicting in-flight renders (B4).
+
+**Correctness:** voice `SwitchTo.open` no longer dropped (C1) · `wrapLinesPx` 0-char-cut clamp,
+byte-parity proven against the old algorithm across widths (C2) · sessions.json persists at
+system/init so a never-turned session survives a WS drop into `--resume` (C3) · Reader marks
+list Backs to where it was entered (marksRet; jump's double-tap got the identical fix its
+Cancel already had; the loss-proofing smoke updated to the new contract + both entry paths;
+C4) · Blackjack saves serialized via a persist chain, loadOk gate untouched (C5) · Parakeet
+pending-job rejection moved 'exit'→'close' so a result flushed at death isn't lost (C6).
+
+**UX:** exiting Main lands alt-tab on the TRUE previous window (slot 1 — Main never stamps the
+MRU; D1) · Files paints "rendering image…" instead of seconds of dead air (D2) · tmux send
+failures ride the one-shot notice onto the keys/tail/grid/scroll titles (D3) · late rpg output
+fires a notice instead of vanishing (D4) · the Mail recipient-picker menu was VERIFIED dead
+(onBack's compose-cancel preempted the focus flip in both nav modes) and got the Files-pickDest
+treatment — pickRecipient only; dictation stages keep the immediate cancel (D5) · **true SMS
+send-results** (D6): additive `sms_send_result` + client `sentIntent` per part (aggregate ok);
+the honest "Handed to phone (unverified)" stays the immediate + old-APK terminal state, the
+card updates in place when a result lands, and a failure after the card is gone fires a notice.
+The RemoteInput/RCS path never fabricates a result. · the audio capture tools grew the
+single-mic (mono TX2) mode the default pipeline actually uses — `--channels 1`, HARD-FAIL when
+no DJI device (recording the wrong capsule poisons learned profiles), a 5-toggle `--mode
+single` checklist; no noise-parameter tuning (D7).
+
+**Code health:** the dead `overlayFromBlank` machinery removed after proving both setOverlay
+callers pass false; `Blackjack.clearTable()` removed (no callers); the Paperclips pacer's
+"switch-back resumes" rationale VERIFIED unreachable (onActivate always routes pc.leave()) —
+it now stops on deactivate (E1) · run-all prints per-phase wall-clock (the pool-leak class
+would now be obvious at a glance) + the three stderr ALL-OK markers moved to stdout +
+`stableT0()` throws on fall-through (E2) · one shared `ifacePriority` + container NICs
+(docker0/veth*/br-*) filtered from /setup, /endpoints, and the banner (E3).
+
+**APK v1.17** (A3 + D6-client + the approved E1 prune: probe/, hud/, G2Pipeline, MainActivity,
+Teleprompter, G2CCService, BluetoothStateReceiver, AppState/StateMachine, Prefs, SetupActivity
+— each verified manifest-absent + unreferenced first). **New Android test baseline: 150** (was
+228; the pruned suites held 78). Staged at `~/.g2cc/g2cc-harness.apk`.
+
+**Lessons:** (1) piping build/smoke output through `tail` eats the real exit code — gate on the
+command's own status (`run-all` exits non-zero at 27/28 by design, so "green" here means
+27/28, checked by eye or by parsing the line, not by exit code). (2) Same-package test files
+import nothing — an import-based dead-reference sweep misses them; sweep by subject-class
+existence too (RootMenuTest). (3) A smoke can encode the OLD behavior as its contract — C4's
+fix rightly broke phase7b's "Recent backs to Options" assertion; the smoke was updated to the
+approved contract, not the fix weakened to the smoke.
+
+---
+
 ## (unstamped) — 2026-07-05 — **Whole-project adversarial review: 72 findings → 65 fixed (8 HIGH) + APK v1.16**
 
 The first full-project review since the ribbon/fullBleed era (the prior reviews predate Phases 1–3).
