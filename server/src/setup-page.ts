@@ -48,6 +48,24 @@ export function getLocalInterfaces(): NetIface[] {
   return result
 }
 
+/** True when `addr` (a socket localAddress, i.e. the server-side IP a request
+ *  arrived on) belongs to a Tailscale-classified interface — either family;
+ *  `::ffff:` v4-mapped forms normalized — or is loopback. Loopback is allowed
+ *  because a same-host process can already read ~/.g2cc/config.json directly.
+ *  Re-resolved per call: tailscaled can restart under a running server.
+ *  (Queue A2, Adam 2026-07-05 pick (a): /setup + /apk answer Tailscale-only.) */
+export function isTailscaleOrLoopbackAddr(addr: string): boolean {
+  const a = addr.startsWith('::ffff:') ? addr.slice(7) : addr
+  if (a === '127.0.0.1' || a === '::1') return true
+  for (const [name, list] of Object.entries(networkInterfaces())) {
+    if (classifyInterface(name) !== 'Tailscale') continue
+    for (const info of list ?? []) {
+      if (info.address === a) return true
+    }
+  }
+  return false
+}
+
 /** Build the per-interface app URL. Just `?token=X#token=X` — the app fetches
  *  the endpoint list from /endpoints at runtime. Token is duplicated into the
  *  hash to survive WebViews that strip query strings. */

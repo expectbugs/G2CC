@@ -20,7 +20,7 @@ import { loadConfig } from './config.js'
 import { startDiscovery, stopDiscovery } from './discovery.js'
 import { handleConnection, setWatchdog } from './ws-handler.js'
 import { Watchdog } from './watchdog.js'
-import { renderSetupPage, getLocalInterfaces } from './setup-page.js'
+import { renderSetupPage, getLocalInterfaces, isTailscaleOrLoopbackAddr } from './setup-page.js'
 import { getEndpointJson } from './endpoints.js'
 import { timingSafeEqualStr } from './auth.js'
 import { warmParakeet } from './stt.js'
@@ -60,8 +60,23 @@ await server.register(websocket)
 // Health check.
 server.get('/health', async () => ({ status: 'ok', version: VERSION }))
 
-// Setup page — multi-endpoint QR.
-server.get('/setup', async (_req, reply) => {
+// Setup page — multi-endpoint QR. /setup hands the auth token to any
+// unauthenticated peer BY DESIGN (it's the pairing bootstrap), so it and /apk
+// answer only on the Tailscale interface + loopback (queue A2, Adam 2026-07-05
+// pick (a)). LAN/other arrivals get a loud 403 — the token gate on /endpoints,
+// /diag, /apk-by-token and the WS stays interface-agnostic.
+function setupInterfaceAllowed(localAddress: string | undefined, clientIp: string, route: string): boolean {
+  const local = localAddress ?? ''
+  if (isTailscaleOrLoopbackAddr(local)) return true
+  console.error(`[g2cc-server] ${route} DENIED: arrived on ${local || '(unknown)'} from ${clientIp} — Tailscale/loopback only (A2a)`)
+  return false
+}
+
+server.get('/setup', async (req, reply) => {
+  if (!setupInterfaceAllowed(req.raw.socket.localAddress, req.ip, '/setup')) {
+    reply.code(403).send({ error: 'setup is served on the Tailscale interface only' })
+    return
+  }
   const html = await renderSetupPage(config.port, config.authToken)
   reply.type('text/html').send(html)
 })
@@ -115,6 +130,10 @@ server.post('/diag', async (req, reply) => {
 const APK_PATH = join(homedir(), '.g2cc', 'g2cc-harness.apk')
 const APK_PATH_LEGACY = '/tmp/g2cc-harness.apk'
 server.get('/apk', async (req, reply) => {
+  if (!setupInterfaceAllowed(req.raw.socket.localAddress, req.ip, '/apk')) {
+    reply.code(403).send({ error: 'apk is served on the Tailscale interface only' })
+    return
+  }
   const token = (req.query as { token?: string } | undefined)?.token
   const bearer = req.headers.authorization
   const tokenOk = typeof token === 'string' && timingSafeEqualStr(token, config.authToken)
@@ -156,10 +175,12 @@ try {
   if (ifaces.length > 0) {
     console.log('[g2cc-server] Reachable at:')
     for (const iface of ifaces) {
-      console.log(`  ${iface.label.padEnd(12)} http://${iface.address}:${config.port}/setup  (${iface.name})`)
+      // /setup + /apk answer Tailscale-only (A2a) — don't advertise URLs that 403.
+      const path = iface.label === 'Tailscale' ? '/setup' : ''
+      console.log(`  ${iface.label.padEnd(12)} http://${iface.address}:${config.port}${path}  (${iface.name})`)
     }
   }
-  console.log('[g2cc-server] -> Open a /setup URL on your phone for the QR codes')
+  console.log('[g2cc-server] -> Open the Tailscale /setup URL on your phone for the QR codes (Tailscale-only by design)')
 
   watchdogInstance.start()
   startDiscovery(config.port)
