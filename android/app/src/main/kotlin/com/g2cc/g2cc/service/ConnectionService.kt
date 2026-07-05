@@ -275,8 +275,34 @@ class ConnectionService : Service(), TestHarness {
         DiagLog.log("sms", "thread $threadId reply: ${messages.size} msgs${if (error != null) " err=$error" else ""}")
     }
 
+    /** D6: report the real (sentIntent-backed) SMS send outcome to the server —
+     *  it updates the result card in place. Never fabricated: only fired when
+     *  the platform actually reported per-part results (or the send threw). */
+    private fun sendSmsSendResult(address: String, ok: Boolean, error: String?) {
+        connection?.send(ClientMessage.SmsSendResult(address, ok, error))
+        DiagLog.log("sms", "send result → server: $address ok=$ok${if (error != null) " err=$error" else ""}")
+    }
+
+    private val smsSendSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private fun smsResultName(rc: Int?): String = when (rc) {
+        android.app.Activity.RESULT_OK -> "OK"
+        SmsManager.RESULT_ERROR_GENERIC_FAILURE -> "GENERIC_FAILURE"
+        SmsManager.RESULT_ERROR_RADIO_OFF -> "RADIO_OFF"
+        SmsManager.RESULT_ERROR_NULL_PDU -> "NULL_PDU"
+        SmsManager.RESULT_ERROR_NO_SERVICE -> "NO_SERVICE"
+        SmsManager.RESULT_ERROR_LIMIT_EXCEEDED -> "LIMIT_EXCEEDED"
+        null -> "NO_RESULT"
+        else -> "code=$rc"
+    }
+
     /** Phase 4b: send an SMS via SmsManager (needs SEND_SMS). Loud diag; the sent
-     *  message shows on the next thread refresh (the provider records it). */
+     *  message shows on the next thread refresh (the provider records it).
+     *  D6 (queue 2026-07-05): SmsManager sends register one sentIntent per part
+     *  and report ONE aggregated sms_send_result (ok = every part RESULT_OK).
+     *  The RemoteInput/RCS path has no per-message result — no report there,
+     *  and the server's 'unverified' card is the honest terminal state. If the
+     *  OS never delivers a result, nothing is sent (no timeout — same). */
     private fun sendSms(address: String, text: String) {
         // Prefer the live conversation notification's RemoteInput (keeps RCS as RCS;
         // Adam 2026-06-18). Falls through to SmsManager when there's no live match.
@@ -284,15 +310,56 @@ class ConnectionService : Service(), TestHarness {
         try {
             val sm = if (Build.VERSION.SDK_INT >= 31) getSystemService(SmsManager::class.java)
                      else @Suppress("DEPRECATION") SmsManager.getDefault()
-            if (sm == null) { DiagLog.log("sms", "no SmsManager — send to $address dropped"); return }
+            if (sm == null) {
+                DiagLog.log("sms", "no SmsManager — send to $address dropped")
+                sendSmsSendResult(address, false, "no SmsManager on this device")
+                return
+            }
             val parts = sm.divideMessage(text)
-            if (parts.size > 1) sm.sendMultipartTextMessage(address, null, parts, null, null)
-            else sm.sendTextMessage(address, null, text, null, null)
-            DiagLog.log("sms", "sent to $address (${text.length} chars, ${parts.size} part(s))")
+            val n = parts.size
+            // Unique action per send — concurrent sends can't cross-deliver.
+            val action = "com.g2cc.g2cc.SMS_SENT_${smsSendSeq.incrementAndGet()}"
+            val receiver = object : android.content.BroadcastReceiver() {
+                private val outcomes = arrayOfNulls<Int>(n)
+                private var received = 0
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    val part = intent?.getIntExtra("part", -1) ?: -1
+                    val done = synchronized(this) {
+                        if (part in 0 until n && outcomes[part] == null) {
+                            outcomes[part] = resultCode
+                            received++
+                        }
+                        received >= n
+                    }
+                    if (!done) return
+                    try { unregisterReceiver(this) } catch (e: Exception) { DiagLog.log("sms", "sentIntent receiver unregister: $e") }
+                    val bad = outcomes.withIndex().filter { it.value != android.app.Activity.RESULT_OK }
+                    val ok = bad.isEmpty()
+                    val error = if (ok) null
+                                else "part${if (bad.size > 1) "s" else ""} ${bad.joinToString { "${it.index + 1}/${n}:${smsResultName(it.value)}" }}"
+                    sendSmsSendResult(address, ok, error)
+                }
+            }
+            // PhoneLocator's registration convention (RECEIVER_NOT_EXPORTED on 33+).
+            val filter = android.content.IntentFilter(action)
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            else registerReceiver(receiver, filter)
+            val sentIntents = ArrayList<PendingIntent>(n)
+            for (i in 0 until n) {
+                sentIntents.add(PendingIntent.getBroadcast(
+                    this, i,
+                    Intent(action).putExtra("part", i).setPackage(packageName),
+                    PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE))
+            }
+            if (n > 1) sm.sendMultipartTextMessage(address, null, parts, sentIntents, null)
+            else sm.sendTextMessage(address, null, text, sentIntents[0], null)
+            DiagLog.log("sms", "sent to $address (${text.length} chars, $n part(s)) — awaiting sentIntent result${if (n > 1) "s" else ""}")
         } catch (e: SecurityException) {
             DiagLog.log("sms", "send DENIED (SEND_SMS not granted): $e")
+            sendSmsSendResult(address, false, "SEND_SMS not granted")
         } catch (e: Exception) {
             DiagLog.log("sms", "send to $address FAILED: $e")
+            sendSmsSendResult(address, false, e.toString())
         }
     }
 

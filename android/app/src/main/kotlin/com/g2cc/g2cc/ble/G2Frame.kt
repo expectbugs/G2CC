@@ -111,4 +111,11 @@ object G2Frame {
 
     const val HEADER_SIZE = 8
     const val CRC_SIZE = 2
+
+    /** The smallest negotiated MTU that fits our LARGEST single packet in one
+     *  ATT write (A3, queue 2026-07-05). commandMulti caps a packet at
+     *  HEADER + (0xFF - CRC) payload + CRC = 263 B, and an ATT write carries
+     *  MTU - 3 B — so anything below this truncates large writes silently
+     *  (the worst failure class on this hardware). */
+    const val MTU_MIN_FOR_MAX_FRAME = HEADER_SIZE + (0xFF - CRC_SIZE) + CRC_SIZE + 3
 }

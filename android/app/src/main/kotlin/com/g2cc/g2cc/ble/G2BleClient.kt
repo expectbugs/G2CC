@@ -233,10 +233,29 @@ class G2BleClient(
 
     override fun initialize() {
         // PROTOCOL_NOTES.md §"BLE Services" — request MTU 512 for write packets.
+        // A3 (queue 2026-07-05): this request used to have NO failure handling,
+        // and commandMulti sizes packets to ConnectionParams.MTU (512), not the
+        // negotiated value — a failed/lowball negotiation left the default ATT
+        // MTU under frames of up to 263 B: silently TRUNCATED writes, the worst
+        // failure class on this hardware. Now: verify the negotiated value fits
+        // our largest frame, retry once on failure, and surface a visible
+        // connection error (failLoudly → ConnectionState.Error → DiagLog +
+        // status) instead of proceeding with large writes.
+        val mtuOk = { mtu: Int, attempt: String ->
+            Log.i(TAG, "[$side] MTU negotiated=$mtu ($attempt)")
+            lastMtu = mtu
+            if (mtu < G2Frame.MTU_MIN_FOR_MAX_FRAME) {
+                failLoudly("requestMtu ($attempt: negotiated $mtu < required ${G2Frame.MTU_MIN_FOR_MAX_FRAME})", 0)
+            }
+        }
         requestMtu(G2Constants.ConnectionParams.MTU)
-            .with { _, mtu ->
-                Log.i(TAG, "[$side] MTU negotiated=$mtu")
-                lastMtu = mtu
+            .with { _, mtu -> mtuOk(mtu, "first try") }
+            .fail { _, status ->
+                Log.e(TAG, "[$side] requestMtu failed status=$status — retrying once")
+                requestMtu(G2Constants.ConnectionParams.MTU)
+                    .with { _, mtu -> mtuOk(mtu, "retry") }
+                    .fail { _, s2 -> failLoudly("requestMtu (after retry)", s2) }
+                    .enqueue()
             }
             .enqueue()
 

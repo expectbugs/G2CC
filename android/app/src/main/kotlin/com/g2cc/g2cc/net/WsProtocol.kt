@@ -306,6 +306,17 @@ sealed interface ClientMessage {
         val error: String? = null,
     ) : ClientMessage
 
+    /** Real outcome of a server-requested sms_send (queue D6): sentIntent-
+     *  backed, ONE message per send, ok = ALL multipart parts accepted. The
+     *  RemoteInput/RCS reply path has no per-message result and never emits
+     *  this — the server card keeps its honest 'unverified' wording there. */
+    @Serializable @SerialName("sms_send_result")
+    data class SmsSendResult(
+        val address: String,
+        val ok: Boolean,
+        val error: String? = null,
+    ) : ClientMessage
+
     /** Now-playing snapshot pushed on MediaSession change (Phase 7). */
     @Serializable @SerialName("media_state")
     data class MediaState(val state: MediaInfo) : ClientMessage

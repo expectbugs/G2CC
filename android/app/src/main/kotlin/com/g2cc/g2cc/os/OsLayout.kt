@@ -24,7 +24,7 @@ import java.util.Locale
 object OsLayout {
     /** Bump on EVERY APK build so Adam can confirm on-glass that the new build installed.
      *  Shown in the top-left antenna ("G2 OS vX.Y") + the connect splash. */
-    const val OS_VERSION = "1.16"
+    const val OS_VERSION = "1.17"
     const val CLOCK_ID = 1
     const val CLOCK_NAME = "clock"
     // 33 = the DE title-bar height (DE_BAR_H in shared/src/constants.ts) — heights must
