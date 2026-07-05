@@ -772,9 +772,15 @@ export function wrapLinesPx(text: string, maxPx: number = TEXT_PAGE_PX, widthFn:
       const cand = line ? line + ' ' + w : w
       if (fits(cand)) { line = cand; continue }
       if (line) lines.push(line)
-      // hard-split a single overlong token (URL/base64) at the px boundary
-      while (!fits(w)) {
-        let cut = w.length - 1
+      // hard-split a single overlong token (URL/base64) at the px boundary.
+      // C2 (review #6 queue): cut clamped ≥1 + the w.length guard — a
+      // pathological widthFn (single char > maxPx, or NaN) used to yield a
+      // 0-char cut, an unbounded loop of empty rows. Behavior-identical for
+      // every terminating input (the clamp binds only where the old loop
+      // never terminated); an overflowing single char lands on its own row
+      // (NO truncation — every char lands somewhere).
+      while (w.length > 0 && !fits(w)) {
+        let cut = Math.max(1, w.length - 1)
         while (cut > 1 && !fits(w.slice(0, cut))) cut--
         lines.push(w.slice(0, cut)); w = w.slice(cut)
       }
