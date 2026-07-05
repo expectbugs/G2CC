@@ -8,6 +8,7 @@ import { oneLine, fmtStamp, clampConfirmBody, fbPagePx } from './_util.js'
 import { renderImageB64 } from './_image.js'
 import { paginateText, errorView } from '../os-compose.js'
 import type { RenderedImage } from '../os-content.js'
+import { notify } from '../os-notify.js'
 
 interface SmsThreadView { id: string; name: string; address: string; snippet: string; unread: boolean; tsMs: number }
 type SmsPage = string | { kind: 'image'; img: RenderedImage | null; failed: string | null }
@@ -48,6 +49,9 @@ export class SmsWindow implements OsWindow {
   private replyStage: 'idle' | 'listening' | 'transcribing' | 'confirm' | 'sending' | 'result' = 'idle'
   private replyText: string | null = null
   private replyResult: string | null = null
+  /** D6: the send most recently handed to the phone — sms_send_result (v1.17+
+   *  clients) matches against it to update the result card in place. */
+  private lastHanded: { addr: string; text: string; name: string } | null = null
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -280,16 +284,42 @@ export class SmsWindow implements OsWindow {
     this.requestRender()
     this.ctx.log(`[os] sms: send → ${addr}: "${text.slice(0, 60)}"`)
     this.ctx.sendSms(addr, text)
-    // The wire is fire-and-forget today (no sms_send_result exists in the
-    // protocol; the phone swallows SmsManager/SecurityException failures into
-    // DiagLog). So say what we KNOW — handed to the phone — never a fabricated
-    // "Sent" (review 2026-07-05: SEND_SMS revocation made the UI claim success
-    // for a message that never left). Back re-pulls the thread, which is the
-    // real verification: the sent message shows there. A true result message
-    // needs an APK protocol addition (queued as an improvement; SmsManager
-    // does support a sentIntent — the old "no per-message ACK" comment was wrong).
+    // Say what we KNOW — handed to the phone — never a fabricated "Sent"
+    // (review 2026-07-05: SEND_SMS revocation made the UI claim success for a
+    // message that never left). A v1.17+ client reports the REAL outcome via
+    // sms_send_result (sentIntent) and onSendResult updates this card in
+    // place; an old APK never sends it, so this honest wording is also the
+    // terminal state — nothing ever waits on the result (queue D6).
+    this.lastHanded = { addr, text, name: this.openName || addr }
     this.replyStage = 'result'
     this.replyResult = `Handed to phone for ${this.openName} (unverified).\n\n"${oneLine(text, 60)}"\n\nBack re-pulls the thread — the message shows there once sent.`
+    this.requestRender()
+  }
+
+  /** D6: the phone's real send outcome (sentIntent; v1.17+ clients only). */
+  onSendResult(address: string, ok: boolean, error: string | null): void {
+    this.ctx.log(`[os] sms: send result for ${address}: ${ok ? 'SENT' : `FAILED (${error ?? 'unknown error'})`}`)
+    const h = this.lastHanded
+    if (!h || h.addr !== address) {
+      this.ctx.log(`[os] sms: …no matching handed-off send (last=${h?.addr ?? 'none'}) — logged only`)
+      return
+    }
+    if (this.replyStage !== 'result') {
+      // The user moved on. Success needs nothing (the re-pulled thread shows
+      // the message); a FAILURE must not die in the log — one-shot notice.
+      if (!ok) {
+        void notify({
+          source: 'sms', priority: 'info',
+          title: `SMS send FAILED to ${h.name}`,
+          body: `${error ?? 'unknown error'} — "${oneLine(h.text, 60)}" did NOT go out.`,
+          targetWindow: 'sms',
+        })
+      }
+      return
+    }
+    this.replyResult = ok
+      ? `Sent to ${h.name}.\n\n"${oneLine(h.text, 60)}"\n\nBack re-pulls the thread.`
+      : `Send FAILED for ${h.name}: ${error ?? 'unknown error'}\n\n"${oneLine(h.text, 60)}"\n\nThe message did NOT go out. Back returns to the thread.`
     this.requestRender()
   }
 

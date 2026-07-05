@@ -1593,6 +1593,12 @@ export class WindowManager {
     if (w instanceof NoticesWindow) w.onReplyResult(key, ok, error)
   }
 
+  /** D6: the phone reported a real SMS send outcome (new APKs only). */
+  onSmsSendResult(address: string, ok: boolean, error: string | null): void {
+    const w = this.windowById('sms')
+    if (w instanceof SmsWindow) w.onSendResult(address, ok, error)
+  }
+
   /** Phase 6: a live Maps nav line arrived — pin it (persistent while blanked,
    *  title-bar while awake). Updates in place; cleared by onNavClear. */
   onNavUpdate(text: string, eta?: string): void {

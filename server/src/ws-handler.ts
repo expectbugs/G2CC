@@ -481,6 +481,14 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       break
     }
 
+    case 'sms_send_result': {
+      // D6: the phone reported the REAL SMS send outcome (sentIntent) → the SMS
+      // window updates its result card in place. Old APKs never send this.
+      if (client.wm) client.wm.onSmsSendResult(msg.address, msg.ok === true, typeof msg.error === 'string' ? msg.error : null)
+      else console.log(`[ws] sms_send_result (no WM): ${msg.address} ok=${msg.ok}${msg.error ? ` err=${msg.error}` : ''}`)
+      break
+    }
+
     case 'media_state': {
       // Phase 7: now-playing snapshot pushed by the phone → the Media window.
       client.lastAppActivityMs = Date.now()

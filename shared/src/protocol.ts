@@ -415,6 +415,19 @@ export interface NotificationReplyResultMsg {
   error?: string
 }
 
+/** Result of a server-requested SMS send (queue D6 — mirrors the Phase-4a
+ *  notification_reply_result flow). The client registers sentIntent
+ *  PendingIntents (one per multipart part; ok = ALL parts accepted) and
+ *  reports the real outcome. OLD APKs never send this — the server's result
+ *  card keeps its honest "Handed to phone (unverified)" wording and merely
+ *  UPDATES in place when this lands; nothing ever waits on it. */
+export interface SmsSendResultMsg {
+  type: 'sms_send_result'
+  address: string
+  ok: boolean
+  error?: string
+}
+
 /** The phone's current now-playing snapshot (Phase 7) — pushed on every
  *  MediaSession change while the Media window has it subscribed (media_cmd
  *  subscribe/unsubscribe gate it; old APKs never send it). */
@@ -492,6 +505,7 @@ export type ClientMessage =
   | InputMsg
   | NotificationDismissedMsg
   | NotificationReplyResultMsg
+  | SmsSendResultMsg
   | MediaStateMsg
   | SmsThreadsReplyMsg
   | SmsThreadReplyMsg

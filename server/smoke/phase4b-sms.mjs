@@ -67,7 +67,17 @@ try {
   await wm.onSelect('menu', 0)   // Send (index 0)
   await waitFor(() => sent.length > 0, 'sms_send forwarded')
   assert.deepEqual(sent[0], { address: '+15551234567', text: 'on my way' })
+  await waitFor(() => textOf(last()).includes('Handed to phone'), 'honest unverified card first')
   console.error('  3. Reply → dictate → confirm → sms_send(address, text) ✓')
+
+  // D6: a v1.17+ client reports the real outcome — the card updates IN PLACE.
+  wm.onSmsSendResult('+15551234567', true, null)
+  await waitFor(() => textOf(last()).includes('Sent to'), 'sms_send_result updates the result card')
+  wm.onSmsSendResult('+15551234567', false, 'RESULT_ERROR_NO_SERVICE')
+  await waitFor(() => textOf(last()).includes('FAILED') && textOf(last()).includes('NO_SERVICE'), 'failure result renders the real error')
+  wm.onSmsSendResult('+19999999999', true, null)   // unmatched address → logged only, card untouched
+  assert.ok(textOf(last()).includes('NO_SERVICE'), 'unmatched result does not clobber the card')
+  console.error('  3b. sms_send_result updates the card in place (sent / failed / unmatched) ✓')
 
   // provider error renders loudly — navigate BACK to the threads level first
   // (review 2026-07-05: injected at the thread level, the error branch never
