@@ -97,13 +97,16 @@ DE is meant to be hat-ready by construction. Everything runs on hardware Adam ow
 network. There are no third-party systems/accounts/credentials anywhere — this is UI + display-rendering
 work for a wearable.
 
-## 0.2 Current state (what is running and proven, as of 2026-06-29)
+## 0.2 Current state (what is running and proven, as of 2026-07-05)
 
-- The **window-manager DE is in daily use**: 15 windows (now MODULAR — one file each in
-  `server/src/windows/`, host = `window-manager.ts`; see the ✅ status banner above), an MRU dashboard
-  `Main`, a left-menu "action set" interaction model. Server on `:7300`. Android client APK v1.14.
-- **Server smoke suite: 24/25 green** (`server/smoke/run-all.mjs`) — the lone red is `phase10-calendar`
-  (external Google-OAuth, see status banner), NOT a regression. Android unit tests green.
+- The **window-manager DE is in daily use**: 15 windows (MODULAR — one file each in
+  `server/src/windows/`, host = `window-manager.ts`; see the ✅ status banner above), running the
+  RIBBON root-nav + fullBleed (Adam's config; menu mode = the byte-for-byte fallback). Server on
+  `:7300`. Android client APK v1.16 staged (v1.14+ on-glass until installed).
+- **Server smoke suite: 27/28 green, ~33 s a run** (`server/smoke/run-all.mjs`) — the lone red is
+  `phase10-calendar` (external Google-OAuth, see status banner), NOT a regression. Android unit
+  tests green (228). The 2026-07-05 whole-project review hardened everything
+  (`docs/CODE_REVIEW_2026-07-05.md` — incl. its refuted/don't-re-chase list).
 - The **BLE wire format is fully decoded** (`docs/G2_BLE_PROTOCOL.md`, authoritative).
 - The interaction model today: a pinned **left menu column** is the "current action set"; **scroll**
   moves the firmware list selection, **tap** activates, **double-tap** backs out/pops a level. This is
@@ -253,8 +256,9 @@ doc. Phase 1 closes exactly these three gaps and nothing else.
 
 ## 0.8 Tooling
 
-- **Regression suite:** `node server/smoke/run-all.mjs` — 23 scripts, the gate. Runs isolated against the
-  `g2cc_smoke` DB + a temp notes file (never production `g2cc`). Run it after **every** server change.
+- **Regression suite:** `node server/smoke/run-all.mjs` — 28 scripts, the gate (27/28; ~33 s). Runs
+  isolated against the `g2cc_smoke` DB + a temp notes file (never production `g2cc` — `_env.mjs`
+  HARD-FAILS on a non-smoke DB since 2026-07-05). Run it after **every** server change.
 - **Offline compose check:** `scripts/scene_to_png.py` (WireScene JSON → PNG; validates client rules incl.
   the wall; font is DejaVu, treat as layout-only).
 - **Build/restart (server-only changes — the whole of Phase 1):** `npm run build -w server` (and
@@ -607,6 +611,13 @@ exception (§2.2.5). **This is a PLAN; each item begins on Adam's explicit go, s
 >   `Bookmark Last` root-menu shortcut; Adam's Shadows Linger place migrated PRECISELY to the new ch33 start
 >   (idx 47, p0). 3-agent + own review, lossless verified. Smoke 27/28. Full detail: the CHANGELOG 2026-07-01
 >   Reader entry.
+>
+> ### ✅ 2026-07-05 — whole-project adversarial review HARDENED all of the above
+> 72 findings → 65 fixed (8 HIGH — incl. a ribbon stale-tap hot-mic window, the queued-alarm
+> stall at the ribbon, Blackjack save-wipe per disconnect, the stale `--resume` crash loop);
+> menu-mode byte-parity re-verified CLEAN by a dedicated invariants re-review lens. Record +
+> refuted list + 96 catalogued improvements: **`docs/CODE_REVIEW_2026-07-05.md`**. Smoke still
+> 27/28, now ~33 s a run. APK v1.16 staged (8 client fixes), install pending.
 >
 > ### ❌ STILL NOT DONE (on-glass / deferred)
 > - **§3.5 for the OTHER large-content windows** — Reader now uses firmware-scroll (above); extending it to

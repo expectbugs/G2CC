@@ -110,7 +110,7 @@ android/         the Kotlin client (foreground service, BLE, renderer)
 audio/           the Python audio + speech‑to‑text pipeline
 scripts/         helpers — EPUB/terminal/image → renderable content, scene → PNG
 shared/          the wire contract shared by both ends
-docs/            protocol notes, the display/UI contract, capability maps
+docs/            protocol notes, the display/UI contract, capability maps (see docs/README.md — the index)
 ```
 
 ## Running it

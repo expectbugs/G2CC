@@ -64,9 +64,22 @@ interface OsWindow {
 
   // ---- optional ----
   statusLine?(): string | null        // live activity for the status bar (listening→…→writing). null=idle
+  preview?(): string | null | Promise<string | null>
+                                      // RIBBON hover preview (Phase 2 §2.2.3): a rich multi-line glance.
+                                      //   MUST be cheap + side-effect-free — in-memory + FAST read-only DB
+                                      //   only; NEVER spawn a subprocess/CC or ping the phone (view() does
+                                      //   for some windows — that is exactly why preview() exists).
+                                      //   null → the ribbon falls back to summary().
   onReload?(): Promise<void>           // clear stuck transients; view() re-derives. (Reload = host action)
-  onActivate?(): void                  // switched TO: launcher-style reset (e.g. Games → games list)
+  onActivate?(reentry?: boolean): void // switched TO: launcher-style reset (e.g. Games → games list).
+                                      //   reentry=true (Phase 3 §3.4) = re-selecting the window you JUST
+                                      //   parked from at the ribbon (Reader: menu on re-entry, resume on
+                                      //   a switch-in from elsewhere).
   onDeactivate?(): void                // switched AWAY: stop anything that must not outlive focus (mic!)
+  onContentScroll?(dir: 'up' | 'down'): Promise<void>
+                                      // §3.4 fullBleed scroll-reading ONLY: a scroll-notch boundary event
+                                      //   while the view set scrollContent (the content is the capture).
+                                      //   Reader turns pages here. Never fires outside fullBleed.
   interruptible?(): boolean            // may a notification overlay repaint now? false during confirm.
   dispose?(): void                     // ws-close: release timers/pollers. Host calls it for every window.
   onStt?(text: string): Promise<void>          // a confirmed dictation transcript arrived
@@ -106,15 +119,23 @@ interface WmContext {
 
 ```ts
 interface WinView {
-  mode: 'text' | 'browse' | 'twocol' | 'tiles' | 'tile'
+  mode: 'text' | 'browse' | 'twocol' | 'tiles' | 'tile' | 'hands'
   title: string                       // window title (host appends notification/nav flashes)
-  menu?: string[]                     // left-menu action rows (the focus list in reading windows)
+  menu?: string[]                     // action rows. Classic: the left menu (focus list in reading
+                                      //   windows). fullBleed: the 3-cell top-bar scroller (the host
+                                      //   STRIPS 'Main'/'Reload' there — ribbon slot 0 covers Main).
   menuMode?: 'passive' | 'capture'    // browse mode: who holds the event-capture (content vs menu)
   items?: string[]                    // browse mode: the content list rows
   text?: string                       // text mode: pre-paginated firmware text
+  scrollContent?: boolean             // §3.4 fullBleed scroll-reading (text mode ONLY — the shared
+                                      //   isScrollRead() predicate gates both compose and input routing):
+                                      //   the content region becomes the scroll=true capture, there is NO
+                                      //   menu, and scroll notches route to onContentScroll. Reader-only
+                                      //   by design today.
   textLeft?: string; textRight?: string   // twocol mode (Main dashboard)
   tiles?: [string, string, string, string]; tilesRect?: { w; h }   // tiles mode: 4 gray4 BMPs
   tile?: string                       // tile mode: one centred BMP
+  dealerTile?: string; playerTile?: string  // hands mode (Blackjack): two small independent card tiles
 }
 ```
 
@@ -263,7 +284,10 @@ Every window ships `server/smoke/phase-<window>.mjs`, auto-discovered by `run-al
   `send`), exercise the level transitions, and **assert every composed frame stays under the wall**
   (`estimateLayoutFrameBytes(scene.regions) <= LAYOUT_FRAME_BUDGET_BYTES`) and menu labels fit 96 px.
 - Run `node server/smoke/run-all.mjs` after every change. Gate: the suite stays green (currently
-  24/25 — `phase10-calendar` is an external Google-OAuth red, unrelated to window code).
+  27/28 — `phase10-calendar` is an external Google-OAuth red, unrelated to window code). The whole
+  run takes ~33 s. `_env.mjs` HARD-FAILS on a non-smoke DB (review 2026-07-05) — never weaken that.
+- End every phase's outermost `finally` with `await getPool().end()` AFTER any cleanup queries —
+  a leaked pool adds a ~10 s idle tail per phase (seven phases had one; review 2026-07-05).
 
 See `phase6-timers.mjs` for the canonical small example and `phase-paperclips.mjs` for a
 controller-driven one.

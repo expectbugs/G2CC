@@ -4,6 +4,97 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-05 — **Whole-project adversarial review: 72 findings → 65 fixed (8 HIGH) + APK v1.16**
+
+The first full-project review since the ribbon/fullBleed era (the prior reviews predate Phases 1–3).
+**Method:** 18 disjoint-slice finder agents (Fable 5, max effort) working from a shared brief that
+encoded the hardware truths, the Three Rules' sanctioned exceptions, frozen layers, and every prior
+don't-re-chase item → ONE adversarial verifier per finding (default posture REFUTE; re-reads the
+cited code, checks the quote exists, traces reachability) → smoke-gated fix batches → a 3-lens
+adversarial re-review of the fix diff itself (its INVARIANTS lens — menu-parity/Three-Rules/byte-
+wall/frozen-layers — returned ZERO findings). Full record + the fixed-findings table + the curated
+improvements list: **`docs/CODE_REVIEW_2026-07-05.md`**.
+
+**The 8 HIGH fixes (server unless noted):**
+- **Blackjack save wiped on every idle disconnect** — the WM rebuilds per WS connection and
+  `dispose()` persisted unconditionally, so a connection that never opened Blackjack upserted the
+  constructor-fresh $1000 game over the real save. persist() now gates on a successful load
+  (`loadOk`, the paperclips C-F1 pattern); failed loads disable persisting loudly and retry on
+  re-enter; a save landing after a fast Deal keeps the live hand.
+- **Stale `--resume` id = permanent crash loop** — CC prunes ~30-day-old sessions; a stale
+  sessions.json id died at spawn (before system/init), the watchdog respawned with the SAME id ×5,
+  and every directory re-pick re-read it. CC's `errors[]` ("No conversation found") now sets a
+  staleResume flag (+ the died-before-init heuristic); watchdog/pool clear the resume target and
+  go FRESH, loudly. The error card also shows CC's real `errors[]` text (2.1.x format drift — the
+  glass used to say just "CC error_during_execution").
+- **Move-into-Trash purged in <24 h, not 30 days** — rename preserves mtime, so old files looked
+  instantly expired to the purge's mtime fallback. Move-to-Trash now routes through moveToTrash
+  (canonical `<ms>-` stamp); the fallback uses max(mtime, ctime); digit-prefixed names only parse
+  as stamps in a plausible epoch-ms range; purge readdir failures are loud.
+- **SMS Back-after-send showed the PRE-send thread** — 'Back' is WM-reserved so the reply-menu
+  re-pull was dead code; the missing sent message invited duplicate sends. onBack now re-pulls;
+  doSend's card says "Handed to phone (unverified)" — the wire has no send-result message (a true
+  `sms_send_result` flow is catalogued as an improvement; SmsManager DOES support sentIntent — the
+  old "no per-message ACK" comment was wrong).
+- **Deliveries status inversion** — the bare `\bdelivered\b` catch-all marked "will be delivered
+  tomorrow" AND "was not delivered" as delivered=true. Failure-first rules rewritten (negations →
+  delayed incl. spelled-out "not be delivered" — caught empirically, the `n'?t` forms only match
+  contractions; future/scheduled → arriving soon). Shop.app/Narvar senders (deliberately queried)
+  now map instead of silently dropping; unmapped fetched senders warn.
+- **Reader cross-book pollution** — opening a never-read book kept the previous book's
+  chapter/page/pages in memory: history pushes, Bookmark Last, and the ribbon preview recorded the
+  new book at the OLD book's coordinates (durable rows). Per-book state resets before the parse;
+  `read_epub.py` output verified byte-identical across all 45 books (positions/pagemaps safe).
+- **Media album art lost/stuck** — the phone pushes art ONCE per track; any transport push
+  (artB64=null) overwrote it server-side ("No album art" after a Play/Pause; a track change on the
+  Art page spun forever). Server carries art forward within a track + re-kicks the render on the
+  late art push; client commits lastArtKey only once a bitmap is in hand.
+- **Ribbon stale-tap window** (medium-rounding-high) — parking nulled lastView only AFTER the
+  async preview fetch; a tap in that window drove the PARKED window ('Ask' = hot mic under the
+  ribbon, no indicator — switchTo skips onDeactivate for parked windows). lastView nulls
+  synchronously in toRibbon + an at-ribbon hub_select guard.
+
+**57 medium/low fixes** — highlights: queued timer/call alarms now flush while the ribbon is on
+screen (the promotion only lived in the window render loop); voice-'blank' requeues a live overlay
+(it used to relight the "dark" screen); dictation clears Suggest state (a stale robot suggestion
+could hijack Confirm — sacred-confirm violation); interrupted turns no longer drop the queued
+prompt they promised to drain; the authToken "regeneration" branch actually regenerates (an empty
+token authenticated ANY peer while the log claimed a fresh one was minted); Files navSeq races +
+menu-'Up' dead focus; a wedged nvidia-smi can no longer accumulate subprocesses to EMFILE (GPU
+single-flight); charts render sampler gaps as GAPS not fabricated 0-dips (stats null → NaN,
+coupled with render_chart.py); LRCLIB 5xx/429 no longer caches as permanent "no lyrics"; tmux poll
+can't restart after parking; grid Reload re-renders instead of wedging the spinner; Deliveries
+lists ALL rows (was a silent newest-42 cap); wake grammar accepts Parakeet's vocative comma ("Hey,
+Butterscotch, …"); send_mail writes Sent copies via maildir tmp/-then-rename; render_terminal
+clips loudly and keeps the live edge; per-entry permission modes reported honestly (set_mode only
+respawns the active session). **Smoke-suite fixes:** `_env.mjs` now HARD-FAILS on a non-smoke DB
+(double opt-in env var) — it was one stray G2CC_PG_DATABASE away from unscoped DELETEs on
+production; seven phases leaked the pg pool (~10 s idle tail each) — **run-all went ~100 s → ~33 s**;
+phase4b's "error renders loudly" step now actually gates the error view; phase9-voice's SMS stub
+uses the real wire shape (it rendered 'NaN' before and asserted nothing).
+
+**APK v1.16** (8 client fixes; install from /setup): BT-adapter bounce during the scan phase no
+longer strands `_connecting=true` forever (the "scanning forever" class); notification debounce is
+access-ordered LRU (hot keys no longer age out mid-suppression) + newest-wins supersede covers
+imageless re-posts (stale MMS retry loops can't forward out of order); MediaBridge no longer leaks
+a session listener per re-subscribe + the album-art key fixes; ConnectionManager gets a closed
+latch (@Synchronized disconnect) so a reconnect straggler can't mint a zombie authed socket;
+MicCapture stop→start race can't release the NEW capture's AudioRecord; AudioStreamer winLimit
+does Long math (Int overflowed at ≥96 kHz stereo float32, disabling handsfree window re-cuts).
+
+**Refuted (recorded in the review doc — don't re-chase):** 5 verifier refutations + 2 of mine.
+**Lesson (the invisible-ESC class):** games.ts's ANSI regex "missing \x1b" was confirmed by BOTH a
+finder and an adversarial verifier — but the prefix was always present as a literal 0x1b byte,
+invisible in the text views both agents used; they tested a reconstruction, not the file. `od -c`
++ running the real regex refuted it. When a finding hinges on an exact string, verify BYTES and
+run the actual artifact. (The byte is now the escaped, greppable `\x1b` form.)
+
+**96 improvement proposals catalogued** (NOT implemented) in the review doc — top: timing-safe
+token compare + /setup exposure review, blank-screen re-send dedupe, invokeMenu→handleSwitchTo,
+BLE MTU-failure guard, sessions.json persist-at-init, Reader marks/jump return-tracking.
+
+---
+
 ## (unstamped) — 2026-07-01 — **Reader: §3.5 firmware-scroll PROVEN + the "sovereign chapters" remodel**
 
 The §3.5 firmware-scroll probe resolved on glass, then Reader was remodelled around the result. Server-only

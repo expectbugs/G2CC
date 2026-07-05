@@ -38,6 +38,8 @@
     "//": "DE shell (overhaul.md). rootNav 'menu' = the proven category launcher (default); 'ribbon' = the MRU recents ribbon (flip + restart to try on glass). recentsDepth = MRU windows shown after the fixed Main slot, before the 'frequent'+'All>' slots (Adam's spec: active + 3 = 4; keep small so the top strip never overflows). fullBleed (Phase 3 §3.3 staging, ribbon-only): true = borderless full-width windows with the action menu in a 3-cell top-bar scroller (the 96px left column reclaimed); false = the proven in-window chrome. Flip on glass to test.",
     "rootNav": "menu",
     "recentsDepth": 4,
-    "fullBleed": false
+    "fullBleed": false,
+    "//readerScrollRows": "row cap for Reader's firmware-scroll pages (sparse content like poetry; the ~660 B byte budget binds first for prose). Default 30.",
+    "readerScrollRows": 30
   }
 }

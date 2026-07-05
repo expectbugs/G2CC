@@ -1,5 +1,11 @@
 # G2CC upgrades v2 — the 2026-06-12 queue
 
+> ## ✅ STATUS: THIS QUEUE IS DONE (historical record)
+> Everything below — the server phases AND the five client features — shipped by r25
+> (2026-06-18; see HANDOFF/CHANGELOG). Still open elsewhere: Phase 16 OBD (hardware on
+> backorder), Phase 9b always-on voice tuning, Phase 4b MMS-read (follow-ups), Lichess
+> (gate A3.2). **Current work lives in `overhaul.md` (the DE/WM overhaul), not here.**
+
 > **This file REPLACES the 2026-06-11 upgrades doc** (Phases 1–11, all shipped and
 > smoke-verified — the full annotated v1 lives in git at `60e6578:upgrades.md`; the WHY
 > is CHANGELOG r3–r17; the per-phase record is UPGRADE_PROGRESS.md). Same contract as

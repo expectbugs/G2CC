@@ -6,7 +6,22 @@ Read this first. System rules: `~/.claude/CLAUDE.md` + `CLAUDE.md` (project). UI
 `UPGRADE_PROGRESS.md` records the v1 phases incl. Adam's gate answers; `CHANGELOG.md` r3–r18
 carries the WHY of everything.
 
-**2026-07-01 (latest) — READER "SOVEREIGN CHAPTERS" REMODEL + §3.5 firmware-scroll PROVEN — DEPLOYED (live),
+**2026-07-05 (latest) — WHOLE-PROJECT ADVERSARIAL REVIEW: 72 findings → 65 FIXED (8 HIGH) — DEPLOYED,
+committed + pushed; APK v1.16 staged (server + client + scripts + smoke + audio).** 18 Fable-max
+finder slices → one adversarial verifier per finding → smoke-gated fixes → a 3-lens re-review of
+the fix diff (invariants lens CLEAN: menu-parity/Three-Rules/byte-wall all held). **THE record =
+`docs/CODE_REVIEW_2026-07-05.md`** (fixed table, refuted list — don't re-chase those, curated
+improvements). HIGHs: Blackjack save wiped per idle disconnect; stale `--resume` crash loop;
+Move-into-Trash purged <24 h; SMS Back-after-send stale thread; deliveries status inversion;
+Reader cross-book pollution; Media album-art loss; ribbon stale-tap hot-mic window. Smoke suite
+itself hardened: `_env.mjs` HARD-FAILS on a non-smoke DB; 7 pg-pool leaks fixed → **run-all now
+~33 s** (was ~100 s), still 27/28 (phase10 = the known OAuth env red). `read_epub.py` verified
+byte-identical across all 45 books (positions/pagemaps safe). **APK v1.16** (BT-bounce scan
+strand, notification LRU + supersede ordering, MediaBridge listener leak + art key, WS closed
+latch, mic stop/start race, handsfree Long math) — **[U] install from /setup, splash shows OS
+1.16**. Docs refreshed + `docs/README.md` index added the same day.
+
+**2026-07-01 — READER "SOVEREIGN CHAPTERS" REMODEL + §3.5 firmware-scroll PROVEN — DEPLOYED (live),
 committed + pushed (server-only + a `scripts/read_epub.py` rewrite, smoke 27/28, NO APK).** The §3.5 probe
 resolved on glass: a multi-line `scroll=true` captured text region DOES locally-scroll, then fires the boundary
 event at the edge → the server auto-advances, seamlessly (no rows skipped), with NO firmware scroll ceiling
@@ -241,7 +256,7 @@ zero state). The phone is the BLE/WiFi bridge — and per **the prime directive*
 it stays in Adam's pocket, untouched, always. A small hat device (ESP32, on backorder) replaces
 the phone eventually; the DE is hat-ready by construction.
 
-## Where we are (2026-06-18, post r25 audit-gap batch + r26 Reader subfolders; APK v1.14)
+## Where we are (2026-07-05, post whole-project review; APK v1.16 staged; ribbon+fullBleed live)
 
 The BLE wire format is fully decoded (`docs/G2_BLE_PROTOCOL.md`, authoritative); the
 window-manager DE is in daily use; and **the entire upgrades.md queue — server AND the five
@@ -258,8 +273,8 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
 - **Server**: the DE — window manager, compositor, content pipeline, CC-subprocess
   bridge, Postgres store (`g2cc` DB, unix-socket peer auth), notification hub, timers,
   calendar sync, games glue. Running on `:7300` (restart procedure below).
-- **Android client: APK v1.14 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
-  /tmp is wiped every boot; a legacy /tmp copy also exists) — check
+- **Android client: APK v1.16 BUILT + STAGED at `~/.g2cc/g2cc-harness.apk`** (durable —
+  /tmp is wiped every boot) — check
   `os/OsLayout.OS_VERSION` on the connect splash for what's actually installed; Adam
   installs from `http://100.107.139.121:7300/setup`. **The on-glass verification batch
   for the whole upgrade is still PENDING** (checklist in UPGRADE_PROGRESS.md / the
@@ -416,6 +431,9 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
   `docs/CODE_REVIEW_2026-06-11.md` · `docs/CODE_REVIEW_2026-06-11b.md` (review #4 — incl.
   the OPEN QUESTIONS batch for Adam) · **`docs/CODE_REVIEW_2026-06-13.md` (review #5 —
   the batch review: fixed items + 4 DEFERRED client findings w/ file:line + fixes)** ·
+  **`docs/CODE_REVIEW_2026-07-05.md` (review #6 — the whole-project pass: 65 fixes, the
+  refuted/don't-re-chase list, 96 catalogued improvements)** · `docs/README.md` (the docs
+  INDEX — live contracts vs historical records) ·
   `CHANGELOG.md` (the WHY of every change) ·
   `UPGRADE_PROGRESS.md` (the batch record + Adam's gate answers).
 - **Server (`server/src/`):** `window-manager.ts` (the host — WindowManager + Main + the
@@ -455,7 +473,9 @@ OBD) or on-glass [U]-tuning (Phase 9b global stream, 4b MMS-read) — see What's
   G2Pipeline, G2CCService, hud/*.
 - **Verification:** `server/smoke/run-all.mjs` — 28 scripts, THE regression suite (**27/28**:
   `phase10-calendar` is a pre-existing external Google-OAuth red — no refresh_token, NOT a
-  regression; don't chase it); run it after every server change. **ISOLATED since review #4: everything store-backed runs in
+  regression; don't chase it); run it after every server change. **~33 s a run since 2026-07-05**
+  (7 pg-pool leaks fixed — if it crawls again, suspect a new leaked pool). `_env.mjs` HARD-FAILS
+  on any non-`g2cc_smoke` DB (override needs `G2CC_SMOKE_ALLOW_DB=<name>` too). **ISOLATED since review #4: everything store-backed runs in
   the `g2cc_smoke` DB + a temp notes file (`server/smoke/_env.mjs` preamble — never the
   production g2cc DB, which the suite used to pollute/consume timers from); phase9-wire
   spawns a hermetic server on :7399; phase10 hits the real Google Calendar read-only.** `scripts/scene_to_png.py`
@@ -494,8 +514,10 @@ The ENTIRE upgrades.md queue — server AND the five client features — is impl
 r23, smoke 23/23, APK v1.13, server restarted). What's left is on-glass verification, a few
 [U]-tuning follow-ups, and the hardware-gated OBD phase:
 
-1. **On-glass verification — install APK v1.13** from `http://100.107.139.121:7300/setup` (the
-   splash shows `OS 1.13`), then run the r22 batch + the r23 tweaks (Adam runs every test himself):
+1. **On-glass verification — install APK v1.16** from `http://100.107.139.121:7300/setup` (the
+   splash shows `OS 1.16`; it carries the 2026-07-05 review's 8 client fixes AND everything since
+   v1.13). Then run whatever remains un-verified from the r22 batch + the r23 tweaks below (Adam
+   runs every test himself):
    - **Media** (Phase 7) — open Media while music plays: track/artist + position bar + Play/Pause
      (TOP, safe), Skip/Prev, album-art page, Lyrics (synced = karaoke current-line). Grant nothing
      new (uses the NLS grant).

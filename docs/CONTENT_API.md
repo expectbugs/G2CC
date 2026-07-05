@@ -65,7 +65,10 @@ visible error code-panel (loud, never dropped).
 ````
 
 Types `line`/`bar`/`scatter`; keys `title`/`xlabel`/`ylabel`/`x`/`series` (shorthand:
-top-level `y`). Rendered by `scripts/render_chart.py` (matplotlib Agg, white-on-black,
+top-level `y`). A `y` value may be `null` — it renders as a GAP (null → NaN; matplotlib
+breaks the line there). Review 2026-07-05: the Stats charts use this for sampler outages —
+a gap is honest, a fabricated 0-dip reads as "GPU died" on a 1–2 s glance. Rendered by
+`scripts/render_chart.py` (matplotlib Agg, white-on-black,
 thick lines) into the render_image gray4 contract → 2×2 tiles. **THE PAGE-2 RULE (Adam's
 elegance constraint, enforced server-side always):** text pages assemble FIRST; chart
 pages land strictly AFTER page 1 regardless of fence position. Page 1 never waits on
