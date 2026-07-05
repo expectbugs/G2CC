@@ -518,6 +518,16 @@ export class MailWindow implements OsWindow {
 
   async onBack(): Promise<boolean> {
     if (this.level === 'compose') {
+      if (this.composeStage === 'pickRecipient') {
+        // D5 (review #6 queue — verified): the blanket compose-cancel below
+        // ran before any focus flip, so this browse list's menu (Cancel/
+        // Reload/Main) was dead UI in BOTH nav modes. The Files-pickDest
+        // treatment: first double-tap flips focus to the menu, the second
+        // cancels. No mic is live at this stage (dictation starts after the
+        // pick), so deferring the cancel is safe.
+        if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
+        this.focus = 'content'
+      }
       // any in-flight compose: Back cancels it (mic must not outlive focus)
       this.stopCompose('back')
       this.level = this.readKey ? 'read' : 'list'
