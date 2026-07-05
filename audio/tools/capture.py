@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""capture.py — record stereo 32-bit float WAV from the DJI Mic 3 USB receiver.
+"""capture.py — record 32-bit float WAV from the DJI Mic 3 USB receiver.
+
+Two capture modes (queue D7, 2026-07-05 — matches CLAUDE.md's pipeline split):
+  --channels 1   single-mic TX2 mono — the DEFAULT PIPELINE's capture shape
+  --channels 2   stereo TX1+TX2 (sample-synchronized) — the NLMS fallback
+                 (default here for continuity with the existing sample set)
 
 Three intended runs (per g2_custom_app_spec.md §B2):
   python capture.py machine_alone
@@ -14,10 +19,13 @@ Discovery:
   python capture.py --list-devices
 
 Sample rate / format:
-  - 48 kHz, 32-bit float, 2 channels (sample-synchronized TX1+TX2)
+  - 48 kHz, 32-bit float
   - DEFAULT capture duration: 30 seconds (override with --duration)
   - DEFAULT input device: auto-pick first device with 'DJI' or 'WIRELESS'
-    in the name; override with --device <id-or-name>
+    in the name; override with --device <id-or-name>. NO DJI candidate found
+    → HARD FAIL (D7): recording the box's default mic looked like a capture
+    but sampled the wrong capsule — profiles learned from it leave residue
+    (capsule + codec MUST match the live capture path, per CLAUDE.md).
 
 NO TIMEOUTS on the recording path — duration is a recording-LENGTH parameter,
 not an I/O timeout. If sounddevice itself blocks, the user's Ctrl-C signal
@@ -59,23 +67,25 @@ def list_devices() -> int:
     return 0
 
 
-def pick_device(arg: str | None) -> int | None:
+def pick_device(arg: str | None, channels: int) -> int:
     """Resolve a device argument to a sounddevice index.
-    None  → auto-pick first DJI candidate.
+    None  → auto-pick first DJI candidate with enough input channels;
+            HARD-FAIL if none (D7 — never silently record the default mic:
+            a wrong-capsule capture poisons every profile learned from it).
     str digit → index.
-    str name → first device whose name contains it (case-insensitive).
-    Returns None if the arg means 'use default input'."""
+    str name → first device whose name contains it (case-insensitive)."""
     devices = sd.query_devices()
     if arg is None:
         for idx, dev in enumerate(devices):
             name = dev['name'].lower()
-            if dev['max_input_channels'] >= 2 and ('dji' in name or 'wireless' in name):
+            if dev['max_input_channels'] >= channels and ('dji' in name or 'wireless' in name):
                 print(f'[capture] auto-picked device [{idx}] {dev["name"]}')
                 return idx
-        # Loud — auto-pick failed; fall back to default input but warn.
-        print('[capture] WARNING: no DJI/wireless device found; using default input',
-              file=sys.stderr)
-        return None
+        raise SystemExit(
+            f'[capture] FAIL: no DJI/wireless input device with >= {channels} channel(s) found.\n'
+            '  Plug in / wake the DJI Mic 3 receiver, or pass --device <id-or-name> explicitly\n'
+            '  (use --list-devices to enumerate). Refusing to record the default mic:\n'
+            '  a profile learned from the wrong capsule leaves residue on real captures.')
     if arg.isdigit():
         return int(arg)
     needle = arg.lower()
@@ -85,12 +95,13 @@ def pick_device(arg: str | None) -> int | None:
     raise SystemExit(f'no audio device matches {arg!r}; use --list-devices to enumerate')
 
 
-def record(name: str, duration: float, device: int | None, rate: int, outdir: Path) -> Path:
+def record(name: str, duration: float, device: int, rate: int, channels: int, outdir: Path) -> Path:
     outdir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%dT%H%M%S')
     wav_path = outdir / f'{name}-{ts}.wav'
 
-    print(f'[capture] recording {duration:.1f}s of "{name}" → {wav_path}')
+    mode = 'mono TX2 (single-mic)' if channels == 1 else 'stereo TX1+TX2 (NLMS fallback)'
+    print(f'[capture] recording {duration:.1f}s of "{name}" [{mode}] → {wav_path}')
     print('[capture] press Ctrl-C to abort cleanly')
 
     n_frames = int(round(duration * rate))
@@ -98,7 +109,7 @@ def record(name: str, duration: float, device: int | None, rate: int, outdir: Pa
     audio = sd.rec(
         frames=n_frames,
         samplerate=rate,
-        channels=DEFAULT_CHANNELS,
+        channels=channels,
         dtype='float32',
         device=device,
     )
@@ -132,7 +143,12 @@ def main() -> int:
     p.add_argument('--rate', type=int, default=DEFAULT_RATE,
                    help=f'Sample rate (default {DEFAULT_RATE}).')
     p.add_argument('--device', default=None,
-                   help='Audio device index or name substring; auto-picks DJI by default.')
+                   help='Audio device index or name substring; auto-picks DJI by default '
+                        '(HARD-FAILS if no DJI/wireless device is present).')
+    p.add_argument('--channels', type=int, choices=(1, 2), default=DEFAULT_CHANNELS,
+                   help='1 = mono TX2 (the default single-mic pipeline), '
+                        f'2 = stereo TX1+TX2 (NLMS fallback; default {DEFAULT_CHANNELS} '
+                        'for continuity with the existing sample set).')
     p.add_argument('--out', type=Path, default=DEFAULT_OUTDIR,
                    help=f'Output directory (default {DEFAULT_OUTDIR}).')
     p.add_argument('--list-devices', action='store_true', help='List audio devices and exit.')
@@ -144,8 +160,8 @@ def main() -> int:
     if not args.name:
         p.error('name argument required (e.g. machine_alone) — or use --list-devices')
 
-    device = pick_device(args.device)
-    wav_path = record(args.name, args.duration, device, args.rate, args.out)
+    device = pick_device(args.device, args.channels)
+    wav_path = record(args.name, args.duration, device, args.rate, args.channels, args.out)
     link_latest_settings(args.out, wav_path)
     return 0
 

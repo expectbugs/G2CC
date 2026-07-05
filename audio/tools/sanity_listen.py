@@ -2,11 +2,12 @@
 """sanity_listen.py — text-mode + spectrogram inspection of captured WAVs.
 
 Validates that:
-  - both channels are present
-  - both are 32-bit float
+  - channel count matches a capture mode (D7): 1 = mono TX2 (the default
+    single-mic pipeline) or 2 = stereo TX1+TX2 (the NLMS fallback)
+  - 32-bit float subtype
   - sample rate is 48 kHz
-  - TX1 (channel 0) carries the louder/noise-dominant signal in machine_alone
-  - TX2 (channel 1) carries voice in voice_plus_machine / voice_alone
+  - stereo: TX1 (ch 0) carries the noise-dominant signal in machine_alone;
+    TX2 (ch 1) carries voice. Mono: the single channel IS TX2/speech.
 
 Spectrograms are written to <wav>.png alongside each input. If matplotlib's
 display backend is unavailable (no X server), text-mode RMS + spectral-band
@@ -67,7 +68,8 @@ def render_spectrogram(wav_path: Path, audio: np.ndarray, sr: int) -> Path | Non
         axes[ch][0].pcolormesh(t, f, sxx_db, shading='gouraud', cmap='viridis')
         axes[ch][0].set_ylabel('Hz')
         axes[ch][0].set_xlabel('s')
-        axes[ch][0].set_title(f'{wav_path.name} — ch {ch} ({"TX1/ref" if ch == 0 else "TX2/speech"})')
+        label = 'TX2/speech (mono)' if n_ch == 1 else ('TX1/ref' if ch == 0 else 'TX2/speech')
+        axes[ch][0].set_title(f'{wav_path.name} — ch {ch} ({label})')
     fig.tight_layout()
     out = wav_path.with_suffix('.png')
     fig.savefig(out, dpi=100)
@@ -92,8 +94,10 @@ def inspect(wav_path: Path) -> bool:
     failures: list[str] = []
     if sr != 48_000:
         failures.append(f'expected 48000 Hz, got {sr} Hz')
-    if n_ch != 2:
-        failures.append(f'expected 2 channels (stereo TX1+TX2), got {n_ch}')
+    # D7: 1 channel = the default single-mic (mono TX2) capture; 2 = the NLMS
+    # fallback stereo pair. Anything else is a broken capture.
+    if n_ch not in (1, 2):
+        failures.append(f'expected 1 (mono TX2) or 2 (stereo TX1+TX2) channels, got {n_ch}')
     if info.subtype not in ('FLOAT', 'DOUBLE'):
         failures.append(f'expected 32-bit float (FLOAT) subtype, got {info.subtype}')
 
@@ -103,7 +107,7 @@ def inspect(wav_path: Path) -> bool:
         lf = band_energy_db(x, sr, 50, 500)         # rumble + machine fundamentals
         mf = band_energy_db(x, sr, 500, 4_000)      # voice band
         hf = band_energy_db(x, sr, 4_000, 12_000)   # sibilance / hash
-        label = 'TX1/ref' if ch == 0 else 'TX2/speech'
+        label = 'TX2/speech (mono)' if n_ch == 1 else ('TX1/ref' if ch == 0 else 'TX2/speech')
         print(f'    ch{ch} ({label}): RMS={rms:.1f} dB  '
               f'LF={lf:.1f} dB  MF={mf:.1f} dB  HF={hf:.1f} dB')
 
