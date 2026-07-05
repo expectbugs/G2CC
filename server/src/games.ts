@@ -28,8 +28,11 @@ const HAND_SCRIPT = '/home/user/G2CC/scripts/render_hand.py'
  *  navigates above it. */
 export const DUNGEON_ROOT = '/home/user'
 
+// Review 2026-07-05: the ESC prefix used to be a LITERAL 0x1b byte here —
+// invisible in most views (it fooled two review agents into "fixing" a regex
+// that was already correct). Escaped form, same behavior, greppable.
 // eslint-disable-next-line no-control-regex
-const ANSI_RE = /\[[0-9;]*[A-Za-z]/g
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g
 
 /** Run one rpg-cli action with the hero's cwd. Nonzero exit WITH output is a
  *  game event (death, fled battle) — resolved as content, loudly logged. */
@@ -45,6 +48,23 @@ export function rpgRun(args: string[], cwd: string): Promise<string> {
       resolve(out || '(no output)')
     })
   })
+}
+
+/** The hero's REAL current location per rpg-cli itself (`rpg-cli -q pwd` prints
+ *  the absolute path). Review 2026-07-05: a cd that triggers a fatal battle
+ *  exits nonzero WITH output (a game event) — the hero respawned at home while
+ *  the window committed the target dir; and a WON mid-trek battle stops the
+ *  walk early with exit 0. Exit-code gating can't restore sync — asking the
+ *  game where the hero actually IS can. Returns null (loud) if pwd fails. */
+export async function rpgPwd(cwd: string): Promise<string | null> {
+  try {
+    const out = await rpgRun(['pwd'], cwd)
+    const line = out.split('\n').map((s) => s.trim()).find((s) => s.startsWith('/'))
+    return line ?? null
+  } catch (e) {
+    console.log(`[games] rpg-cli pwd failed (cwd left as-is): ${(e as Error).message}`)
+    return null
+  }
 }
 
 export interface ChessState {

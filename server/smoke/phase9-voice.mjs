@@ -108,7 +108,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
       { id: 't1', name: 'Becky', address: '+15551234567', snippet: 'see you then', unread: false },
       { id: 't2', name: 'Mom', address: '+15557654321', snippet: 'call me', unread: true },
     ], 0, 2, null),
-    requestSmsThread: (id) => wm.onSmsThread(id, id === 't1' ? 'Becky' : 'Mom', '+15551234567', [{ from: 'them', text: 'see you then', ts: 0, mms: [] }], 0, 1, null),
+    // the REAL SmsMessage wire shape (review 2026-07-05: the old {from,text,ts,mms}
+    // stub rendered 'Me · NaN/NaN NaN:NaN' — the smoke could not see the thread text)
+    requestSmsThread: (id) => wm.onSmsThread(id, id === 't1' ? 'Becky' : 'Mom', '+15551234567', [{ id: 'm1', body: 'see you then', incoming: true, tsMs: 1750000000000 }], 0, 1, null),
   }
   wm = new WindowManager(ctx)
   const mail = wm.windows.find((w) => w.id === 'mail')
@@ -123,6 +125,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   await wm.onVoiceCommand("butterscotch read becky's last text"); await sleep(80)
   const sms = wm.windows.find((w) => w.id === 'sms')
   assert.equal(sms.level, 'thread', 'voice "read X\'s last text" OPENS the matched thread')
+  await sleep(40)
+  const threadPage = scenes.length ? (scenes[scenes.length - 1].regions.find((r) => r.name === 'content')?.content?.text ?? '') : ''
+  assert.ok(threadPage.includes('see you then'), `thread page shows the message body (got: ${threadPage.slice(0, 80)})`)
+  assert.ok(!threadPage.includes('NaN'), 'no NaN artifacts in the rendered thread (wire-shape stub)')
   assert.equal(sms.openName, 'Becky', 'matched + opened the named contact (not Mom)')
   wm.dispose()
   console.error('  5. voice read OPENS the item (mail newest + SMS by contact name) ✓')

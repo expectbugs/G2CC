@@ -72,6 +72,11 @@ function parseSession(path) {
     const ts = typeof d.timestamp === 'string' ? d.timestamp : null
     if (ts && !startedAt) startedAt = ts
     if (t === 'user') {
+      // isMeta user lines are HARNESS-injected (system-reminders, skill
+      // base-dir notes, image placeholders) — not Adam's prompts (review
+      // 2026-07-05). The wrapper regex below stays for older files that
+      // predate the isMeta flag.
+      if (d.isMeta === true) { skip('meta-user'); continue }
       const text = extractUserText(d.message?.content)
       if (text === null) { skip('user-tool-result'); continue }
       if (/^\s*(<command-|<local-command|Caveat:)/.test(text)) { skip('command-wrapper'); continue }

@@ -575,7 +575,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
           type: 'session_info',
           sessionId: entry.id,
           projectPath,
-          mode: client.mode,
+          mode: entry.session.permissionMode,   // the entry's ACTUAL mode (review 2026-07-05 — a reused entry may predate set_mode)
           poolSize: client.pool.count,
           poolIndex: client.pool.indexOf(entry.id),
           resumed,
@@ -658,6 +658,17 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // would mutate sttInFlightCount + run a zero-byte handleAudio that
       // returns instantly, corrupting the in-flight tracker.
       if (!client.collectingAudio) {
+        // Review 2026-07-05: while a transcription is IN FLIGHT, a stray
+        // duplicate audio_end must not route through sttError() — its
+        // wm.onSttError unwinds the live 'transcribing…' window state, so
+        // the real transcript that follows gets discarded as stale (spoken
+        // dictation lost + a bogus error shown). The in-flight pipeline owns
+        // the WM dictation state and always delivers its own terminal
+        // sttResult/sttError; the stray stays loud in the log only.
+        if (client.sttInFlightCount > 0) {
+          console.warn(`[ws] duplicate audio_end while ${client.sttInFlightCount} transcription(s) in flight — logged only (the live pipeline owns the WM state)`)
+          break
+        }
         console.warn(`[ws] audio_end without prior audio_start — ignoring`)
         sttError(client, 'audio_end without prior audio_start')
         break
@@ -712,7 +723,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       if (active) {
         sendMsg(client, {
           type: 'status',
-          mode: client.mode,
+          mode: active.session.permissionMode,   // actual spawn mode (review 2026-07-05)
           contextPct: active.contextPct,
           isProcessing: false,
           poolSize: client.pool.count,
@@ -806,7 +817,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         client.currentPage = entry.scrollback.lastPage
         sendMsg(client, {
           type: 'status',
-          mode: client.mode,
+          mode: entry.session.permissionMode,   // actual spawn mode (review 2026-07-05)
           contextPct: entry.contextPct,
           isProcessing: entry.session.isAlive() && entry.session.isProcessingTurn,
           poolSize: client.pool.count,
@@ -833,7 +844,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         sendMsg(client, { type: 'output', ...page })
         sendMsg(client, {
           type: 'status',
-          mode: client.mode,
+          mode: active.session.permissionMode,   // actual spawn mode (review 2026-07-05)
           contextPct: active.contextPct,
           isProcessing: false,
           poolSize: client.pool.count,
@@ -888,7 +899,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
           type: 'session_info',
           sessionId: existing.id,
           projectPath: match.project,
-          mode: client.mode,
+          mode: existing.session.permissionMode,   // the existing entry's ACTUAL mode (review 2026-07-05)
           poolSize: client.pool.count,
           poolIndex: client.pool.indexOf(existing.id),
           resumed: true,
@@ -911,7 +922,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
           type: 'session_info',
           sessionId: entry.id,
           projectPath: match.project,
-          mode: client.mode,
+          mode: entry.session.permissionMode,   // actual spawn mode (review 2026-07-05)
           poolSize: client.pool.count,
           poolIndex: client.pool.indexOf(entry.id),
           resumed: true,
@@ -1255,7 +1266,7 @@ function wireSessionEvents(client: WSClient, entry: PoolEntry): void {
       if (client.autoScroll) client.currentPage = scrollback.lastPage
       sendMsg(client, { type: 'output', ...scrollback.getPage(client.currentPage) })
       sendMsg(client, {
-        type: 'status', mode: client.mode, contextPct: entry.contextPct,
+        type: 'status', mode: entry.session.permissionMode, contextPct: entry.contextPct,   // actual spawn mode (review 2026-07-05)
         isProcessing: false, poolSize: client.pool.count,
         poolIndex: client.pool.indexOf(sessionId), projectName: entry.name,
       })
@@ -1273,7 +1284,12 @@ function wireSessionEvents(client: WSClient, entry: PoolEntry): void {
   })
 
   session.on('permission_request', (info: { requestId: string; rawEvent: Record<string, unknown> }) => {
-    if (client.mode === 'bypassPermissions') {
+    // Review 2026-07-05: key on the SESSION's actual spawn mode, not client.mode —
+    // a default-spawned session must not be silently auto-approved just because
+    // set_mode later flipped the client-wide intent to bypass. (A bypass-spawned
+    // session never emits permission_request at all, so this branch only ever
+    // sees non-bypass sessions — auto-approve was always the wrong arm for them.)
+    if (session.permissionMode === 'bypassPermissions') {
       session.respondToPermission(info.requestId, true)
     } else {
       entry.pendingPermissionId = info.requestId
@@ -1478,7 +1494,7 @@ function handlePrompt(client: WSClient, text: string): void {
     client.streamBuffer = ''
     sendMsg(client, {
       type: 'status',
-      mode: client.mode,
+      mode: active?.session.permissionMode ?? client.mode,   // actual spawn mode when known (review 2026-07-05)
       contextPct: client.dispatcher.contextPct(),
       isProcessing: true,
       poolSize: client.pool.count,

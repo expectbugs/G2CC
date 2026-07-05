@@ -48,6 +48,16 @@ export class ReaderWindow implements OsWindow {
   // 2026-06-30); 'options' = its submenu (Voice/Jump/Mark/Recent/Chapters).
   private level: 'menu' | 'options' | 'library' | 'chapters' | 'read' | 'confirm' | 'jump' | 'marks' = 'menu'
   private libOffset = 0
+  /** The library listing AS RENDERED — taps resolve against this snapshot, not a
+   *  fresh readdir (review 2026-07-05: a file added/removed while the page sat
+   *  on glass shifted rows and the tap opened the wrong book, whose persist()
+   *  then hijacked 'Last'). view() refreshes it every library render (the Files
+   *  this.entries pattern). */
+  private libSnap: { items: string[]; cells: LibCell[] } | null = null
+  /** Where the Jump numpad's Cancel returns (review 2026-07-05: it hardcoded
+   *  'read', so Options→Jump→Cancel forced a phantom read state when no page
+   *  was loaded — the first scroll then skipped chapter 1 entirely). */
+  private jumpRet: 'read' | 'options' = 'read'
   private cwd = ''   // current subfolder under ~/books ('' = root); navigation persists across switches
   private lastBook: { path: string } | null = null   // the root "Last" shortcut target (most-recently-read)
   private lastBookLoaded = false                      // lazy-load + invalidate guard for lastBook
@@ -222,6 +232,16 @@ export class ReaderWindow implements OsWindow {
     this.jumpBuf = ''
     this.jumpError = null
     this.markedNote = false
+    // Reset the PER-BOOK reading state BEFORE the parse await (review
+    // 2026-07-05): the previous book's chapter/page/pages/chapterTitle used to
+    // survive into a no-saved-position open — polluting history pushes,
+    // 'Bookmark Last', and the ribbon preview with cross-book coordinates (and
+    // a render during the subprocess await showed mixed state). The resume path
+    // is unaffected: openChapter overwrites all four.
+    this.chapter = 0
+    this.page = 0
+    this.pages = []
+    this.chapterTitle = ''
     const name = basename(path)
     try {
       const meta = await listChapters(path)
@@ -242,6 +262,7 @@ export class ReaderWindow implements OsWindow {
       this.ctx.log(`[reader] open ${name} failed: ${(e as Error).message}`)
       this.bookTitle = name
       this.chapters = []
+      this.chapter = 0   // a resume-path openChapter may have thrown mid-way — keep error-page coords in-book (review 2026-07-05)
       this.pages = paginateText(`ERROR opening ${name}:\n\n${(e as Error).message}`, this.pagePx, this.pageRows, this.maxBytes)
       this.page = 0
       this.chapterTitle = '(error)'
@@ -363,6 +384,14 @@ export class ReaderWindow implements OsWindow {
    *  full-bleed scroll-reading (onContentScroll) and the classic Next/Prev menu. */
   private async pageForward(): Promise<void> {
     this.markedNote = false
+    if (this.pages.length === 0) {
+      // Phantom read state — 'read' reached with no page loaded (review
+      // 2026-07-05: e.g. Jump→Cancel before any chapter was opened). Open the
+      // CURRENT chapter: advancing from nothing used to open chapter+1 and
+      // silently skip chapter 1, then persist the wrong spot.
+      if (this.chapters.length > 0) { await this.openChapter(this.chapter, 0); this.requestRender() }
+      return
+    }
     if (this.page < this.pages.length - 1) { this.page++; this.persist(); this.requestRender() }
     else if (this.chapter < this.chapters.length - 1) { await this.openChapter(this.chapter + 1, 0); this.requestRender() }
     // else: at the very end of the book — stay put (no-op).
@@ -521,8 +550,10 @@ export class ReaderWindow implements OsWindow {
     try {
       rows = this.libRows()
     } catch (e) {
+      this.libSnap = null
       return errorView('Reader · error', `cannot list ${join(BOOKS_DIR, this.cwd)}: ${(e as Error).message}`)
     }
+    this.libSnap = rows   // taps resolve against THIS render (review 2026-07-05)
     const atRoot = this.cwd === ''
     if (atRoot && !this.lastBookLoaded) { this.lastBook = await this.loadLast(); this.lastBookLoaded = true }
     const nBooks = rows.cells.filter((c) => c.t === 'book').length
@@ -566,9 +597,13 @@ export class ReaderWindow implements OsWindow {
         case 'Voice off': this.setVoice(false); return
         case 'Jump':
           if (!this.bookPath) { this.ctx.log('[reader] Jump: no book open'); this.requestRender(); return }
-          this.jumpBuf = ''; this.jumpError = null; this.level = 'jump'; this.ensurePageMap(); this.requestRender(); return
+          this.jumpBuf = ''; this.jumpError = null; this.jumpRet = 'options'; this.level = 'jump'; this.ensurePageMap(); this.requestRender(); return
         case 'Mark':
           if (!this.bookPath) { this.ctx.log('[reader] Mark: no book open'); this.requestRender(); return }
+          // No page loaded yet (book opened to the chapter list, never read):
+          // marking ch0/p0 with an empty label and dropping into a phantom read
+          // state helped nobody (review 2026-07-05) — refuse loudly instead.
+          if (!this.pages.length) { this.ctx.log('[reader] Mark: nothing read yet in this book — open a chapter first'); this.requestRender(); return }
           try { await addBookmark(this.bookPath, this.chapter, this.page, this.currentLabel()); this.markedNote = true; this.ctx.log(`[reader] bookmarked ${basename(this.bookPath)} ch${this.chapter + 1} p${this.page + 1}`) }
           catch (e) { this.ctx.log(`[reader] bookmark failed: ${(e as Error).message}`) }
           this.level = 'read'; this.requestRender(); return   // mark, then back to reading
@@ -583,7 +618,12 @@ export class ReaderWindow implements OsWindow {
       }
     }
     if (this.level === 'library') {
-      const { items, cells } = this.libRows()
+      // Resolve against the listing AS RENDERED (review 2026-07-05): a fresh
+      // readdir here let an scp'd/removed file shift rows between render and
+      // tap — opening the wrong book, whose persist() then hijacked 'Last'.
+      const snap = this.libSnap
+      if (!snap) { this.ctx.log('[os] reader: library tap with no rendered listing — resyncing'); this.requestRender(); return }
+      const { items, cells } = snap
       const { map, prevOffset, nextOffset } = browsePageItems(items, this.libOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[os] reader: library index ${index} out of range`); return }
@@ -628,7 +668,7 @@ export class ReaderWindow implements OsWindow {
       } else if (key === 'Cancel') {
         this.jumpBuf = ''
         this.jumpError = null
-        this.level = 'read'
+        this.level = this.jumpRet   // back where Jump was entered from (review 2026-07-05 — 'read' was hardcoded)
         this.requestRender()
       }
       return
@@ -701,7 +741,7 @@ export class ReaderWindow implements OsWindow {
       case 'Next': await this.pageForward(); return
       case 'Prev': await this.pageBackward(); return
       case 'Jump':
-        this.jumpBuf = ''; this.jumpError = null; this.markedNote = false; this.focus = 'content'; this.level = 'jump'
+        this.jumpBuf = ''; this.jumpError = null; this.markedNote = false; this.focus = 'content'; this.jumpRet = 'read'; this.level = 'jump'
         this.ensurePageMap()
         this.requestRender()
         return

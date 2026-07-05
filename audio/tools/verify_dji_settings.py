@@ -87,8 +87,10 @@ def load_dry_run() -> dict[str, str]:
     }
 
 
-def normalize_yes(ans: str) -> bool:
-    return ans.lower() in ('y', 'yes', 'true', '1')
+def normalize_yes(ans) -> bool:
+    # str() first (review 2026-07-05): --json mode hands us real JSON booleans,
+    # and .lower() on bool crashed with AttributeError. True -> 'true' (accepted).
+    return str(ans).strip().lower() in ('y', 'yes', 'true', '1')
 
 
 def verify(answers: dict[str, str]) -> list[str]:

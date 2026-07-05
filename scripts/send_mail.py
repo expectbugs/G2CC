@@ -47,8 +47,8 @@ def plain_body(msg):
     if part is not None:
         try:
             return part.get_content()
-        except Exception:
-            pass
+        except Exception as e:
+            sys.stderr.write(f"send_mail: plain part undecodable ({e}); falling back\n")
     part = msg.get_body(preferencelist=("html",))
     if part is not None:
         try:
@@ -56,8 +56,18 @@ def plain_body(msg):
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             from read_maildir import html_to_text
             return html_to_text(part.get_content())
-        except Exception:
-            return ""
+        except Exception as e:
+            sys.stderr.write(f"send_mail: html part undecodable ({e}); trying lenient decode\n")
+    # Last resort (review 2026-07-05: silent '' dropped the quoted original from
+    # a reply with zero log) — lenient latin-1 payload decode keeps the words.
+    try:
+        p = msg.get_body(preferencelist=("plain", "html"))
+        if p is not None:
+            payload = p.get_payload(decode=True)
+            if payload:
+                return payload.decode("latin-1", "replace")
+    except Exception as e:
+        sys.stderr.write(f"send_mail: lenient body decode failed ({e}); quoting nothing\n")
     return ""
 
 
@@ -73,16 +83,26 @@ def file_to_sent(sent_maildir, raw):
     if not sent_maildir:
         return None
     cur = os.path.join(sent_maildir, "cur")
+    tmp = os.path.join(sent_maildir, "tmp")
     os.makedirs(cur, exist_ok=True)
+    os.makedirs(tmp, exist_ok=True)
     # uniqueness: a counter avoids a same-second collision
     i = 0
     while True:
-        path = os.path.join(cur, maildir_name(f"{int(time.time() * 1000) % 100000}_{i}"))
+        name = maildir_name(f"{int(time.time() * 1000) % 100000}_{i}")
+        path = os.path.join(cur, name)
         if not os.path.exists(path):
             break
         i += 1
-    with open(path, "wb") as fh:
+    # Maildir delivery discipline (review 2026-07-05): write to tmp/ then rename
+    # into cur/ — a concurrent mbsync scanning cur/ must never see a half-written
+    # file (same filesystem, atomic).
+    tmp_path = os.path.join(tmp, name)
+    with open(tmp_path, "wb") as fh:
         fh.write(raw)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.rename(tmp_path, path)
     return path
 
 

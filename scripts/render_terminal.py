@@ -29,6 +29,14 @@ def main():
     longest = max((len(ln) for ln in lines), default=1)
     cols = min(max(longest, int(req.get("cols", 80))), 220)
     rows = min(max(len(lines), int(req.get("rows", 22))), 48)
+    # Physical caps stay (below ~2 px/char the grid is unreadable), but a clip
+    # must be LOUD and keep the LIVE edge (review 2026-07-05: >48 rows silently
+    # dropped the BOTTOM — the newest output — and >220 cols the right edge).
+    if len(lines) > rows:
+        sys.stderr.write(f"render_terminal: pane {len(lines)} rows > {rows} — keeping the LAST {rows} (live edge)\n")
+        lines = lines[-rows:]
+    if longest > cols:
+        sys.stderr.write(f"render_terminal: pane {longest} cols > {cols} — right edge clipped\n")
 
     cw = w / cols
     ch = h / rows
@@ -39,7 +47,7 @@ def main():
     font = ImageFont.truetype(FONT, max(8, int(ch)))
     g15 = 15 * 17
 
-    for r, line in enumerate(lines[:rows]):
+    for r, line in enumerate(lines):
         y = int(round(r * ch))
         for c, glyph in enumerate(line[:cols]):
             if glyph == " " or not glyph.strip():

@@ -35,17 +35,51 @@ export async function moveToTrash(src: string, now: number): Promise<string> {
   return dst
 }
 
+/** A `<digits>-` name prefix counts as a deposit stamp only when it is a
+ *  plausible epoch-ms (review 2026-07-05: a hand-dropped '2024-report.pdf'
+ *  parsed as epoch 2024 → age ≈ forever → purged on the FIRST sweep). Bounds:
+ *  2001-09-09 (1e12, the first 13-digit ms) … a day past `now`. */
+function depositStampMs(name: string, now: number): number | null {
+  const m = /^(\d+)-/.exec(name)
+  if (!m) return null
+  const ms = Number(m[1])
+  return ms >= 1e12 && ms <= now + DAY_MS ? ms : null
+}
+
 /** Purge trash entries older than the TTL. Loud per-entry; returns the count
  *  removed. A missing trash dir is fine (nothing deleted yet). */
 export async function purgeOldTrash(log: (m: string) => void, now: number): Promise<number> {
   let entries: string[]
-  try { entries = await readdir(TRASH_DIR) } catch { return 0 }
+  try {
+    entries = await readdir(TRASH_DIR)
+  } catch (e) {
+    // Only a missing dir is the sanctioned quiet case (nothing trashed yet).
+    // Any other readdir failure means the purge has silently stopped working —
+    // say so (review 2026-07-05; it used to swallow EACCES/EIO the same way).
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      log(`[trash] purge readdir FAILED (purge is NOT running): ${(e as Error).message}`)
+    }
+    return 0
+  }
   let removed = 0
   for (const name of entries) {
-    const m = /^(\d+)-/.exec(name)
+    const stamp = depositStampMs(name, now)
     let age: number
-    if (m) age = now - Number(m[1])
-    else { try { age = now - (await stat(join(TRASH_DIR, name))).mtimeMs } catch { continue } }  // hand-dropped file: use mtime
+    if (stamp !== null) age = now - stamp
+    else {
+      // Hand-dropped file (terminal `mv` into the trash): rename PRESERVES
+      // mtime, so a file last edited >30 days ago looked instantly expired and
+      // was purged within a day (review 2026-07-05, data loss). Linux rename
+      // updates the inode ctime — max(mtime, ctime) ≈ the deposit time, and a
+      // later metadata change only EXTENDS trash life, never shortens it.
+      try {
+        const st = await stat(join(TRASH_DIR, name))
+        age = now - Math.max(st.mtimeMs, st.ctimeMs)
+      } catch (e) {
+        log(`[trash] purge stat ${name} failed (skipped this sweep): ${(e as Error).message}`)
+        continue
+      }
+    }
     if (age > TRASH_TTL_MS) {
       try { await rm(join(TRASH_DIR, name), { recursive: true, force: true }); removed++; log(`[trash] purged ${name} (older than 30 days)`) }
       catch (e) { log(`[trash] purge ${name} FAILED: ${(e as Error).message}`) }

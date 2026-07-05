@@ -141,6 +141,16 @@ export class SearchWindow implements OsWindow {
     this.listening = false
     this.transcribing = false
     this.pendingQuery = null
+    // Abandoning an IN-FLIGHT search must not masquerade as a completed empty
+    // one (review 2026-07-05): level stayed 'results' with zero rows, so the
+    // next view asserted 'No results for "q"' — a fabricated claim (the late
+    // real result is seq-discarded and never corrects it). Reset to the idle
+    // query view, mirroring onBack's results-abandon; clear the query too so
+    // the ribbon preview drops the stale '"q" · 0 hits' residue.
+    if (this.searching) {
+      this.level = 'query'
+      this.query = ''
+    }
     this.searching = false
   }
 

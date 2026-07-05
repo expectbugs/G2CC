@@ -370,6 +370,12 @@ export class FilesWindow implements OsWindow {
 
   private upOne(): void {
     this.navSeq++
+    // Menu 'Up' must hand focus back to the rows (review 2026-07-05 — the
+    // DE_DESIGN contract; every sibling menu transition does this). Without it
+    // the parent's rows rendered captureless-dead and the recovery double-tap
+    // ejected to locations (or clean out of the window at a location root).
+    // The '..'-row caller is already on content focus — a no-op there.
+    this.focus = 'content'
     if (this.stack.length > 1) {
       this.stack.pop()
       this.offset = 0
@@ -619,6 +625,7 @@ export class FilesWindow implements OsWindow {
   private showStats(target: 'file' | 'dir'): void {
     this.statsFrom = target === 'file' ? 'actions' : 'tree'
     if (target === 'file' && this.actionPath) {
+      this.navSeq++   // supersede an in-flight image render (review 2026-07-05; the dir branch already bumps)
       try {
         const st = statSync(this.actionPath)
         this.pages = paginateText([
@@ -670,6 +677,7 @@ export class FilesWindow implements OsWindow {
   private async doDelete(): Promise<void> {
     const path = this.actionPath
     if (!path || this.opBusy) { this.ctx.log('[os] files: delete with no target / op in flight — ignored (LOUD)'); return }
+    this.navSeq++   // an op's result screen must not be repainted by a stale render (review 2026-07-05)
     this.opBusy = true
     const wasCwd = this.actionIsCwd
     try {
@@ -705,6 +713,7 @@ export class FilesWindow implements OsWindow {
     const src = this.actionPath
     const verb = this.actionVerb
     if (!src || !verb || this.opBusy) { this.ctx.log('[os] files: transfer with no source/verb / op in flight — ignored (LOUD)'); return }
+    this.navSeq++   // an op's result screen must not be repainted by a stale render (review 2026-07-05)
     this.opBusy = true
     const wasCwd = this.actionIsCwd
     const dst = join(destDir, this.actionName)
@@ -716,27 +725,41 @@ export class FilesWindow implements OsWindow {
           throw new Error('cannot move/copy a folder into itself or one of its subfolders')
         }
       }
-      if (existsSync(dst)) throw new Error(`${dst} already exists (no overwrites — pick another folder or rename first)`)
-      if (verb === 'copy') {
-        if (this.actionIsDir) await cp(src, dst, { recursive: true, errorOnExist: true, force: false })
-        else await copyFile(src, dst, fsConstants.COPYFILE_EXCL)
-      } else {
-        try {
-          await rename(src, dst)
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
-          // Cross-filesystem move: copy then remove the source (dirs recursively).
-          if (this.actionIsDir) { await cp(src, dst, { recursive: true, errorOnExist: true, force: false }); await rm(src, { recursive: true }) }
-          else { await copyFile(src, dst, fsConstants.COPYFILE_EXCL); await unlink(src) }
-        }
-      }
-      this.ctx.log(`[os] files: ${verb.toUpperCase()} ${this.actionIsDir ? 'dir ' : ''}${src} → ${dst}`)
-      this.pages = [`${verb === 'move' ? 'Moved' : 'Copied'} ${this.actionName}\n→ ${destDir}`]
-      if (verb === 'move') {
-        // Moved the dir we were in → follow it to its new home (the old parents
-        // still exist, so Up keeps working); a file/child move just clears the target.
-        if (wasCwd && this.stack.length > 0) this.stack[this.stack.length - 1] = dst
+      if (verb === 'move' && resolvePath(destDir) === resolvePath(TRASH_DIR)) {
+        // Moving INTO the Trash location IS a trash deposit (review 2026-07-05):
+        // route through moveToTrash so the entry gets the canonical `<ms>-`
+        // stamp. A plain rename PRESERVED the source's old mtime, so the purge
+        // treated any >30-day-old file as instantly expired and rm'd it within
+        // a day — while the UI promised "restorable for 30 days" (data loss).
+        // The stamp also de-collides, so the no-overwrite check is moot here.
+        const dest = await moveToTrash(src, Date.now())
+        this.ctx.log(`[os] files: MOVE ${this.actionIsDir ? 'dir ' : ''}${src} → ${dest} (trash deposit, stamped)`)
+        this.pages = [`Moved ${this.actionName} to Trash.\n(restorable for 30 days)`]
+        if (wasCwd && this.stack.length > 0) this.stack[this.stack.length - 1] = dest
         this.actionPath = wasCwd ? this.cwd() : null
+      } else {
+        if (existsSync(dst)) throw new Error(`${dst} already exists (no overwrites — pick another folder or rename first)`)
+        if (verb === 'copy') {
+          if (this.actionIsDir) await cp(src, dst, { recursive: true, errorOnExist: true, force: false })
+          else await copyFile(src, dst, fsConstants.COPYFILE_EXCL)
+        } else {
+          try {
+            await rename(src, dst)
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
+            // Cross-filesystem move: copy then remove the source (dirs recursively).
+            if (this.actionIsDir) { await cp(src, dst, { recursive: true, errorOnExist: true, force: false }); await rm(src, { recursive: true }) }
+            else { await copyFile(src, dst, fsConstants.COPYFILE_EXCL); await unlink(src) }
+          }
+        }
+        this.ctx.log(`[os] files: ${verb.toUpperCase()} ${this.actionIsDir ? 'dir ' : ''}${src} → ${dst}`)
+        this.pages = [`${verb === 'move' ? 'Moved' : 'Copied'} ${this.actionName}\n→ ${destDir}`]
+        if (verb === 'move') {
+          // Moved the dir we were in → follow it to its new home (the old parents
+          // still exist, so Up keeps working); a file/child move just clears the target.
+          if (wasCwd && this.stack.length > 0) this.stack[this.stack.length - 1] = dst
+          this.actionPath = wasCwd ? this.cwd() : null
+        }
       }
     } catch (e) {
       this.ctx.log(`[os] files: ${verb} ${src} → ${dst} FAILED: ${(e as Error).message}`)
@@ -863,6 +886,7 @@ export class FilesWindow implements OsWindow {
       switch (label) {
         case 'Open': await this.openFile(path, this.actionName); return
         case 'Move': case 'Copy': {
+          this.navSeq++   // supersede an in-flight image render — it must not hijack the picker (review 2026-07-05)
           this.actionVerb = label === 'Move' ? 'move' : 'copy'
           this.destStack = []
           this.destOffset = 0
@@ -872,7 +896,7 @@ export class FilesWindow implements OsWindow {
           return
         }
         case 'Rename': this.startNameEntry('rename', 'actions'); return
-        case 'Del': { this.level = 'confirmDel'; this.requestRender(); return }
+        case 'Del': { this.navSeq++; this.level = 'confirmDel'; this.requestRender(); return }   // ditto — never repaint over a delete confirm
         case 'Stats': { this.showStats('file'); return }
         default: this.ctx.log(`[os] files actions: unknown menu label '${label}' — ignored (LOUD)`)
       }
@@ -933,6 +957,7 @@ export class FilesWindow implements OsWindow {
     }
     if (this.level === 'pickAction') {
       if (label === 'Open') {
+        this.navSeq++   // supersede an in-flight image render (review 2026-07-05)
         const t = this.pickTarget
         if (t) { this.destStack.push(t); this.destOffset = 0 }
         this.pickTarget = null

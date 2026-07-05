@@ -52,7 +52,10 @@ def normalize_series(spec):
         ys = s.get("y")
         if not isinstance(ys, list) or not ys:
             raise ValueError("every series needs a non-empty numeric 'y' list")
-        s["y"] = [float(v) for v in ys]
+        # None -> NaN (review 2026-07-05, coupled with stats.ts series()): a
+        # sampler gap must render AS a gap — matplotlib breaks the line at NaN —
+        # never as a fabricated 0 dip. Additive: all-numeric specs unchanged.
+        s["y"] = [float(v) if v is not None else float("nan") for v in ys]
     return series
 
 

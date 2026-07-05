@@ -6,6 +6,7 @@
 // inbox is read/mutated and no mail is sent) — Compose/Reply/Forward/Del/Unread
 // flows + image pages. NEVER touches Adam's real mail or sends email.
 import './_env.mjs'
+import { getPool } from '../dist/store.js'
 import { strict as assert } from 'node:assert'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -169,5 +170,6 @@ try {
   }
 } finally {
   rmSync(sb, { recursive: true, force: true })
+  await getPool().end()   // review 2026-07-05: pool leak = ~10 s idle tail per phase
 }
 console.log('phase8b-mail: ALL OK')

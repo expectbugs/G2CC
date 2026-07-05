@@ -450,6 +450,15 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string,
  *  (the centre cell). The top bar is the scroll=true CAPTURE iff the menu holds focus
  *  (any reading mode, or a browse window flipped to its menu); else the content list
  *  captures and the bar is a passive title (a different id — see FULLBLEED_MENU_ID). */
+/** §3.4 scroll-reading predicate — the SINGLE source of truth shared by compose
+ *  (which region captures on glass) and the WM's input routing
+ *  (fullBleedMenuCaptures / onScroll). Review 2026-07-05: the WM hand-mirrored
+ *  this without the mode gate, so the two halves of the contract could drift —
+ *  one shared predicate makes that impossible. */
+export function isScrollRead(view: WinView): boolean {
+  return view.scrollContent === true && view.mode === 'text'
+}
+
 export function composeFullBleedScene(
   view: WinView, battery: string, statusLine: string | null, menu: string[], menuCursor: number,
 ): WireScene {
@@ -457,7 +466,7 @@ export function composeFullBleedScene(
   const barW = DE_TITLE_W - DE_BATT_W
   // §3.4 scroll-reading (Reader): the CONTENT captures (a scroll=true antenna), the
   // menu is empty, the top bar is a passive title, no status bar (full reading height).
-  const scrollRead = view.scrollContent === true && view.mode === 'text'
+  const scrollRead = isScrollRead(view)
   const menuCaptures = !scrollRead && (view.mode !== 'browse' || (view.menuMode ?? 'passive') === 'capture')
   const hasStatus = !scrollRead && statusLine !== null
   const contentH = hasStatus ? DE_CONTENT_H : DE_CONTENT_H_FULL

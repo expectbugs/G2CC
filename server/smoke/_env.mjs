@@ -56,6 +56,15 @@ if (process.env.G2CC_PG_DATABASE === SMOKE_DB) {
       process.exit(1)
     }
   }
+} else if (process.env.G2CC_SMOKE_ALLOW_DB === process.env.G2CC_PG_DATABASE) {
+  // Double opt-in: name the exact db in G2CC_SMOKE_ALLOW_DB to accept the risk.
+  console.error(`[smoke] WARNING: running against db '${process.env.G2CC_PG_DATABASE}' (explicit double opt-in)`)
 } else {
-  console.error(`[smoke] WARNING: running against db '${process.env.G2CC_PG_DATABASE}' (explicit override)`)
+  // HARD-FAIL (review 2026-07-05): several phases run unscoped DELETEs
+  // (reader_positions, notifications, deliveries, window_usage…) — a stray
+  // G2CC_PG_DATABASE=g2cc in the environment would have destroyed production
+  // rows behind a mere warning. Refuse unless the override names itself twice.
+  console.error(`[smoke] FATAL: refusing to run against non-smoke db '${process.env.G2CC_PG_DATABASE}'.`)
+  console.error(`[smoke] Smoke phases issue unscoped DELETEs. To really do this: G2CC_SMOKE_ALLOW_DB='${process.env.G2CC_PG_DATABASE}' as well.`)
+  process.exit(1)
 }

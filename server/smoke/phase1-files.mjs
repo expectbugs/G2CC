@@ -3,6 +3,7 @@
 // exactly one event-capture region, frame estimate under the wall budget,
 // and blankScene()'s load-bearing wake antenna untouched (B2).
 import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
+import { getPool } from '../dist/store.js'
 import { strict as assert } from 'node:assert'
 import { composeScene, blankScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
 
@@ -300,5 +301,6 @@ if (process.argv.includes('--emit-scene')) {
   }
 }
 
+await getPool().end()   // review 2026-07-05: a leaked pool idles ~10 s before the process can exit
 console.log('phase1-files: ALL OK')
 }

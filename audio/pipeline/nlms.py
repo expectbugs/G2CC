@@ -59,6 +59,13 @@ def nlms_clean(
         raise ValueError(f'NLMS expects np.ndarray, got {type(stereo).__name__}')
     if stereo.ndim != 2 or stereo.shape[1] != 2:
         raise ValueError(f'NLMS expects (N, 2) stereo input, got shape {stereo.shape}')
+    if stereo.dtype.kind != 'f':
+        # F2 guard (review 2026-07-05, same class as notch_filter/spectral_subtract):
+        # a bare float32 cast of int PCM leaves +/-32768-scale values — the NLMS
+        # energy math then silently misbehaves. Normalize at the boundary instead.
+        raise ValueError(
+            f'nlms_clean expects float dtype, got {stereo.dtype}. '
+            'Convert int PCM with stereo.astype(np.float32) / 32768.0 first.')
     if stereo.dtype != np.float32:
         stereo = stereo.astype(np.float32, copy=False)
     if mu <= 0 or mu >= 1:

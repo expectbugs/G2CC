@@ -101,8 +101,8 @@ try {
   // Clean up BOTH tables — the out-for-delivery flashes (section 3 + 3b) persist
   // notifications in the shared g2cc_smoke DB; an unseen one would title-flash on
   // EVERY other smoke's windows and break their title assertions (caught 2026-06-18).
-  try { await query(`DELETE FROM deliveries`) } catch {}
-  try { await query(`DELETE FROM notifications WHERE source = 'deliveries'`) } catch {}
+  try { await query(`DELETE FROM deliveries`) } catch (e) { console.error(`  cleanup failed: ${e.message}`) }
+  try { await query(`DELETE FROM notifications WHERE source = 'deliveries'`) } catch (e) { console.error(`  cleanup failed: ${e.message}`) }
   await getPool().end()
 }
 console.log('phase13-deliveries: ALL OK')

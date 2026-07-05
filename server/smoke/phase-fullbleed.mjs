@@ -8,7 +8,7 @@ import './_env.mjs'
 import { strict as assert } from 'node:assert'
 import { WindowManager } from '../dist/window-manager.js'
 import { composeFullBleedScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES, paginateText, FB_TEXT_PAGE_PX, FB_READ_ROW_CAP, FB_READ_MAX_BYTES } from '../dist/os-compose.js'
-import { query } from '../dist/store.js'
+import { query, getPool } from '../dist/store.js'
 
 const SCREEN_W = 576, MENU_COL_X = 96   // DE constants (the classic content pane starts at x=96)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -101,7 +101,7 @@ const settle = async (last, pred, what, ms = 12000) => {
 
 // =========================================================== 2. WM ribbon + fullBleed
 {
-  await query('DELETE FROM window_usage').catch(() => {})
+  await query('DELETE FROM window_usage').catch((e) => console.error(`  cleanup failed: ${e.message}`))
   const { wm, last } = mkWm({ rootNav: 'ribbon', recentsDepth: 4, fullBleed: true })
   try {
     // a BROWSE window (Mail): full-width content, no left-menu list, battery, top bar.
@@ -129,7 +129,7 @@ const settle = async (last, pred, what, ms = 12000) => {
 
 // =========================================================== 3. flag gates it (classic ribbon)
 {
-  await query('DELETE FROM window_usage').catch(() => {})
+  await query('DELETE FROM window_usage').catch((e) => console.error(`  cleanup failed: ${e.message}`))
   const { wm, last } = mkWm({ rootNav: 'ribbon', recentsDepth: 4 })   // fullBleed omitted → off
   try {
     wm.switchTo('mail')
@@ -155,4 +155,5 @@ const settle = async (last, pred, what, ms = 12000) => {
   } finally { wm.dispose?.() }
 }
 
+await getPool().end()   // review 2026-07-05: pool leak = ~10 s idle tail per phase
 console.error('\nphase-fullbleed: ALL OK')

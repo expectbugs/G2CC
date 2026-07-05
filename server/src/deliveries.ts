@@ -57,11 +57,22 @@ export interface Delivery {
 const DIGEST = /\b(daily digest|informed delivery|your daily|mailbox preview)\b/i
 const MARKETING = /\b(prime day|gift card|deal of|% off|\d+% off|coupon|wish list|sale ends|save now|limited time)\b/i
 // Evaluated IN ORDER, first match wins. FAILURE/DELAY is FIRST so "could not be
-// delivered" is never read as 'delivered' (review 2026-06-13).
+// delivered" is never read as 'delivered' (review 2026-06-13). Review 2026-07-05:
+// the old bare \bdelivered\b catch-all flipped FUTURE-tense pre-alerts ("will be
+// delivered tomorrow") and NEGATED failure mail ("was not delivered") to
+// delivered=true — the exact inversion the failure-first ordering exists to
+// prevent. Now: negated forms extend 'delayed'; future/scheduled forms get their
+// own 'arriving soon' rule BEFORE 'delivered'; 'delivered' keeps only anchored
+// past-tense forms + a subject-leading "Delivered…" (text starts with the subject).
 const STATUS_RULES: [RegExp, string, boolean][] = [
-  [/\b(could ?n'?t|can ?not|can'?t|unable to|failed to|was not|wasn'?t) be delivered\b|\bundeliverable\b|\bdelivery (failed|exception|attempt(ed)?)\b|\bdelay(ed|s)?\b|\bexception\b/i, 'delayed', false],
+  // `not be delivered` covers the SPELLED-OUT negations ("could/can/will not be
+  // delivered") — the n'?t forms only match contractions (review 2026-07-05:
+  // empirically caught; without it a bare "could not be delivered" subject fell
+  // through to NO rule at all once the delivered catch-all was removed).
+  [/\b(could ?n'?t|can ?not|can'?t|unable to|failed to|was not|wasn'?t) be delivered\b|\bnot be delivered\b|\b(has|have)n'?t been delivered\b|\b(was|has|have) not (been )?delivered\b|\bnot delivered\b|\bundeliverable\b|\bdelivery (failed|exception|attempt(ed)?)\b|\bdelay(ed|s)?\b|\bexception\b/i, 'delayed', false],
   [/\bout for delivery\b/i, 'out for delivery', false],
-  [/\b(was|been|is|successfully) delivered\b|\bdelivered\b/i, 'delivered', true],
+  [/\b(will|to) be delivered\b|\bscheduled (for delivery|to be delivered)\b/i, 'arriving soon', false],
+  [/\b(was|been|is|got|successfully) delivered\b|^delivered\b/i, 'delivered', true],
   [/\barriv(ing|es)\b.*\b(today|tomorrow|soon)\b|\bexpected (today|tomorrow)\b/i, 'arriving soon', false],
   [/\b(has|have|was) shipped\b|\bon (its|the) way\b|\bin transit\b|\bshipment\b/i, 'in transit', false],
 ]
@@ -88,6 +99,14 @@ export function carrierFromAddr(from: string): string | null {
   if (domain.includes('fedex')) return 'FedEx'
   if (isDomain('dhl.com') || domain.includes('dhl.')) return 'DHL'
   if (domain.includes('amazon')) return 'Amazon'
+  // Aggregators read_gmail.py deliberately queries (review 2026-07-05: their
+  // mail was fetched then silently dropped here — a real Shop.app "out for
+  // delivery" produced no row, no flash, no warn). No TRACKING_RULES shapes for
+  // these, so their updates key by msg-id — multiple loud rows beat a silent
+  // miss. oncehub.com stays unmapped on purpose (a scheduling service, not a
+  // carrier) — the syncFromMessages unmapped-sender warn keeps it visible.
+  if (isDomain('shop.app')) return 'Shop'
+  if (isDomain('narvar.com')) return 'Narvar'
   return null
 }
 
@@ -170,7 +189,17 @@ export async function syncFromMessages(msgs: GmailMsg[]): Promise<{ upserted: nu
   let unparsed = 0
   for (const m of msgs) {
     const d = parseDelivery(m)
-    if (!d) continue
+    if (!d) {
+      // A fetched message whose CARRIER doesn't resolve is a silent miss of the
+      // 'never a silent miss' rule (review 2026-07-05): read_gmail's query only
+      // returns senders we asked for, so an unmapped domain here means the
+      // query list and carrierFromAddr have drifted — say so. (Marketing/digest
+      // skips resolve a carrier first, so they stay quiet as intended.)
+      if (!carrierFromAddr(m.from)) {
+        console.warn(`[deliveries] fetched mail from UNMAPPED sender "${m.from}" — carrierFromAddr has no rule for it; skipped: "${m.subject.slice(0, 70)}"`)
+      }
+      continue
+    }
     if (d.status === '(unparsed)') {
       unparsed++
       console.warn(`[deliveries] UNPARSED ${d.carrier} shipment (no tracking/status): "${m.subject.slice(0, 70)}" — see log`)
@@ -238,10 +267,16 @@ export interface DeliveryRow {
 
 /** NEWEST-FIRST by last update (Adam 2026-06-13: a just-delivered package should
  *  sit ABOVE an older "on the way" one — not grouped by delivered-state). */
+/** limit=0 → ALL rows (review 2026-07-05: the window fetched a silent 42-row
+ *  cap, so older tracked deliveries were unreachable and the title reported the
+ *  capped count as the total; browsePageItems pages the frames regardless, so
+ *  the full set costs nothing on the wire). */
 export async function listDeliveries(limit = 40): Promise<DeliveryRow[]> {
-  const r = await query<{ dkey: string; carrier: string; tracking: string | null; status: string; subject: string | null; last_update: Date; delivered: boolean }>(
-    `SELECT dkey, carrier, tracking, status, subject, last_update, delivered
-     FROM deliveries ORDER BY last_update DESC LIMIT $1`, [limit])
+  const base = `SELECT dkey, carrier, tracking, status, subject, last_update, delivered
+     FROM deliveries ORDER BY last_update DESC`
+  const r = limit > 0
+    ? await query<{ dkey: string; carrier: string; tracking: string | null; status: string; subject: string | null; last_update: Date; delivered: boolean }>(base + ' LIMIT $1', [limit])
+    : await query<{ dkey: string; carrier: string; tracking: string | null; status: string; subject: string | null; last_update: Date; delivered: boolean }>(base, [])
   return r.rows.map((x) => ({
     dkey: x.dkey, carrier: x.carrier, tracking: x.tracking, status: x.status,
     subject: x.subject, lastUpdate: x.last_update, delivered: x.delivered,

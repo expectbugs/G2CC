@@ -120,13 +120,29 @@ function sampleCpuTemp(): number | null {
 // ---- GPU (nvidia-smi, async) -----------------------------------------------
 
 let gpuFailedOnce = false
+/** Single-flight guard (review 2026-07-05): a WEDGED nvidia-smi (driver Xid /
+ *  ioctl hang — it never exits, so maxBuffer never trips) used to leave every
+ *  10 s tick spawning ANOTHER stuck child (+3 pipe fds each) until the server
+ *  hit EMFILE hours later and unrelated subsystems (WS accepts, CC spawns)
+ *  failed. At most ONE nvidia-smi is ever in flight; while it's stuck the GPU
+ *  fields honestly sample null (a chart gap, not a fabricated 0) and CPU/RAM
+ *  sampling continues. NOT a timeout — the stuck child is left to the driver. */
+let gpuInFlight = false
+let gpuSkipLogged = false
 
 function sampleGpu(): Promise<{ gpuPct: number; gpuMemMb: number; gpuMemTotalMb: number; gpuTempC: number } | null> {
+  if (gpuInFlight) {
+    if (!gpuSkipLogged) { gpuSkipLogged = true; console.error('[stats] previous nvidia-smi still running — GPU sampling skipped until it settles (driver stuck?)') }
+    return Promise.resolve(null)
+  }
+  gpuInFlight = true
   return new Promise((resolve) => {
     execFile('nvidia-smi',
       ['--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu', '--format=csv,noheader,nounits'],
       { maxBuffer: 1024 * 1024 },
       (err, stdout) => {
+        gpuInFlight = false
+        if (gpuSkipLogged) { gpuSkipLogged = false; console.error('[stats] stuck nvidia-smi settled — GPU sampling resumed') }
         if (err) {
           if (!gpuFailedOnce) { gpuFailedOnce = true; console.error(`[stats] nvidia-smi failed (GPU stats unavailable): ${err.message}`) }
           resolve(null); return
@@ -228,9 +244,12 @@ function xMinutesAgo(ss: readonly StatSample[]): number[] {
   return ss.map((s) => Math.round((s.ts - now) / 6_000) / 10)
 }
 
-function series(ss: readonly StatSample[], pick: (s: StatSample) => number | null): number[] {
-  // Charts need numbers; gaps render as 0 with a log (rare — sampler keeps going).
-  return ss.map((s) => pick(s) ?? 0)
+function series(ss: readonly StatSample[], pick: (s: StatSample) => number | null): (number | null)[] {
+  // Gaps stay NULL (review 2026-07-05): they used to be fabricated as literal 0
+  // data points — an nvidia-smi outage drew the GPU line plunging to 0 °C / 0 %,
+  // which on a 1-2 s glance reads as "GPU died". render_chart.py maps null →
+  // NaN and matplotlib breaks the line there: a gap renders AS a gap.
+  return ss.map((s) => pick(s))
 }
 
 export interface ChartSpecPage { title: string; spec: Record<string, unknown> }

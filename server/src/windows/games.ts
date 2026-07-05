@@ -10,7 +10,7 @@ import { browsePageItems } from './_browse.js'
 import { paginateText, fwTextWidth, BJ_DEALER_RECT, BJ_PLAYER_RECT } from '../os-compose.js'
 import type { RenderedImage, RenderedTile } from '../os-content.js'
 import {
-  rpgRun, chessMove, chessPreview, renderBoard, renderHand, saveBlackjack, loadBlackjack,
+  rpgRun, rpgPwd, chessMove, chessPreview, renderBoard, renderHand, saveBlackjack, loadBlackjack,
   DUNGEON_ROOT, type ChessState, type HandCard,
 } from '../games.js'
 import { Blackjack, isBust, type Phase as BjPhase } from '../blackjack.js'
@@ -594,6 +594,13 @@ function bjMoney(n: number): string {
 class BlackjackController {
   private readonly game = new Blackjack()
   private loaded = false
+  /** True once loadBlackjack RESOLVED (incl. the fresh-install null row).
+   *  persist() is gated on it (review 2026-07-05): the WM is rebuilt per WS
+   *  connection and dispose() persists unconditionally, so an untouched
+   *  controller — or one whose load failed/hadn't landed — used to upsert its
+   *  constructor-fresh $1000 game over the REAL save on every disconnect.
+   *  Mirrors the paperclips C-F1 clobber guard. */
+  private loadOk = false
   // Per-tile render cache (chess prefetchBoard pattern, ×2). The bmp holds the
   // LAST successful render so a re-render swaps IN PLACE — it never nulls back
   // to a text placeholder mid-hand (that would flip the layout). `key` is the
@@ -615,13 +622,28 @@ class BlackjackController {
     if (!this.loaded) {
       this.loaded = true
       void loadBlackjack().then((s) => {
+        this.loadOk = true   // BEFORE the null-row return — a fresh install must be able to save
         if (!s) return
+        // A hand already started while the SELECT was in flight (fast Deal tap):
+        // keeping the LIVE hand beats clobbering it on glass — the restored
+        // save would swap cards/bet/bankroll mid-play (review 2026-07-05).
+        if (this.game.player().length > 0) {
+          this.ctx.log('[os] blackjack: save arrived after a hand started — keeping the live hand (save skipped)')
+          return
+        }
         this.game.restore(s)
         this.dealerKey = null
         this.playerKey = null
         this.syncTiles()
         this.requestRender()
-      }).catch((e: unknown) => this.ctx.log(`[os] blackjack: load failed: ${e instanceof Error ? e.message : String(e)}`))
+      }).catch((e: unknown) => {
+        // Retryable: loaded=false → the next enter()/Reload re-attempts the
+        // load; loadOk stays false so persist() can NOT overwrite the real
+        // save with this fresh $1000 game (review 2026-07-05).
+        this.loaded = false
+        this.ctx.log(`[os] blackjack: load FAILED — save NOT loaded; persisting is disabled until a load succeeds (re-enter retries): ${e instanceof Error ? e.message : String(e)}`)
+        this.requestRender()
+      })
     }
     this.syncTiles()
     this.requestRender()
@@ -631,6 +653,15 @@ class BlackjackController {
   dispose(): void { this.persist() }
 
   private persist(): void {
+    if (!this.loadOk) {
+      // Never upsert a game whose save never loaded (fresh construct / failed
+      // or in-flight load) — that silently wiped the real bankroll on every
+      // WS disconnect (review 2026-07-05). The untouched-controller dispose
+      // (Blackjack never opened this connection) skips silently — there is
+      // nothing to report; a failed/in-flight load after a real enter() is loud.
+      if (this.loaded) this.ctx.log('[os] blackjack: persist skipped — the save never loaded this connection (protects the stored game)')
+      return
+    }
     void saveBlackjack(this.game.snapshot()).catch((e: unknown) =>
       this.ctx.log(`[os] blackjack: save failed: ${e instanceof Error ? e.message : String(e)}`))
   }
@@ -958,6 +989,21 @@ export class GamesWindow implements OsWindow {
 
   // ------------------------------------------------ rpg helpers
 
+  /** After a cd RAN, adopt the hero's REAL location from `rpg-cli -q pwd`
+   *  (review 2026-07-05): a fatal battle en route respawns the hero at home
+   *  while the window committed the target dir, and a WON mid-trek battle
+   *  stops the walk early with exit 0 — the intended dir is a guess either
+   *  way. Falls back to the intended dir when pwd fails (rpgPwd logs), always
+   *  clamped inside the dungeon. */
+  private async syncCwdFromGame(intended: string): Promise<void> {
+    const real = await rpgPwd(this.cwd)
+    const next = real ?? intended
+    this.cwd = next === DUNGEON_ROOT || next.startsWith(DUNGEON_ROOT + '/') ? next : DUNGEON_ROOT
+    if (real && real !== intended) {
+      this.ctx.log(`[os] games: rpg cwd resynced to the hero's real location ${real} (intended ${intended} — a battle en route changed the outcome)`)
+    }
+  }
+
   /** Run one rpg-cli action. Returns true when the action actually RAN and
    *  succeeded — callers that mirror game state (the `cd` cwd update) must
    *  gate on it: the busy early-return and the error path both used to be
@@ -1276,7 +1322,7 @@ export class GamesWindow implements OsWindow {
           // location (review 2026-06-11b). Re-render so the rpg-out title
           // shows the NEW cwd.
           if (await this.rpgAction(['cd', '..'])) {
-            this.cwd = parent
+            await this.syncCwdFromGame(parent)
             this.rpgOffset = 0
             this.requestRender()
           }
@@ -1285,7 +1331,7 @@ export class GamesWindow implements OsWindow {
         default: {
           const dir = row.endsWith('/') ? row.slice(0, -1) : row
           if (await this.rpgAction(['cd', dir])) {   // battles can trigger on the way
-            this.cwd = join(this.cwd, dir)
+            await this.syncCwdFromGame(join(this.cwd, dir))
             this.rpgOffset = 0
             this.requestRender()
           }

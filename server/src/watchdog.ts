@@ -151,11 +151,27 @@ export class Watchdog extends EventEmitter {
           console.log(`[watchdog] Session ${id} was unregistered/replaced during the ${backoff}ms backoff — skipping respawn`)
           continue
         }
+        // STALE-RESUME ESCAPE (review 2026-07-05): a --resume spawn whose saved
+        // id CC no longer knows dies instantly (before system/init) with "No
+        // conversation found" — respawning with the SAME id crash-looped through
+        // all 5 backoffs, and every directory re-pick re-read the same stale id
+        // from sessions.json: a permanent loop. Precise signal first (CC said
+        // so), then the heuristic (resume-spawned + died before init). The
+        // conversation is gone either way — go FRESH, loudly.
+        const wentFresh = session.staleResume || (session.spawnedWithResume && session.ccSessionId === null)
+        if (wentFresh) {
+          console.warn(`[watchdog] Session ${id}'s --resume id is stale (${session.staleResume ? 'CC: no conversation found' : 'died before init'}) — clearing it; respawning FRESH`)
+          session.clearResumeTarget()
+        }
         // If CC had assigned a session ID, adopt it for --resume so the
         // conversation context is preserved across the respawn.
         // (4th-pass L6: spawnedWithResume now derives from session.config so
         // the HUD's "resumed" indicator stays accurate without an event wire.)
-        const priorCcId = session.ccSessionId
+        // Skipped when the stale branch fired (diff-review 2026-07-05): a session
+        // that HAD init'd (ccSessionId set) whose conversation later became
+        // unresumable would otherwise re-adopt the very id just cleared —
+        // re-entering the loop the clear exists to break.
+        const priorCcId = wentFresh ? null : session.ccSessionId
         if (priorCcId) {
           session.setResumeTarget(priorCcId)
           console.log(`[watchdog] Will --resume ${priorCcId} on respawn`)

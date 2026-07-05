@@ -75,6 +75,18 @@ def main(out_path):
     names = [r["name"] for r in regions]
     if len(set(names)) != len(names) or "clock" in names:
         problems.append(f"region name problem (dup or reserved 'clock'): {names}")
+    # Client hard-rejects these too (review 2026-07-05 — previously unmirrored):
+    for r in regions:
+        if r["id"] <= 0:
+            problems.append(f"region '{r['name']}' id {r['id']} <= 0 (client rejects)")
+        if not r["name"]:
+            problems.append(f"region id {r['id']} has an EMPTY name (client rejects)")
+        if r["name"] == "ant":
+            # NOT a client reject (diff-review 2026-07-05 — the first cut wrongly
+            # hard-failed here): SceneCodec REWRITES an 'ant' region's text to the
+            # OS version string. Legacy menu/probe scenes legitimately use it —
+            # warn that the preview text won't match glass, keep rendering.
+            print("warn: region 'ant' — SceneCodec rewrites its text to the OS version string; preview text will not match glass", file=sys.stderr)
     # Client rules previously unmirrored here (review 2026-06-11b):
     for r in regions:
         if len(r["name"].encode("utf-8")) > 16:           # G2Renderer: names ≤16 UTF-8 B

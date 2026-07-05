@@ -91,7 +91,12 @@ export async function getLyrics(
     if (resp.status === 404) {
       console.log(`[lyrics] LRCLIB 404 (no lyrics) for "${a} — ${t}" (${ds}s)`)
     } else if (!resp.ok) {
-      console.error(`[lyrics] LRCLIB HTTP ${resp.status} for "${a} — ${t}" — treating as not-found`)
+      // TRANSIENT server-side failure (5xx/429): do NOT cache (review
+      // 2026-07-05 — it was written as a durable negative, so one LRCLIB
+      // outage marked the track lyric-less FOREVER). Mirrors the fetch-failure
+      // catch; only 200 and 404 are durable facts worth caching.
+      console.error(`[lyrics] LRCLIB HTTP ${resp.status} for "${a} — ${t}" — transient, NOT cached (retry next open)`)
+      return { found: false, synced: null, plain: null }
     } else {
       const j = await resp.json() as { syncedLyrics?: string | null; plainLyrics?: string | null; instrumental?: boolean }
       const synced = j.syncedLyrics?.trim() || null

@@ -90,7 +90,25 @@ def _transcribe_job(engine, line: str) -> str:
     # Decode → mono → NR → transcribe the cleaned array.
     data, sr = sf.read(wav, dtype="float32")
     if data.ndim > 1:
-        data = data.mean(axis=1).astype(np.float32, copy=False)
+        if not adaptive and data.shape[1] == 2:
+            # PROFILE path = the single-mic pipeline: dji_pipeline_cli's R6-HIGH
+            # channel policy applies here too (review 2026-07-05 — a plain mean
+            # silently mixed a TX1 noise reference INTO the speech when the DJI
+            # was left in Stereo/Dual-File mode). Same-signal channels → ch0;
+            # differing channels → LOUD refuse (operator switches DJI to Mono).
+            ch0, ch1 = data[:, 0], data[:, 1]
+            diff_rms = float(np.sqrt(np.mean((ch0 - ch1) ** 2)))
+            max_rms = float(max(np.sqrt(np.mean(ch0 ** 2)), np.sqrt(np.mean(ch1 ** 2)), 1e-9))
+            if diff_rms / max_rms > 0.01:
+                raise ValueError(
+                    f"stereo channels differ (relative RMS diff {diff_rms / max_rms:.3f} > 0.01) — "
+                    "likely DJI Stereo/Dual-File mode (TX1 noise + TX2 speech); refusing to average "
+                    "the noise reference into the speech. Switch the DJI to Mono and re-record."
+                )
+            data = ch0.astype(np.float32, copy=False)
+        else:
+            # Adaptive/BT path: no TX1/TX2 semantics — plain downmix is fine.
+            data = data.mean(axis=1).astype(np.float32, copy=False)
     if adaptive:
         cleaned, sr = denoise.adaptive_denoise(data, sr, alpha=alpha)
     else:

@@ -18,7 +18,11 @@
  *  false-positive rate; supersedes the earlier "G2"). Matched case-insensitively
  *  and tolerant of Parakeet splitting it ("butter scotch"). */
 export const WAKE_WORD = 'butterscotch'
-const WAKE_RE = /^\s*(?:hey\s+)?butter[\s-]?scotch\b[\s,]*/i
+// `hey[\s,]+` (review 2026-07-05): Parakeet is a punctuation model and emits
+// the vocative comma — "Hey, Butterscotch, blank." — which the old `hey\s+`
+// rejected, silently dropping the wake command via the sanctioned quiet path.
+// Pure widening: every previously-matching utterance still matches.
+const WAKE_RE = /^\s*(?:hey[\s,]+)?butter[\s-]?scotch\b[\s,]*/i
 
 /** Spoken window names → window ids (the DE windows). Kept deterministic; a
  *  name that doesn't match yields no command (logged loudly by the caller). */

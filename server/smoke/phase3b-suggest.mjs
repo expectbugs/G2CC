@@ -128,8 +128,8 @@ try {
   }
 } finally {
   if (convId !== null) {
-    try { await query(`DELETE FROM conversations WHERE project_path LIKE $1`, [`/tmp/smoke-suggest-%`]) } catch {}
-    try { await query(`DELETE FROM conversations WHERE project_path = $1`, ['/home/user/aria']) } catch {}
+    try { await query(`DELETE FROM conversations WHERE project_path LIKE $1`, [`/tmp/smoke-suggest-%`]) } catch (e) { console.error(`  cleanup failed: ${e.message}`) }
+    try { await query(`DELETE FROM conversations WHERE project_path = $1`, ['/home/user/aria']) } catch (e) { console.error(`  cleanup failed: ${e.message}`) }
   }
   rmSync(FAKE, { force: true })
   rmSync(SIDECAR, { force: true })

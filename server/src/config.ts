@@ -201,7 +201,14 @@ export function loadConfig(): G2CCConfig {
   // the token on every restart — the paired phone failed auth with zero hints.
   // Persist the generated one (self-healing, mirrors first-run) and say so.
   if (typeof saved.authToken !== 'string' || !saved.authToken) {
-    console.error(`[config] ${CONFIG_PATH} has NO authToken — generated a new one and SAVED it back. The phone/APK must re-pair via /setup (their baked token no longer matches).`)
+    // Review 2026-07-05: a PRESENT-but-invalid authToken ("", null, a number)
+    // survives the `{...defaults, ...saved}` spread, so this branch used to
+    // log "generated a new one" while persisting the bad value back — an
+    // empty token then authenticates ANY peer ("" === ""), and a null one
+    // bricks the legit phone forever. Actually regenerate before persisting
+    // (defaultConfig() already minted a fresh UUID this call).
+    merged.authToken = defaults.authToken
+    console.error(`[config] ${CONFIG_PATH} has NO/invalid authToken — generated a new one and SAVED it back. The phone/APK must re-pair via /setup (their baked token no longer matches).`)
     saveConfig(merged)
   }
   // Light shape validation — wrong types here used to surface as confusing

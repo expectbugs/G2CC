@@ -2,7 +2,7 @@
 // Pure move out of os-windows.ts; behaviour unchanged. See docs/WINDOW_API.md.
 
 import type { OsWindow, WmContext, WinView } from './types.js'
-import { browsePageItems, BROWSE_PAGE } from './_browse.js'
+import { browsePageItems } from './_browse.js'
 import { oneLine, fmtStamp, clampConfirmBody } from './_util.js'
 import { errorView } from '../os-compose.js'
 import { listDeliveries, getDelivery, deliveriesSummary, type DeliveryRow } from '../deliveries.js'
@@ -65,7 +65,10 @@ export class DeliveriesWindow implements OsWindow {
       ].join('\n')
       return { mode: 'text', title: `Deliveries · ${d.carrier}`, menu: ['Back', 'Reload', 'Main'], text }
     }
-    try { this.rows = await listDeliveries(BROWSE_PAGE * 3); this.lastError = null } catch (e) { this.lastError = (e as Error).message }
+    // ALL rows (review 2026-07-05: the old BROWSE_PAGE*3 fetch silently capped
+    // the list at the newest 42 — older tracked deliveries were unreachable and
+    // the title lied about the total). browsePageItems pages the frames.
+    try { this.rows = await listDeliveries(0); this.lastError = null } catch (e) { this.lastError = (e as Error).message }
     if (this.lastError) return errorView('Deliveries · error', this.lastError)
     if (this.rows.length === 0) {
       return { mode: 'text', title: 'Deliveries', menu: ['Reload', 'Main'], text: 'No tracked deliveries.\n\n(syncs from carrier mail every 15 min)' }

@@ -33,6 +33,7 @@ Usage:
 from html.parser import HTMLParser
 import io
 import json
+import posixpath
 import re
 import sys
 import warnings
@@ -129,6 +130,15 @@ def _norm(name):
     return (name or "").split("/")[-1]
 
 
+def _norm_path(name):
+    """Normalise an href/item PATH for matching, keeping the directory (review
+    2026-07-05: basename-only keying merged two same-named files from different
+    folders — e.g. book1/c1.xhtml + book2/c1.xhtml in a merged omnibus — into
+    ONE anchor list, splitting chapters at the other book's titles)."""
+    p = posixpath.normpath((name or "").lstrip("/"))
+    return "" if p == "." else p
+
+
 def toc_entries(book):
     """Depth-first ORDERED list of (file, fragment_or_None, title) from the TOC —
     sections AND leaves, so a novel's own title-page anchor and its chapter
@@ -202,16 +212,41 @@ def build_chapters(book):
     Returns [(title, text)] in reading order. Front matter / anchorless docs
     stay one chapter each (graceful degrade)."""
     entries = toc_entries(book)
-    # file (basename) -> ordered [(fragment_or_None, title)]
-    by_file = {}
+    # full TOC path (normalised, directory KEPT) -> ordered [(fragment_or_None,
+    # title)]. Review 2026-07-05: keying by basename alone merged same-named
+    # files from different directories into one anchor list.
+    by_path = {}
     for file, frag, title in entries:
-        by_file.setdefault(_norm(file), []).append((frag, title))
+        by_path.setdefault(_norm_path(file), []).append((frag, title))
+
+    def toc_for_name(raw_name):
+        """The TOC bucket for one spine doc: exact normalised path first; else a
+        single path-SUFFIX match (TOC hrefs are nav-dir-relative while item
+        names are OPF-root-relative — 'xhtml/p2.html' vs 'OEBPS/xhtml/p2.html');
+        else an UNAMBIGUOUS basename match (the old tolerance). An ambiguous
+        match degrades the doc to anchorless (one chapter) — loud on stderr,
+        never a cross-book split."""
+        n = _norm_path(raw_name)
+        if n in by_path:
+            return by_path[n]
+        suffix = [k for k in by_path if k.endswith("/" + n) or n.endswith("/" + k)]
+        if len(suffix) == 1:
+            return by_path[suffix[0]]
+        if len(suffix) > 1:
+            print(f"read_epub: ambiguous TOC path match for {raw_name!r} ({suffix}) — treating as anchorless", file=sys.stderr)
+            return []
+        base = _norm(n)
+        base_keys = [k for k in by_path if _norm(k) == base]
+        if len(base_keys) == 1:
+            return by_path[base_keys[0]]
+        if len(base_keys) > 1:
+            print(f"read_epub: TOC basename {base!r} ambiguous across {base_keys} — treating {raw_name!r} as anchorless", file=sys.stderr)
+        return []
 
     chapters = []
     for si, item in enumerate(spine_documents(book)):
-        name = _norm(item.get_name())
         html = item.get_content().decode("utf-8", errors="replace")
-        toc_for = by_file.get(name, [])
+        toc_for = toc_for_name(item.get_name())
         frags = [(f, t) for (f, t) in toc_for if f]      # anchored chapters
         lead_title = next((t for (f, t) in toc_for if not f), None)  # file-level title (novel title page)
 

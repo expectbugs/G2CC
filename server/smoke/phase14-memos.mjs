@@ -76,8 +76,8 @@ try {
     wm.dispose()
   }
 } finally {
-  try { await query(`DELETE FROM memos WHERE transcript LIKE 'smoke clip %'`) } catch {}
-  try { await query(`DELETE FROM notifications WHERE title = 'Memo saved'`) } catch {}
+  try { await query(`DELETE FROM memos WHERE transcript LIKE 'smoke clip %'`) } catch (e) { console.error(`  cleanup failed: ${e.message}`) }
+  try { await query(`DELETE FROM notifications WHERE title = 'Memo saved'`) } catch (e) { console.error(`  cleanup failed: ${e.message}`) }
   if (MEMOS_DIR) rmSync(MEMOS_DIR, { recursive: true, force: true })
   await getPool().end()
 }

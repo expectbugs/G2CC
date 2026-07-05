@@ -327,8 +327,16 @@ class SessionLevel {
       if (stale()) return
       this.lastError = message
       this.busy = false
+      // An INTERRUPTED turn ends as error('Interrupted') followed synchronously
+      // by turn_complete (cc-session synthesizes both). The queued prompt must
+      // SURVIVE this handler so turn_complete's drain fires it — dropping it
+      // here made the Interrupt contract ("a prompt sent meanwhile rides the
+      // queue and drains on the abort's turn_complete") dead code and silently
+      // lost a confirmed dictation (review 2026-07-05). Genuine error turns
+      // still drop: firing a queued prompt into an errored context is wrong.
+      const wasInterrupting = this.turnPhase === 'interrupting'
       this.turnPhase = null
-      this.dropQueued('turn error')
+      if (!wasInterrupting) this.dropQueued('turn error')
       this.dropPermissions('turn error')   // the turn that asked is dead; CC won't honor late answers
       this.discardUnreadTranscript('turn error')
       this.requestRender()
@@ -559,6 +567,16 @@ class SessionLevel {
           this.ctx.log(`[os] ${this.who}: ${this.verb} refused — answer the pending permission first`)
           return null
         }
+        // A live Suggest must not coexist with dictation (review 2026-07-05):
+        // Confirm checks pendingSuggestion FIRST, so a leftover suggestion
+        // would hijack the confirm card and send robot-predicted text unread —
+        // the sacred-confirm violation. The verb is the user's latest intent;
+        // clear the suggestion exactly like stopDictation does (seq bump
+        // discards any in-flight one-shot).
+        if (this.suggesting || this.pendingSuggestion !== null) {
+          this.ctx.log(`[os] ${this.who}: ${this.verb} — dropping live suggestion state`)
+          this.clearSuggestion()
+        }
         this.listening = true
         this.transcribing = false   // anything still in flight is now stale (discarded in onStt)
         this.ctx.audio('start')
@@ -566,6 +584,15 @@ class SessionLevel {
         return null
       }
       case 'Done': {
+        // Stale-tap guard (review 2026-07-05): a Done racing a permission/error
+        // stopDictation set transcribing=true with no capture behind it —
+        // wedging 'transcribing…', and able to RESURRECT a canceled dictation's
+        // in-flight result (onStt accepts solely on transcribing). Every
+        // sibling handler guards this race class; now Done does too.
+        if (!this.listening) {
+          this.ctx.log(`[os] ${this.who}: Done with no active dictation — ignored (LOUD)`)
+          return null
+        }
         this.listening = false
         this.transcribing = true
         this.ctx.audio('stop')
@@ -597,7 +624,11 @@ class SessionLevel {
         // predicted message for the model, NOT dictation, so it deliberately
         // skips tryIntent — a predicted "note: …" should reach the model, not
         // silently become a note.
-        if (this.pendingSuggestion !== null) {
+        // pendingStt wins when both are somehow set (review 2026-07-05 belt-
+        // and-braces — the verb/Re-record now clear suggestions, so the
+        // coexistence state should be unreachable; if it ever recurs, the
+        // HUMAN-CONFIRMED transcript must beat the robot prediction).
+        if (this.pendingSuggestion !== null && this.pendingStt === null) {
           const s = this.pendingSuggestion
           this.pendingSuggestion = null
           this.suggestSeq++   // any late one-shot return is now stale
@@ -616,6 +647,12 @@ class SessionLevel {
       }
       case 'Re-record': {
         // Discard the mangled transcript and record again immediately.
+        // Mirrors the verb's suggestion-clear (review 2026-07-05): re-opening
+        // the mic must not leave a pendingSuggestion to hijack the next Confirm.
+        if (this.suggesting || this.pendingSuggestion !== null) {
+          this.ctx.log(`[os] ${this.who}: Re-record — dropping live suggestion state`)
+          this.clearSuggestion()
+        }
         this.pendingStt = null
         this.restorePages()
         this.listening = true
@@ -1019,8 +1056,12 @@ class SessionLevel {
     }
   }
 
-  /** Respawn with current opts (Options model/effort change; resumes context). */
-  async respawn(fresh = false): Promise<void> {
+  /** Respawn with current opts (Options model/effort change; resumes context).
+   *  Returns true when the respawn actually RAN; false when the single-flight
+   *  guard refused it (review 2026-07-05: the caller must roll back any opts
+   *  mutation on refusal, or the UI/preview/history claim a model/effort the
+   *  subprocess isn't running). A thrown respawn is neither — it propagates. */
+  async respawn(fresh = false): Promise<boolean> {
     // Single-flight: a second Options tap during the ~0.5-1 s spawn window ran a
     // CONCURRENT respawn — it read ccSessionId off the still-initializing entry
     // (null → silently dropped the --resume conversation), killed the mid-spawn
@@ -1028,11 +1069,12 @@ class SessionLevel {
     // watchdog: an immortal zombie CC (review 2026-06-11b). Reject, loudly.
     if (this.respawning) {
       this.ctx.log(`[os] ${this.who}: respawn already in flight — tap ignored (LOUD)`)
-      return
+      return false
     }
     this.respawning = true
     try {
       await this.respawnInner(fresh)
+      return true
     } finally {
       this.respawning = false
     }
@@ -1154,14 +1196,21 @@ class SessionOptions {
     if (label === undefined) { this.log(`[os] options: index ${index} out of range — ignored (LOUD)`); return null }
     try {
       if (label.startsWith('Model: ')) {
+        // A REFUSED respawn (single-flight guard) rolls the cycle back — that
+        // tap really was ignored, so opts must not drift from the running
+        // subprocess (review 2026-07-05). A THROWN respawn keeps the new value
+        // on purpose: the error card's Reload/New-session recovery should
+        // spawn what was just chosen.
+        const prevModel = l.opts.model
         l.opts.model = cycleNext(MODELS, l.opts.model)
-        await l.respawn()
+        if (!await l.respawn()) { l.opts.model = prevModel; return null }
         this.requestRender()
         return null
       }
       if (label.startsWith('Effort: ')) {
+        const prevEffort = l.opts.effort
         l.opts.effort = cycleNext(EFFORTS, l.opts.effort)
-        await l.respawn()
+        if (!await l.respawn()) { l.opts.effort = prevEffort; return null }
         this.requestRender()
         return null
       }

@@ -63,8 +63,10 @@ export function markdownToPlaintext(md: string): string {
       continue
     }
 
-    // Unordered list items
-    let processed = line.replace(/^(\s*)[-*+]\s/, '$1▸ ')
+    // Unordered list items. '·' — the firmware does NOT render '▸' (Appendix B
+    // glyph list; review 2026-07-05 — every CC bullet on the legacy path baked
+    // in a box/blank glyph).
+    let processed = line.replace(/^(\s*)[-*+]\s/, '$1· ')
 
     // SRV-10 (no-mangle): apply the emphasis/link transforms ONLY to the
     // non-code segments of a line, so inline code like `my_var_name` or `a*b`

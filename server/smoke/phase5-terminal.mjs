@@ -4,6 +4,7 @@
 // helpers (list/capture/send round-trip/new), the 80×22 grid render, and the
 // TerminalWindow state machine (sessions→view→keys→dictate→grid→new session).
 import './_env.mjs'
+import { getPool } from '../dist/store.js'
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
 
@@ -214,6 +215,7 @@ try {
     wm.dispose()   // stops the Terminal capture poll (else the process hangs)
   }
 } finally {
-  try { execFileSync('tmux', ['-L', SOCK, 'kill-server'], { stdio: 'ignore' }) } catch {}
+  try { execFileSync('tmux', ['-L', SOCK, 'kill-server'], { stdio: 'ignore' }) } catch (e) { console.error(`  cleanup failed (tmux kill-server): ${e.message}`) }
+  await getPool().end()   // review 2026-07-05: pool leak = ~10 s idle tail per phase
 }
 console.log('phase5-terminal: ALL OK')

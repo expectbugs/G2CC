@@ -163,15 +163,27 @@ export class SessionPool extends EventEmitter {
    *  hit "No active CC session" on the next prompt, with no recovery path. */
   getOrCreateByDirectory(projectPath: string, options: CreateOptions = {}): { entry: PoolEntry; resumed: boolean; wired: boolean } {
     // First, see if we already have a live pool entry for this path.
+    let evictedStaleResume = false
     for (const entry of this.sessions.values()) {
       if (entry.projectPath !== projectPath) continue
       if (!entry.session.isAlive()) {
         // Stale crash-looped entry — evict so we recreate below.
         console.warn(`[pool] evicting dead pool entry ${entry.id} for ${projectPath} (crash-loop or kill); creating fresh`)
+        // The dead entry died on a stale --resume id (review 2026-07-05): re-
+        // reading the SAME id from sessions.json below would re-enter the exact
+        // crash loop the user is trying to escape ("Pick a directory … to start
+        // it fresh"). Remember the signature; skip the saved id this time.
+        if (entry.session.staleResume || (entry.session.spawnedWithResume && entry.session.ccSessionId === null)) {
+          evictedStaleResume = true
+        }
         this.sessions.delete(entry.id)
         if (this.activeId === entry.id) this.activeId = null
         this.emit('session_evicted', entry.id)   // let the ws-handler unregister it from the Watchdog (avoid a zombie ref)
-        break
+        // `continue`, not `break` (review 2026-07-05): breaking skipped a LIVE
+        // entry for the same path later in iteration order — the caller then
+        // created a SECOND subprocess for the directory (both resuming the
+        // same conversation). Evict every dead one; still reuse a live one.
+        continue
       }
       this.activeId = entry.id
       return { entry, resumed: entry.session.spawnedWithResume, wired: true }
@@ -181,7 +193,9 @@ export class SessionPool extends EventEmitter {
     const saved = loadSavedSessions()
     const match = saved.find(s => s.projectPath === projectPath)
 
-    if (match) {
+    if (match && evictedStaleResume) {
+      console.warn(`[pool] saved resume id for ${projectPath} is STALE (its session died on --resume) — starting FRESH; the next healthy session overwrites sessions.json`)
+    } else if (match) {
       const entry = this.createResumeSession(projectPath, match.id, options)
       return { entry, resumed: true, wired: false }
     }
@@ -254,7 +268,10 @@ export class SessionPool extends EventEmitter {
     const totalTokens = usage.inputTokens + usage.outputTokens
       + usage.cacheReadTokens + usage.cacheCreationTokens
     const window = usage.contextWindow > 0 ? usage.contextWindow : 200_000
-    entry.contextPct = Math.min(100, Math.round((totalTokens / window) * 100))
+    // Error/interrupted turns carry a fabricated all-zero usage payload —
+    // writing it clobbered the REAL context fill with 0% (review 2026-07-05).
+    // Skip the pct write for those; the turn still counts as activity.
+    if (totalTokens > 0) entry.contextPct = Math.min(100, Math.round((totalTokens / window) * 100))
     entry.lastActivity = new Date()
   }
 

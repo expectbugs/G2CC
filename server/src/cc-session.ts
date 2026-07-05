@@ -76,6 +76,11 @@ export class CCSession extends EventEmitter {
    *  2026-06-11) renders as a calm "Interrupted" instead of a scary failure. */
   private _interruptRequested = false
   private _interruptSeq = 0
+  /** Set when CC reports "No conversation found" for our --resume id (review
+   *  2026-07-05): the saved id is STALE (CC prunes ~30-day-old sessions) and
+   *  respawning with it crash-loops forever. The watchdog + pool read this to
+   *  drop the id and go fresh. */
+  private _staleResume = false
   consecutiveFailures = 0
 
   constructor(config: CCSessionConfig) {
@@ -97,6 +102,11 @@ export class CCSession extends EventEmitter {
    *  so an idle-but-prompted session no longer reports busy forever. */
   get isProcessingTurn(): boolean { return this._isProcessingTurn }
   get projectPath(): string { return this.config.projectPath }
+  /** The permission mode this session ACTUALLY spawns with (review 2026-07-05):
+   *  set_mode respawns only the active entry, so a background entry can run a
+   *  different mode than the client-wide intent — status reporting must use
+   *  THIS, never client.mode, or the HUD lies about the running subprocess. */
+  get permissionMode(): CCPermissionMode { return this.config.permissionMode ?? 'bypassPermissions' }
   /** CC's own session UUID — captured from the system init event. Used for --resume. */
   get ccSessionId(): string | null { return this._ccSessionId }
   /** True iff the most-recent spawn used --resume (i.e. preserves prior CC
@@ -106,6 +116,16 @@ export class CCSession extends EventEmitter {
   get spawnedWithResume(): boolean { return this.config.sessionId !== undefined }
   /** Prime the --resume sessionId for the next spawn() (used by watchdog). */
   setResumeTarget(ccSessionId: string): void { this.config.sessionId = ccSessionId }
+  /** CC told us our --resume id no longer exists (see _staleResume). */
+  get staleResume(): boolean { return this._staleResume }
+  /** Drop the --resume target so the NEXT spawn is FRESH (review 2026-07-05:
+   *  a stale saved id died instantly at startup — before system/init — and the
+   *  retained config.sessionId re-crashed every watchdog respawn and every
+   *  directory re-pick: a permanent, self-repeating loop). */
+  clearResumeTarget(): void {
+    delete this.config.sessionId
+    this._staleResume = false
+  }
 
   // [V] Spawn flags verified from ARIA session_pool.py:126-141 + g2code/cc-session.ts.
   // [V] --include-partial-messages verified from g2code Phase 0 testing (2026-04-15).
@@ -457,10 +477,17 @@ export class CCSession extends EventEmitter {
         // empty result (verified live 2026-06-11) — name it instead of guessing.
         const interrupted = this._interruptRequested
         this._interruptRequested = false
+        // 2.1.x rides the real reason on a top-level `errors: string[]` (verified
+        // live 2026-07-05: a stale --resume dies with errors:["No conversation
+        // found with session ID: …"], NO result, NO error field — the old chain
+        // showed a bare "CC error_during_execution" on glass).
+        const errorsArr = Array.isArray(data.errors) ? (data.errors as unknown[]).map(String).filter(Boolean) : []
+        if (errorsArr.some((s) => /no conversation found/i.test(s))) this._staleResume = true
         const detail = (interrupted ? 'Interrupted' : undefined)
           || (data.result as string)
           || (typeof err === 'string' ? err : undefined)
           || (err && typeof err === 'object' && typeof err.message === 'string' ? err.message : undefined)
+          || (errorsArr.length ? errorsArr.join('; ') : undefined)
           || (this._sawRateLimitThisTurn ? `${resultSubtype} (a rate_limit_event arrived during this turn — possibly throttled; retry shortly)` : undefined)
           || `CC ${resultSubtype || 'error'}`
         console.error(`[cc-session] turn ERROR (${resultSubtype}) cwd=${this.config.projectPath} recent=[${this._recentEvents.join(',')}] raw=${JSON.stringify(data).slice(0, 4000)}`)

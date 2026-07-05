@@ -266,9 +266,9 @@ export class SmsWindow implements OsWindow {
         else this.ctx.log(`[os] sms: Send at stage '${this.replyStage}' — ignored (LOUD)`)
         return
       case 'Re-record': this.startReply(); return
-      case 'Back':
-        if (this.replyStage === 'result') { this.replyStage = 'idle'; this.replyResult = null; this.openThread(this.openId, this.openName, this.openAddr, 0) }
-        return
+      // NB: no 'Back' case — the label is HOST-owned (the WM intercepts it and
+      // routes through onBack), so a case here is unreachable dead code
+      // (review 2026-07-05; the post-send re-pull now lives in onBack).
       default: this.ctx.log(`[os] sms reply: menu '${label}' — ignored (LOUD)`)
     }
   }
@@ -280,10 +280,16 @@ export class SmsWindow implements OsWindow {
     this.requestRender()
     this.ctx.log(`[os] sms: send → ${addr}: "${text.slice(0, 60)}"`)
     this.ctx.sendSms(addr, text)
-    // Fire-and-forget: SmsManager has no per-message ACK we await here. Show a
-    // sent confirmation, then Back re-pulls the thread so the sent message shows.
+    // The wire is fire-and-forget today (no sms_send_result exists in the
+    // protocol; the phone swallows SmsManager/SecurityException failures into
+    // DiagLog). So say what we KNOW — handed to the phone — never a fabricated
+    // "Sent" (review 2026-07-05: SEND_SMS revocation made the UI claim success
+    // for a message that never left). Back re-pulls the thread, which is the
+    // real verification: the sent message shows there. A true result message
+    // needs an APK protocol addition (queued as an improvement; SmsManager
+    // does support a sentIntent — the old "no per-message ACK" comment was wrong).
     this.replyStage = 'result'
-    this.replyResult = `Sent to ${this.openName}.\n\n"${oneLine(text, 60)}"\n\nBack to see the thread.`
+    this.replyResult = `Handed to phone for ${this.openName} (unverified).\n\n"${oneLine(text, 60)}"\n\nBack re-pulls the thread — the message shows there once sent.`
     this.requestRender()
   }
 
@@ -331,6 +337,16 @@ export class SmsWindow implements OsWindow {
   }
 
   async onBack(): Promise<boolean> {
+    if (this.level === 'thread' && this.replyStage === 'result') {
+      // Back from the sent-result card RE-PULLS the thread (review 2026-07-05):
+      // 'Back' is a WM-reserved label that never reaches onReplyMenu, so the
+      // re-pull there was dead code — Back rendered the PRE-send pages and the
+      // just-sent message was missing ("did it send?" → duplicate re-send risk).
+      this.stopReply('back (sent)')
+      this.replyResult = null
+      this.openThread(this.openId, this.openName, this.openAddr, 0)
+      return true
+    }
     if (this.level === 'thread' && this.replyStage !== 'idle') { this.stopReply('back'); this.requestRender(); return true }
     if (this.level === 'thread') { this.readSeq++; this.level = 'threads'; this.focus = 'content'; this.requestRender(); return true }
     if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }

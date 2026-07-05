@@ -147,7 +147,7 @@ try {
     wm.dispose()
   }
 } finally {
-  try { await query(`DELETE FROM conversations WHERE project_path LIKE '/tmp/smoke-search-%'`) } catch {}
+  try { await query(`DELETE FROM conversations WHERE project_path LIKE '/tmp/smoke-search-%'`) } catch (e) { console.error(`  cleanup failed: ${e.message}`) }
   rmSync(sandbox, { recursive: true, force: true })
   await getPool().end()
 }

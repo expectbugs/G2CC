@@ -9,7 +9,7 @@ import { strict as assert } from 'node:assert'
 import { RibbonShell } from '../dist/ribbon.js'
 import { WindowManager } from '../dist/window-manager.js'
 import { estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES } from '../dist/os-compose.js'
-import { query } from '../dist/store.js'
+import { query, getPool } from '../dist/store.js'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -241,4 +241,5 @@ const settle = async (last, pred, what, ms = 15000) => {
   } finally { wm.dispose?.() }
 }
 
+await getPool().end()   // review 2026-07-05: pool leak = ~10 s idle tail per phase
 console.error('\nphase-ribbon: ALL OK')

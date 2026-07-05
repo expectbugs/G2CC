@@ -309,6 +309,14 @@ export class MailWindow implements OsWindow {
     this.pendingText = null
     this.composePage = 0
     this.composeBusy = false   // B5: clears on every exit (doSend already clears it on its own paths)
+    // Leave the compose LEVEL too (review 2026-07-05): Reload-during-compose and
+    // park-to-ribbon left level='compose' with all flags cleared — composeView's
+    // fallthrough then rendered a fake-busy 'Preparing…' that never resolves.
+    // Mirrors the Cancel path; doSend sets its own level AFTER this call.
+    if (this.level === 'compose') {
+      this.level = this.readKey ? 'read' : 'list'
+      this.focus = 'content'
+    }
   }
 
   private async startRecipientPick(mode: 'forward' | 'compose'): Promise<void> {

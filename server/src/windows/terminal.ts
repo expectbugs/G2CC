@@ -236,6 +236,11 @@ export class TerminalWindow implements OsWindow {
   private scrollPage = 0
   private scrollSeq = 0   // invalidates an in-flight scrollback capture if the user leaves scroll mid-fetch
   private lastError: string | null = null
+  /** One-shot new-session failure notice (review 2026-07-05): it used to ride
+   *  lastError, which the sessions view() rightfully wipes on the next
+   *  successful list fetch — the failure text never reached the glass. Shown
+   *  as a title suffix on the sessions list; cleared on the next tap. */
+  private notice: string | null = null
   // dictation (send text OR new-session name)
   private dictPurpose: 'send' | 'newSession' | null = null
   private listening = false
@@ -321,7 +326,10 @@ export class TerminalWindow implements OsWindow {
       const rows = this.sessions.map((s) => `${s.attached ? '● ' : ''}${s.name} (${s.windows}w)`)
       rows.push('+ New session')
       const { items } = browsePageItems(rows, this.sessOffset)
-      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: 'Tmux · sessions', menu: ['Reload', 'Main'], items }
+      // The one-shot notice rides the title (compose px-clamps it) — a leading
+      // row would shift tap indices vs onBrowseSelect (review 2026-07-05).
+      const title = this.notice ? `Tmux · ! ${this.notice}` : 'Tmux · sessions'
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title, menu: ['Reload', 'Main'], items }
     }
     if (this.level === 'keys') {
       // The input hub: full keyboard + slash-commands lead, then the quick keys.
@@ -389,6 +397,7 @@ export class TerminalWindow implements OsWindow {
 
   // ---- input ----
   async onBrowseSelect(index: number): Promise<void> {
+    this.notice = null   // one-shot: any interaction clears it
     if (this.level === 'sessions') {
       const rows = this.sessions.map((s) => `${s.attached ? '● ' : ''}${s.name} (${s.windows}w)`)
       rows.push('+ New session')
@@ -447,6 +456,7 @@ export class TerminalWindow implements OsWindow {
       if (m === -1) { this.kbdOffset = prevOffset; this.requestRender(); return }
       if (m === -2) { this.kbdOffset = nextOffset; this.requestRender(); return }
       this.kbdOffset = 0; this.level = 'view'
+      this.mode = 'tail'   // watch the command run (review 2026-07-05 — a lingering grid stayed pre-command)
       if (m < TERM_SLASH_COMMANDS.length && this.session) {
         const cmd = TERM_SLASH_COMMANDS[m]
         try {
@@ -470,11 +480,16 @@ export class TerminalWindow implements OsWindow {
     this.focus = 'content'
     this.content = ''
     this.requestRender()
+    // Captured AFTER the render kick (a view() pass may run ensurePoll and bump
+    // pollGen); a park/switch during the capture must not restart the poll it
+    // stopped (review 2026-07-05).
+    const gen = this.pollGen
     try {
       this.content = await tmuxCapture(name)
     } catch (e) {
       this.content = `(capture failed: ${(e as Error).message})`
     }
+    if (gen !== this.pollGen) { this.ctx.log('[os] term: open-capture superseded (deactivate/nav) — poll not restarted'); return }
     this.ensurePoll()
     this.requestRender()
   }
@@ -528,7 +543,12 @@ export class TerminalWindow implements OsWindow {
 
   private async refreshTail(): Promise<void> {
     if (!this.session) return
+    // Stale-guard (review 2026-07-05): onDeactivate/stopPoll bumps pollGen mid-
+    // capture; restarting the poll here resurrected it for a PARKED window —
+    // an orphan tmux capture loop every TERM_POLL_MS until re-entry.
+    const gen = this.pollGen
     try { this.content = await tmuxCapture(this.session) } catch (e) { this.content = `(capture failed: ${(e as Error).message})` }
+    if (gen !== this.pollGen) { this.ctx.log('[os] term: tail refresh superseded (deactivate/nav) — poll not restarted'); return }
     this.ensurePoll()
     this.requestRender()
   }
@@ -597,6 +617,7 @@ export class TerminalWindow implements OsWindow {
   private async kbdRun(): Promise<void> {
     const buf = this.kbdBuf
     this.kbdBuf = ''; this.kbdGroup = null; this.kbdShift = false; this.kbdOffset = 0; this.level = 'view'
+    this.mode = 'tail'   // the comment's promise — a lingering grid otherwise showed a PRE-command snapshot (review 2026-07-05)
     if (!this.session) { this.ctx.log('[os] term: keyboard Run with no session — ignored'); this.requestRender(); return }
     if (!buf) { this.ctx.log('[os] term: keyboard Run with empty buffer — nothing sent'); await this.refreshTail(); return }
     try {
@@ -658,7 +679,7 @@ export class TerminalWindow implements OsWindow {
           const c = cleanSessionName(text)
           if ('error' in c) {
             this.ctx.log(`[os] term: new session rejected: ${c.error}`)
-            this.level = 'sessions'; this.lastError = `New session rejected: ${c.error}`; this.requestRender(); return
+            this.level = 'sessions'; this.notice = `New session rejected: ${c.error}`; this.requestRender(); return
           }
           try {
             await tmuxNewSession(c.name)
@@ -666,7 +687,7 @@ export class TerminalWindow implements OsWindow {
             await this.openSession(c.name)   // jump straight into it
           } catch (e) {
             this.ctx.log(`[os] term: new session FAILED: ${(e as Error).message}`)
-            this.level = 'sessions'; this.lastError = `New session failed: ${(e as Error).message}`; this.requestRender()
+            this.level = 'sessions'; this.notice = `New session failed: ${(e as Error).message}`; this.requestRender()
           }
         } else {
           if (!this.session) { this.ctx.log('[os] term: send with no session — ignored'); this.level = 'sessions'; this.requestRender(); return }
@@ -678,6 +699,7 @@ export class TerminalWindow implements OsWindow {
             this.ctx.log(`[os] term: dictation send FAILED: ${(e as Error).message}`)
           }
           this.level = 'view'
+          this.mode = 'tail'   // watch it run (review 2026-07-05)
           await this.refreshTail()
         }
         return
@@ -715,7 +737,11 @@ export class TerminalWindow implements OsWindow {
     this.resetKbd()
     this.gridSeq++
     this.lastError = null
+    this.notice = null
     this.focus = 'content'
+    // A grid view reloads to a FRESH snapshot (review 2026-07-05: the seq bump
+    // alone discarded an in-flight render and left the '⏳' spinner forever).
+    if (this.level === 'view' && this.mode === 'grid') void this.renderGrid()
   }
 
   private resetKbd(): void { this.kbdBuf = ''; this.kbdGroup = null; this.kbdShift = false; this.kbdOffset = 0 }

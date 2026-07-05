@@ -32,7 +32,20 @@ export function fbPagePx(ctx: WmContext): number { return fbPagePxCfg(ctx.config
  *  marked. (Mail paginates instead — its bodies are long by nature.) */
 export function clampConfirmBody(body: string, max = 600): string {
   if (Buffer.byteLength(body, 'utf8') <= max) return body
-  return body.slice(0, max) + `\n… (+${body.length - max} more chars — the full text is used)`
+  // Cut by UTF-8 BYTES via code-point iteration (review 2026-07-05: the old
+  // code-unit slice(0, max) was a no-op for multi-byte text — a 900 B CJK body
+  // sailed through with a nonsense negative '+N more' marker — and could split
+  // a surrogate pair into U+FFFD mojibake; same class as clampPxMiddle's fix).
+  let out = ''
+  let bytes = 0
+  for (const ch of body) {
+    const cb = Buffer.byteLength(ch, 'utf8')
+    if (bytes + cb > max) break
+    out += ch
+    bytes += cb
+  }
+  const cutChars = [...body].length - [...out].length
+  return out + `\n… (+${cutChars} more chars — the full text is used)`
 }
 
 export function fmtStamp(d: Date): string {

@@ -216,15 +216,37 @@ export class MediaWindow implements OsWindow {
    *  cached lyrics/art so they re-derive for the new song. */
   onMediaState(state: MediaState): void {
     const prevKey = this.trackKey()
-    this.state = state
+    const prevArt = this.state?.artB64 ?? null
+    // The client pushes artB64 ONCE per track (MediaBridge's lastArtKey dedupe
+    // — protocol.ts documents it); every later playback push carries null.
+    // Review 2026-07-05: wholesale replacement dropped the art on the first
+    // Play/Pause, so the Art page claimed "No album art" for a track that had
+    // it. Same track + incoming null + we had art → carry it forward.
+    this.state = (state.artB64 === null || state.artB64 === undefined) && prevArt !== null && this.sameTrack(state)
+      ? { ...state, artB64: prevArt }
+      : state
     this.stateAt = Date.now()
     if (this.trackKey() !== prevKey) {
       this.lyricsFor = ''; this.lrc = null; this.plainPages = null; this.lyricsPage = 0
       this.artFor = ''; this.art = null; this.artFailed = null; this.artSeq++
       if (this.level === 'lyrics') void this.loadLyrics()
       if (this.level === 'art') void this.renderArt()
+    } else if (this.level === 'art' && prevArt === null && this.state.artB64) {
+      // The track's art push landed ~100 ms AFTER its base push while the Art
+      // page was up (review 2026-07-05): the track-change render already ran
+      // (and bailed on no-art) and nothing re-kicked it — '⏳ rendering…'
+      // forever. Kick it now; renderArt's artFor dedupe prevents duplicates.
+      void this.renderArt()
     }
     this.requestRender()
+  }
+
+  /** Same track as the current state? (artist·title·album — the trackKey basis,
+   *  computed against the INCOMING state rather than this.state.) */
+  private sameTrack(s: MediaState): boolean {
+    const cur = this.state
+    if (!cur) return false
+    return cur.artist === s.artist && cur.title === s.title && cur.album === s.album
   }
 
   async onBack(): Promise<boolean> {

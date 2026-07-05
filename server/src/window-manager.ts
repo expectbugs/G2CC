@@ -19,7 +19,7 @@ import type { WireScene, MediaState, SmsThread, SmsMessage } from '@g2cc/shared'
 import { renderChart, type RenderedImage } from './os-content.js'
 import {
   composeScene, composeFullBleedScene, paginateText, errorView, blankScene, blankFlashScene, fwTextWidth,
-  DEFAULT_BROWSE_MENU, type WinView, type RibbonChrome,
+  DEFAULT_BROWSE_MENU, isScrollRead, type WinView, type RibbonChrome,
 } from './os-compose.js'
 import { parseVoiceCommand, type VoiceCommand } from './voice.js'
 import {
@@ -544,6 +544,14 @@ export class WindowManager {
     // per WS connect). Fire-and-forget; a down DB just leaves the fresh in-memory
     // order, logged. Re-render once loaded so the restored order shows.
     void loadWindowUsage().then((usage) => {
+      // Windows activated BEFORE the load resolves must stay the freshest
+      // (review 2026-07-05): the blind merge overwrote their in-session stamps
+      // with restored (older) ones and clobbered the counts. Snapshot the
+      // pre-load activations, apply the restored values, then re-stamp the
+      // pre-load ones ABOVE every restored stamp in their original order and
+      // ADD the in-session count delta to the restored count.
+      const preLoad = new Map<string, { stamp: number; count: number }>()
+      for (const [id, stamp] of this.lastUsed) preLoad.set(id, { stamp, count: this.useCount.get(id) ?? 0 })
       let maxStamp = 0
       for (const [id, u] of usage) {
         if (!this.windows.some((w) => w.id === id)) continue   // ignore retired ids
@@ -554,6 +562,17 @@ export class WindowManager {
       // Keep new stamps monotonic ABOVE every restored one (they are ordering
       // tokens, not a clock — a fresh switchTo must still sort newest).
       if (this.useCounter < maxStamp) this.useCounter = maxStamp
+      if (preLoad.size > 0) {
+        const inOrder = [...preLoad.entries()].sort((a, b) => a[1].stamp - b[1].stamp)
+        for (const [id, pre] of inOrder) {
+          const restored = usage.get(id)
+          this.lastUsed.set(id, ++this.useCounter)             // freshest, original relative order kept
+          const count = (restored?.useCount ?? 0) + pre.count  // durable + this session's activations
+          this.useCount.set(id, count)
+          void persistWindowUsage(id, this.useCounter, count).catch((e: unknown) =>
+            this.ctx.log(`[os] persist window-usage(${id}) failed: ${e instanceof Error ? e.message : String(e)}`))
+        }
+      }
       // Re-render ONLY at the ribbon root (where the restored order shows at once +
       // the atRibbon guard means we're not inside a window). Elsewhere the restored
       // MRU surfaces on the next natural render (the dashboard pacer / any
@@ -849,15 +868,7 @@ export class WindowManager {
           // Phase 4 queue flush: promote ONE pending overlay once nothing
           // blocks. Setting state + renderQueued re-iterates the already-
           // serialized do/while — no reentrancy (B5).
-          if (!this.activeOverlay && !this.blanked && this.pendingNotifs.length > 0
-              && (this.active.interruptible?.() ?? true)) {
-            const next = this.pendingNotifs.shift()
-            if (next) {
-              this.ctx.log(`[notify] flushing queued ${next.priority} "${next.title}" (${this.pendingNotifs.length} still pending)`)
-              this.setOverlay(next, false)
-              this.renderQueued = true
-            }
-          }
+          if (this.maybePromoteQueued()) this.renderQueued = true
         } while (this.renderQueued)
       } catch (e) {
         // Insurance: nothing in the loop should throw past the per-step
@@ -868,6 +879,25 @@ export class WindowManager {
         this.rendering = false
       }
     })()
+  }
+
+  /** Phase 4 queue flush: promote ONE pending overlay once nothing blocks
+   *  (review 2026-07-05 — extracted so the RIBBON surface flushes too; it used
+   *  to live only in the window render loop, so a queued timer/call alarm
+   *  stalled as long as the ribbon was on screen). The ribbon counts as
+   *  interruptible: it is never a sacred dictation/confirm surface (the parked
+   *  window's interruptible() only matters while that window is displayed —
+   *  its mic is already stopped and re-entry re-shows any permission card).
+   *  In menu mode atRibbon is always false, so the gate is unchanged.
+   *  Returns true when an overlay was promoted; callers re-render their way. */
+  private maybePromoteQueued(): boolean {
+    if (this.activeOverlay || this.blanked || this.pendingNotifs.length === 0) return false
+    if (!this.atRibbon && !(this.active.interruptible?.() ?? true)) return false
+    const next = this.pendingNotifs.shift()
+    if (!next) return false
+    this.ctx.log(`[notify] flushing queued ${next.priority} "${next.title}" (${this.pendingNotifs.length} still pending)`)
+    this.setOverlay(next, false)
+    return true
   }
 
   /** Ribbon-root render — its own conflated sender (separate from the window
@@ -909,6 +939,12 @@ export class WindowManager {
           }
           this.lastView = null   // the ribbon has no menu/browse list — taps are tap=enter, scroll=focus
           this.ctx.send(scene)
+          // Queue flush at the ribbon (review 2026-07-05): a queued timer/call
+          // alarm must not stall while the ribbon is the surface. Promoting sets
+          // activeOverlay, so requestRender falls through to the WINDOW loop
+          // (the overlay IS the screen) — and any queued ribbon pass discards
+          // itself on the activeOverlay re-check above, so nothing paints over it.
+          if (this.maybePromoteQueued()) this.requestRender()
         } while (this.ribbonRenderQueued)
       } catch (e) {
         this.ctx.log(`[ribbon] render loop threw: ${(e as Error).message}`)
@@ -989,7 +1025,13 @@ export class WindowManager {
       void persistWindowUsage(id, this.useCounter, n).catch((e: unknown) =>
         this.ctx.log(`[os] persist window-usage(${id}) failed: ${e instanceof Error ? e.message : String(e)}`))
     } else (w as MainWindow).resetToRoot()                        // Phase 11: Main returns to its launcher root
-    w.onActivate?.(reentry)                                       // launcher reset (Games→list); reentry → Reader menu
+    try {
+      w.onActivate?.(reentry)                                     // launcher reset (Games→list); reentry → Reader menu
+    } catch (e) {
+      // Wrapped like its sibling onDeactivate (review 2026-07-05): a throwing
+      // onActivate must not escape switchTo into a void'd voice/handler chain.
+      this.ctx.log(`[os] onActivate failed (${w.id}): ${(e as Error).message}`)
+    }
     this.requestRender()
   }
 
@@ -1071,6 +1113,14 @@ export class WindowManager {
       // list regions so this shouldn't fire — but a stale/firmware-odd event must
       // not mutate window state invisibly (review 2026-06-11).
       this.ctx.log(`[os] select ${region}[${index}] ignored — screen is blanked`)
+      return
+    }
+    // At the ribbon no hub_select is ever legitimate (the strip is an antenna:
+    // its taps arrive as SYS taps) — this is a stale tap racing the park
+    // (review 2026-07-05). Eaten, like every other stale tap; the belt to
+    // toRibbon's synchronous lastView=null braces.
+    if (this.rootNav === 'ribbon' && this.atRibbon) {
+      this.ctx.log(`[os] ${region} tap [${index}] raced the ribbon transition — eaten`)
       return
     }
     try {
@@ -1161,7 +1211,7 @@ export class WindowManager {
   private fullBleedMenuCaptures(): boolean {
     const v = this.lastView
     if (!v) return false
-    if (v.scrollContent) return false   // §3.4: the content captures (scroll-reading), not the menu
+    if (isScrollRead(v)) return false   // §3.4: the content captures (scroll-reading), not the menu — the SHARED compose predicate (review 2026-07-05)
     return v.mode !== 'browse' || v.menuMode === 'capture'
   }
 
@@ -1246,7 +1296,10 @@ export class WindowManager {
         if (act.kind === 'blank') {
           this.blanked = true
           this.ctx.log('[os] screen BLANK (double-tap at ribbon root) — double-tap again to wake')
-          this.ctx.send(blankScene())
+          // Keep a live Maps nav line on the dark screen (review 2026-07-05 —
+          // 'nav owns the blanked surface'; every other blank site already does
+          // this). The menu-mode twin deliberately stays plain (classic parity).
+          this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
           return
         }
         return
@@ -1298,7 +1351,9 @@ export class WindowManager {
     }
     // §3.4 fullBleed scroll-reading: the CONTENT is the scroll capture (no menu) →
     // each notch turns a page (down = next, up = prev). Reader does the page math.
-    if (this.fullBleed && this.lastView?.scrollContent) {
+    // isScrollRead = the SAME predicate compose renders by, so routing can never
+    // disagree with what actually captures on glass (review 2026-07-05).
+    if (this.fullBleed && this.lastView && isScrollRead(this.lastView)) {
       try { await this.active.onContentScroll?.(dir) }
       catch (e) { this.ctx.log(`[os] onContentScroll failed (${this.active.id}): ${(e as Error).message}`) }
       return
@@ -1325,6 +1380,13 @@ export class WindowManager {
       this.parked = true
     }
     this.atRibbon = true
+    // Null lastView SYNCHRONOUSLY (review 2026-07-05): renderRibbon only nulls
+    // it after the async preview fetch, so a tap landing in that window used to
+    // resolve against the PARKED window's menu — 'Ask' turned the mic on under
+    // the ribbon with no indicator and no stop path (switchTo skips
+    // onDeactivate for a parked window). The parked view is gone from
+    // tap-resolution the instant it is parked.
+    this.lastView = null
     if (fromWindow) this.ribbon.enterFromWindow()
     else this.ribbon.enterRoot()
     this.renderRibbon()
@@ -1381,17 +1443,26 @@ export class WindowManager {
    *  back. A non-matching utterance is the SANCTIONED quiet path (8 h of
    *  factory audio would be log spam otherwise — the spec's one exception). */
   async onVoiceCommand(transcript: string): Promise<void> {
-    const text = (transcript ?? '').trim()
-    if (!text) return
-    const w = parseVoiceCommand(text, { wake: true })
-    if (w.cmd) { await this.dispatchVoice(w.cmd); return }
-    if (w.prefixed) { this.ctx.log(`[voice] "butterscotch" heard but no grammar match — ignored (LOUD): "${text.slice(0, 80)}"`); return }
-    const reader = this.windowById('reader')
-    if (this.active.id === 'reader' && reader instanceof ReaderWindow && reader.voiceOn) {
-      const a = parseVoiceCommand(text, { wake: false })
-      if (a.cmd?.kind === 'page') { await this.dispatchVoice(a.cmd); return }
+    // try/catch + resync mirrors onStt/onSttError (review 2026-07-05): ws-handler
+    // void's this call, so a rejection here (e.g. Mail's onOpen failing on a
+    // Maildir IO error mid-'read my email') otherwise dies in the global
+    // unhandledRejection backstop with no DE feedback at all.
+    try {
+      const text = (transcript ?? '').trim()
+      if (!text) return
+      const w = parseVoiceCommand(text, { wake: true })
+      if (w.cmd) { await this.dispatchVoice(w.cmd); return }
+      if (w.prefixed) { this.ctx.log(`[voice] "butterscotch" heard but no grammar match — ignored (LOUD): "${text.slice(0, 80)}"`); return }
+      const reader = this.windowById('reader')
+      if (this.active.id === 'reader' && reader instanceof ReaderWindow && reader.voiceOn) {
+        const a = parseVoiceCommand(text, { wake: false })
+        if (a.cmd?.kind === 'page') { await this.dispatchVoice(a.cmd); return }
+      }
+      // else: quiet (sanctioned) — a handsfree utterance with no applicable command.
+    } catch (e) {
+      this.ctx.log(`[voice] command handler failed (${this.active.id}): ${(e as Error).message}`)
+      this.requestRender()   // view() surfaces the error state; never a dead screen
     }
-    // else: quiet (sanctioned) — a handsfree utterance with no applicable command.
   }
 
   private async dispatchVoice(cmd: VoiceCommand): Promise<void> {
@@ -1399,7 +1470,26 @@ export class WindowManager {
     switch (cmd.kind) {
       case 'window': this.blanked = false; this.switchTo(cmd.id); return
       case 'blank':
-        if (!this.blanked) { this.blanked = true; this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene()) }
+        if (!this.blanked) {
+          // A live overlay must not survive into the dark (review 2026-07-05):
+          // with blanked && activeOverlay both set, the dark gate is false and
+          // any background render (nav update, chrome refresh) relights the
+          // screen with the alarm. Requeue it instead — never marked seen, so
+          // the alarm re-surfaces on wake via the existing flush (B5 kept).
+          if (this.activeOverlay) {
+            if (this.overlayEvt) {
+              this.pendingNotifs.unshift(this.overlayEvt)
+              this.pendingNotifs.sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority])
+            }
+            this.ctx.log(`[voice] blank with a live overlay — requeued${this.overlayEvt ? ` (${this.overlayEvt.priority} "${this.overlayEvt.title}")` : ''}`)
+            this.activeOverlay = null
+            this.overlayEvt = null
+            this.overlayRendered = false
+            this.overlayFromBlank = false
+          }
+          this.blanked = true
+          this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
+        }
         return
       case 'wake':
         if (this.blanked) { this.clearPopupTimer(); this.blankFlash = null; this.blanked = false; this.requestRender() }

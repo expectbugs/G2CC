@@ -69,10 +69,16 @@ try {
   assert.deepEqual(sent[0], { address: '+15551234567', text: 'on my way' })
   console.error('  3. Reply → dictate → confirm → sms_send(address, text) ✓')
 
-  // provider error renders loudly
+  // provider error renders loudly — navigate BACK to the threads level first
+  // (review 2026-07-05: injected at the thread level, the error branch never
+  // rendered and this step gated nothing)
+  await wm.onBackGesture()               // result/thread → thread list (or reply-abort)
+  await wm.onBackGesture()               // ensure we're at 'threads'
+  const smsWin = wm.windows.find((w) => w.id === 'sms')
+  await waitFor(() => smsWin.level === 'threads', 'back at the threads level')
   wm.onSmsThreads([], 0, 0, 'READ_SMS not granted')
-  // (back to threads level first so the error view is what renders)
-  console.error('  4. provider error path accepted (no throw) ✓')
+  await waitFor(() => titleOf(last()).includes('error') && textOf(last()).includes('READ_SMS'), 'provider error VIEW rendered')
+  console.error('  4. provider error renders loudly (error view on glass) ✓')
 
   console.log('phase4b-sms: ALL OK')
 } finally {

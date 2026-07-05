@@ -3,6 +3,7 @@
 // exchange (new game → e4 → engine reply; illegal move loud-fails), board
 // render through the shared splitter, tiles compose for parity.
 import './_env.mjs'   // DB+notes isolation — MUST be the first import (review 2026-06-11b)
+import { getPool } from '../dist/store.js'
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -142,5 +143,6 @@ if (!EMIT) {
   }
 }
 
+await getPool().end()   // review 2026-07-05: pool leak = ~10 s idle tail per phase
 if (EMIT) process.stdout.write(JSON.stringify(scene))
 else console.log('phase11-games: ALL OK')
