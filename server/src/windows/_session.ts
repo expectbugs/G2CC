@@ -261,6 +261,14 @@ class SessionLevel {
         this.requestRender()
       }
     })
+    session.on('session_init', () => {
+      if (stale()) return
+      // C3 (review #6 queue): ccSessionId arrives via this async init event
+      // AFTER open()'s post-spawn persist (which skips null ids) — persist
+      // again now so a DE session that never completes a turn is still
+      // resumable after a WS drop.
+      this.ctx.pool.persistSessionMeta()
+    })
     session.on('turn_complete', (info: { text: string; toolCalls: string[]; usage: CCUsage }) => {
       if (stale()) return
       this.busy = false

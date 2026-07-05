@@ -587,6 +587,11 @@ export class CCSession extends EventEmitter {
     // "system" init event — capture CC's own session UUID for --resume.
     if (msgType === 'system' && data.subtype === 'init' && typeof data.session_id === 'string') {
       this._ccSessionId = data.session_id
+      // C3 (review #6 queue): announce it so owners can persist sessions.json
+      // NOW — resume ids used to persist only on turn_complete (the post-spawn
+      // persist runs before this async event, when ccSessionId is still null),
+      // so a session that init'd but never completed a turn was lost to --resume.
+      this.emit('session_init', data.session_id)
     }
   }
 }

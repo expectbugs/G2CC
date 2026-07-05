@@ -1252,6 +1252,14 @@ function wireSessionEvents(client: WSClient, entry: PoolEntry): void {
     scrollback.append(content)
   })
 
+  // C3 (review #6 queue): persist the resume id the moment system/init hands
+  // it over — persistSessionMeta skips null ccSessionIds, so the post-spawn
+  // persist can't capture it and a session that never completes a turn used
+  // to be unresumable. Idempotent + cheap (atomic rewrite of sessions.json).
+  session.on('session_init', () => {
+    client.pool.persistSessionMeta()
+  })
+
   session.on('turn_complete', (info: { text: string; toolCalls: string[]; costUsd: number; usage: CCUsage }) => {
     client.pool.updateUsage(sessionId, info.usage)
     client.pool.persistSessionMeta()
