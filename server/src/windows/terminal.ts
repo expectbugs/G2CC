@@ -236,11 +236,16 @@ export class TerminalWindow implements OsWindow {
   private scrollPage = 0
   private scrollSeq = 0   // invalidates an in-flight scrollback capture if the user leaves scroll mid-fetch
   private lastError: string | null = null
-  /** One-shot new-session failure notice (review 2026-07-05): it used to ride
-   *  lastError, which the sessions view() rightfully wipes on the next
-   *  successful list fetch — the failure text never reached the glass. Shown
-   *  as a title suffix on the sessions list; cleared on the next tap. */
+  /** One-shot failure notice (review 2026-07-05): it used to ride lastError,
+   *  which the sessions view() rightfully wipes on the next successful list
+   *  fetch — the failure text never reached the glass. Shown as a title suffix
+   *  (sessions list + view/keys via titled(), queue D3 — tmux send failures
+   *  used to be log-only); cleared on the next tap. */
   private notice: string | null = null
+
+  /** D3: ride the one-shot notice on a level title — the compose px
+   *  middle-clamp keeps the title head + the notice tail both visible. */
+  private titled(base: string): string { return this.notice ? `${base} · ! ${this.notice}` : base }
   // dictation (send text OR new-session name)
   private dictPurpose: 'send' | 'newSession' | null = null
   private listening = false
@@ -334,7 +339,7 @@ export class TerminalWindow implements OsWindow {
     if (this.level === 'keys') {
       // The input hub: full keyboard + slash-commands lead, then the quick keys.
       const items = ['⌨ Keyboard', '/ Slash cmd', ...QUICK_KEYS.map((k) => k.label)]
-      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Tmux · ${this.session} · keys`, menu: ['Back', 'Reload', 'Main'], items }
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: this.titled(`Tmux · ${this.session} · keys`), menu: ['Back', 'Reload', 'Main'], items }
     }
     if (this.level === 'kbd') {
       const { items } = browsePageItems(this.kbdModel().items, this.kbdOffset)
@@ -348,7 +353,7 @@ export class TerminalWindow implements OsWindow {
     // view level
     if (this.dictating()) return this.dictView()
     if (this.mode === 'grid') {
-      const title = `Tmux · ${this.session} · grid`
+      const title = this.titled(`Tmux · ${this.session} · grid`)
       const menu = ['Keys', 'Dictate', 'Tail', 'Terms', 'Reload', 'Main']
       if (this.gridImg) return { mode: 'tiles', tilesRect: { w: this.gridImg.w, h: this.gridImg.h }, title, menu, tiles: this.gridImg.tiles }
       return { mode: 'text', title, menu, text: this.gridFailed ? `grid render FAILED:\n${this.gridFailed}` : '⏳ rendering 80×22…' }
@@ -364,7 +369,7 @@ export class TerminalWindow implements OsWindow {
     while (rows.length && rows[rows.length - 1].trim() === '') rows.pop()
     const tail = bottomRows(rows, TERM_PAGE_ROWS, TERM_TAIL_MAX_BYTES).join('\n')
     return {
-      mode: 'text', title: `Tmux · ${this.session} · tail`,
+      mode: 'text', title: this.titled(`Tmux · ${this.session} · tail`),
       menu: ['Keys', 'Dictate', 'Grid', 'Focus', 'Terms', 'Reload', 'Main'],
       text: tail || '(no output yet)',
     }
@@ -381,7 +386,7 @@ export class TerminalWindow implements OsWindow {
     const at = total <= 1 ? '' : this.scrollPage === 0 ? ' (top)' : this.scrollPage >= total - 1 ? ' (live)' : ''
     return {
       mode: 'text',
-      title: `Tmux · ${this.session} · scroll ${this.scrollPage + 1}/${total}${at}`,
+      title: this.titled(`Tmux · ${this.session} · scroll ${this.scrollPage + 1}/${total}${at}`),
       menu: ['Up', 'Down', 'Live', 'Reload', 'Main'],
       text: pages[this.scrollPage] || '(no scrollback)',
     }
@@ -422,6 +427,7 @@ export class TerminalWindow implements OsWindow {
         this.ctx.log(`[os] term: sent ${k.label} → ${this.session}`)
       } catch (e) {
         this.ctx.log(`[os] term: send ${k.label} FAILED: ${(e as Error).message}`)
+        this.notice = `send ${k.label} failed: ${(e as Error).message}`   // D3: on glass, not just the log
       }
       this.requestRender()   // stay in keys for rapid sequences; Back to see the result
       return
@@ -465,6 +471,7 @@ export class TerminalWindow implements OsWindow {
           this.ctx.log(`[os] term: slash ${cmd} → ${this.session}`)
         } catch (e) {
           this.ctx.log(`[os] term: slash ${cmd} FAILED: ${(e as Error).message}`)
+          this.notice = `slash ${cmd} failed: ${(e as Error).message}`   // D3
         }
       }
       await this.refreshTail()
@@ -626,6 +633,7 @@ export class TerminalWindow implements OsWindow {
       this.ctx.log(`[os] term: keyboard ran "${buf.slice(0, 60)}" (${buf.length} chars) → ${this.session}`)
     } catch (e) {
       this.ctx.log(`[os] term: keyboard send FAILED: ${(e as Error).message}`)
+      this.notice = `keyboard send failed: ${(e as Error).message}`   // D3
     }
     await this.refreshTail()
   }
@@ -697,6 +705,7 @@ export class TerminalWindow implements OsWindow {
             this.ctx.log(`[os] term: dictated + ran "${text.slice(0, 60)}" (${text.length} chars) → ${this.session}`)
           } catch (e) {
             this.ctx.log(`[os] term: dictation send FAILED: ${(e as Error).message}`)
+            this.notice = `dictation send failed: ${(e as Error).message}`   // D3
           }
           this.level = 'view'
           this.mode = 'tail'   // watch it run (review 2026-07-05)
