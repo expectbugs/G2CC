@@ -123,9 +123,13 @@ class PaperclipsController {
   }
   private stopPacer(): void { if (this.pacer) { clearInterval(this.pacer); this.pacer = null } }
 
-  /** GamesWindow switched away — persist; keep the pacer so a switch-back resumes
-   *  (its requestRender no-ops while inactive). The engine keeps ticking. */
-  onDeactivate(): void { void paperclips.flush() }
+  /** GamesWindow switched away — persist + stop the pacer. (E1 verified: the
+   *  old "keep it so a switch-back resumes" rationale was unreachable —
+   *  GamesWindow.onActivate always routes through pc.leave() + the games menu,
+   *  and the only way back into the dash is pc.enter(), which restarts it. The
+   *  backgrounded ticks were WM-gated no-ops; now they don't happen at all.)
+   *  The ENGINE keeps ticking — only the render pacer stops. */
+  onDeactivate(): void { this.stopPacer(); void paperclips.flush() }
   /** ws close — stop our pacer. The engine is a process singleton; we do NOT
    *  tear it down (idle game keeps running for the next connection). */
   dispose(): void { this.stopPacer(); void paperclips.flush() }

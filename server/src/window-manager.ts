@@ -429,8 +429,6 @@ export class WindowManager {
    *  overlay tap resolution is gated on it (see setOverlay / onSelect). */
   private overlayRendered = false
   private overlayEvt: NotifyEvent | null = null
-  /** True when the overlay is a blanked-screen popup (auto-re-blanks). */
-  private overlayFromBlank = false
   /** timer/call events waiting for the active window to become interruptible
    *  (or for the current overlay to clear). Sorted call-first, FIFO within. */
   private pendingNotifs: NotifyEvent[] = []
@@ -636,10 +634,12 @@ export class WindowManager {
     this.lastBlankSurface = surface
   }
 
-  private setOverlay(evt: NotifyEvent, fromBlank: boolean): void {
+  // (E1: the old fromBlank param is gone — a blanked screen gets the Phase-2
+  // one-line FLASH, never this overlay, so no caller ever passed true and
+  // every overlayFromBlank branch was dead.)
+  private setOverlay(evt: NotifyEvent): void {
     this.activeOverlay = notificationView(evt)
     this.overlayEvt = evt
-    this.overlayFromBlank = fromBlank
     // B1 insurance: the overlay is about to own the screen via the window
     // render loop (which also clears this at its send) — drop the blank cache
     // now so no path can dedupe against a pre-overlay surface.
@@ -729,7 +729,7 @@ export class WindowManager {
         this.requestRender()   // badge updates now; the render-loop flush check promotes later
         return
       }
-      this.setOverlay(evt, false)
+      this.setOverlay(evt)
       this.requestRender()
       return
     }
@@ -742,16 +742,15 @@ export class WindowManager {
     this.requestRender()
   }
 
-  /** Overlay menu actions (Open/Dismiss/Main). Blanked popups were already
-   *  marked seen at display time; awake overlays mark seen on the action. */
+  /** Overlay menu actions (Open/Dismiss/Main) — overlays are always the
+   *  awake class (a blanked screen gets the one-line flash instead), so the
+   *  action marks the event seen. */
   private overlayAction(action: 'Open' | 'Dismiss' | 'Main'): void {
     const evt = this.overlayEvt
-    const fromBlank = this.overlayFromBlank
     this.clearPopupTimer()
     this.activeOverlay = null
     this.overlayEvt = null
-    this.overlayFromBlank = false
-    if (evt && !fromBlank) this.markEvtSeen(evt)
+    if (evt) this.markEvtSeen(evt)
     this.ctx.log(`[notify] overlay ${action}${evt ? ` (${evt.priority} "${evt.title}")` : ''}`)
     if (action === 'Open') {
       this.blanked = false
@@ -763,9 +762,7 @@ export class WindowManager {
       this.goHome()
       return
     }
-    // Dismiss: a blanked popup returns to blank; an awake overlay returns to
-    // the prior view (requestRender re-derives it).
-    if (fromBlank) { this.sendBlank(blankScene()); return }
+    // Dismiss: return to the prior view (requestRender re-derives it).
     this.requestRender()
   }
 
@@ -921,7 +918,7 @@ export class WindowManager {
     const next = this.pendingNotifs.shift()
     if (!next) return false
     this.ctx.log(`[notify] flushing queued ${next.priority} "${next.title}" (${this.pendingNotifs.length} still pending)`)
-    this.setOverlay(next, false)
+    this.setOverlay(next)
     return true
   }
 
@@ -1279,23 +1276,11 @@ export class WindowManager {
    *  double-tap wakes back to Main. */
   async onBackGesture(): Promise<void> {
     if (this.activeOverlay) {
-      // Double-tap on an overlay = Dismiss. A blanked popup additionally
-      // WAKES (the user is clearly engaging — and "double-tap wakes" holds);
-      // it was already marked seen at display time.
+      // Double-tap on an overlay = Dismiss.
       if (!this.overlayRendered) {
         // Same race policy as onSelect: the double-tap was aimed at the view
         // still on glass, not at an overlay the user hasn't seen — eat it.
         this.ctx.log('[os] double-tap raced the overlay render — eaten (overlay not yet on glass)')
-        this.requestRender()
-        return
-      }
-      if (this.overlayFromBlank) {
-        this.ctx.log('[notify] blanked popup dismissed by double-tap — waking')
-        this.clearPopupTimer()
-        this.activeOverlay = null
-        this.overlayEvt = null
-        this.overlayFromBlank = false
-        this.blanked = false
         this.requestRender()
         return
       }
@@ -1513,7 +1498,6 @@ export class WindowManager {
             this.activeOverlay = null
             this.overlayEvt = null
             this.overlayRendered = false
-            this.overlayFromBlank = false
           }
           this.blanked = true
           this.sendBlank(this.navLine ? blankFlashScene(this.navLine) : blankScene())

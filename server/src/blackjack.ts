@@ -256,17 +256,6 @@ export class Blackjack {
     this._outcome = outcome
   }
 
-  /** Clear a settled hand back to betting (the controller calls this to start a
-   *  new round; the bet persists as the default rebet). */
-  clearTable(): void {
-    this._player = []
-    this._dealer = []
-    this._outcome = null
-    this._lastDelta = 0
-    this._revealed = false
-    this._phase = 'betting'
-  }
-
   /** Rebuy when busted broke. */
   rebuy(amount: number): void {
     const a = Math.floor(amount)
