@@ -26,7 +26,20 @@ function classifyInterface(name: string): string {
   return name
 }
 
-/** Non-loopback IPv4 interfaces sorted Tailscale/WireGuard first, then LAN. */
+/** Priority rank shared by the /setup QR ordering and the /endpoints JSON
+ *  (E3 — it used to be duplicated in endpoints.ts, free to drift). The phone
+ *  tries endpoints in this order: lower = first. */
+export function ifacePriority(label: string): number {
+  if (label === 'Tailscale' || label === 'WireGuard') return 0
+  if (label === 'Ethernet' || label === 'WiFi') return 1
+  if (label === 'VPN/tunnel') return 2
+  return 3
+}
+
+/** Non-loopback IPv4 interfaces sorted Tailscale/WireGuard first, then LAN.
+ *  Container/bridge interfaces (docker0, veth*, br-*) are EXCLUDED (E3): the
+ *  phone can never reach them — listing them wasted reconnect attempts and
+ *  QR slots. Feeds /setup, /endpoints, and the startup banner alike. */
 export function getLocalInterfaces(): NetIface[] {
   const result: NetIface[] = []
   const ifaces = networkInterfaces()
@@ -34,17 +47,13 @@ export function getLocalInterfaces(): NetIface[] {
     if (!list) continue
     for (const info of list) {
       if (info.family === 'IPv4' && !info.internal) {
-        result.push({ name, address: info.address, label: classifyInterface(name) })
+        const label = classifyInterface(name)
+        if (label === 'Docker') continue
+        result.push({ name, address: info.address, label })
       }
     }
   }
-  const priority = (i: NetIface): number => {
-    if (i.label === 'Tailscale' || i.label === 'WireGuard') return 0
-    if (i.label === 'Ethernet' || i.label === 'WiFi') return 1
-    if (i.label === 'VPN/tunnel') return 2
-    return 3
-  }
-  result.sort((a, b) => priority(a) - priority(b))
+  result.sort((a, b) => ifacePriority(a.label) - ifacePriority(b.label))
   return result
 }
 
