@@ -448,6 +448,16 @@ export class WindowManager {
    *  (null = plain blank). NOT marked seen — the badge nags until read in
    *  Notices (Adam Q1). Cleared on wake / replacement / timer / dispose. */
   private blankFlash: NotifyEvent | null = null
+  /** B1 (review #6 queue): while blanked, background events (chrome refreshes,
+   *  nav updates) used to re-send an identical blankScene/blankFlashScene — a
+   *  full ack-gated layout rebuild for zero visual change, precisely while
+   *  Adam is driving. Serialized last blank-family surface actually SENT.
+   *  INVARIANT: non-null ⟺ the last frame put on glass was exactly this blank
+   *  surface — both non-blank send funnels (the window/overlay render loop and
+   *  the ribbon render loop) clear it at their ctx.send, so a skipped
+   *  duplicate always means "the glass already shows these bytes". The screen
+   *  can never stay dark on a stale cache. */
+  private lastBlankSurface: string | null = null
   /** Adam's blanked-flash auto-clear timer (display pacing, blanked case only).
    *  Cleared on EVERY exit path: tap, double-tap, replacement, dispose. */
   private blankPopupTimer: ReturnType<typeof setTimeout> | null = null
@@ -616,10 +626,24 @@ export class WindowManager {
       this.ctx.log(`[notify] markSeen(${evt.id}) failed: ${e instanceof Error ? e.message : String(e)}`))
   }
 
+  /** All blank-family sends route here (B1). Skips when the composed surface
+   *  is byte-identical to what the glass already shows; otherwise sends and
+   *  records. Cache set only AFTER a successful send. */
+  private sendBlank(scene: WireScene): void {
+    const surface = JSON.stringify(scene)
+    if (surface === this.lastBlankSurface) return   // glass already shows exactly this
+    this.ctx.send(scene)
+    this.lastBlankSurface = surface
+  }
+
   private setOverlay(evt: NotifyEvent, fromBlank: boolean): void {
     this.activeOverlay = notificationView(evt)
     this.overlayEvt = evt
     this.overlayFromBlank = fromBlank
+    // B1 insurance: the overlay is about to own the screen via the window
+    // render loop (which also clears this at its send) — drop the blank cache
+    // now so no path can dedupe against a pre-overlay surface.
+    this.lastBlankSurface = null
     // The overlay exists but has NOT been rendered yet — until the render loop
     // composes it, taps must not resolve as overlay actions (a tap aimed at a
     // window's own 'Main' row was marking the undisplayed alarm seen +
@@ -665,12 +689,12 @@ export class WindowManager {
       if (this.blankFlash) this.ctx.log(`[notify] blank flash replaced by newer (${this.blankFlash.priority} → ${evt.priority})`)
       this.blankFlash = evt
       try {
-        this.ctx.send(blankFlashScene(this.flashLine(evt)))
+        this.sendBlank(blankFlashScene(this.flashLine(evt)))
       } catch (e) {
         // A line that somehow blows the budget must not strand the screen.
         this.ctx.log(`[notify] blank flash compose failed (${(e as Error).message}) — staying blank`)
         this.blankFlash = null
-        this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
+        this.sendBlank(this.navLine ? blankFlashScene(this.navLine) : blankScene())
         return
       }
       // The badge must still nag on wake: unseen++ above + a persistent title
@@ -686,10 +710,10 @@ export class WindowManager {
         // in this timer would crash the process; blankScene() can't throw.
         if (this.blanked && !this.activeOverlay) {
           try {
-            this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
+            this.sendBlank(this.navLine ? blankFlashScene(this.navLine) : blankScene())
           } catch (e) {
             this.ctx.log(`[notify] re-blank compose failed (${(e as Error).message}) — plain blank`)
-            this.ctx.send(blankScene())
+            this.sendBlank(blankScene())
           }
         }
       }, BLANK_POPUP_MS)
@@ -741,7 +765,7 @@ export class WindowManager {
     }
     // Dismiss: a blanked popup returns to blank; an awake overlay returns to
     // the prior view (requestRender re-derives it).
-    if (fromBlank) { this.ctx.send(blankScene()); return }
+    if (fromBlank) { this.sendBlank(blankScene()); return }
     this.requestRender()
   }
 
@@ -760,7 +784,7 @@ export class WindowManager {
       // in place via onNavUpdate and only clears on nav_clear); a 5 s flash
       // still takes precedence for its window, then nav resumes.
       if (this.blankFlash) return
-      this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
+      this.sendBlank(this.navLine ? blankFlashScene(this.navLine) : blankScene())
       return
     }
     // Phase 2: the ribbon root has its own conflated sender (it composes its own
@@ -864,6 +888,7 @@ export class WindowManager {
           // list; winMenuCursor for the fullBleed antenna), so they must agree.
           this.lastView = { ...view, menu: renderedMenu }
           if (this.activeOverlay && view === this.activeOverlay) this.overlayRendered = true
+          this.lastBlankSurface = null   // B1: a non-blank frame goes on glass
           this.ctx.send(scene)
           // Phase 4 queue flush: promote ONE pending overlay once nothing
           // blocks. Setting state + renderQueued re-iterates the already-
@@ -938,6 +963,7 @@ export class WindowManager {
             }
           }
           this.lastView = null   // the ribbon has no menu/browse list — taps are tap=enter, scroll=focus
+          this.lastBlankSurface = null   // B1: a non-blank frame goes on glass
           this.ctx.send(scene)
           // Queue flush at the ribbon (review 2026-07-05): a queued timer/call
           // alarm must not stall while the ribbon is the surface. Promoting sets
@@ -1299,7 +1325,7 @@ export class WindowManager {
           // Keep a live Maps nav line on the dark screen (review 2026-07-05 —
           // 'nav owns the blanked surface'; every other blank site already does
           // this). The menu-mode twin deliberately stays plain (classic parity).
-          this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
+          this.sendBlank(this.navLine ? blankFlashScene(this.navLine) : blankScene())
           return
         }
         return
@@ -1329,7 +1355,7 @@ export class WindowManager {
       if (this.active.id === 'main') {
         this.blanked = true
         this.ctx.log('[os] screen BLANK (double-tap at Main root) — double-tap again to wake')
-        this.ctx.send(blankScene())
+        this.sendBlank(blankScene())
         return
       }
       this.switchTo('main')
@@ -1488,7 +1514,7 @@ export class WindowManager {
             this.overlayFromBlank = false
           }
           this.blanked = true
-          this.ctx.send(this.navLine ? blankFlashScene(this.navLine) : blankScene())
+          this.sendBlank(this.navLine ? blankFlashScene(this.navLine) : blankScene())
         }
         return
       case 'wake':
@@ -1583,7 +1609,7 @@ export class WindowManager {
     this.navLine = null
     this.ctx.log('[nav] cleared')
     if (this.blanked && !this.activeOverlay) {
-      this.ctx.send(this.blankFlash ? blankFlashScene(this.flashLine(this.blankFlash)) : blankScene())
+      this.sendBlank(this.blankFlash ? blankFlashScene(this.flashLine(this.blankFlash)) : blankScene())
     } else {
       this.requestRender()
     }
