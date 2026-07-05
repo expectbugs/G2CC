@@ -416,6 +416,14 @@ export class FilesWindow implements OsWindow {
       // Stale-swap guard (review 2026-06-11b): any navigation during the PIL
       // subprocess invalidates this request.
       const seq = ++this.navSeq
+      // D2 (review #6 queue): paint a placeholder IMMEDIATELY — the PIL
+      // subprocess is seconds of dead air that invited the impatient second
+      // tap (which the navSeq guards then have to eat). The render below
+      // swaps the real tiles in (or the error page) when it lands.
+      this.pages = [`rendering image…\n\n${name}`]
+      this.page = 0
+      this.level = 'read'
+      this.requestRender()
       try {
         const img = await renderImageFile(path, DE_CONTENT_W, DE_CONTENT_H)
         if (seq !== this.navSeq) {
