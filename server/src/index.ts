@@ -22,6 +22,7 @@ import { handleConnection, setWatchdog } from './ws-handler.js'
 import { Watchdog } from './watchdog.js'
 import { renderSetupPage, getLocalInterfaces } from './setup-page.js'
 import { getEndpointJson } from './endpoints.js'
+import { timingSafeEqualStr } from './auth.js'
 import { warmParakeet } from './stt.js'
 import { warmStore } from './store.js'
 import { paperclips } from './paperclips.js'
@@ -70,7 +71,7 @@ server.get('/endpoints', async (req, reply) => {
   // Token gate via Authorization: Bearer <token> — same secret as the WS auth.
   const auth = req.headers.authorization
   const expected = `Bearer ${config.authToken}`
-  if (auth !== expected) {
+  if (typeof auth !== 'string' || !timingSafeEqualStr(auth, expected)) {
     reply.code(401).send({ error: 'unauthorized' })
     return
   }
@@ -84,7 +85,7 @@ server.get('/endpoints', async (req, reply) => {
 const DIAG_LOG_PATH = '/tmp/g2cc-harness-diag.log'
 server.post('/diag', async (req, reply) => {
   const auth = req.headers.authorization
-  if (auth !== `Bearer ${config.authToken}`) {
+  if (typeof auth !== 'string' || !timingSafeEqualStr(auth, `Bearer ${config.authToken}`)) {
     reply.code(401).send({ error: 'unauthorized' })
     return
   }
@@ -115,7 +116,9 @@ const APK_PATH_LEGACY = '/tmp/g2cc-harness.apk'
 server.get('/apk', async (req, reply) => {
   const token = (req.query as { token?: string } | undefined)?.token
   const bearer = req.headers.authorization
-  if (token !== config.authToken && bearer !== `Bearer ${config.authToken}`) {
+  const tokenOk = typeof token === 'string' && timingSafeEqualStr(token, config.authToken)
+  const bearerOk = typeof bearer === 'string' && timingSafeEqualStr(bearer, `Bearer ${config.authToken}`)
+  if (!tokenOk && !bearerOk) {
     reply.code(401).send({ error: 'unauthorized' })
     return
   }
