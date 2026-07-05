@@ -14,6 +14,7 @@ import {
   DUNGEON_ROOT, type ChessState, type HandCard,
 } from '../games.js'
 import { Blackjack, isBust, type Phase as BjPhase } from '../blackjack.js'
+import { notify } from '../os-notify.js'
 import { paperclips, type PcSnapshot, type PcPhase } from '../paperclips.js'
 
 const RPG_ACTIONS = ['» stat', '» battle', '» ls (inspect)', '» todo', '» buy (list shop)'] as const
@@ -1036,7 +1037,16 @@ export class GamesWindow implements OsWindow {
     if (this.level === 'rpg' || this.level === 'rpg-out') {
       this.level = 'rpg-out'
     } else {
-      this.ctx.log(`[os] games: rpg output ready but the user left the rpg area (level=${this.level}) — stored, not shown`)
+      // D4 (review #6 queue): the stored output used to vanish silently. A
+      // one-shot info notice tells the user it's waiting (badge + Notices);
+      // targetWindow routes Open back to Games.
+      this.ctx.log(`[os] games: rpg output ready but the user left the rpg area (level=${this.level}) — stored + notified`)
+      void notify({
+        source: 'games', priority: 'info',
+        title: 'rpg: output ready',
+        body: `rpg-cli ${args.join(' ')} finished — reopen Games · rpg to read it.`,
+        targetWindow: 'games',
+      })
     }
     this.requestRender()
     return ok
