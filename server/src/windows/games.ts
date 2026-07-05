@@ -652,6 +652,11 @@ class BlackjackController {
   leave(): void { this.persist() }
   dispose(): void { this.persist() }
 
+  /** C5 (review #6 queue): SERIALIZED via the reader persistChain pattern —
+   *  rapid hands could race their upserts on separate pool clients and commit
+   *  out of order (an older bankroll winning). The snapshot is taken at call
+   *  time, so the chain writes in call order and the last call's values win. */
+  private persistChain: Promise<void> = Promise.resolve()
   private persist(): void {
     if (!this.loadOk) {
       // Never upsert a game whose save never loaded (fresh construct / failed
@@ -662,8 +667,11 @@ class BlackjackController {
       if (this.loaded) this.ctx.log('[os] blackjack: persist skipped — the save never loaded this connection (protects the stored game)')
       return
     }
-    void saveBlackjack(this.game.snapshot()).catch((e: unknown) =>
-      this.ctx.log(`[os] blackjack: save failed: ${e instanceof Error ? e.message : String(e)}`))
+    const snap = this.game.snapshot()
+    this.persistChain = this.persistChain
+      .then(async () => { await saveBlackjack(snap) })
+      .catch((e: unknown) =>
+        this.ctx.log(`[os] blackjack: save failed: ${e instanceof Error ? e.message : String(e)}`))
   }
 
   // ----------------------------------------------- tile rendering
