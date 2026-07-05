@@ -320,9 +320,17 @@ class ParakeetDaemon {
       while (this.queue.length) this.queue.shift()!.reject(err)
     }
     proc.on('exit', (code, signal) => {
+      // Log at exit time, but REJECT on 'close' (C6, review #6 queue): a result
+      // flushed just before the daemon died is still draining through the pipe
+      // at 'exit' — rejecting here lost that race. 'close' fires once stdio is
+      // fully drained, so onStdout gets to consume the final frame first.
       console.warn(`[stt] parakeet daemon exited (code=${code} signal=${signal})`)
+    })
+    proc.on('close', (code, signal) => {
       die(new Error(`parakeet daemon exited (code=${code} signal=${signal})`))
     })
+    // 'close' never fires for a process that failed to spawn (ENOENT/EACCES) —
+    // die() here too; the identity gate makes the second call a no-op.
     proc.on('error', (e) => { console.error(`[stt] parakeet daemon spawn error: ${e}`); die(e) })
   }
 
