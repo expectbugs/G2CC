@@ -84,6 +84,9 @@ class ConnectionManager(
     // sendBinary) see consistent updates.
     @Volatile private var ws: WebSocket? = null
     private val wsGen = AtomicInteger(0)
+    /** Terminal latch (review 2026-07-05): set by disconnect()/shutdown(); a
+     *  late reconnect straggler must never re-open a socket on a dead manager. */
+    @Volatile private var closed = false
 
     // Mutated from both the OkHttp dispatcher thread (onClosed / onFailure) and
     // from refreshEndpoints (scope.launch on Dispatchers.IO). @Volatile + the
@@ -141,6 +144,12 @@ class ConnectionManager(
     fun connect() {
         // @Synchronized (review 2026-06-11): Job.cancel() can't abort this non-suspending
         // body, so reconnectJob and forceReconnect could interleave inside it.
+        // Closed-latch (review 2026-07-05): a reconnectJob straggler entering
+        // connect() AFTER disconnect()/shutdown() minted a fresh gen and opened
+        // a zombie authed socket nothing owned (its heartbeats kept it alive;
+        // no path ever closed it). ConnectionService builds a fresh manager per
+        // session, so the latch never blocks a legitimate reconnect.
+        if (closed) { Log.i(TAG, "connect() after disconnect — ignored (closed latch)"); return }
         // Bug fix #5: don't reconnect if we already have a healthy authed
         // socket. (g2aria's TS check on `readyState === OPEN` doesn't translate
         // directly — OkHttp's WebSocket doesn't expose readyState. Use our
@@ -174,7 +183,12 @@ class ConnectionManager(
         ensureLivenessWatchdog()
     }
 
+    @Synchronized   // diff-review 2026-07-05: must hold connect()'s monitor, or a straggler
+    // that already passed the closed-check mints a FRESH gen after our bump —
+    // the exact zombie the latch kills. Body is non-blocking (job cancels,
+    // gen bump, async ws.close), so holding the lock is cheap.
     fun disconnect() {
+        closed = true   // review 2026-07-05: latch BEFORE the gen bump — see connect()
         reconnectJob?.cancel(); reconnectJob = null
         livenessJob?.cancel(); livenessJob = null
         clientHbJob?.cancel(); clientHbJob = null

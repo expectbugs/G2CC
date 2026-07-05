@@ -41,6 +41,15 @@ object MediaBridge {
         try {
             val m = ctx.getSystemService(MediaSessionManager::class.java)
             if (m == null) { DiagLog.log("media", "no MediaSessionManager"); onState(MediaInfo(playing = false)); return }
+            // Re-subscribe (Media Reload / window re-entry) must not STACK
+            // listeners (review 2026-07-05: every repeat subscribe() added
+            // another OnActiveSessionsChangedListener; unsubscribe() removes
+            // only the latest — the leaked ones fired N callbacks per session
+            // change for the life of the process). Remove the previous first.
+            sessionsListener?.let { l ->
+                try { (msm ?: m).removeOnActiveSessionsChangedListener(l) } catch (e: Exception) { DiagLog.log("media", "stale listener remove failed: $e") }
+            }
+            sessionsListener = null
             msm = m
             val comp = ComponentName(ctx, NotifyListener::class.java)
             val sessions = m.getActiveSessions(comp)
@@ -136,12 +145,26 @@ object MediaBridge {
             )
             p(base)
             if (artKey != lastArtKey) {
-                lastArtKey = artKey
                 val bmp = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART) ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
-                // H2: encode + re-push the art OFF the main thread (ANR class).
-                if (bmp != null) ioScope.launch {
-                    val art = encodeArt(bmp) ?: return@launch
-                    if (lastArtKey == artKey) push?.invoke(base.copy(artB64 = art))   // still the same track
+                // Commit the dedupe key ONLY once a bitmap is in hand (review
+                // 2026-07-05: marking it before a LATE-loading art existed
+                // skipped the track's art forever — every later metadata push
+                // matched the key and bailed). A failed/oversize encode resets
+                // the key so a later push can retry.
+                if (bmp != null) {
+                    lastArtKey = artKey
+                    // H2: encode + re-push the art OFF the main thread (ANR class).
+                    ioScope.launch {
+                        val art = encodeArt(bmp)
+                        if (art == null) {
+                            // Reset ONLY if we still own the key (diff-review 2026-07-05):
+                            // a STALE failure landing after a track change was clobbering
+                            // the newer track's committed key, dropping its in-flight art.
+                            if (lastArtKey == artKey) lastArtKey = ""
+                            return@launch
+                        }
+                        if (lastArtKey == artKey) push?.invoke(base.copy(artB64 = art))   // still the same track
+                    }
                 }
             }
         } catch (e: Exception) { DiagLog.log("media", "pushNow failed: $e") }

@@ -171,6 +171,12 @@ class NotifyListener : NotificationListenerService() {
             }
         }
 
+        // Newest-wins supersede for ANY newer post on this key (review
+        // 2026-07-05: this used to live below the imageless early-return, so a
+        // text-only re-post let an older in-flight MMS retry loop forward its
+        // stale title/text out of order AFTER the newer content).
+        imgJobs[sbn.key]?.cancel()
+
         // No image → forward immediately (cheap, stays on the main thread).
         if (imgRef.isEmpty()) {
             ConnectionService.forwardNotification(
@@ -184,7 +190,6 @@ class NotifyListener : NotificationListenerService() {
         // callback → zombie-listener risk), then forward text+image together. The
         // dedup stamp above already ran on the main thread, so only the FIRST
         // occurrence per image reaches this expensive path.
-        imgJobs[sbn.key]?.cancel()   // newest-wins: supersede an in-flight loop for this key
         val job = ioScope.launch {
             // Phase 1 (MMS retry, review 2026-06-12 evidence): Google Messages
             // posts the conversation notification, but the RCS attachment file
@@ -401,7 +406,12 @@ class NotifyListener : NotificationListenerService() {
 
     companion object {
         private const val SEEN_CAP = 64
-        private val seen = LinkedHashMap<String, String>()
+        // ACCESS-ordered (review 2026-07-05): insertion order evicted the OLDEST
+        // key even while it was hot — a media app re-posting every few seconds
+        // aged out mid-suppression and re-forwarded identical content. With
+        // accessOrder=true the suppression GET refreshes recency, so eviction
+        // takes the true least-recently-active key.
+        private val seen = LinkedHashMap<String, String>(64, 0.75f, true)
         private const val MAPS_PKG = "com.google.android.apps.maps"
         /** Phase 6: the key of the live Maps nav notification (cleared on removal). */
         @Volatile

@@ -66,6 +66,11 @@ class MicCapture(private val context: Context) {
 
     private var record: AudioRecord? = null
     private var captureJob: Job? = null
+    /** Capture generation (review 2026-07-05): the old read-loop's finally
+     *  block, landing AFTER a rapid stop()->start(), used to see the NEW
+     *  capture's isCapturing=true and release the NEW AudioRecord (the wsGen
+     *  stale-guard pattern). Bumped on every start(). */
+    private val captureGen = java.util.concurrent.atomic.AtomicInteger(0)
     private val scope = CoroutineScope(Dispatchers.IO)
 
     // Set true once we've taken over the comms audio route for the BT-SCO path
@@ -124,6 +129,7 @@ class MicCapture(private val context: Context) {
 
             onEvent(Event.Started(source, sampleRate, channels, encoding))
 
+            val myGen = captureGen.incrementAndGet()
             captureJob = scope.launch {
                 try {
                     runReadLoop(rec, encoding, onEvent)
@@ -134,8 +140,10 @@ class MicCapture(private val context: Context) {
                     // the instance isn't permanently wedged. stop() flips
                     // isCapturing=false first then cancels this job, so the check
                     // below avoids double-release in the user-stopped path.
+                    // gen check (review 2026-07-05): after a rapid stop()->start()
+                    // this stale finally must NOT release the NEW capture.
                     synchronized(this@MicCapture) {
-                        if (isCapturing) {
+                        if (isCapturing && myGen == captureGen.get()) {
                             Log.w(TAG, "read-loop exited while isCapturing=true — cleaning up")
                             isCapturing = false
                             releaseLocked()

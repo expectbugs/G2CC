@@ -198,6 +198,20 @@ class ConnectionService : Service(), TestHarness {
             if (i?.action != android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED) return
             val st = i.getIntExtra(android.bluetooth.BluetoothAdapter.EXTRA_STATE, -1)
             DiagLog.log("conn", "bluetooth adapter state → $st")
+            if (st == android.bluetooth.BluetoothAdapter.STATE_OFF &&
+                !_launched.value && _connecting.value && left == null
+            ) {
+                // Adapter died during the pure SCAN phase (review 2026-07-05):
+                // no lens client exists yet, so no Error callback will ever
+                // release `_connecting` — it strands true and the STATE_ON
+                // auto-recovery below gates itself off FOREVER (the "scanning
+                // forever" class). Kill the scan + release the flag so the
+                // ON edge re-runs a fresh scan. Mirrors the lens-client
+                // Error-branch release; no timeout involved.
+                DiagLog.log("recover", "bluetooth OFF mid-scan — releasing _connecting so the ON edge can rescan")
+                scanner?.stop(); scanner = null
+                _connecting.value = false
+            }
             if (st == android.bluetooth.BluetoothAdapter.STATE_ON &&
                 !_launched.value && !_connecting.value && !recovering
             ) {

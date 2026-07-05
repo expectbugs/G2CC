@@ -87,7 +87,11 @@ class AudioStreamer(
                         fmtSampleRate = event.sampleRate; fmtChannels = event.channels
                         fmtEnc = encName; fmtSource = sourceName; winBytes = 0
                         val bytesPerSample = when (encName) { "float32" -> 4; "int8" -> 1; else -> 2 }
-                        winLimit = event.sampleRate * event.channels * bytesPerSample * WINDOW_MS / 1000
+                        // Long math (review 2026-07-05): Int overflowed at >=96 kHz
+                        // stereo float32 x WINDOW_MS, going negative and disabling
+                        // handsfree window re-cutting entirely.
+                        winLimit = (event.sampleRate.toLong() * event.channels * bytesPerSample * WINDOW_MS / 1000)
+                            .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
                         connection.send(
                             ClientMessage.AudioStart(
                                 sampleRate = event.sampleRate,
