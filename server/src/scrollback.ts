@@ -13,8 +13,18 @@ export class ScrollbackBuffer {
   private lines: string[] = []
   private hasMarker = false
   private droppedTotal = 0
+  /** B3 (review #6 queue): getPage/lastPage re-paginated the WHOLE buffer per
+   *  call on the legacy phone-UI output path. Page split cached; invalidated
+   *  on append/clear (the only mutators). */
+  private cachedPages: string[] | null = null
+
+  private pages(): string[] {
+    if (this.cachedPages === null) this.cachedPages = paginateText(this.lines.join('\n'), PAGE_CHAR_TARGET)
+    return this.cachedPages
+  }
 
   append(text: string): void {
+    this.cachedPages = null
     const newLines = text.split('\n')
     this.lines.push(...newLines)
     if (this.lines.length > SCROLLBACK_MAX_LINES) {
@@ -37,15 +47,17 @@ export class ScrollbackBuffer {
     this.lines = []
     this.hasMarker = false
     this.droppedTotal = 0
+    this.cachedPages = null
   }
 
   getPage(pageIndex: number): { text: string; page: number; totalPages: number } {
-    const fullText = this.lines.join('\n')
-    if (fullText.length === 0) {
+    // pages() === [] ⟺ the joined text is empty (paginateText of '' is []) —
+    // the same condition the pre-cache code keyed off fullText.length === 0.
+    const pages = this.pages()
+    if (pages.length === 0) {
       return { text: '', page: 1, totalPages: 1 }
     }
 
-    const pages = paginateText(fullText, PAGE_CHAR_TARGET)
     const clamped = Math.max(0, Math.min(pageIndex, pages.length - 1))
     let text = pages[clamped] ?? ''
 
@@ -65,9 +77,9 @@ export class ScrollbackBuffer {
   }
 
   get lastPage(): number {
-    const fullText = this.lines.join('\n')
-    if (fullText.length === 0) return 0
-    return paginateText(fullText, PAGE_CHAR_TARGET).length - 1
+    const pages = this.pages()
+    if (pages.length === 0) return 0
+    return pages.length - 1
   }
 
   get lineCount(): number {
