@@ -156,4 +156,4 @@ const settle = async (last, pred, what, ms = 12000) => {
 }
 
 await getPool().end()   // review 2026-07-05: pool leak = ~10 s idle tail per phase
-console.error('\nphase-fullbleed: ALL OK')
+console.log('\nphase-fullbleed: ALL OK')   // stdout — the suite-wide marker channel (E2); PROGRESS stays on stderr

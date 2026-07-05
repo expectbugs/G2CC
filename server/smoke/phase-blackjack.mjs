@@ -97,6 +97,9 @@ const stableT0 = async () => {
     if (cur !== null && cur === prev) return
     prev = cur
   }
+  // E2: proceeding silently here let a never-stabilizing dealer tile turn the
+  // cost-contract capture into noise — fail loud instead.
+  throw new Error('stableT0: dealer tile never stabilized within 40 polls (~6 s)')
 }
 const MENU_MAX_PX = 90
 function checkScene(sc, where) {
@@ -195,7 +198,7 @@ try {
   await settle((x) => /Blackjack/.test(titleOf(x)), 'Reload stays in Blackjack')
   console.error('  9. Reload refreshes in place ✓')
 
-  console.error('\nphase-blackjack: ALL OK')
+  console.log('\nphase-blackjack: ALL OK')   // stdout — the suite-wide marker channel (E2); PROGRESS stays on stderr
 } finally {
   wm.dispose?.()
   await query('DELETE FROM blackjack_save WHERE id = 1')

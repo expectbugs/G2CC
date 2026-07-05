@@ -24,15 +24,27 @@ if (scripts.length === 0) {
 }
 
 let failed = 0
+const results = []
 for (const s of scripts) {
   process.stdout.write(`\n=== ${s} ===\n`)
+  const t0 = Date.now()
+  let ok = true
   try {
     execFileSync(process.execPath, [join(here, s)], { stdio: 'inherit' })
   } catch {
     failed++
+    ok = false
     console.error(`✗ ${s} FAILED`)
   }
+  results.push({ s, ok, ms: Date.now() - t0 })
 }
 
+// Per-phase wall-clock (E2, review #6 queue): the seven-phase pg-pool leak
+// added ~70 s of pure idle tail and nothing surfaced it — a per-phase timing
+// line makes the next leak-class regression obvious at a glance.
+console.log('\nrun-all timings:')
+for (const r of results) {
+  console.log(`  ${r.ok ? '✓' : '✗'} ${r.s.padEnd(30)} ${(r.ms / 1000).toFixed(1)}s`)
+}
 console.log(`\nrun-all: ${scripts.length - failed}/${scripts.length} passed`)
 process.exit(failed ? 1 : 0)
