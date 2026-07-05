@@ -1555,11 +1555,9 @@ export class WindowManager {
     try {
       await this.active.onMenuSelect(label)
     } catch (e) {
-      if (e instanceof SwitchTo) {
-        this.switchTo(e.windowId)
-        if (e.menuLabel) await this.active.onMenuSelect(e.menuLabel).catch((err) => this.ctx.log(`[voice] post-switch '${e.menuLabel}' failed: ${(err as Error).message}`))
-        return
-      }
+      // C1 (review #6 queue): this catch used to re-implement the switch and
+      // dropped SwitchTo.open — voice would switch without opening the item.
+      if (e instanceof SwitchTo) { await this.handleSwitchTo(e); return }
       this.ctx.log(`[voice] menu '${label}' failed (${this.active.id}): ${(e as Error).message}`)
       this.requestRender()
     }
