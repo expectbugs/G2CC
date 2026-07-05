@@ -150,14 +150,25 @@ try {
     console.error('  5. bookmarks: Mark → list → gate(+Delete) → removed ✓')
 
     // --- 6. recent-spots breadcrumbs (the undo trail, browsable) ---
+    // C4 (queue 2026-07-05): Back from the marks list returns WHERE IT WAS
+    // ENTERED FROM (marksRet), not the old markKind heuristic (recent→Options).
     reader.level = 'read'   // Section 5 ended in the bookmarks list → back to the page
     await reader.onMenuSelect('Recent')   // the classic reading menu surfaces Recent
     assert.equal(reader.level, 'marks', 'Recent opens the breadcrumb list')
     assert.equal(reader.markKind, 'recent', 'markKind = recent')
     assert.ok(reader.markList.length >= 1, `recent spots recorded from the jumps, got ${reader.markList.length}`)
-    assert.equal(await reader.onBack(), true, 'back out of recent → Options (hierarchical)')
-    assert.equal(reader.level, 'options', 'Recent backs out to Options')
-    console.error(`  6. recent spots: ${reader.markList.length} breadcrumb(s) browsable ✓`)
+    assert.equal(await reader.onBack(), true, 'back out of recent')
+    assert.equal(reader.level, 'read', 'read-menu Recent backs out to the page (marksRet)')
+    // …and the same list entered from Options returns to Options.
+    reader.level = 'options'
+    const ov = await reader.view()
+    const recentIdx = ov.items.indexOf('Recent')
+    assert.ok(recentIdx >= 0, `Options lists Recent, got ${JSON.stringify(ov.items)}`)
+    await reader.onBrowseSelect(recentIdx)
+    assert.equal(reader.level, 'marks', 'Options→Recent opens the list')
+    assert.equal(await reader.onBack(), true, 'back out of Options-entered recent')
+    assert.equal(reader.level, 'options', 'Options-entered Recent backs out to Options (marksRet)')
+    console.error(`  6. recent spots: ${reader.markList.length} breadcrumb(s) browsable; Back lands where entered (read + options) ✓`)
 
     // --- 7. backing UP the levels never moves the saved position (new hierarchy) ---
     reader.level = 'read'

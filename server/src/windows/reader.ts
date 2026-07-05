@@ -58,6 +58,11 @@ export class ReaderWindow implements OsWindow {
    *  'read', so Options→Jump→Cancel forced a phantom read state when no page
    *  was loaded — the first scroll then skipped chapter 1 entirely). */
   private jumpRet: 'read' | 'options' = 'read'
+  /** C4 (review #6 queue): where Back/exit from the marks list returns to —
+   *  set at each entry point (root-menu Bookmarks, Options→Recent, read-menu
+   *  Bookmarks/Recent). The old markKind heuristic sent read-menu entries to
+   *  the wrong level. The confirm gate + pendingNav.ret stay untouched (r27). */
+  private marksRet: 'menu' | 'options' | 'read' = 'menu'
   private cwd = ''   // current subfolder under ~/books ('' = root); navigation persists across switches
   private lastBook: { path: string } | null = null   // the root "Last" shortcut target (most-recently-read)
   private lastBookLoaded = false                      // lazy-load + invalidate guard for lastBook
@@ -586,7 +591,7 @@ export class ReaderWindow implements OsWindow {
         case 'Bookmarks':
           this.markKind = 'bookmarks'
           try { this.markList = this.bookPath ? await listBookmarks(this.bookPath) : [] } catch (e) { this.ctx.log(`[reader] bookmarks load failed: ${(e as Error).message}`); this.markList = [] }
-          this.markOffset = 0; this.level = 'marks'; this.requestRender(); return
+          this.markOffset = 0; this.marksRet = 'menu'; this.level = 'marks'; this.requestRender(); return
         case 'Options': this.level = 'options'; this.requestRender(); return
         default: this.ctx.log(`[reader] menu index ${index} out of range — resyncing`); this.requestRender(); return
       }
@@ -610,7 +615,7 @@ export class ReaderWindow implements OsWindow {
         case 'Recent':
           this.markKind = 'recent'
           try { this.markList = this.bookPath ? await listHistory(this.bookPath, RECENT_VIEW) : [] } catch (e) { this.ctx.log(`[reader] recent load failed: ${(e as Error).message}`); this.markList = [] }
-          this.markOffset = 0; this.level = 'marks'; this.requestRender(); return
+          this.markOffset = 0; this.marksRet = 'options'; this.level = 'marks'; this.requestRender(); return
         case 'Chapters':
           if (!this.bookPath) { this.ctx.log('[reader] Chapters: no book open'); this.requestRender(); return }
           this.chapOffset = 0; this.level = 'chapters'; this.requestRender(); return
@@ -758,13 +763,13 @@ export class ReaderWindow implements OsWindow {
       case 'Bookmarks':
         this.markKind = 'bookmarks'
         try { this.markList = this.bookPath ? await listBookmarks(this.bookPath) : [] } catch (e) { this.ctx.log(`[reader] bookmarks load failed: ${(e as Error).message}`); this.markList = [] }
-        this.markOffset = 0; this.focus = 'content'; this.markedNote = false; this.level = 'marks'
+        this.markOffset = 0; this.focus = 'content'; this.markedNote = false; this.marksRet = 'read'; this.level = 'marks'
         this.requestRender()
         return
       case 'Recent':
         this.markKind = 'recent'
         try { this.markList = this.bookPath ? await listHistory(this.bookPath, RECENT_VIEW) : [] } catch (e) { this.ctx.log(`[reader] recent load failed: ${(e as Error).message}`); this.markList = [] }
-        this.markOffset = 0; this.focus = 'content'; this.markedNote = false; this.level = 'marks'
+        this.markOffset = 0; this.focus = 'content'; this.markedNote = false; this.marksRet = 'read'; this.level = 'marks'
         this.requestRender()
         return
       case 'Voice on': this.setVoice(true); return
@@ -823,10 +828,12 @@ export class ReaderWindow implements OsWindow {
       case 'chapters':
         this.level = 'options'; this.requestRender(); return true    // Chapters is reached from Options
       case 'marks':
-        this.level = this.markKind === 'bookmarks' ? 'menu' : 'options'   // Bookmarks from the menu, Recent from Options
+        this.level = this.marksRet   // back where the list was entered from (C4 — the markKind heuristic sent read-menu entries astray)
         this.requestRender(); return true
       case 'jump':
-        this.jumpBuf = ''; this.jumpError = null; this.level = 'options'; this.requestRender(); return true
+        // Same class as marks (the jumpRet fix's gesture twin): Cancel already
+        // returns via jumpRet; the double-tap used to hardcode 'options'.
+        this.jumpBuf = ''; this.jumpError = null; this.level = this.jumpRet; this.requestRender(); return true
       case 'confirm':                                                // double-tap on the gate = Cancel (stay put)
         this.level = this.pendingNav?.ret ?? 'read'; this.pendingNav = null; this.requestRender(); return true
     }
