@@ -312,6 +312,30 @@ try {
     assert.equal(fakes.sent.length, 2, 'quick prompt sent through prompt()')
     turnComplete(fakes.handlers, 'done')                    // clean up the busy state
 
+    // ==== Adam's park-and-read scenario (2026-07-09), verified exactly: ====
+    // start a research turn → park to Reader mid-turn → the turn completes
+    // WHILE PARKED → return → the answer is immediately on the scroll-read
+    // page, and nothing about parking touched the turn.
+    scout.onActivate(true)                                   // menued (Ask reachable)
+    await scout.onMenuSelect('Ask')                          // mic on (listening)
+    await scout.onMenuSelect('Done')                         // stop mic → transcribing
+    await scout.onStt('find me a coach')                     // transcript arrives
+    await scout.onMenuSelect('Confirm')                      // sacred confirm → prompt sent
+    assert.equal(fakes.sent.length, 3, 'the research prompt reached the subprocess')
+    let vv = await scout.view()
+    assert.ok((vv.title.includes('thinking')) || vv.menu.includes('Interrupt'), 'turn in flight')
+    scout.onDeactivate()                                     // park → Reader (mic stop is a no-op here)
+    r = await deliverLiveFrame({ kind: 'text', text: 'progress while parked' })
+    assert.equal(r.ok, true, 'live frames still accepted while parked')
+    assert.equal(r.displayed, false, 'truthfully reported as held (window inactive)')
+    turnComplete(fakes.handlers, 'Park answer line.\n\n' + 'Body of the parked answer. '.repeat(40))
+    scout.onActivate(false)                                  // return from the ribbon (switch-in, not reentry)
+    vv = await scout.view()
+    assert.equal(vv.scrollContent, true, 'the completed answer is IMMEDIATELY the scroll-read view on return')
+    assert.ok(vv.text.includes('Park answer line'), 'page 1 of the new answer is showing')
+    assert.equal(scoutLiveStatus().frameHeld, false, 'the stale live frame did not survive its turn')
+    console.error('  3b. park-and-read: turn survives parking; answer waits on page 1 ✓')
+
     // dispose() unregisters the sink → live frames reject with "no client".
     scout.dispose()
     r = await deliverLiveFrame({ kind: 'text', text: 'hello?' })
