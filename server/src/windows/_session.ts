@@ -9,7 +9,7 @@ import type { WmContext, WinView } from './types.js'
 import { BROWSE_PAGE, MORE_ROW, PREV_ROW } from './_browse.js'
 import { cycleNext, fmtStamp, oneLine, fbPagePx } from './_util.js'
 import { paginateText } from '../os-compose.js'
-import { parseMarkdown, renderChart, splitDocForPages, type Block, type RenderedImage } from '../os-content.js'
+import { parseMarkdown, renderChart, renderImageFileCached, splitDocForPages, type Block, type RenderedImage } from '../os-content.js'
 import {
   ensureConversation, recordTurn, listConversations, listTurns, getTurn, recentTurns,
   type TurnKind,
@@ -75,20 +75,23 @@ function blocksToText(blocks: Block[]): string {
       case 'stats': for (const c of b.cards) out.push(`${c.value}  ${c.label}`.trim()); break
       case 'rule': out.push('─'.repeat(20)); break
       case 'logo': break   // tile-only block
-      // chart blocks are EXTRACTED before text assembly (PAGE-2 RULE); this
-      // case only fires if one leaks through another path — keep it visible.
+      // chart/img blocks are EXTRACTED before text assembly (PAGE-2 RULE); these
+      // cases only fire if one leaks through another path — keep it visible.
       case 'chart': out.push('[chart — rendered on a later page]'); break
+      case 'img': out.push('[image — rendered on a later page]'); break
     }
     out.push('')
   }
   return out.join('\n').trim() || '(empty)'
 }
 
-/** One session page: pre-paginated TEXT, or an image page (Phase 8 charts).
- *  img null = still rasterizing (renders as a placeholder text page); the
- *  async fill-in swaps it and requestRenders. Failures REPLACE the page with
- *  a loud bounded text page. */
-type SessionPage = string | { kind: 'image'; img: RenderedImage | null; caption: string }
+/** One session page: pre-paginated TEXT, or an image page (Phase 8 charts +
+ *  Scout g2img). img null = still rasterizing (renders as a placeholder text
+ *  page); the async fill-in swaps it and requestRenders. Failures REPLACE the
+ *  page with a loud bounded text page. `chart` distinguishes the Phase-8 chart
+ *  pages (bare title) from g2img pages (caption in the title) EXACTLY — the
+ *  old caption==='chart' sentinel collided with a literal caption "chart". */
+type SessionPage = string | { kind: 'image'; img: RenderedImage | null; caption: string; chart: boolean }
 
 /** One live CC subprocess rendered to FIRMWARE TEXT pages — the content/state
  *  machine behind the CC window's session level and the whole Aria window.
@@ -155,6 +158,11 @@ class SessionLevel {
    *  incremented in turn_complete for a non-error turn. (convId, the DB
    *  capture handle, is set ASYNchronously, so it can't gate the menu.) */
   private completedTurns = 0
+  /** Monotonic turn-boundary counter (EVERY turn_complete, error turns too) —
+   *  Scout stamps live frames with it so a frame from turn N can never render
+   *  under turn N+1 (the parked-window queued-prompt drain gap; review
+   *  2026-07-09 #5). Additive; cc/aria ignore it. */
+  turnSeq = 0
   /** Stale-seq guard: every Cancel / Regenerate / new Suggest / state-clear
    *  bumps this, so an in-flight one-shot's async return is discarded if
    *  anything changed while it ran. */
@@ -272,6 +280,7 @@ class SessionLevel {
     session.on('turn_complete', (info: { text: string; toolCalls: string[]; usage: CCUsage }) => {
       if (stale()) return
       this.busy = false
+      this.turnSeq++
       this.toolLine = ''
       this.turnPhase = null
       // Keep the pool's per-entry stats live for DE turns too — without this
@@ -416,30 +425,39 @@ class SessionLevel {
    *  start as placeholders and swap in when the async rasterizer finishes
    *  (cached by spec hash, so re-renders and page flips are free). */
   private assemblePages(): void {
-    const { textBlocks, chartSpecs } = splitDocForPages(this.doc)
+    const { textBlocks, media } = splitDocForPages(this.doc)
     const pages: SessionPage[] = this.paginate(blocksToText(textBlocks))
-    for (const spec of chartSpecs) {
-      const pageObj: SessionPage = { kind: 'image', img: null, caption: 'chart' }
-      pages.push(pageObj)
-      this.fillChartPage(pageObj, spec)
+    for (const m of media) {
+      if (m.kind === 'chart') {
+        const pageObj: SessionPage = { kind: 'image', img: null, caption: 'chart', chart: true }
+        pages.push(pageObj)
+        this.fillMediaPage(pageObj, () => renderChart(m.spec, DE_CONTENT_W, DE_CONTENT_H), 'CHART')
+      } else {
+        // g2img (Scout, docs/SCOUT.md): caption falls back to the filename so an
+        // image page is always identifiable in the title.
+        const pageObj: SessionPage = { kind: 'image', img: null, caption: m.caption ?? basename(m.path), chart: false }
+        pages.push(pageObj)
+        this.fillMediaPage(pageObj, () => renderImageFileCached(m.path, DE_CONTENT_W, DE_CONTENT_H), 'IMAGE')
+      }
     }
     this.pages = pages
   }
 
-  /** Async chart fill-in: swap the placeholder for tiles on success; on
-   *  failure REPLACE the page with a loud bounded text page (full error in
-   *  the log; the spec itself is already in the doc + history). */
-  private fillChartPage(pageObj: SessionPage, spec: string): void {
-    void renderChart(spec, DE_CONTENT_W, DE_CONTENT_H).then((img) => {
+  /** Async media fill-in (charts + g2img images share it): swap the placeholder
+   *  for tiles on success; on failure REPLACE the page with a loud bounded text
+   *  page (full error in the log; the spec/path itself is already in the doc +
+   *  history). */
+  private fillMediaPage(pageObj: SessionPage, render: () => Promise<RenderedImage>, what: 'CHART' | 'IMAGE'): void {
+    void render().then((img) => {
       if (!this.pages.includes(pageObj)) return   // doc replaced while rendering — stale
       ;(pageObj as Exclude<SessionPage, string>).img = img
       this.requestRender()
     }).catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : String(e)
-      this.ctx.log(`[os] ${this.who}: chart render failed: ${msg}`)
+      this.ctx.log(`[os] ${this.who}: ${what.toLowerCase()} render failed: ${msg}`)
       const i = this.pages.indexOf(pageObj)
       if (i !== -1) {
-        const bounded = this.paginate(`CHART RENDER FAILED\n\n${msg}`)
+        const bounded = this.paginate(`${what} RENDER FAILED\n\n${msg}`)
         this.pages[i] = bounded.length > 1
           ? bounded[0].split('\n').slice(0, -1).join('\n') + '\n… (full error in the server log)'
           : bounded[0]
@@ -474,18 +492,22 @@ class SessionLevel {
       // Phase 8 image page. Rendered → the proven tiles path (the ~4 s push
       // happens only because the user flipped TO this page — the PAGE-2 RULE
       // working, not a regression). Still rasterizing → placeholder text.
+      // The caption rides the title (the Files-viewer convention) — the compose
+      // px-clamp bounds it; the full caption stays in the doc/history. Chart
+      // pages keep the bare title (cc/aria byte-identical — docs/SCOUT.md).
+      const mediaTitle = cur.chart ? title : `${title} · ${oneLine(cur.caption, 24)}`
       if (cur.img) {
         return {
           mode: 'tiles',
           tilesRect: { w: cur.img.w, h: cur.img.h },
-          title,
+          title: mediaTitle,
           menu: this.menu(),
           tiles: cur.img.tiles,
         }
       }
       return {
         mode: 'text',
-        title,
+        title: mediaTitle,
         menu: this.menu(),
         text: `⏳ ${cur.caption} rendering…\n\n(this page becomes the image when ready)`,
       }
@@ -496,6 +518,23 @@ class SessionLevel {
       menu: this.menu(),
       text: (cur as string | undefined) ?? '',
     }
+  }
+
+  /** Bounds-checked page steps (Scout's scroll-reading drives these from
+   *  onContentScroll; the menu Next/Prev keep their inline twins in onMenu).
+   *  Returns whether the page actually moved. */
+  pageForward(): boolean {
+    if (this.page >= this.pages.length - 1) return false
+    this.page++
+    this.requestRender()
+    return true
+  }
+
+  pageBackward(): boolean {
+    if (this.page <= 0) return false
+    this.page--
+    this.requestRender()
+    return true
   }
 
   /** Re-show the conversation doc (after a transient confirm/permission view).

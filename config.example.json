@@ -24,6 +24,19 @@
       "explain further"
     ]
   },
+  "scout": {
+    "//": "Scout — the mixed-mode assistant window (docs/SCOUT.md). cwd = the session workspace (must live under /home/user/); model/effort seed the session (Options cycles them live).",
+    "cwd": "/home/user/scout",
+    "model": "opus",
+    "effort": "max",
+    "quickPrompts": [
+      "Continue",
+      "Show me pictures of the first result",
+      "Show me the next few results",
+      "More detail on that one",
+      "Summarize what you found so far"
+    ]
+  },
   "notifications": {
     "//": "Android package → priority (call|timer|sms|email|info). Unlisted packages = 'info'. NOTE: the map REPLACES the defaults wholesale when present (no per-package merge) — copy the defaults you want to keep.",
     "packageMap": {

@@ -23,6 +23,7 @@ import { Watchdog } from './watchdog.js'
 import { renderSetupPage, getLocalInterfaces, isTailscaleOrLoopbackAddr } from './setup-page.js'
 import { getEndpointJson } from './endpoints.js'
 import { timingSafeEqualStr } from './auth.js'
+import { deliverLiveFrame, scoutLiveStatus } from './scout-live.js'
 import { warmParakeet } from './stt.js'
 import { warmStore } from './store.js'
 import { paperclips } from './paperclips.js'
@@ -156,6 +157,39 @@ server.get('/apk', async (req, reply) => {
     .type('application/vnd.android.package-archive')
     .header('Content-Disposition', 'attachment; filename="g2cc-harness.apk"')
     .send(apk)
+})
+
+// Scout live-display channel (docs/SCOUT.md) — the Scout CC subprocess pushes
+// mid-turn frames here via scripts/scout_show.py. LOOPBACK CLIENTS ONLY (the
+// subprocess runs on this box) + the Bearer token — belt and suspenders: the
+// server listens on 0.0.0.0, and this route must never be drivable from the
+// network even with a leaked token.
+function scoutLiveAllowed(req: { raw: { socket: { remoteAddress?: string } }; headers: Record<string, unknown> },
+  reply: { code: (n: number) => { send: (b: unknown) => void } }, route: string): boolean {
+  const remote = req.raw.socket.remoteAddress ?? ''
+  if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
+    console.error(`[g2cc-server] ${route} DENIED: remote ${remote || '(unknown)'} — loopback only`)
+    reply.code(403).send({ ok: false, displayed: false, detail: 'scout live channel is loopback-only' })
+    return false
+  }
+  const auth = req.headers.authorization
+  if (typeof auth !== 'string' || !timingSafeEqualStr(auth, `Bearer ${config.authToken}`)) {
+    reply.code(401).send({ ok: false, displayed: false, detail: 'unauthorized' })
+    return false
+  }
+  return true
+}
+
+server.post('/scout/live', async (req, reply) => {
+  if (!scoutLiveAllowed(req, reply, '/scout/live')) return
+  // deliverLiveFrame never throws — every outcome is a truthful LiveResult.
+  const result = await deliverLiveFrame(req.body)
+  reply.send(result)
+})
+
+server.get('/scout/live/status', async (req, reply) => {
+  if (!scoutLiveAllowed(req, reply, '/scout/live/status')) return
+  reply.send(scoutLiveStatus())
 })
 
 // WebSocket route.

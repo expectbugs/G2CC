@@ -4,6 +4,67 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-09 — **Scout: the mixed-mode assistant window (server-only, no APK)**
+
+New window `scout` (docs/SCOUT.md is authoritative; all seven design decisions locked with Adam
+2026-07-09): an Aria-pattern CC session at `/home/user/scout` (opus/max, bypassPermissions,
+`server/prompts/scout-g2.md` appended) whose subprocess **controls the display** — built for
+"search the web for used Prevost conversions… now show me the bathroom of the first one".
+
+**Mechanism — marker blocks, not MCP:** answers may embed ` ```g2img ` fences (absolute local
+path + optional `caption:`) which render as full-pane tile pages via the existing Phase-8
+chart machinery, now media-generalized (`splitDocForPages` → ordered `media`; shared
+`fillMediaPage`; `renderImageFileCached` adds a stat-keyed promise cache). PAGE-2 rule holds;
+malformed fences degrade to loud code blocks; render failures become loud bounded pages.
+MCP was considered and deferred — the CLI below gives the identical practical UX, and an MCP
+server could wrap the same endpoint later with zero rework.
+
+**Live mid-turn frames:** `scripts/scout_show.py` (stdlib, token from `~/.g2cc/config.json`)
+→ `POST /scout/live` (loopback-only + Bearer, both enforced) → `scout-live.ts` sink → the
+window paints progress text/images while a multi-minute research turn runs. Frames show only
+while a turn is in flight, are superseded by the answer, and every reply reports the truth
+(`displayed`/reason; exit 0/3/2/1). Oversized text frames are REJECTED (≤560 B), never
+truncated.
+
+**Reading UX:** fullBleed answers use Reader's scroll-read mechanism (menu-less `scrollContent`
+page, notch = page turn, double-tap parks); image pages fall back to the menued tiles view for
+Next/Prev. Menued-first on a fresh window so Ask is one tap away; a real turn snaps to 'read';
+ribbon reentry restores the menu (Reader's `reentry` pattern) plus `Read`/`Type` verbs.
+
+**Input:** dictation (`Ask`, the sacred confirm step), scout-specific quick-prompts
+(`config.scout.quickPrompts`), and the Terminal's tap keyboard extracted VERBATIM to
+`windows/_kbd.ts` (terminal delegates to it; phase5-terminal is the regression proof) with
+`Run` → the real `prompt()` queue path.
+
+**Web tooling for the model:** `scripts/fetch_images.py` (aria venv Playwright: `list`/`get
+--index|--match`/`shot`; downloads ride the browser context so hotlink walls don't bite) +
+the existing `~/aria/fetch_page.py` + built-in WebSearch (verified working headless on this
+box 2026-07-09, as were: Playwright chromium, WebP→`render_image.py`, and the full
+page→list→download→gray4 chain).
+
+**Review-hardened (two adversarial passes, every finding verified then fixed or consciously
+accepted):** `Type` stale-tap guard (a tap racing Ask could hide a HOT MIC behind the kbd
+level — the aria Ask-landing class) · live text frames now gated by BYTES *and* wrapped ROWS
+(560 B of newline-dense text wrapped past the ~6-row pane and clipped invisibly while the CLI
+said "shown") · `displayed` replies claim only what the window can know (active-view delivery;
+overlay/blank/BLE-latency caveats stated, "on glass" fabrication removed) · live frames are
+turnSeq-stamped so a parked window + queued-prompt drain can't show turn N's frame under turn
+N+1 · leaving Options lands MENUED (New-session's fresh card could strand on a menu-less
+scroll page via the image-page path) · `scout.cwd` validated on the RESOLVED path (`..`
+traversal) · kbd title shows the buffer TAIL under the fb tail-clamp · chart-vs-img pages
+distinguished by flag, not the caption string · scout_show bounded diagnostics get visible
+`…` markers · smoke `waitFor` awaits async conds. Accepted-with-rationale: overlay-state is
+unknowable window-side without a WM hook (wording carries the caveat); `fetch_images.py`'s
+silent networkidle grace mirrors the blessed fetch_page.py byte-for-byte.
+
+**Lessons:** (1) Scout is category **Tools**, not a new 'AI' category — Adam folded AI into
+Tools 2026-06-13 so Main stays at 5 categories; phase5-dashboard guards it and caught the
+regression. (2) `splitDocForPages`'s signature change broke phase8-charts — updated to the
+`media` contract; cc/aria behavior stays byte-identical (chart captions/titles unchanged).
+(3) Smoke: `phase-scout.mjs` (fake pool/session, REAL render_image.py raster on a generated
+fixture, offline). Suite 28/29 — the +1 is scout; the one red stays phase10-calendar
+(external Google-OAuth, pre-existing).
+
 ## (unstamped) — 2026-07-05 (later) — **The review-#6 improvement queue: all 24 items + APK v1.17**
 
 The 24 improvements catalogued by review #6 (`HANDOFF.md` §4 of that era; curated from 96

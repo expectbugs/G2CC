@@ -5,7 +5,7 @@
 // Persisted at ~/.g2cc/config.json. First-run creates default + random auth token.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { DEFAULT_SERVER_PORT } from '@g2cc/shared'
@@ -62,6 +62,20 @@ export interface G2CCConfig {
      *  glasses) — privacy/noise spam like "Device ID accessed" (Adam 2026-06-14).
      *  Case-insensitive substring match against BOTH title and body. */
     blockTitles: string[]
+  }
+  /** Scout — the mixed-mode assistant window (docs/SCOUT.md, Adam 2026-07-09).
+   *  A CC session at a fixed workspace cwd with the scout-g2 system prompt;
+   *  answers may embed ```g2img / ```chart pages + live scout-show frames. */
+  scout: {
+    /** Workspace cwd for the Scout session (downloads land in <cwd>/downloads).
+     *  MUST be under /home/user/ (session-pool path rules). */
+    cwd: string
+    /** Model alias for the Scout session (Options cycles it live). */
+    model: string
+    /** Effort for the Scout session (Adam: max). */
+    effort: CcEffort
+    /** Canned prompts for Scout's `Prompts` menu (web-research flavored). */
+    quickPrompts: string[]
   }
   /** DE shell config (Phase 2 overhaul.md — the ribbon DE/WM). */
   de: {
@@ -140,6 +154,19 @@ function defaultConfig(): G2CCConfig {
         'explain further',
       ],
     },
+    scout: {
+      cwd: '/home/user/scout',
+      model: 'opus',
+      effort: 'max',
+      // Web-research starters (Adam can override in config.json).
+      quickPrompts: [
+        'Continue',
+        'Show me pictures of the first result',
+        'Show me the next few results',
+        'More detail on that one',
+        'Summarize what you found so far',
+      ],
+    },
     notifications: {
       // Pixel 10a defaults (Phase 9): dialer → the caller-ID overlay popup,
       // messaging → sms, gmail → email; everything else 'info'.
@@ -192,6 +219,7 @@ export function loadConfig(): G2CCConfig {
     ...saved,
     stt: { ...defaults.stt, ...(saved.stt ?? {}) },
     claude: { ...defaults.claude, ...(saved.claude ?? {}) },
+    scout: { ...defaults.scout, ...(saved.scout ?? {}) },
     notifications: { ...defaults.notifications, ...(saved.notifications ?? {}) },
     de: { ...defaults.de, ...(saved.de ?? {}) },
   }
@@ -216,6 +244,30 @@ export function loadConfig(): G2CCConfig {
   if (!Array.isArray(merged.claude.quickPrompts) || merged.claude.quickPrompts.some((p) => typeof p !== 'string')) {
     console.error('[config] claude.quickPrompts is not a string array — using defaults')
     merged.claude.quickPrompts = defaults.claude.quickPrompts
+  }
+  // Scout shape validation (docs/SCOUT.md) — a bad value must degrade loudly to
+  // the default, never brick the window (the rootNav fallback pattern). The
+  // under-/home/user/ rule is enforced on the RESOLVED path so `..` traversal
+  // can't sneak the cwd out (review 2026-07-09 #6); '/home/user' bare is also
+  // rejected (the workspace must be a real subdirectory).
+  if (typeof merged.scout.cwd !== 'string'
+      || resolve(merged.scout.cwd) !== merged.scout.cwd.replace(/\/+$/, '')
+      || !resolve(merged.scout.cwd).startsWith('/home/user/')
+      || resolve(merged.scout.cwd) === '/home/user') {
+    console.error(`[config] scout.cwd '${String(merged.scout.cwd)}' must be a normalized absolute path strictly under /home/user/ — using the default ${defaults.scout.cwd}`)
+    merged.scout.cwd = defaults.scout.cwd
+  }
+  if (typeof merged.scout.model !== 'string' || !merged.scout.model) {
+    console.error('[config] scout.model is not a non-empty string — using the default opus')
+    merged.scout.model = defaults.scout.model
+  }
+  if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(merged.scout.effort)) {
+    console.error(`[config] scout.effort '${String(merged.scout.effort)}' is not a valid effort — using the default max`)
+    merged.scout.effort = defaults.scout.effort
+  }
+  if (!Array.isArray(merged.scout.quickPrompts) || merged.scout.quickPrompts.some((p) => typeof p !== 'string')) {
+    console.error('[config] scout.quickPrompts is not a string array — using defaults')
+    merged.scout.quickPrompts = defaults.scout.quickPrompts
   }
   if (typeof merged.notifications.packageMap !== 'object' || merged.notifications.packageMap === null || Array.isArray(merged.notifications.packageMap)) {
     console.error('[config] notifications.packageMap is not an object — using defaults')

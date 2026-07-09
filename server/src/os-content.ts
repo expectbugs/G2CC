@@ -8,6 +8,7 @@
 // per page (the DE 2x2 tile grid, docs/DE_DESIGN.md §3).
 
 import { execFile } from 'node:child_process'
+import { stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { DE_CONTENT_W, DE_CONTENT_H, DE_TILE_W, DE_TILE_H } from '@g2cc/shared'
 import { encodeGray4Bmp } from './gray4bmp.js'
@@ -27,6 +28,10 @@ export type Block =
   /** ```chart fenced block (Phase 8) — the JSON spec text, rendered async to
    *  an image PAGE that lands strictly AFTER page 1 (THE PAGE-2 RULE). */
   | { t: 'chart'; spec: string }
+  /** ```g2img fenced block (Scout, docs/SCOUT.md) — an absolute image-file path
+   *  (+ optional caption), rendered async to an image PAGE like ```chart. The
+   *  server renders LOCAL FILES only; the model downloads first. */
+  | { t: 'img'; path: string; caption?: string }
 
 export interface RenderedContent {
   pages: number
@@ -88,6 +93,36 @@ export function parseMarkdown(md: string): Block[] {
           blocks.push({ t: 'chart', spec: specText })
         } catch (e) {
           blocks.push({ t: 'code', lines: [`(bad \`\`\`chart JSON: ${(e as Error).message})`, ...body] })
+        }
+        continue
+      }
+      if (lang === 'g2img') {
+        // Scout (docs/SCOUT.md): first content line = absolute file path, optional
+        // `caption: …` line. Anything else is malformed and degrades to the loud
+        // visible code block (the ```chart pattern) so the model sees its mistake.
+        let path: string | null = null
+        let caption: string | undefined
+        let sawCaption = false   // tracks the LINE, not the value — an empty caption: still counts (strictness, review 2026-07-09)
+        let bad: string | null = null
+        for (const rawLine of body) {
+          const l = rawLine.trim()
+          if (!l) continue
+          const cap = l.match(/^caption:\s*(.*)$/i)
+          if (cap) {
+            if (sawCaption) { bad = 'more than one caption line'; break }
+            sawCaption = true
+            caption = cap[1].trim() || undefined
+            continue
+          }
+          if (path !== null) { bad = 'more than one path line'; break }
+          path = l
+        }
+        if (bad === null && path === null) bad = 'no image path'
+        if (bad === null && path !== null && !path.startsWith('/')) bad = `path must be absolute (got '${path}')`
+        if (bad === null && path !== null) {
+          blocks.push({ t: 'img', path, caption })
+        } else {
+          blocks.push({ t: 'code', lines: [`(bad \`\`\`g2img block: ${bad})`, ...body] })
         }
         continue
       }
@@ -311,6 +346,38 @@ export function renderImageFile(path: string, maxW: number, maxH: number): Promi
   })
 }
 
+/** Promise-cached renderImageFile (Scout g2img pages, docs/SCOUT.md) — page
+ *  re-assembly (confirm cards, restorePages) must not re-rasterize the same
+ *  photo. Keyed by path + size + mtime + bounds so an overwritten file re-renders
+ *  and a missing file rejects loudly (the stat is part of the promise). Mirrors
+ *  chartCache: in-flight dedupe, failure-evict, small LRU. */
+const imageCache = new Map<string, Promise<RenderedImage>>()
+
+export function renderImageFileCached(path: string, maxW: number, maxH: number): Promise<RenderedImage> {
+  const p = (async () => {
+    const st = await stat(path)   // loud reject on a missing/unreadable file
+    const key = `${maxW}x${maxH}:${path}:${st.size}:${st.mtimeMs}`
+    const hit = imageCache.get(key)
+    if (hit) {
+      imageCache.delete(key)   // refresh LRU position
+      imageCache.set(key, hit)
+      return hit
+    }
+    const render = renderImageFile(path, maxW, maxH).catch((e: unknown) => {
+      imageCache.delete(key)   // failed renders don't poison the cache
+      throw e
+    })
+    imageCache.set(key, render)
+    while (imageCache.size > CACHE_MAX) {
+      const oldest = imageCache.keys().next().value
+      if (oldest === undefined) break
+      imageCache.delete(oldest)
+    }
+    return render
+  })()
+  return p
+}
+
 // ---- chart rendering (render_chart.py — Phase 8) --------------------------
 
 const CHART_SCRIPT = '/home/user/G2CC/scripts/render_chart.py'
@@ -356,13 +423,23 @@ export function renderChart(spec: string, w: number, h: number): Promise<Rendere
   return guarded
 }
 
-/** THE PAGE-2 RULE assembler (pure — Phase 8): text pages FIRST from every
- *  non-chart block, chart specs strictly AFTER, regardless of where the model
- *  emitted the fences. Page 1 never waits on or contains imagery. */
-export function splitDocForPages(blocks: Block[]): { textBlocks: Block[]; chartSpecs: string[] } {
-  const textBlocks = blocks.filter((b) => b.t !== 'chart')
-  const chartSpecs = blocks.filter((b): b is Extract<Block, { t: 'chart' }> => b.t === 'chart').map((b) => b.spec)
-  return { textBlocks, chartSpecs }
+/** One extracted media page spec (chart JSON or a g2img file), in document order. */
+export type MediaSpec =
+  | { kind: 'chart'; spec: string }
+  | { kind: 'img'; path: string; caption?: string }
+
+/** THE PAGE-2 RULE assembler (pure — Phase 8, media-generalized for Scout):
+ *  text pages FIRST from every non-media block, media specs strictly AFTER in
+ *  document order, regardless of where the model emitted the fences. Page 1
+ *  never waits on or contains imagery. */
+export function splitDocForPages(blocks: Block[]): { textBlocks: Block[]; media: MediaSpec[] } {
+  const textBlocks = blocks.filter((b) => b.t !== 'chart' && b.t !== 'img')
+  const media: MediaSpec[] = []
+  for (const b of blocks) {
+    if (b.t === 'chart') media.push({ kind: 'chart', spec: b.spec })
+    else if (b.t === 'img') media.push({ kind: 'img', path: b.path, caption: b.caption })
+  }
+  return { textBlocks, media }
 }
 
 /** Typeset blocks onto a SINGLE w×h tile (page 0 only). PARKED, NO PRODUCERS

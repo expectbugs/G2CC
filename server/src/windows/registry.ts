@@ -15,6 +15,7 @@ import { TimersWindow } from './timers.js'
 import { CalendarWindow } from './calendar.js'
 import { GamesWindow } from './games.js'
 import { NoticesWindow } from './notices.js'
+import { ScoutWindow } from './scout.js'
 import { SearchWindow } from './search.js'
 import { TerminalWindow } from './terminal.js'
 import { DeliveriesWindow } from './deliveries.js'
@@ -29,6 +30,7 @@ export type WindowFactory = (ctx: WmContext, reRender: () => void) => OsWindow
 export const WINDOW_FACTORIES: WindowFactory[] = [
   (c, rr) => new AriaWindow(c, rr),
   (c, rr) => new CcWindow(c, rr),
+  (c, rr) => new ScoutWindow(c, rr),
   (c, rr) => new MailWindow(c, rr),
   (c, rr) => new FilesWindow(c, rr),
   (c, rr) => new ReaderWindow(c, rr),

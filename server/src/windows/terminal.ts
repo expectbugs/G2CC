@@ -4,6 +4,7 @@
 import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
 import type { OsWindow, WmContext, WinView } from './types.js'
 import { browsePageItems } from './_browse.js'
+import { kbdModel as sharedKbdModel, type KbdCell } from './_kbd.js'
 import { clampConfirmBody, fbPagePx } from './_util.js'
 import { errorView, fwTextWidth, wrapLinesPx } from '../os-compose.js'
 import type { RenderedImage } from '../os-content.js'
@@ -162,24 +163,11 @@ const QUICK_KEYS: { label: string; keys: string[] }[] = [
   { label: 'Esc', keys: ['Escape'] },
 ]
 
-// The on-screen KEYBOARD (upgrades.md Phase 5, "slow-ass by design, the fallback")
-// — the only way to type an exact string (a slash command, a path, a flag) when
-// dictation can't (ASR won't emit '/'). Char GROUPS in a native browse list →
-// tap a group → tap a char → it appends to a buffer; Run sends the buffer literal
-// + Enter. Each group's char-view is ≤16 rows (one page); 9 groups + 6 action rows
-// = 15 ≤ BROWSE_ROW_CAP so the group view is one page too. '⇧ Shift' upper-cases
-// the letter groups. (i-soxi: plain send-keys -l, no special wire — the slow path.)
-const KBD_GROUPS: { label: string; chars: string }[] = [
-  { label: 'a b c d e f g', chars: 'abcdefg' },
-  { label: 'h i j k l m n', chars: 'hijklmn' },
-  { label: 'o p q r s t u', chars: 'opqrstu' },
-  { label: 'v w x y z', chars: 'vwxyz' },
-  { label: '0 1 2 3 … 9', chars: '0123456789' },
-  { label: '/ . , - _ : ; =', chars: '/.,-_:;=' },     // '/' leads — slash commands
-  { label: '( ) [ ] { } < >', chars: '()[]{}<>' },
-  { label: '! ? @ # $ % & *', chars: '!?@#$%&*' },
-  { label: '+ | \\ ~ ^ " \' `', chars: '+|\\~^"\'`' },
-]
+// The on-screen KEYBOARD model lives in _kbd.ts now (extracted for Scout,
+// docs/SCOUT.md — labels/cells verbatim; each group's char-view is ≤16 rows =
+// one page; 9 groups + 6 action rows = 15 ≤ BROWSE_ROW_CAP so the group view is
+// one page too). Run here sends the buffer literal + Enter to tmux.
+// (i-soxi: plain send-keys -l, no special wire — the slow path.)
 
 // One-tap common Claude Code slash commands (Adam: he couldn't type a slash command
 // at all). Sent literal + Enter (runs immediately). Editable here; if Adam wants it
@@ -188,9 +176,6 @@ const KBD_GROUPS: { label: string; chars: string }[] = [
 const TERM_SLASH_COMMANDS: string[] = [
   '/clear', '/compact', '/resume', '/cost', '/model', '/status', '/config', '/agents', '/review', '/help', '/exit',
 ]
-
-type KbdAction = 'space' | 'bksp' | 'shift' | 'clear' | 'run' | 'done' | 'groups'
-type KbdCell = { t: 'group'; chars: string } | { t: 'char'; ch: string } | { t: 'act'; a: KbdAction }
 
 function cleanSessionName(raw: string): { name: string } | { error: string } {
   const name = raw.trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9_-]/g, '')
@@ -599,24 +584,7 @@ export class TerminalWindow implements OsWindow {
    *  cell map, so view() and onBrowseSelect resolve the SAME indices (the
    *  browsePageItems pattern). */
   private kbdModel(): { items: string[]; cells: KbdCell[] } {
-    const items: string[] = []
-    const cells: KbdCell[] = []
-    if (this.kbdGroup === null) {
-      for (const g of KBD_GROUPS) {
-        items.push(this.kbdShift ? g.label.toUpperCase() : g.label)
-        cells.push({ t: 'group', chars: this.kbdShift ? g.chars.toUpperCase() : g.chars })
-      }
-      const acts: [string, KbdAction][] = [
-        ['␣ Space', 'space'], ['⌫ Bksp', 'bksp'],
-        [`⇧ Shift: ${this.kbdShift ? 'ON' : 'off'}`, 'shift'],
-        ['✕ Clear', 'clear'], ['⏎ Run', 'run'], ['‹ Done', 'done'],
-      ]
-      for (const [label, a] of acts) { items.push(label); cells.push({ t: 'act', a }) }
-    } else {
-      for (const ch of this.kbdGroup) { items.push(ch); cells.push({ t: 'char', ch }) }
-      items.push('‹ groups'); cells.push({ t: 'act', a: 'groups' })
-    }
-    return { items, cells }
+    return sharedKbdModel(this.kbdGroup, this.kbdShift)   // _kbd.ts — extracted verbatim
   }
 
   /** Run the composed buffer: send it literal + Enter (always-run on send — Adam

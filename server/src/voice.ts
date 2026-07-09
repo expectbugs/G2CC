@@ -42,6 +42,7 @@ export const WINDOW_ALIASES: Record<string, string> = {
   terminal: 'term', term: 'term', tmux: 'term',
   assistant: 'aria', aria: 'aria',
   code: 'cc', claude: 'cc',
+  scout: 'scout',
 }
 
 export type VoiceCommand =

@@ -4,6 +4,17 @@
 (project rules), `docs/README.md` (the docs index — live contracts vs history). History lives
 in `CHANGELOG.md` + git; don't re-derive it.
 
+> **2026-07-09 addendum — Scout shipped (server-only).** New window `scout`: a CC session at
+> `/home/user/scout` that drives the display — ` ```g2img ` answer pages (the chart machinery,
+> media-generalized), live mid-turn frames via `scripts/scout_show.py` → `POST /scout/live`
+> (loopback+Bearer), fullBleed scroll-read answers, dictation + quick-prompts + the shared
+> `_kbd.ts` tap keyboard (extracted verbatim from Terminal). **`docs/SCOUT.md` is the
+> authoritative spec**; the CHANGELOG entry has the lessons (category is Tools, not 'AI' —
+> the 2026-06-13 five-category rule; `splitDocForPages` now returns ordered `media`). Smoke
+> baseline is now **28/29** (`phase-scout.mjs` added; calendar stays the known red). Zero APK
+> changes. NOT yet driven on-glass — first live session should confirm scroll-read paging,
+> an image page push, and one `scout_show.py` frame end-to-end.
+
 ## 0. What this project is (context that matters — read before judging anything here)
 
 G2CC is Adam's **personal, first-party UI for his own Even Realities G2 smart glasses** — a

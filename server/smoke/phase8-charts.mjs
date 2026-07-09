@@ -30,9 +30,12 @@ assert.ok(badCode, 'malformed chart spec degrades to the loud code block')
 console.error('  1. parseMarkdown: chart fence + malformed degrade ✓')
 
 // --- 2. PAGE-2 RULE assembly: text first even when the chart came FIRST ---
-const { textBlocks, chartSpecs } = splitDocForPages(blocks)
+// splitDocForPages now returns media-in-document-order (charts + Scout g2img —
+// docs/SCOUT.md); charts arrive as {kind:'chart', spec}.
+const { textBlocks, media } = splitDocForPages(blocks)
+const chartSpecs = media.filter((m) => m.kind === 'chart').map((m) => m.spec)
 assert.equal(chartSpecs.length, 1)
-assert.ok(textBlocks.every((b) => b.t !== 'chart'))
+assert.ok(textBlocks.every((b) => b.t !== 'chart' && b.t !== 'img'))
 assert.ok(textBlocks.some((b) => b.t === 'para' && b.text.includes('CPU spiked')), 'text blocks intact')
 // The page union mirror: text pages then chart placeholders.
 const textPages = paginateText('The CPU spiked to 80% at t=3.\n\nMore analysis text here.')
