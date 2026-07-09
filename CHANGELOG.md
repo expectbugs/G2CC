@@ -4,6 +4,21 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-09 (later still) — **Billing audit: subscription is structural now**
+
+Adam flagged the dollar figures in the turn logs. Verified end-to-end: **no API billing ever
+happened** — `total_cost_usd` in stream-json is the CLI's notional accounting and is included
+usage on a Max subscription (official costs doc); the box's OAuth login is `subscriptionType:
+max`; no `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN` exists anywhere
+(`.bashrc`'s `CLAUDE_API_KEY` is a name the CLI does not read — inert; possibly aria's).
+Two real hygiene holes closed anyway: (1) `claudeChildEnv()` — both claude spawn paths
+(cc-session + suggest) now SCRUB operator-session identity vars (the server had been
+daemonized from inside a Claude Code session and carried its `CLAUDECODE`/`SESSION_ID` into
+children) AND all API-key auth vars, making subscription billing structural (in `--print`
+mode an inherited `ANTHROPIC_API_KEY` would silently win over the subscription per the auth
+docs); `CLAUDE_CODE_OAUTH_TOKEN` deliberately kept. (2) The server itself is relaunched with
+those vars unset.
+
 ## (unstamped) — 2026-07-09 (later) — **Scout on-glass round 1: the stray-tap + image-freeze fixes**
 
 Adam's first real session surfaced four issues; the logs confirmed all of them with receipts

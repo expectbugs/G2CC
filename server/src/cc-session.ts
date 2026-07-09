@@ -22,6 +22,31 @@ import type { CcEffort } from './config.js'
 // real DE spawn. Override with the CLAUDE_CLI env var.
 const CLAUDE_CLI = process.env.CLAUDE_CLI ?? '/home/user/.local/bin/claude'
 
+/** Env for `claude` child processes: process.env SCRUBBED of two classes
+ *  (Adam 2026-07-09, after the billing scare):
+ *  (a) OPERATOR-SESSION IDENTITY — the server may be (re)started from inside a
+ *      Claude Code session (it happened: the daemonized server carried the
+ *      operator session's CLAUDECODE/SESSION_ID/etc into every child);
+ *  (b) API-KEY AUTH — G2CC sessions bill the box's logged-in Max SUBSCRIPTION,
+ *      never an API key. Per the official auth docs, --print mode SILENTLY
+ *      prefers an inherited ANTHROPIC_API_KEY over the subscription login —
+ *      scrubbing makes subscription billing structural. (CLAUDE_API_KEY is not
+ *      a name the CLI reads — inert, scrubbed as noise. CLAUDE_CODE_OAUTH_TOKEN
+ *      is deliberately KEPT: it's a legit subscription-auth mechanism.) */
+const SCRUBBED_ENV_VARS = new Set([
+  'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'AI_AGENT', 'CLAUDE_EFFORT',
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_API_KEY',
+])
+
+export function claudeChildEnv(): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && !SCRUBBED_ENV_VARS.has(k)) env[k] = v
+  }
+  return env
+}
+
 export type CCPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
 
 export interface CCUsage {
@@ -173,10 +198,7 @@ export class CCSession extends EventEmitter {
 
     // [V] Env vars verified from ARIA session_pool.py:122-124 + g2code/cc-session.ts.
     // CLAUDE_CODE_EFFORT_LEVEL=max kept as redundancy with the CLI flag (CLI authoritative).
-    const env: Record<string, string> = {}
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k !== 'CLAUDECODE' && v !== undefined) env[k] = v
-    }
+    const env = claudeChildEnv()
     env.CLAUDE_CODE_EFFORT_LEVEL = effort
     env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1'
 

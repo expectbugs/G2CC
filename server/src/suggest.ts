@@ -16,6 +16,7 @@
 
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
+import { claudeChildEnv } from './cc-session.js'
 import type { RecentTurn } from './history.js'
 
 // Same override the cc-session path uses, so the smoke can point at a fake CLI.
@@ -73,7 +74,9 @@ export async function suggestNextPrompt(turns: RecentTurn[], cwd: string, signal
       '--tools', '',                       // no tools — pure prediction, always self-terminates
       '--system-prompt', systemPrompt,
     ]
-    const child = execFile(CLAUDE_CLI, args, { cwd, maxBuffer: 2 * 1024 * 1024, signal },
+    // claudeChildEnv: scrubbed of operator-session identity + API-key auth vars
+    // (subscription billing is structural — see cc-session.ts, Adam 2026-07-09).
+    const child = execFile(CLAUDE_CLI, args, { cwd, maxBuffer: 2 * 1024 * 1024, signal, env: claudeChildEnv() },
       (err, stdout, stderr) => {
         if (err) {
           // Log the FULL stderr loudly (the card message clamps it for the HUD,
