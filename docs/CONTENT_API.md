@@ -41,6 +41,7 @@ LLM markdown ──parseMarkdown()──► Block[] ──render_content.py─�
 | ```` ```lang ```` fenced block | bordered monospace panel (13px) |
 | ```` ```stat ```` fenced block | **big-number stat cards** (see below) |
 | ```` ```chart ```` fenced block | **matplotlib image page, strictly page ≥2** (see below) |
+| ```` ```g2img ```` fenced block | **local image FILE → dithered image page, page ≥2** (Scout, `docs/SCOUT.md`: one absolute-path line + optional `caption:` line; malformed → loud code block; render failure → loud bounded page) |
 | `---` | horizontal rule |
 | `\|a\|b\|` table rows | aligned monospace lines (proper grid later) |
 | inline `**b**` / `*i*` / `` `c` `` / `[t](url)` | flattened to plain text (v1) |
@@ -89,6 +90,7 @@ type Block =
   | { t: 'stats'; cards: { value: string; label: string }[] }  // ≤3 used
   | { t: 'rule' }
   | { t: 'chart'; spec: string }   // JSON spec text → async image page (PAGE-2 RULE)
+  | { t: 'img'; path: string; caption?: string }   // ```g2img local file → async image page (PAGE-2 RULE; Scout)
 ```
 
 ## Guidance baked into the system prompts

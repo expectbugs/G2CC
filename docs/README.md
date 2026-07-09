@@ -17,6 +17,7 @@ Read top-down when fresh; the per-file notes say which is which.
 | `SIM_TOOLING.md` | The EvenHub-simulator design loop + measured firmware font metrics (incl. the `─`≈21 px finding). Layout guide only — validate feel on glass. |
 | `SDK_CAPABILITY_MAP.md` | What the official SDK exposes vs what G2CC uses (the display+input-only scope decision). |
 | `DISPATCH.md` | The dispatch-target architecture (vanilla CC now, swarm specialist later). |
+| `SCOUT.md` | **The Scout window contract** (2026-07-09): the mixed-mode assistant — ```g2img answer pages, the `/scout/live` mid-turn frame channel + `scout_show.py`, `fetch_images.py`, the locked design decisions. |
 | `HAT_BRIDGE_SPEC.md` | The ESP32 hat design + BOM (not built yet; the phone-replacement path). |
 
 ## Reviews (each is also the don't-re-chase list for its era)

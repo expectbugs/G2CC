@@ -1,10 +1,14 @@
 // G2CC server entry — Fastify + WebSocket + mDNS discovery.
 //
 // Routes:
-//   GET  /health     — liveness probe
-//   GET  /setup      — multi-endpoint QR setup page (HTML)
-//   GET  /endpoints  — JSON endpoint list for client refetch (Phase 3A)
-//   WS   /ws         — main WebSocket
+//   GET  /health             — liveness probe
+//   GET  /setup              — multi-endpoint QR setup page (HTML; Tailscale/loopback only)
+//   GET  /endpoints          — JSON endpoint list for client refetch (Phase 3A)
+//   POST /diag               — harness diag sink (Bearer)
+//   GET  /apk                — harness APK download (Tailscale/loopback + token)
+//   POST /scout/live         — Scout mid-turn live frame (loopback + Bearer; docs/SCOUT.md)
+//   GET  /scout/live/status  — Scout live-channel status (loopback + Bearer)
+//   WS   /ws                 — main WebSocket
 //
 // Inheritance: g2code/server/src/index.ts ported with:
 //   - drops the app/dist static serving (no built-in app — Android client connects directly)

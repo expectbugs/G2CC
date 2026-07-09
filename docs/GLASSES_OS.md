@@ -79,7 +79,9 @@ pagination). The model never touches a coordinate. Three layers, increasing prec
    - ` ```chart ` — simple schema e.g. `{"type":"line","title":"CPU %","x":[...],"y":[...]}`; **also
      accept Vega-Lite and Mermaid** (models know those cold) → server-rasterized.
    - ` ```stat ` — `[{"label":"Temp","value":"72°","trend":"+3"}]` big-number cards.
-   - ` ```gauge ` / ` ```image ` / ` ```diagram `(Mermaid).
+   - ` ```g2img ` — a local image FILE as a dithered page-≥2 image page (SHIPPED 2026-07-09 for
+     Scout — `docs/SCOUT.md`; the model downloads, the server renders local files only).
+   - ` ```gauge ` / ` ```image ` / ` ```diagram `(Mermaid) — still future.
 3. **A validated `display` tool** for guarantees + the interactive round-trip — `display({blocks:[...]})`;
    the schema rejects malformed input with a clear error the model self-corrects, and the tool
    **returns the user's interaction** (tap/scroll/select) so "respond with a chart" becomes a real

@@ -7,7 +7,7 @@ checklist; the FINALIZED UI behaviour lives in `DE_DESIGN.md` (it wins on any co
 reality in `G2_BLE_PROTOCOL.md`.
 
 > **Status:** Phase 1 (the modularization) is **DONE** — merged + on-glass verified, 2026-06-29. The
-> `windows/` layout below is **live**: all 14 windows are one-per-file modules, the contracts live in
+> `windows/` layout below is **live**: all 15 windows are one-per-file modules, the contracts live in
 > `windows/types.ts`, the host is `server/src/window-manager.ts`, and adding a window touches only a new
 > file + one `registry.ts` line + one smoke. The contracts are **frozen** — Phase 1 moved *where code
 > lives*, never the API.
@@ -26,8 +26,9 @@ server/src/
     registry.ts            # WINDOW_FACTORIES[] — the ONE place adding a feature touches.
     _browse.ts             # shared browse pagination (browsePageItems, …) + byte budgets
     _util.ts               # shared pure formatters (oneLine, fmtStamp, clampConfirmBody)
-    _session.ts            # shared SessionLevel / SessionOptions / HistoryLevel (CC + Aria)
-    main.ts cc.ts aria.ts mail.ts files.ts reader.ts timers.ts calendar.ts games.ts
+    _session.ts            # shared SessionLevel / SessionOptions / HistoryLevel (CC + Aria + Scout)
+    _kbd.ts                # shared on-glass tap-keyboard model (Terminal + Scout — docs/SCOUT.md)
+    main.ts cc.ts aria.ts scout.ts mail.ts files.ts reader.ts timers.ts calendar.ts games.ts
     notices.ts search.ts terminal.ts deliveries.ts media.ts sms.ts   # one window per file
   os-compose.ts os-content.ts os-display.ts os-menu.ts os-notify.ts  # PROVEN — never touched here
 ```
@@ -130,8 +131,8 @@ interface WinView {
   scrollContent?: boolean             // §3.4 fullBleed scroll-reading (text mode ONLY — the shared
                                       //   isScrollRead() predicate gates both compose and input routing):
                                       //   the content region becomes the scroll=true capture, there is NO
-                                      //   menu, and scroll notches route to onContentScroll. Reader-only
-                                      //   by design today.
+                                      //   menu, and scroll notches route to onContentScroll. Users:
+                                      //   Reader (chapters) + Scout (answer pages — docs/SCOUT.md).
   textLeft?: string; textRight?: string   // twocol mode (Main dashboard)
   tiles?: [string, string, string, string]; tilesRect?: { w; h }   // tiles mode: 4 gray4 BMPs
   tile?: string                       // tile mode: one centred BMP

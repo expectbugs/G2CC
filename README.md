@@ -34,6 +34,7 @@ strict per‑frame size limits. You navigate with the temple's touch bar and the
 | --- | --- |
 | **Main** | A dashboard: battery states, host/CPU/GPU pulse, unseen notifications, next timer, recently‑used apps |
 | **Claude Code** / **Aria** | A live AI coding/assistant session running as a subprocess on the PC, streamed to the lenses with a dictate‑and‑confirm flow |
+| **Scout** | A mixed‑mode research assistant whose model drives the display: web searches by voice, answers as scrollable pages with embedded dithered photos (` ```g2img `), and live mid‑turn progress frames pushed to the lenses |
 | **Reader** | An EPUB reader with your books' *real* chapters, firmware‑scrolling pages, and book‑faithful formatting (see below) |
 | **Mail** / **SMS** / **Notices** | Read + reply to email, texts, and phone notifications, dictated by voice |
 | **Files** | Browse the PC's filesystem, preview text + images, move/copy/rename/trash |
