@@ -488,6 +488,21 @@ class SessionLevel {
     const p = this.phase()
     const title = `${tab} · ${basename(this.projectPath)}${pageSuffix}${p ? ` · ${p}` : ''}`
     const cur = this.pages[this.page]
+    // Dictation/suggest states over an IMAGE page render a TEXT card instead
+    // (Adam on-glass 2026-07-09): a state flip changes the menu list, the
+    // client re-pushes ALL tiles on any layout rebuild (~150 BLE packets,
+    // 30-60 s), and Done/Cancel taps each triggered ANOTHER re-push — the
+    // display froze for minutes with a hot mic. Text pages keep the old
+    // behavior (the conversation stays readable while dictating).
+    if ((this.listening || this.transcribing || this.suggesting)
+        && cur !== undefined && typeof cur !== 'string') {
+      const text = this.listening
+        ? 'Listening — speak your prompt, then Done.\n(Cancel to abandon; the image page returns after.)'
+        : this.transcribing
+          ? 'Transcribing…\n(Cancel to abandon; the image page returns after.)'
+          : 'Predicting your next prompt…\n(Cancel to abandon; the image page returns after.)'
+      return { mode: 'text', title, menu: this.menu(), text }
+    }
     if (cur !== undefined && typeof cur !== 'string') {
       // Phase 8 image page. Rendered → the proven tiles path (the ~4 s push
       // happens only because the user flipped TO this page — the PAGE-2 RULE
@@ -585,7 +600,13 @@ class SessionLevel {
     // confirm step, like STT).
     if (this.suggesting) return ['Cancel', 'Reload', 'Main']
     if (this.pendingSuggestion) return ['Confirm', 'Regenerate', 'Cancel', 'Reload', 'Main']
-    if (this.busy) return ['Interrupt', 'Next', 'Prev', 'Reload', 'Main']
+    // Interrupt at index 2, NOT 0 (Adam on-glass 2026-07-09): the fullBleed
+    // cursor tap fires the CURRENT cell, R1 accidental taps are unavoidable,
+    // and Interrupt-at-default aborted a live $5 research turn seconds after
+    // it started. Same reasoning as Approve/Deny-not-at-0 above; the WM now
+    // also resets the cursor to 0 on any menu-set change, so cell 0 is the
+    // guaranteed default — it must be harmless (Next).
+    if (this.busy) return ['Next', 'Prev', 'Interrupt', 'Reload', 'Main']
     const idle = [this.verb, 'Next', 'Prev', 'Prompts', 'Options', 'Reload', 'Main']
     // Suggest leads the idle menu once there's a completed response to predict
     // from (Adam taps it to skip dictating the obvious next prompt).

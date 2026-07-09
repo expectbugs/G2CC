@@ -4,6 +4,33 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-09 (later) — **Scout on-glass round 1: the stray-tap + image-freeze fixes**
+
+Adam's first real session surfaced four issues; the logs confirmed all of them with receipts
+(two research turns aborted — one within seconds of `thinking…` — and 13-msg/153-packet scene
+re-pushes back-to-back during a dictation attempt on an image page; dozens of scroll-read taps
+logged "no consumer").
+
+- **The fb cursor never defaults onto a dangerous label.** WM: `winMenuCursor` resets to cell
+  0 on every menu-SET change (it used to persist across state flips, landing on whatever
+  occupied its old index — Interrupt, in the case that cost ~$5). Session busy menu is now
+  `Next·Prev·Interrupt·…` (the Approve/Deny-not-at-0 lesson applied); Scout's live-frame menu
+  matches, and its idle menus lead with the state's natural default (menued → `Ask`; image
+  page → `Next`).
+- **Dictation/suggest over an IMAGE page renders a TEXT card** (shared `_session.ts`, image
+  pages only — text-page dictation unchanged): every state flip on a tiles view forced a
+  full ~150-packet tile re-push (30-60 s each, serialized), which is exactly the 2026-06-11
+  "tiles for session content" lesson resurfacing via Phase-8/Scout image pages. The card says
+  what the mic is doing; the image page returns after.
+- **Double-tap in scroll-read surfaces Scout's own menu** (new optional WM hook
+  `onScrollReadBack`; Reader unchanged — it doesn't implement it). Answer pages previously
+  had NO reachable Ask (the only path was park → re-enter); now: double-tap → `Ask` at cell 0,
+  `Read` returns to the text, double-tap again parks.
+- **`Next`/`Prev` dismiss a live frame** (they paged invisibly beneath it before), and the
+  live channel now logs one loud line per frame outcome (it was invisible in the server log).
+
+Smoke 28/29 (phase-scout grew asserts for every fix; calendar red unchanged).
+
 ## (unstamped) — 2026-07-09 — **Scout: the mixed-mode assistant window (server-only, no APK)**
 
 New window `scout` (docs/SCOUT.md is authoritative; all seven design decisions locked with Adam

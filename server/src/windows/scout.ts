@@ -233,14 +233,33 @@ export class ScoutWindow implements OsWindow, ScoutLiveSink {
       }
     }
     const v = await this.session.view(this.label)
-    // Idle extras on the session menu: 'Read' (fullBleed: back to scroll-reading)
-    // + 'Type' (the shared tap keyboard). Prepended so they're one scroll-notch
-    // away on the top-bar; label-resolved taps keep this race-safe.
+    // Idle menu ordering (Adam on-glass 2026-07-09 — the WM resets the cursor
+    // to cell 0 on every menu change, so CELL 0 IS THE DEFAULT ACTION):
+    //  - menued (double-tap from reading / reentry): Ask first — his flow is
+    //    "double-tap, tap = mic"; Read (back to scrolling) + Type adjacent.
+    //  - on an image page: Next/Prev first (navigation IS the primary action
+    //    there; an accidental tap just pages).
+    //  - classic (fullBleed off): the proven order + Type appended-front.
     if (this.session.phase() === null) {
-      const extras = [...(this.fbActive && this.sessionUi === 'menued' ? ['Read'] : []), 'Type']
-      v.menu = [...extras, ...(v.menu ?? [])]
+      const rest = (v.menu ?? []).filter((l) => l !== 'Ask' && l !== 'Next' && l !== 'Prev')
+      if (this.fbActive && this.sessionUi === 'menued') {
+        v.menu = ['Ask', 'Read', 'Type', 'Next', 'Prev', ...rest]
+      } else if (typeof this.session.pages[this.session.page] !== 'string') {
+        v.menu = ['Next', 'Prev', 'Ask', 'Type', ...rest]
+      } else {
+        v.menu = ['Type', ...(v.menu ?? [])]
+      }
     }
     return v
+  }
+
+  /** Double-tap while the scroll-read page is on glass (the WM hook, Adam
+   *  on-glass 2026-07-09): surface the menued view — Ask/Type one tap away,
+   *  'Read' returns to scrolling, a second double-tap parks to the ribbon. */
+  async onScrollReadBack(): Promise<boolean> {
+    this.sessionUi = 'menued'
+    this.requestRender()
+    return true
   }
 
   /** The mid-turn live frame (docs/SCOUT.md): a glanceable text page or a tiles
@@ -248,7 +267,10 @@ export class ScoutWindow implements OsWindow, ScoutLiveSink {
   private liveView(f: LiveFrame): WinView {
     const phase = this.session.phase()
     const base = `Scout · live${phase ? ` · ${phase}` : ''}`
-    const menu = ['Interrupt', 'Reload', 'Main']
+    // Next/Prev lead (they page the underlying answer doc, harmless) so the
+    // default cursor cell is never Interrupt (Adam on-glass 2026-07-09 — a
+    // stray R1 tap aborted a live turn).
+    const menu = ['Next', 'Prev', 'Interrupt', 'Reload', 'Main']
     if (f.kind === 'image') {
       return {
         mode: 'tiles', tilesRect: { w: f.img.w, h: f.img.h },
@@ -279,6 +301,12 @@ export class ScoutWindow implements OsWindow, ScoutLiveSink {
       this.sessionUi = 'read'
       this.requestRender()
       return
+    }
+    // Next/Prev while a live frame is up DISMISS it and page the answer doc —
+    // they'd otherwise page invisibly under the frame. The frame is ephemeral
+    // by contract; the next scout_show push repaints.
+    if (this.liveFrame && (label === 'Next' || label === 'Prev')) {
+      this.liveFrame = null
     }
     if (label === 'Type') {
       // Stale-tap guard (the aria Ask-landing class, review 2026-06-11b): a tap

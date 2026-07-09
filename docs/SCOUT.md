@@ -65,17 +65,22 @@ Ask/Type/quick-prompt ──► SessionLevel.prompt() ──► claude subproces
   --match STR --out DIR` → downloads via the browser context (cookies/referer survive),
   `shot URL --out FILE [--full]` → page screenshot.
 
-## Interaction contract
+## Interaction contract (revised after Adam's first on-glass session, 2026-07-09)
 
 | State | View | Gestures |
 |---|---|---|
-| idle + fullBleed, `read` | scroll-read page (no menu) | scroll = page turn (images render as menued tiles pages); double-tap = ribbon |
-| idle, re-entered from ribbon | menued session view, `Read`+`Type` prepended | top-bar scroller; `Read` returns to scroll-read |
-| listening/confirm/permission/busy | SessionLevel's proven menued views | unchanged from CC/Aria |
-| busy + live frame | the pushed frame (text or tiles), `Interrupt` on the menu | cleared lazily when the turn ends |
+| idle + fullBleed, `read` | scroll-read page (no menu) | scroll = page turn (images render as menued tiles pages); **double-tap = Scout's own menu** (the `onScrollReadBack` WM hook); double-tap again from the menu = ribbon |
+| idle, menued (double-tap / reentry) | menued session view, **`Ask` first** (cell 0 = mic), then `Read`/`Type`/`Next`/`Prev` | top-bar scroller; `Read` returns to scroll-read |
+| idle, on an image page | menued tiles view, **`Next`/`Prev` first** (nav is the default cell) | Next/Prev page; state flips leave the tiles instantly (below) |
+| listening/transcribing/suggesting over an IMAGE page | a **TEXT card** (never the tiles — a state flip on tiles re-pushed ~150 BLE packets and froze the display for minutes) | Done/Cancel as usual; the image page returns after |
+| busy | menued view, busy menu = `Next·Prev·Interrupt·…` — **Interrupt never at cell 0** | Interrupt is a deliberate two-notch reach |
+| busy + live frame | the pushed frame; menu `Next·Prev·Interrupt·…` | `Next`/`Prev` dismiss the frame and page the doc; cleared when its turn ends |
 | fullBleed off | classic menued session view everywhere (Aria-identical + `Type`) | unchanged |
 
-Any session activity (phase non-null) flips the UI back to `read` so the answer lands in scroll-read.
+A real turn (busy) flips the UI back to `read` so the answer lands in scroll-read. The WM now
+resets the fullBleed cursor to **cell 0 on every menu change** — cell 0 is the deterministic
+default everywhere, and every Scout/session menu keeps cell 0 harmless (a stray R1 tap can
+never Interrupt/destroy; it was aborting live turns).
 
 ## Config
 

@@ -119,6 +119,12 @@ export interface OsWindow {
    *  direction (down = forward / next page, up = back / previous). Only fires in
    *  fullBleed for a scrollContent view. Reader turns the page here. */
   onContentScroll?(dir: 'up' | 'down'): Promise<void>
+  /** §SCOUT (Adam on-glass 2026-07-09): a double-tap while YOUR scrollContent
+   *  view is on glass. Return true = consumed (you surfaced a menu/level);
+   *  false/absent = the host parks to the ribbon as before. Scroll-reading
+   *  windows only — Scout surfaces its Ask/Type menu here; Reader keeps the
+   *  straight-to-ribbon park by not implementing it. */
+  onScrollReadBack?(): Promise<boolean>
   /** May a notification OVERLAY repaint this window right now? (Phase 4, B5.)
    *  Session windows answer false while listening/transcribing/pendingStt/
    *  pendingPermission — the confirm step's "nothing reaches CC unread"

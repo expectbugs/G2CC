@@ -73,44 +73,52 @@ export function scoutLiveStatus(): ScoutLiveStatus {
   return { clientConnected: true, ...s.liveStatus() }
 }
 
+/** One server-log line per frame outcome (Adam's testing 2026-07-09: the
+ *  channel was invisible in the log — display actions must be loud). */
+function logResult(kind: string, r: LiveResult): LiveResult {
+  console.error(`[scout-live] ${kind} frame ${r.ok ? (r.displayed ? 'DISPLAYED' : 'held') : 'REJECTED'} — ${r.detail}`)
+  return r
+}
+
 /** Validate + render + deliver one frame from the HTTP body. Never throws —
  *  every failure returns a LOUD LiveResult the CLI turns into a nonzero exit. */
 export async function deliverLiveFrame(body: unknown): Promise<LiveResult> {
   const b = (body ?? {}) as { kind?: unknown; text?: unknown; path?: unknown; caption?: unknown }
+  const kind = typeof b.kind === 'string' ? b.kind : '(bad-kind)'
   if (b.kind !== 'text' && b.kind !== 'image') {
-    return { ok: false, displayed: false, detail: `kind must be 'text' or 'image' (got ${JSON.stringify(b.kind)})` }
+    return logResult(kind, { ok: false, displayed: false, detail: `kind must be 'text' or 'image' (got ${JSON.stringify(b.kind)})` })
   }
   if (!sink) {
-    return { ok: false, displayed: false, detail: 'no glasses client connected — nothing to display on' }
+    return logResult(kind, { ok: false, displayed: false, detail: 'no glasses client connected — nothing to display on' })
   }
 
   if (b.kind === 'text') {
     if (typeof b.text !== 'string' || !b.text.trim()) {
-      return { ok: false, displayed: false, detail: 'text frames need a non-empty `text` string' }
+      return logResult(kind, { ok: false, displayed: false, detail: 'text frames need a non-empty `text` string' })
     }
     const bytes = Buffer.byteLength(b.text, 'utf8')
     if (bytes > LIVE_TEXT_MAX_BYTES) {
-      return {
+      return logResult(kind, {
         ok: false, displayed: false,
         detail: `text frame is ${bytes}B — live frames must fit one glanceable page (≤${LIVE_TEXT_MAX_BYTES}B). Put long content in your ANSWER (it paginates); live frames are for short progress lines.`,
-      }
+      })
     }
     const rows = wrapLinesPx(b.text, TEXT_PAGE_PX).length
     if (rows > LIVE_TEXT_MAX_ROWS) {
-      return {
+      return logResult(kind, {
         ok: false, displayed: false,
         detail: `text frame wraps to ${rows} display rows — the pane shows ${LIVE_TEXT_MAX_ROWS} and the overflow would be invisibly clipped. Shorten it (≤${LIVE_TEXT_MAX_ROWS} wrapped rows) or put it in your ANSWER, which paginates.`,
-      }
+      })
     }
-    return sink.acceptLiveFrame({ kind: 'text', text: b.text })
+    return logResult(kind, sink.acceptLiveFrame({ kind: 'text', text: b.text }))
   }
 
   // image frame
   if (typeof b.path !== 'string' || !b.path.startsWith('/')) {
-    return { ok: false, displayed: false, detail: `image frames need an absolute \`path\` (got ${JSON.stringify(b.path)})` }
+    return logResult(kind, { ok: false, displayed: false, detail: `image frames need an absolute \`path\` (got ${JSON.stringify(b.path)})` })
   }
   if (b.caption !== undefined && typeof b.caption !== 'string') {
-    return { ok: false, displayed: false, detail: 'caption must be a string when present' }
+    return logResult(kind, { ok: false, displayed: false, detail: 'caption must be a string when present' })
   }
   const caption = (typeof b.caption === 'string' && b.caption.trim()) ? b.caption.trim() : b.path.split('/').pop() ?? b.path
   let img: RenderedImage
@@ -120,11 +128,11 @@ export async function deliverLiveFrame(body: unknown): Promise<LiveResult> {
     // can't exist on the live path. The reply waits for the real outcome.
     img = await renderImageFileCached(b.path, DE_CONTENT_W, DE_CONTENT_H)
   } catch (e) {
-    return { ok: false, displayed: false, detail: `image render failed: ${e instanceof Error ? e.message : String(e)}` }
+    return logResult(kind, { ok: false, displayed: false, detail: `image render failed: ${e instanceof Error ? e.message : String(e)}` })
   }
   // Re-read the sink AFTER the await — the client may have disconnected (and
   // the window disposed) while the raster ran.
   const s = sink
-  if (!s) return { ok: false, displayed: false, detail: 'glasses client disconnected while the image rendered' }
-  return s.acceptLiveFrame({ kind: 'image', img, caption, path: b.path })
+  if (!s) return logResult(kind, { ok: false, displayed: false, detail: 'glasses client disconnected while the image rendered' })
+  return logResult(kind, s.acceptLiveFrame({ kind: 'image', img, caption, path: b.path }))
 }

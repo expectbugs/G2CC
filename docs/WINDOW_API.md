@@ -81,6 +81,11 @@ interface OsWindow {
                                       // §3.4 fullBleed scroll-reading ONLY: a scroll-notch boundary event
                                       //   while the view set scrollContent (the content is the capture).
                                       //   Reader turns pages here. Never fires outside fullBleed.
+  onScrollReadBack?(): Promise<boolean>
+                                      // §SCOUT: double-tap while YOUR scrollContent view is on glass.
+                                      //   true = consumed (you surfaced a menu); false/absent = the host
+                                      //   parks to the ribbon as before. Scout surfaces Ask/Type here;
+                                      //   Reader keeps park-to-ribbon by not implementing it.
   interruptible?(): boolean            // may a notification overlay repaint now? false during confirm.
   dispose?(): void                     // ws-close: release timers/pollers. Host calls it for every window.
   onStt?(text: string): Promise<void>          // a confirmed dictation transcript arrived

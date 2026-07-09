@@ -498,6 +498,10 @@ export class WindowManager {
    *  in fullBleed mode. Server-drawn (the menu is an antenna, not a native list).
    *  Reset on switchTo; clamped each render to the rendered menu length. */
   private winMenuCursor = 0
+  /** The last-rendered fullBleed menu (joined labels) — a change resets the
+   *  cursor to cell 0 so a state flip can't leave it on a dangerous label
+   *  (Adam on-glass 2026-07-09). Null = no fb menu rendered yet. */
+  private lastFbMenuKey: string | null = null
 
   constructor(private ctx: WmContext) {
     // Each window's requestRender only fires while it IS the active window — a
@@ -846,6 +850,19 @@ export class WindowManager {
           let scene: WireScene
           try {
             if (useFullBleed) {
+              // Reset the cursor to cell 0 whenever the menu SET changes (Adam
+              // on-glass 2026-07-09): the cursor used to persist across state
+              // flips, so it could sit on whatever label happened to occupy its
+              // old index in the NEW menu — an accidental R1 tap then fired it
+              // (a live turn was aborted by a stray tap landing on Interrupt).
+              // With this reset, cell 0 is the deterministic default for every
+              // menu — and every window orders cell 0 harmless. Same-menu
+              // re-renders (page turns, title changes) keep the cursor.
+              const menuKey = renderedMenu!.join('\u001f')
+              if (menuKey !== this.lastFbMenuKey) {
+                this.winMenuCursor = 0
+                this.lastFbMenuKey = menuKey
+              }
               this.winMenuCursor = Math.max(0, Math.min(Math.max(0, renderedMenu!.length - 1), this.winMenuCursor))
               scene = composeFullBleedScene(view, this.g2BatteryText(), this.active.statusLine?.() ?? null, renderedMenu!, this.winMenuCursor)
             } else {
@@ -1039,6 +1056,7 @@ export class WindowManager {
     this.parked = false                                    // Phase 2: entering a window un-parks it…
     if (this.rootNav === 'ribbon') this.atRibbon = false   // …and leaves the ribbon
     this.winMenuCursor = 0                                 // §3.3: the new window's menu starts at cell 0
+    this.lastFbMenuKey = null                              // fresh window → the first render re-keys the menu
     this.active = w
     if (id !== 'main') {
       this.lastUsed.set(id, ++this.useCounter)                    // Phase 11 MRU (monotonic, distinct)
@@ -1315,7 +1333,20 @@ export class WindowManager {
         }
         return
       }
-      // Inside a window. BROWSE windows are hierarchical navigators (the content
+      // Inside a window. A SCROLL-READING window may consume the double-tap to
+      // surface its own action menu first (Adam on-glass 2026-07-09: Scout's
+      // answer pages had NO reachable Ask — the only path was park→re-enter).
+      // The optional hook keeps Reader's park-to-ribbon exactly as before (it
+      // doesn't implement it); a second double-tap from the surfaced menu
+      // still parks (the menued view is a plain reading view).
+      if (this.lastView && isScrollRead(this.lastView) && this.active.onScrollReadBack) {
+        try {
+          if (await this.active.onScrollReadBack()) return
+        } catch (e) {
+          this.ctx.log(`[os] onScrollReadBack failed (${this.active.id}): ${(e as Error).message}`)
+        }
+      }
+      // BROWSE windows are hierarchical navigators (the content
       // list captures; their menu + parent levels are reached only via the
       // window's own onBack — flip focus to the menu, then pop levels). So in
       // ribbon mode double-tap DRIVES that onBack: the browse window stays fully

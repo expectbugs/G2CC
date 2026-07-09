@@ -161,11 +161,22 @@ try {
     assert.ok(v.title.includes('Test photo'), 'caption rides the title')
     assertComposable(v, 'image page view')
 
+    // Dictation over an IMAGE page renders a TEXT card, not the tiles (Adam
+    // on-glass 2026-07-09: state flips on tiles re-pushed ~150 BLE packets each
+    // — the display froze for minutes with a hot mic).
+    level.page = level.pages.length - 1
+    level.listening = true
+    const dv = await level.view('Scout')
+    assert.equal(dv.mode, 'text', 'listening over an image page → text card')
+    assert.ok(dv.text.includes('Listening'), 'the card says what the mic is doing')
+    assert.equal(dv.menu[0], 'Done', 'Done leads the listening menu')
+    level.listening = false
+
     // failure path: a missing file REPLACES the page with a loud bounded text page
     await level.setDoc(parseMarkdown('```g2img\n/nonexistent/nope.jpg\n```\n\ntext'))
     await waitFor(() => typeof level.pages[level.pages.length - 1] === 'string', 'failure replacement')
     assert.ok(level.pages[level.pages.length - 1].includes('IMAGE RENDER FAILED'), 'loud failure page')
-    console.error('  2. SessionLevel media pages: PAGE-2, fill-in, caption, loud failure ✓')
+    console.error('  2. SessionLevel media pages: PAGE-2, fill-in, caption, dictation-over-image, loud failure ✓')
   }
 
   // ============================================== 3. ScoutWindow behavior (fake pool)
@@ -198,15 +209,29 @@ try {
     await scout.onBrowseSelect(runIdx)                     // ⏎ Run
     assert.deepEqual(fakes.sent, ['c'], 'keyboard Run sent the buffer as a prompt')
 
-    // The turn is now busy → live frames accept + display.
+    // The turn is now busy → the busy menu must NEVER default to Interrupt
+    // (Adam on-glass 2026-07-09: a stray tap aborted a $5 turn).
+    v = await scout.view()
+    assert.equal(v.menu[0], 'Next', 'busy menu cell 0 is harmless (Next), Interrupt demoted')
+    assert.ok(v.menu.includes('Interrupt'), 'Interrupt still reachable while busy')
+
+    // Live frames accept + display.
     r = await deliverLiveFrame({ kind: 'text', text: 'Searching…' })
     assert.equal(r.ok, true, 'busy live text frame accepted')
     assert.equal(r.displayed, true, 'frame displayed (window active, session level)')
     v = await scout.view()
     assert.equal(v.text, 'Searching…', 'live text frame renders')
     assert.ok(v.title.includes('live'), 'live title marker')
+    assert.notEqual(v.menu[0], 'Interrupt', 'live-frame menu cell 0 is never Interrupt')
     assert.ok(v.menu.includes('Interrupt'), 'Interrupt reachable from the live frame')
     assertComposable(v, 'live text frame')
+
+    // Next during a live frame DISMISSES it and pages the doc.
+    await scout.onMenuSelect('Next')
+    v = await scout.view()
+    assert.ok(!v.title.includes('live'), 'Next dismissed the live frame')
+    r = await deliverLiveFrame({ kind: 'text', text: 'Searching…' })
+    assert.equal(r.ok, true, 're-push after dismissal accepted (frames are ephemeral)')
 
     // Live IMAGE frame — real raster through the same path.
     r = await deliverLiveFrame({ kind: 'image', path: fixture, caption: 'first look' })
@@ -245,11 +270,22 @@ try {
     await scout.onContentScroll('up')
     assert.equal((await scout.view()).title, t1, 'scroll-up turned back')
 
+    // Double-tap from scroll-read → the WM hook surfaces the menued view with
+    // Ask at cell 0 (Adam on-glass 2026-07-09: answer pages had no reachable Ask).
+    assert.equal(await scout.onScrollReadBack(), true, 'onScrollReadBack consumes the double-tap')
+    v = await scout.view()
+    assert.equal(v.menu[0], 'Ask', 'surfaced menu leads with Ask (default cell = mic)')
+    assert.ok(v.menu.includes('Read') && v.menu.includes('Type'), 'Read + Type adjacent')
+    await scout.onMenuSelect('Read')
+    v = await scout.view()
+    assert.equal(v.scrollContent, true, 'Read returns to scroll-reading')
+
     // Reentry (ribbon re-select) → menued view with Read; Read returns to scrolling.
     scout.onDeactivate()
     scout.onActivate(true)
     v = await scout.view()
     assert.ok(v.menu.includes('Read') && v.menu.includes('Ask'), 'reentry shows the menued view with Read')
+    assert.equal(v.menu[0], 'Ask', 'reentry menu leads with Ask too')
     assert.ok(v.menu.every((l) => fwTextWidth(l) <= 96), 'menu labels fit the 96px column')
     assertComposable(v, 'reentry menued view')
     await scout.onMenuSelect('Read')
