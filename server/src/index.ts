@@ -22,7 +22,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { loadConfig } from './config.js'
 import { startDiscovery, stopDiscovery } from './discovery.js'
-import { handleConnection, setWatchdog } from './ws-handler.js'
+import { handleConnection, setWatchdog, closeAllClients } from './ws-handler.js'
 import { Watchdog } from './watchdog.js'
 import { renderSetupPage, getLocalInterfaces, isTailscaleOrLoopbackAddr } from './setup-page.js'
 import { getEndpointJson } from './endpoints.js'
@@ -269,6 +269,11 @@ function shutdown(): void {
   console.log('\n[g2cc-server] Shutting down...')
   watchdogInstance.stop()
   stopDiscovery()
+  // Terminate live WS clients FIRST (2026-07-09, observed live): server.close()
+  // waits for open connections, and the phone's keepalived WS never ends — the
+  // shutdown hung forever after this log line. The app auto-reconnects.
+  const nClients = closeAllClients()
+  if (nClients > 0) console.log(`[g2cc-server] terminated ${nClients} live WS client(s) for shutdown`)
   // Bug fix #9: catch close rejection — otherwise we'd hang on signal if
   // server.close() rejects (rare but possible: stuck connection). Loud-and-
   // proud per the no-silent-failure rule.

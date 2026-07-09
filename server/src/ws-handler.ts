@@ -165,6 +165,24 @@ function startGTimer(client: WSClient, kind: 'rate-text' | 'rate-image'): void {
   }, intervalMs)
 }
 
+/** Live WS clients (shutdown bookkeeping, 2026-07-09): server.close() waits for
+ *  open connections, and the phone keeps its WS alive with keepalives — a
+ *  restart while the phone was connected therefore HUNG FOREVER after
+ *  "Shutting down..." (observed live). Not a timeout: an ordered close. */
+const liveClients = new Set<WSClient>()
+
+/** Terminate every live client so server.close() can resolve (the app's
+ *  foreground service auto-reconnects by design). Returns how many. */
+export function closeAllClients(): number {
+  const n = liveClients.size
+  for (const c of liveClients) {
+    try { c.ws.terminate() } catch (e) {
+      console.error(`[ws] shutdown terminate failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  return n
+}
+
 export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
   const pool = new SessionPool()
 
@@ -298,6 +316,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
   })
 
   ws.on('close', (code: number, reason: Buffer) => {
+    liveClients.delete(client)
     if (client.authTimer) clearTimeout(client.authTimer)
     if (client.streamTimer) clearTimeout(client.streamTimer)
     if (client.hbInterval) clearInterval(client.hbInterval)
@@ -335,6 +354,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     console.log(`[ws] client closed (code=${code} reason="${String(reason)}") — killed ${killedCount} sessions`)
   })
 
+  liveClients.add(client)
   return client
 }
 
