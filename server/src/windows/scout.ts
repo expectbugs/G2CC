@@ -484,6 +484,23 @@ export class ScoutWindow implements OsWindow, ScoutLiveSink {
 
   async onStt(text: string): Promise<void> { await this.session.onStt(text) }
   async onSttError(error: string): Promise<void> { await this.session.onSttError(error) }
+  /** PC-native view: the session transcript pane. */
+  surfaceView() { return this.session.surfaceView() }
+  /** Typed text (multi-surface 2026-07-13). With the on-glass kbd OPEN, the
+   *  typed line REPLACES the buffer (completes the tap-typing — never fights
+   *  it): the user sees it in the kbd view and taps Run/Done as usual.
+   *  Otherwise straight to the session — Enter is the confirm. */
+  async onTypedText(text: string): Promise<void> {
+    if (this.level === 'kbd') {
+      this.kbdBuf = text
+      this.kbdGroup = null
+      this.kbdOffset = 0
+      this.log(`[os] scout: typed text replaced the kbd buffer (${text.length} chars) — tap Run to send`)
+      this.requestRender()
+      return
+    }
+    await this.session.onTypedText(text)
+  }
 
   dispose(): void { unregisterScoutLiveSink(this) }
 }

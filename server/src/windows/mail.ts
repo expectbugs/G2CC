@@ -488,6 +488,25 @@ export class MailWindow implements OsWindow {
     this.requestRender()
   }
 
+  /** Typed text (multi-surface 2026-07-13): at the compose BODY stage the typed
+   *  line lands as the body at the review step — sending a real email keeps
+   *  its confirm flow (it guards the SEND). Elsewhere: loud discard (start a
+   *  Reply/Compose first; reading and lists are tap-driven). */
+  async onTypedText(text: string): Promise<void> {
+    if (this.level !== 'compose' || this.composeStage !== 'body') {
+      this.ctx.log(`[os] mail: typed text outside a compose body (level=${this.level}, stage=${this.composeStage}) — REFUSED (start a Reply/Compose first): "${text.slice(0, 60)}"`)
+      this.requestRender()
+      throw new Error('start a Reply or Compose first — typed text is the message body')
+    }
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    this.listening = false
+    this.transcribing = false
+    this.pendingText = text.trim()
+    this.composePage = 0
+    this.ctx.log(`[os] mail: typed body staged for review (${text.length} chars)`)
+    this.requestRender()
+  }
+
   async onSttError(error: string): Promise<void> {
     if (this.listening || this.transcribing) this.ctx.audio('stop')
     const had = this.listening || this.transcribing || this.pendingText !== null

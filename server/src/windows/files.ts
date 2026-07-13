@@ -1065,6 +1065,24 @@ export class FilesWindow implements OsWindow {
     this.requestRender()
   }
 
+  /** Typed text (multi-surface 2026-07-13): at the NAME level the typed line
+   *  lands as the pending name at its confirm step (rename/mkdir mutate the
+   *  filesystem — the confirm guards the ACTION). Elsewhere: loud discard
+   *  (Files navigation is tap-driven; use Rename/New folder first). */
+  async onTypedText(text: string): Promise<void> {
+    if (this.level !== 'name') {
+      this.ctx.log(`[os] files: typed text outside name entry (level=${this.level}) — REFUSED (use Rename/New folder first): "${text.slice(0, 60)}"`)
+      this.requestRender()
+      throw new Error('use Rename or New folder first — typed text is the name')
+    }
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    this.listening = false
+    this.transcribing = false
+    this.pendingName = text.trim()
+    this.ctx.log(`[os] files: typed name staged for CONFIRM (${this.nameVerb ?? '?'}; "${text.slice(0, 60)}")`)
+    this.requestRender()
+  }
+
   async onSttError(error: string): Promise<void> {
     if (this.listening || this.transcribing) this.ctx.audio('stop')
     this.listening = false

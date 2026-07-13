@@ -188,7 +188,10 @@ export interface WireScene {
   regions: SceneRegion[]
 }
 
-/** A ring/gesture input event forwarded from the client's EventParser. */
+/** A ring/gesture input event forwarded from the client's EventParser.
+ *  'text' (multi-surface, 2026-07-13) is a whole typed line/paragraph from a
+ *  surface's keyboard (PC page text bar / phone control mode) — routed to the
+ *  window manager's onTypedText, NEVER truncated. */
 export type InputEventKind =
   | 'tap'
   | 'double_tap'
@@ -198,6 +201,13 @@ export type InputEventKind =
   | 'hub_select'
   | 'hub_gesture'
   | 'focus'
+  | 'text'
+
+/** Which kind of display/input surface a client attaches as (multi-surface,
+ *  2026-07-13). 'phone' = the Android app (BLE bridge and/or on-phone control
+ *  mode — ONE surface either way); 'browser' = the PC page (/pc). Absent on
+ *  the wire = 'phone' (pre-1.18 APKs send a bare os_attach). */
+export type SurfaceKind = 'phone' | 'browser'
 
 // ============================================================
 // Client -> Server messages
@@ -220,6 +230,10 @@ export interface ClientHbMsg {
    *  omit it). Decoded client-side from the 09-00/09-01 device-info frames
    *  (G2_BLE_PROTOCOL.md §10, f4.f12) — [U] until the on-glass batch. */
   g2Battery?: number
+  /** Are the glasses currently BLE-connected to the phone? (multi-surface
+   *  2026-07-13; optional — pre-1.18 APKs omit it → server keeps null =
+   *  unknown). Feeds os_status so the PC page can say "live on glasses". */
+  g2Connected?: boolean
 }
 
 /** A phone notification forwarded by the client's NotificationListenerService
@@ -385,8 +399,23 @@ export interface BleAckMsg {
 
 /** Opt into Glasses-OS mode (Phase 1). After this, the server drives the
  *  display via `render` and reacts to `input`. The legacy dispatch-menu app
- *  never sends this, so it is completely unaffected by the OS path. */
-export interface OsAttachMsg { type: 'os_attach' }
+ *  never sends this, so it is completely unaffected by the OS path.
+ *  Multi-surface (2026-07-13): the connection attaches to the ONE persistent
+ *  OsSession as a surface of `surface` kind; absent = 'phone' (pre-1.18 APKs).
+ *  Re-sending os_attach on an already-attached connection is idempotent — it
+ *  re-runs the attach render (the app uses this after a BLE cold-launch). */
+export interface OsAttachMsg { type: 'os_attach'; surface?: SurfaceKind }
+
+/** A surface asks the server to reset things (multi-surface 2026-07-13).
+ *  'soft' = refresh the GLASSES connection: routed to the phone surface as
+ *  `glasses_reset` (loud error back when no phone is attached).
+ *  'hard' = clean-slate the ENTIRE system in-process: broadcast `hard_reset`,
+ *  kill every DE CC subprocess, rebuild the WindowManager fresh at the root,
+ *  clear the resume-window pointer — ALL durable user data is kept. */
+export interface ResetMsg {
+  type: 'reset'
+  kind: 'soft' | 'hard'
+}
 
 /** A ring/gesture input event (from the client's EventParser). The PC owns the
  *  reaction → updates state → sends a new `render`. Optional fields carry the
@@ -403,6 +432,10 @@ export interface InputMsg {
    *  region name) and its raw f3 value (observed 1/2 — plausibly direction). */
   region?: string
   value?: number
+  /** event 'text' (multi-surface 2026-07-13): one Enter-submitted line/
+   *  paragraph from a surface's keyboard. Arbitrary length — NEVER truncated
+   *  (the no-truncation rule); the WM routes it to the active window. */
+  text?: string
 }
 
 /** Result of a Phase-4a inline reply the client attempted (filled a forwarded
@@ -503,6 +536,7 @@ export type ClientMessage =
   | DiagMsg
   | OsAttachMsg
   | InputMsg
+  | ResetMsg
   | NotificationDismissedMsg
   | NotificationReplyResultMsg
   | SmsSendResultMsg
@@ -751,6 +785,60 @@ export interface PhoneLocateMsg {
   action: 'start' | 'stop'
 }
 
+/** Server → BROWSER surfaces only (multi-surface 2026-07-13): who is attached
+ *  to the OS session + whether the glasses are BLE-live on the phone. Sent on
+ *  attach/detach/g2Connected change. NEVER sent to 'phone' surfaces — a
+ *  pre-1.18 APK logs a decode failure per unknown message type. */
+export interface OsStatusMsg {
+  type: 'os_status'
+  surfaces: { id: string; kind: SurfaceKind }[]
+  /** null = unknown (no phone attached, or a pre-g2Connected APK). */
+  g2Connected: boolean | null
+}
+
+/** Server → the PHONE surface: refresh the glasses BLE connection (the Soft
+ *  Reset button, possibly pressed on the PC page). The app runs its BLE
+ *  session recovery KEEPING the WebSocket, then re-sends os_attach — the
+ *  server answers any os_attach with a full re-render. */
+export interface GlassesResetMsg { type: 'glasses_reset' }
+
+/** Server → ALL surfaces, broadcast immediately BEFORE the server hard-resets
+ *  itself in-process (Hard Reset button). The phone reacts with a full local
+ *  teardown (BLE + WS) then auto-reconnects into its previous mode; the PC
+ *  page shows "system restarting" and lets its reconnect loop re-attach. */
+export interface HardResetMsg { type: 'hard_reset' }
+
+/** PC-native views (multi-surface 2026-07-13): the active window's optional
+ *  FULL-FIDELITY content for big screens, broadcast to BROWSER surfaces
+ *  alongside each render. The glasses scene stays the source of interaction;
+ *  these are richer READ panes (in-memory only — the preview() cost class). */
+export interface SurfaceViewReader {
+  kind: 'reader'
+  window: 'reader'
+  title: string
+  /** The WHOLE current chapter (pages joined) — never truncated. */
+  body: string
+  /** Current glasses page index + each page's char offset into body, so the
+   *  pane can scroll-sync to exactly where the glasses are. */
+  page: number
+  pageOffsets: number[]
+  progress: string
+}
+export interface SurfaceViewSession {
+  kind: 'session'
+  window: string
+  title: string
+  /** The session doc (prompt + streamed response), unpaginated. */
+  body: string
+  /** Live phase line (thinking/tool/writing…) or null when idle. */
+  state: string | null
+}
+export type SurfaceView = SurfaceViewReader | SurfaceViewSession
+export interface SurfaceViewMsg {
+  type: 'surface_view'
+  view: SurfaceView | null
+}
+
 export type ServerMessage =
   | AuthResultMsg
   | HbMsg
@@ -784,3 +872,7 @@ export type ServerMessage =
   | SmsThreadRequestMsg
   | SmsSendMsg
   | PhoneLocateMsg
+  | OsStatusMsg
+  | GlassesResetMsg
+  | HardResetMsg
+  | SurfaceViewMsg

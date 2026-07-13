@@ -42,6 +42,7 @@ import { MediaWindow } from './windows/media.js'
 import { NoticesWindow } from './windows/notices.js'
 import { RibbonShell } from './ribbon.js'
 import { loadWindowUsage, persistWindowUsage } from './window-usage.js'
+import { saveActiveWindow } from './os-state.js'
 
 /** How long a notification FLASH holds a BLANKED screen before auto-returning
  *  to blank. 10 s → 5 s (Adam 2026-06-12, Phase 2: "i use blank mode when
@@ -603,9 +604,48 @@ export class WindowManager {
     }, 30_000)
   }
 
-  /** Detach from the global hub + kill timers (called on ws close — a dead WM
-   *  must not accumulate hub listeners or fire orphan popups/pacers). */
+  /** Multi-surface (2026-07-13): a surface just attached (os_attach — first
+   *  attach OR the app's re-attach after a BLE cold-launch). Force a full
+   *  repaint of the current state to every surface. Clearing lastBlankSurface
+   *  is MANDATORY: sendBlank dedupes byte-identical blank frames, so a surface
+   *  attaching while the screen is blanked would otherwise receive NOTHING
+   *  (dark glass, no state) until the next wake. */
+  onSurfaceAttached(): void {
+    this.lastBlankSurface = null
+    this.requestRender()
+  }
+
+  /** Restart resume (os-state, 2026-07-13): reopen the persisted active window
+   *  after a server restart. The pointer load is async at boot, so this
+   *  self-guards: it applies AT MOST once, and never after a real navigation
+   *  (switchTo sets restoreConsumed) or when the WM has already left the boot
+   *  default — a user who beat the DB query keeps their place. */
+  restoreActiveWindow(id: string): void {
+    if (this.restoreConsumed) { this.ctx.log(`[os] restart-resume '${id}' skipped — already navigated`); return }
+    this.restoreConsumed = true
+    if (id === 'main') return   // the boot default anyway
+    if (this.active.id !== 'main') { this.ctx.log(`[os] restart-resume '${id}' skipped — '${this.active.id}' already active`); return }
+    if (!this.windows.some((w) => w.id === id)) { this.ctx.log(`[os] restart-resume: unknown window '${id}' (retired?) — staying at the root`); return }
+    this.ctx.log(`[os] restart-resume → ${id}`)
+    this.switchTo(id)
+  }
+
+  /** True once a restore was applied OR any real navigation happened. */
+  private restoreConsumed = false
+
+  /** True once dispose() ran (hard reset / shutdown). In-flight input
+   *  handlers hold a reference to THIS WM and may complete after the session
+   *  rebuilt a fresh one (review 2026-07-13 F3) — a retired WM must never
+   *  paint surfaces or persist state into the new world (its switchTo used to
+   *  re-persist the active-window pointer AFTER hardReset cleared it). */
+  private retired = false
+
+  /** Detach from the global hub + kill timers (called at server shutdown /
+   *  hard reset — a dead WM must not accumulate hub listeners or fire orphan
+   *  popups/pacers). Multi-surface: NOT called on ws close any more — the
+   *  session outlives its surfaces. */
   dispose(): void {
+    this.retired = true
     notifyHub.off('notification', this.onHubNotification)
     notifyHub.off('seen', this.onHubSeen)
     notifyHub.off('dismissPhone', this.onHubDismissPhone)
@@ -632,6 +672,11 @@ export class WindowManager {
    *  is byte-identical to what the glass already shows; otherwise sends and
    *  records. Cache set only AFTER a successful send. */
   private sendBlank(scene: WireScene): void {
+    if (this.retired) { this.ctx.log('[os] blank on a RETIRED WM — discarded'); return }
+    // Multi-surface: no surface → no send AND no cache write (a stale cache
+    // could otherwise dedupe away the first real blank after an attach;
+    // onSurfaceAttached clears it anyway — belt and braces).
+    if (this.ctx.hasDisplay && !this.ctx.hasDisplay()) return
     const surface = JSON.stringify(scene)
     if (surface === this.lastBlankSurface) return   // glass already shows exactly this
     this.ctx.send(scene)
@@ -774,6 +819,14 @@ export class WindowManager {
    *  one in flight, at most one queued (the latest state wins — view() always
    *  reads current state, so collapsing intermediate renders is correct). */
   requestRender(): void {
+    // A retired WM (hard reset rebuilt the session) must never paint the new
+    // world's surfaces — a stale in-flight handler's render dies here, loudly.
+    if (this.retired) { this.ctx.log('[os] render on a RETIRED WM (stale post-reset handler) — discarded'); return }
+    // Multi-surface: with ZERO surfaces attached there is nothing to paint —
+    // skip the compose entirely (the 30 s dashboard pacer would otherwise keep
+    // running view() DB queries into the void all day). State still mutates;
+    // onSurfaceAttached() re-renders everything on the next attach.
+    if (this.ctx.hasDisplay && !this.ctx.hasDisplay()) return
     if (this.blanked && !this.activeOverlay) {
       // Stay dark until the user double-taps back (background events keep
       // updating state; the wake render re-derives everything). A blanked
@@ -904,6 +957,19 @@ export class WindowManager {
           if (this.activeOverlay && view === this.activeOverlay) this.overlayRendered = true
           this.lastBlankSurface = null   // B1: a non-blank frame goes on glass
           this.ctx.send(scene)
+          // PC-native views (2026-07-13): the active window's full-fidelity
+          // pane rides beside every window render (browser surfaces only —
+          // os-session gates it). Cheap by contract (in-memory fields only);
+          // an overlay keeps the underlying window's pane (the mirror shows
+          // the overlay; the pane is a reading aid). Failure-isolated.
+          if (this.ctx.sendSurfaceView) {
+            try {
+              this.ctx.sendSurfaceView(this.active.surfaceView?.() ?? null)
+            } catch (e) {
+              this.ctx.log(`[os] surfaceView failed (${this.active.id}): ${(e as Error).message}`)
+              this.ctx.sendSurfaceView(null)
+            }
+          }
           // Phase 4 queue flush: promote ONE pending overlay once nothing
           // blocks. Setting state + renderQueued re-iterates the already-
           // serialized do/while — no reentrancy (B5).
@@ -944,6 +1010,9 @@ export class WindowManager {
    *  preview text then sends the shell's scene. */
   private renderRibbon(): void {
     if (!this.ribbon) return
+    if (this.retired) { this.ctx.log('[ribbon] render on a RETIRED WM — discarded'); return }
+    // Multi-surface: nothing attached → nothing to paint (see requestRender).
+    if (this.ctx.hasDisplay && !this.ctx.hasDisplay()) return
     if (this.ribbonRendering) { this.ribbonRenderQueued = true; return }
     this.ribbonRendering = true
     void (async () => {
@@ -979,6 +1048,9 @@ export class WindowManager {
           this.lastView = null   // the ribbon has no menu/browse list — taps are tap=enter, scroll=focus
           this.lastBlankSurface = null   // B1: a non-blank frame goes on glass
           this.ctx.send(scene)
+          // At the ribbon root no window is on screen — clear the PC pane to
+          // its scene-derived fallback.
+          this.ctx.sendSurfaceView?.(null)
           // Queue flush at the ribbon (review 2026-07-05): a queued timer/call
           // alarm must not stall while the ribbon is the surface. Promoting sets
           // activeOverlay, so requestRender falls through to the WINDOW loop
@@ -1040,6 +1112,10 @@ export class WindowManager {
   }
 
   switchTo(id: string): void {
+    // Restart resume (os-state): any real navigation supersedes a pending
+    // boot-restore — the restore must never yank the user off a window they
+    // just opened (the load is async; see restoreActiveWindow).
+    this.restoreConsumed = true
     const w = this.windows.find((x) => x.id === id)
     if (!w) { this.ctx.log(`[os] switchTo unknown window '${id}'`); this.requestRender(); return }
     // §3.4 re-entry: re-selecting the SAME window you parked from (it was active at
@@ -1058,13 +1134,25 @@ export class WindowManager {
     this.winMenuCursor = 0                                 // §3.3: the new window's menu starts at cell 0
     this.lastFbMenuKey = null                              // fresh window → the first render re-keys the menu
     this.active = w
+    // Multi-surface restart resume: persist "what is open" on every switch
+    // (incl. Main — switching home must overwrite a stale Reader pointer).
+    // Capture path: fire-and-forget; a down DB loses only the pointer.
+    // RETIRED guard (F3): a stale post-reset handler's switchTo must not
+    // re-persist a pointer hardReset just cleared.
+    if (!this.retired) {
+      void saveActiveWindow(id).catch((e: unknown) =>
+        this.ctx.log(`[os] persist active-window(${id}) failed: ${e instanceof Error ? e.message : String(e)}`))
+    }
     if (id !== 'main') {
       this.lastUsed.set(id, ++this.useCounter)                    // Phase 11 MRU (monotonic, distinct)
       const n = (this.useCount.get(id) ?? 0) + 1                  // Phase 3 §3.1 frequency
       this.useCount.set(id, n)
-      // Persist (capture path — fire-and-forget; a down DB keeps the in-memory order).
-      void persistWindowUsage(id, this.useCounter, n).catch((e: unknown) =>
-        this.ctx.log(`[os] persist window-usage(${id}) failed: ${e instanceof Error ? e.message : String(e)}`))
+      // Persist (capture path — fire-and-forget; a down DB keeps the in-memory
+      // order). Retired WMs (F3) keep their in-memory move but write nothing.
+      if (!this.retired) {
+        void persistWindowUsage(id, this.useCounter, n).catch((e: unknown) =>
+          this.ctx.log(`[os] persist window-usage(${id}) failed: ${e instanceof Error ? e.message : String(e)}`))
+      }
     } else (w as MainWindow).resetToRoot()                        // Phase 11: Main returns to its launcher root
     try {
       w.onActivate?.(reentry)                                     // launcher reset (Games→list); reentry → Reader menu
@@ -1422,6 +1510,14 @@ export class WindowManager {
       this.parked = true
     }
     this.atRibbon = true
+    // Restart resume (review 2026-07-13 F7): parking at the ribbon root is the
+    // ribbon-mode 'home' — persist it (as 'main', which restore treats as the
+    // boot default) or a restart would resume INTO the window the user had
+    // deliberately exited. Mirrors menu-mode goHome → switchTo('main').
+    if (!this.retired) {
+      void saveActiveWindow('main').catch((e: unknown) =>
+        this.ctx.log(`[os] persist active-window(ribbon home) failed: ${e instanceof Error ? e.message : String(e)}`))
+    }
     // Null lastView SYNCHRONOUSLY (review 2026-07-05): renderRibbon only nulls
     // it after the async preview fetch, so a tap landing in that window used to
     // resolve against the PARKED window's menu — 'Ask' turned the mic on under
@@ -1477,6 +1573,68 @@ export class WindowManager {
       else this.ctx.log(`[os] STT error arrived for '${this.active.id}' which takes no dictation — logged only: ${error}`)
     } catch (e) {
       this.ctx.log(`[os] stt-error handler failed (${this.active.id}): ${(e as Error).message}`)
+    }
+  }
+
+  /** Multi-surface typed text (2026-07-13): one Enter-submitted line from a
+   *  surface keyboard (PC page / phone control mode). Routing mirrors the tap
+   *  policy: an overlay loud-ignores it (overlay actions are taps, and typed
+   *  words must never act blind on a card); the ribbon root loud-ignores
+   *  ("enter a window first"); BLANKED wakes and delivers (the typist is
+   *  looking at a live mirror, not the dark glass). Delivery: the window's
+   *  onTypedText, else the onStt fallback (accepts exactly when the window is
+   *  mid-dictation — a typed substitute for a garbled transcript), else a
+   *  loud no-consumer log. NEVER truncated.
+   *  Returns a USER-FACING discard reason when the text was NOT delivered to
+   *  a window (review 2026-07-13 F4: the typing surface already cleared its
+   *  input bar on socket-send success — a server-console-only discard was
+   *  silent data loss from the typist's chair). null = delivered/handled. */
+  async onTypedText(text: string): Promise<string | null> {
+    if (!text || text.trim().length === 0) {
+      this.ctx.log('[os] typed text EMPTY — ignored')
+      return 'empty text'
+    }
+    if (this.activeOverlay) {
+      this.ctx.log(`[os] typed text during a notification overlay — IGNORED (act on the overlay first): "${text.slice(0, 60)}"`)
+      this.requestRender()
+      return 'a notification overlay is up — act on it first (tap = act, double-tap = dismiss)'
+    }
+    if (this.blanked) {
+      this.clearPopupTimer()
+      this.blankFlash = null
+      this.blanked = false
+      this.ctx.log('[os] screen WAKE (typed text)')
+      // fall through — the wake render happens via the delivery below
+    }
+    if (this.rootNav === 'ribbon' && this.atRibbon) {
+      this.ctx.log(`[os] typed text at the ribbon root — IGNORED (enter a window first): "${text.slice(0, 60)}"`)
+      this.renderRibbon()
+      return 'you are at the ribbon root — enter a window first (Enter/tap opens the highlighted one)'
+    }
+    try {
+      if (this.active.onTypedText) {
+        this.ctx.log(`[os] typed text → ${this.active.id} (${text.length} chars)`)
+        await this.active.onTypedText(text)
+        return null
+      } else if (this.active.onStt) {
+        // Mid-dictation substitute; SessionLevel-style guards self-discard
+        // loudly when the window isn't transcribing.
+        this.ctx.log(`[os] typed text → ${this.active.id} via the onStt fallback (${text.length} chars)`)
+        await this.active.onStt(text)
+        return null
+      } else {
+        this.ctx.log(`[os] typed text for '${this.active.id}' which takes no text — DISCARDED (${text.length} chars): "${text.slice(0, 80)}"`)
+        this.requestRender()
+        return `the '${this.active.label}' window takes no typed text`
+      }
+    } catch (e) {
+      if (e instanceof SwitchTo) { await this.handleSwitchTo(e); return null }
+      // Windows THROW their deliberate refusals ("open a thread first") so the
+      // reason reaches the typing surface; real bugs surface the same way —
+      // loud beats lost either way.
+      this.ctx.log(`[os] typed text refused/failed (${this.active.id}): ${(e as Error).message}`)
+      this.requestRender()
+      return `${this.active.label}: ${(e as Error).message}`
     }
   }
 

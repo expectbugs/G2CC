@@ -4,6 +4,7 @@
 import { readdirSync, existsSync } from 'node:fs'
 import { join, basename, resolve as resolvePath } from 'node:path'
 import type { OsWindow, WmContext, WinView } from './types.js'
+import type { SurfaceView } from '@g2cc/shared'
 import { browsePageItems } from './_browse.js'
 import { oneLine } from './_util.js'
 import { paginateText, errorView, FB_TEXT_PAGE_PX, TEXT_PAGE_PX, FB_READ_PAGE_ROWS, TEXT_PAGE_ROWS, FB_READ_MAX_BYTES, FB_READ_ROW_CAP, TEXT_PAGE_MAX_BYTES } from '../os-compose.js'
@@ -178,6 +179,32 @@ export class ReaderWindow implements OsWindow {
     if (this.voiceOn) lines.push('voice ▲')
     if (this.saveFailed) lines.push('⚠ unsaved')
     return lines.join('\n')
+  }
+
+  /** PC-native view (multi-surface 2026-07-13): the WHOLE current chapter for
+   *  the PC page's big reading pane, with per-page char offsets so the pane
+   *  scroll-syncs to exactly where the glasses are. Same in-memory fields
+   *  preview() reads — NO DB, NO EPUB subprocess (the preview() cost class). */
+  surfaceView(): SurfaceView | null {
+    if (!this.bookPath || this.pages.length === 0) return null
+    const pageOffsets: number[] = []
+    let acc = 0
+    for (const p of this.pages) {
+      pageOffsets.push(acc)
+      acc += p.length + 2   // the '\n\n' page seam below
+    }
+    const where = this.pageMap && this.pageMap.total > 0
+      ? `p.${localToGlobal(this.pageMap.counts, this.chapter, this.page)}/${this.pageMap.total} · ${Math.round((localToGlobal(this.pageMap.counts, this.chapter, this.page) / this.pageMap.total) * 100)}%`
+      : `p.${this.page + 1}/${this.pages.length}`
+    return {
+      kind: 'reader',
+      window: 'reader',
+      title: `${this.bookTitle}${this.chapterTitle ? ` · ${this.chapterTitle}` : ''}`,
+      body: this.pages.join('\n\n'),
+      page: Math.min(this.page, this.pages.length - 1),
+      pageOffsets,
+      progress: `ch ${this.chapter + 1}/${this.chapters.length} · ${where}`,
+    }
   }
 
   /** Toggle handsfree voice-paging (Phase 9a). Starts/stops the continuous mic. */

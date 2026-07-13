@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import com.g2cc.g2cc.os.MirrorGeometry
 import com.g2cc.g2cc.render.Content
 import com.g2cc.g2cc.render.Display
 import com.g2cc.g2cc.render.Gray4Bmp
@@ -49,19 +50,27 @@ object ExpectedMirror {
 
     /** Approximate guide for a native list region: one row per item. The firmware owns the
      *  real rendering AND the selection ring (which the phone can't know), so like text this
-     *  is a layout guide, not a pixel reference. */
+     *  is a layout guide, not a pixel reference. Row pitch comes from [MirrorGeometry]
+     *  (multi-surface 2026-07-13) so control-mode HIT-TESTING lands on the rows exactly
+     *  where they're DRAWN — the adaptive pitch also makes every row of a long browse
+     *  page visible (and tappable) instead of clipping past the region. */
     private fun drawListRegion(canvas: Canvas, r: Region, c: Content.ListItems, outlines: Boolean) {
         if (outlines) outline(canvas, r, Color.rgb(60, 60, 60))
+        val pitch = MirrorGeometry.listRowPitch(r.h, c.items.size)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE; textSize = 15f; typeface = Typeface.MONOSPACE
+            color = Color.WHITE
+            // Native pitch keeps the native 15px text; compressed rows shrink with it.
+            textSize = minOf(15f, pitch - 2f).coerceAtLeast(6f)
+            typeface = Typeface.MONOSPACE
         }
         canvas.save()
         canvas.clipRect(r.x, r.y, r.x + r.w, r.y + r.h)
-        var y = r.y + 20f
-        for (item in c.items) {
-            canvas.drawText(item, r.x + 8f, y, paint)
-            y += 34f                       // ~firmware list row pitch
-            if (y > r.y + r.h) break       // firmware scrolls; the mirror just clips
+        for ((i, item) in c.items.withIndex()) {
+            val top = r.y + i * pitch
+            if (top >= r.y + r.h) break    // firmware scrolls; the mirror just clips
+            // Baseline centered in the row band (row i spans top..top+pitch —
+            // the same band MirrorGeometry.hitListRow resolves to index i).
+            canvas.drawText(item, r.x + 8f, top + (pitch + paint.textSize * 0.75f) / 2f, paint)
         }
         canvas.restore()
     }

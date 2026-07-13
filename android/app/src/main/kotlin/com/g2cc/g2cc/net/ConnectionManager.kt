@@ -75,6 +75,9 @@ class ConnectionManager(
     private val batteryPct: (() -> Int?)? = null,
     /** Glasses battery % supplier (Adam 2026-06-12, v1.9 — see ClientHb.g2Battery). */
     private val g2BatteryPct: (() -> Int?)? = null,
+    /** Glasses BLE-live? supplier (multi-surface 2026-07-13, v1.18 — see
+     *  ClientHb.g2Connected). Null provider/sample omits the field. */
+    private val g2Connected: (() -> Boolean?)? = null,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -369,7 +372,7 @@ class ConnectionManager(
                 }
                 is ServerMessage.Hb -> {
                     // Reply immediately so the server knows our event loop is alive.
-                    send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke(), g2Battery = g2BatteryPct?.invoke()))
+                    send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke(), g2Battery = g2BatteryPct?.invoke(), g2Connected = g2Connected?.invoke()))
                 }
                 else -> {
                     onMessage(msg)
@@ -487,7 +490,7 @@ class ConnectionManager(
             while (wsGen.get() == myGen) {
                 delay(HEARTBEAT_INTERVAL_MS)
                 if (wsGen.get() != myGen) break
-                send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke(), g2Battery = g2BatteryPct?.invoke()))
+                send(ClientMessage.ClientHb(System.currentTimeMillis(), battery = batteryPct?.invoke(), g2Battery = g2BatteryPct?.invoke(), g2Connected = g2Connected?.invoke()))
             }
         }
     }

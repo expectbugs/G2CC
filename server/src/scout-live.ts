@@ -61,16 +61,29 @@ export function unregisterScoutLiveSink(s: ScoutLiveSink): void {
 }
 
 export interface ScoutLiveStatus {
+  /** Multi-surface (2026-07-13): the WM is boot-created now, so the sink is
+   *  registered from boot — this field truthfully means "a ScoutWindow sink
+   *  exists", no longer "a phone is connected". See surfacesAttached for that. */
   clientConnected: boolean
+  /** How many display surfaces (phone / browser) are attached to the OS
+   *  session right now. 0 = a frame will be accepted+held/rendered but nobody
+   *  is looking at it. Provided by os-session at boot (avoids a module cycle). */
+  surfacesAttached: number
   windowActive: boolean
   turnBusy: boolean
   frameHeld: boolean
 }
 
+/** Injected by os-session.ts at boot (a provider fn, not an import — the
+ *  registry chain scout.ts → scout-live.ts must not import os-session back). */
+let surfacesProvider: (() => number) | null = null
+export function setScoutSurfacesProvider(fn: () => number): void { surfacesProvider = fn }
+
 export function scoutLiveStatus(): ScoutLiveStatus {
   const s = sink
-  if (!s) return { clientConnected: false, windowActive: false, turnBusy: false, frameHeld: false }
-  return { clientConnected: true, ...s.liveStatus() }
+  const surfacesAttached = surfacesProvider ? surfacesProvider() : 0
+  if (!s) return { clientConnected: false, surfacesAttached, windowActive: false, turnBusy: false, frameHeld: false }
+  return { clientConnected: true, surfacesAttached, ...s.liveStatus() }
 }
 
 /** One server-log line per frame outcome (Adam's testing 2026-07-09: the
@@ -90,6 +103,13 @@ export async function deliverLiveFrame(body: unknown): Promise<LiveResult> {
   }
   if (!sink) {
     return logResult(kind, { ok: false, displayed: false, detail: 'no glasses client connected — nothing to display on' })
+  }
+  // Multi-surface truthfulness (review 2026-07-13 F5): the sink is registered
+  // from BOOT now (the WM is session-lifetime), so sink-presence no longer
+  // implies anyone can SEE a frame. With zero surfaces attached, 'displayed'
+  // would be fabricated — reject exactly like master's no-client case.
+  if ((surfacesProvider ? surfacesProvider() : 0) === 0) {
+    return logResult(kind, { ok: false, displayed: false, detail: 'no display surface attached (glasses/phone/PC all disconnected) — nothing can show this frame' })
   }
 
   if (b.kind === 'text') {
@@ -130,9 +150,13 @@ export async function deliverLiveFrame(body: unknown): Promise<LiveResult> {
   } catch (e) {
     return logResult(kind, { ok: false, displayed: false, detail: `image render failed: ${e instanceof Error ? e.message : String(e)}` })
   }
-  // Re-read the sink AFTER the await — the client may have disconnected (and
-  // the window disposed) while the raster ran.
+  // Re-read the sink AND the surface count AFTER the await (re-review R6) —
+  // the last surface may have detached while the ~1-2 s raster ran, and
+  // 'displayed: true' with nobody attached is a fabricated status.
   const s = sink
   if (!s) return logResult(kind, { ok: false, displayed: false, detail: 'glasses client disconnected while the image rendered' })
+  if ((surfacesProvider ? surfacesProvider() : 0) === 0) {
+    return logResult(kind, { ok: false, displayed: false, detail: 'every display surface detached while the image rendered — nothing can show it' })
+  }
   return logResult(kind, s.acceptLiveFrame({ kind: 'image', img, caption, path: b.path }))
 }

@@ -4,7 +4,7 @@
 // so every window module and the host import from one place. `implements
 // OsWindow` is the enforced API (TypeScript strict). See docs/WINDOW_API.md.
 
-import type { WireScene } from '@g2cc/shared'
+import type { WireScene, SurfaceView } from '@g2cc/shared'
 import type { SessionPool, PoolEntry } from '../session-pool.js'
 import type { G2CCConfig } from '../config.js'
 import type { MemoAudio } from '../memo.js'
@@ -54,8 +54,20 @@ export interface WmContext {
   requestSmsThread?(threadId: string, page: number): void
   /** Phase 4b: send an SMS (after the dictation confirm; needs SEND_SMS). */
   sendSms?(address: string, text: string): void
-  /** Phase 15: ring the phone to find it (start/stop). */
-  phoneLocate?(action: 'start' | 'stop'): void
+  /** Phase 15: ring the phone to find it (start/stop). Multi-surface: returns
+   *  false when no phone surface is attached (the ring did NOT happen) so the
+   *  caller can render the truthful failure instead of "Ringing your phone". */
+  phoneLocate?(action: 'start' | 'stop'): boolean
+  /** Multi-surface (2026-07-13): is ANY display surface attached? The render
+   *  pumps skip composing when nothing can show the frame (state still
+   *  mutates; the next attach re-renders everything). Absent = assume yes —
+   *  keeps in-process smoke-test WmContext stubs working unchanged. */
+  hasDisplay?(): boolean
+  /** PC-native views (2026-07-13): push the active window's full-fidelity pane
+   *  content to BROWSER surfaces (null = no native view — the page falls back
+   *  to its scene-derived text panel). Wired by os-session; absent in smoke
+   *  stubs. */
+  sendSurfaceView?(view: SurfaceView | null): void
 }
 
 /** Main's category-launcher groups (upgrades.md v2 Phase 11, XFCE-style). Each
@@ -132,6 +144,20 @@ export interface OsWindow {
   interruptible?(): boolean
   onStt?(text: string): Promise<void>
   onSttError?(error: string): Promise<void>
+  /** Multi-surface typed text (2026-07-13): one Enter-submitted line/paragraph
+   *  from a surface keyboard (PC page text bar / phone control mode). Typed
+   *  text is EXACT and user-authored — windows should act on it directly
+   *  (session windows send it as the prompt with NO confirm card; destructive
+   *  actions like SMS-send/terminal-exec keep their own confirm). Absent → the
+   *  WM falls back to onStt (which accepts only mid-dictation and self-
+   *  discards loudly otherwise), else logs a loud no-consumer line. */
+  onTypedText?(text: string): Promise<void>
+  /** PC-native views (2026-07-13): the window's full-fidelity pane content for
+   *  big screens, computed per render and broadcast to browser surfaces. MUST
+   *  be cheap + side-effect-free (the preview() cost class: in-memory fields
+   *  ONLY — no DB, no subprocess, no phone request). null/absent = the PC page
+   *  falls back to its scene-derived text panel. */
+  surfaceView?(): SurfaceView | null
   /** Release any window-held resource (timers, pollers) on ws-close. The WM
    *  calls it for every window in dispose(). Absent = nothing to release. */
   dispose?(): void

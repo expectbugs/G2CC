@@ -56,7 +56,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -108,6 +110,8 @@ class ConnectionService : Service(), TestHarness {
     private var clockJob: Job? = null
     private var renderConsumerJob: Job? = null       // single serialized consumer of server-pushed scenes
     private var sceneCh: Channel<WireScene>? = null   // CONFLATED → latest scene wins (no scroll-render pileup/interleave)
+    private var mirrorClockJob: Job? = null           // BLE-less mirror clock tick (control mode — renderer == null)
+    private var lastWire: WireScene? = null           // last good server scene, re-decoded by the mirror clock (main scope only)
     private var syncJob: Job? = null          // 80-00 sync_trigger keepalive (both lenses)
     private var watchdogJob: Job? = null      // glasses-response gap watchdog (silent-drop detector)
     private var renewalJob: Job? = null       // periodic re-takeover (the ~120s app-slot lifetime)
@@ -147,12 +151,24 @@ class ConnectionService : Service(), TestHarness {
     // ---- observable state for the bound UI (HarnessActivity) -----------------
     private val _status = MutableStateFlow("Disconnected")
     val status = _status.asStateFlow()
+    /** Server `error` messages for the CONTROL UI (re-review R2: the typed-text
+     *  delivery discard used to die in the Diag log while ControlActivity had
+     *  already cleared the input field — silent data loss from the typist's
+     *  chair). Buffered so a burst can't suspend the WS reader. */
+    private val _serverErrors = MutableSharedFlow<String>(extraBufferCapacity = 8, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
+    val serverErrors = _serverErrors.asSharedFlow()
     private val _launched = MutableStateFlow(false)
     val launched = _launched.asStateFlow()
     private val _connecting = MutableStateFlow(false)
     val connecting = _connecting.asStateFlow()
     private val _serverMode = MutableStateFlow(false)
     val serverMode = _serverMode.asStateFlow()
+    // Control mode (multi-surface 2026-07-13): the phone screen is a display+input
+    // surface of its own — the WS may run with NO glasses/BLE at all. Persisted in
+    // SharedPreferences so the START_STICKY relaunch re-enters it; cleared only by
+    // a manual disconnect().
+    private val _controlMode = MutableStateFlow(false)
+    val controlMode = _controlMode.asStateFlow()
     private val _testing = MutableStateFlow(false)
     val testing = _testing.asStateFlow()
     private val _scene = MutableStateFlow<Scene?>(null)
@@ -231,6 +247,20 @@ class ConnectionService : Service(), TestHarness {
         DiagLog.log("svc", "battery read failed: $e")
         null
     }
+
+    // Control-mode persistence (multi-surface 2026-07-13): the START_STICKY
+    // null-intent relaunch must re-enter control mode after a system kill —
+    // in-memory state doesn't survive the process.
+    private fun controlPrefs() = getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+    private fun readControlModePref(): Boolean = controlPrefs().getBoolean(KEY_CONTROL_MODE, false)
+    private fun writeControlModePref(v: Boolean) { controlPrefs().edit().putBoolean(KEY_CONTROL_MODE, v).apply() }
+    /** Was the BLE bridge active? (review 2026-07-13 F9: the sticky/boot
+     *  relaunch used to hunt BLE unconditionally — a battery-draining forever-
+     *  scan when the service was running in pure glasses-less control mode.)
+     *  Default TRUE: pre-pref installs behave exactly like today (bridge daily
+     *  = auto-reconnect); a manual disconnect() clears both prefs. */
+    private fun readBridgingPref(): Boolean = controlPrefs().getBoolean(KEY_BRIDGING, true)
+    private fun writeBridgingPref(v: Boolean) { controlPrefs().edit().putBoolean(KEY_BRIDGING, v).apply() }
 
     /** Phase 9: forward a phone notification (from [com.g2cc.g2cc.service.NotifyListener])
      *  to the server. Loud no-op when the WS isn't up — missed phone
@@ -383,7 +413,24 @@ class ConnectionService : Service(), TestHarness {
         // point of sticky + the battery-opt exemption is to come back CONNECTED, but the
         // old guard only connected on ACTION_CONNECT, so the relaunched service idled in
         // foreground doing nothing until Adam opened the app (review 2026-06-11).
-        if (intent == null || intent.action == ACTION_CONNECT) connect()   // connect() is idempotent (guards launched/connecting)
+        when {
+            // Control mode (multi-surface): phone-screen surface, NO BLE connect —
+            // this path must work with the glasses absent entirely.
+            intent?.action == ACTION_CONTROL -> enterControlMode()
+            // Sticky relaunch AND boot/update resume share the same dual-pref
+            // re-entry (review 2026-07-13 F9): re-enter exactly the mode(s)
+            // that were active — pure control mode must NOT start a BLE hunt
+            // for glasses that are at home in the case.
+            intent == null || intent.action == ACTION_RESUME -> {
+                val ctl = readControlModePref()
+                val bridge = readBridgingPref()
+                DiagLog.log("svc", "resume relaunch: control=$ctl bridge=$bridge")
+                if (ctl) enterControlMode()
+                if (bridge) connect()
+                if (!ctl && !bridge) DiagLog.log("svc", "resume with neither mode persisted — idling in foreground (open the app to connect)")
+            }
+            intent.action == ACTION_CONNECT -> connect()
+        }
         return START_STICKY
     }
 
@@ -404,6 +451,7 @@ class ConnectionService : Service(), TestHarness {
 
     fun connect() {
         if (_launched.value || _connecting.value) return
+        writeBridgingPref(true)   // F9: the sticky/boot resume re-enters BLE only when it was active
         _connecting.value = true
         setStatus("Scanning for Even G2…")
         DiagLog.log("conn", "scan start")
@@ -416,6 +464,11 @@ class ConnectionService : Service(), TestHarness {
 
     fun disconnect() {
         DiagLog.log("conn", "disconnect requested (MANUAL)")
+        // Manual disconnect exits control mode too (and its sticky-restart pref) —
+        // "Disconnect" means ALL the way down, not "…but come back as control".
+        _controlMode.value = false
+        writeControlModePref(false)
+        writeBridgingPref(false)   // F9: nor "…but come back scanning"
         teardown()
         setStatus("Disconnected.")
         _scene.value = null
@@ -446,9 +499,36 @@ class ConnectionService : Service(), TestHarness {
 
     /** Glasses-OS Slice 1: open a WS to the PC and let the server drive the display.
      *  BLE must already be up (we reuse the cold-launched session, keepalive + clock).
-     *  On connect → os_attach; on `render` → setScene; ring events → `input`. */
+     *  On connect → os_attach; on `render` → setScene; ring events → `input`.
+     *  Multi-surface (2026-07-13): the guard is unchanged (the BLE path stays
+     *  byte-identical); the body moved to [startServerWs] so control mode can
+     *  start the WS with NO glasses. */
     fun enterServerMode() {
         if (!_launched.value || _serverMode.value) return
+        startServerWs()
+    }
+
+    /** Control mode (multi-surface 2026-07-13): the phone SCREEN becomes a
+     *  display+input surface — landscape mirror + touch + keyboard — with the
+     *  glasses optional. Persisted so the sticky relaunch re-enters it; a later
+     *  BLE cold-launch joins the SAME WS (see [maybeColdLaunch]'s re-attach). */
+    fun enterControlMode() {
+        _controlMode.value = true
+        writeControlModePref(true)
+        if (_serverMode.value) {
+            DiagLog.log("os", "control mode ON — WS already live (server mode); reusing it")
+            return
+        }
+        DiagLog.log("os", "control mode ON — starting the server WS (no BLE required)")
+        startServerWs()
+    }
+
+    /** The WS + render-pump half of server mode, callable WITHOUT glasses
+     *  (control mode). Everything below is the historical enterServerMode()
+     *  body except: the pump decodes BEFORE the renderer check (so a
+     *  renderer-less phone still mirrors), the mirror clock job, and
+     *  os_attach carrying `surface:"phone"`. */
+    private fun startServerWs() {
         _serverMode.value = true
         // Single serialized render pump: server scenes go through a CONFLATED channel and ONE
         // consumer renders them one at a time. Without this, rapid scrolls each spawned their own
@@ -470,7 +550,9 @@ class ConnectionService : Service(), TestHarness {
                 next = ch.tryReceive().getOrNull() ?: next
                 val wire = next ?: ch.receiveCatching().getOrNull() ?: break
                 next = null
-                val r = renderer ?: continue
+                // Decode FIRST (multi-surface 2026-07-13) so a renderer-less phone
+                // (control mode / mid-soft-reset) still mirrors; the loud-fail is
+                // unchanged and the renderer path below stays order-identical.
                 val sceneObj = try {
                     SceneCodec.toScene(wire, latestClockText)
                 } catch (e: kotlinx.coroutines.CancellationException) {
@@ -481,6 +563,14 @@ class ConnectionService : Service(), TestHarness {
                     // must not kill the whole bridge process (review 2026-06-11).
                     DiagLog.log("os", "BAD render scene: ${e::class.simpleName}: ${e.message}")
                     setStatus("Bad scene from server: ${e.message}")
+                    continue
+                }
+                lastWire = wire   // good scene — the mirror clock re-decodes this on minute ticks
+                val r = renderer
+                if (r == null) {
+                    // BLE-less: no glasses to drive — the decoded scene IS the display
+                    // (ControlActivity's mirror renders it). Was `continue`-and-drop.
+                    _scene.value = sceneObj
                     continue
                 }
                 DiagLog.log("os", "render → setScene (${sceneObj.regions.size} regions: ${sceneObj.regions.joinToString { it.name }})")
@@ -502,6 +592,35 @@ class ConnectionService : Service(), TestHarness {
                 DiagLog.log("os", "render result=${if (done.await()) "OK" else "PREEMPTED/FAIL"}")
             }
         }
+        // BLE-less mirror clock (multi-surface 2026-07-13): with a renderer, startClock()
+        // owns the on-glass clock and refreshes `_scene` after each confirmed write; with
+        // NO renderer nothing would tick the control-mode mirror's clock. This 1 s pacer
+        // (same Main.immediate scope as the pump → no `_scene`/`lastWire` races) re-decodes
+        // the last good wire scene with fresh clock text when the minute string changes.
+        // It also keeps `latestClockText` ≤1 s fresh for the pump's own decodes — in pure
+        // control mode nothing else calls nowClock(). Lives/dies with the WS (full
+        // teardown), NOT with the BLE session (keepWs teardown keeps it).
+        mirrorClockJob = scope.launch {
+            var lastShown: String? = null
+            while (isActive) {
+                delay(1000)
+                val t = nowClock()
+                if (renderer != null) { lastShown = null; continue }   // BLE clock owns the display
+                val wire = lastWire ?: continue
+                if (t == lastShown) continue
+                val sceneObj = try {
+                    SceneCodec.toScene(wire, t)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // The wire decoded fine when it arrived; a failure here is real news.
+                    DiagLog.log("os", "mirror clock re-decode FAILED: ${e::class.simpleName}: ${e.message} — keeping the old frame")
+                    continue
+                }
+                lastShown = t
+                _scene.value = sceneObj
+            }
+        }
         val url = "ws://${BuildConfig.SERVER_HOST}:${BuildConfig.SERVER_PORT}/ws"
         DiagLog.log("os", "server mode → connecting $url")
         setStatus("Server mode: connecting to PC…")
@@ -511,10 +630,14 @@ class ConnectionService : Service(), TestHarness {
             httpClient = OkHttpClient(),
             batteryPct = { readBatteryPct() },   // Phase 9: battery rides client_hb
             g2BatteryPct = { g2Battery },        // Adam 2026-06-12: glasses battery [U]
+            // Multi-surface: report whether the glasses are BLE-live. R lens Ready is
+            // THE display-path signal — the renderer writes through the R lens only,
+            // and maybeColdLaunch gates on the same ConnectionState.Ready.
+            g2Connected = { right?.state?.value is ConnectionState.Ready },
             onMessage = { msg -> scope.launch { onServerMessage(msg) } },
             onConnected = {
-                DiagLog.log("os", "WS authed → sending os_attach")
-                connection?.send(ClientMessage.OsAttach)
+                DiagLog.log("os", "WS authed → sending os_attach (surface=phone)")
+                connection?.send(ClientMessage.OsAttach(surface = "phone"))
                 scope.launch { setStatus("Server mode: PC connected. Use the ring.") }
             },
             onDisconnected = {
@@ -537,6 +660,110 @@ class ConnectionService : Service(), TestHarness {
         )
         connection = cm
         cm.connect()
+    }
+
+    // ------------------------------------------------- control mode (binder commands)
+
+    /** Control-mode input (touch on the phone mirror). Returns false + loud log
+     *  when there's no live WS — the Activity paints a red status line. */
+    fun sendControlInput(input: ClientMessage.Input): Boolean {
+        val conn = connection
+        if (conn == null) {
+            DiagLog.log("os", "control input '${input.event}' DROPPED — no WS connection (control/server mode not active?)")
+            return false
+        }
+        val sent = conn.send(input)
+        if (!sent) DiagLog.log("os", "control input '${input.event}' DROPPED — WS not ready (reconnecting)")
+        return sent
+    }
+
+    /** A whole typed line from the control keyboard → `input{event:'text'}`.
+     *  Sent WHOLE, never truncated (the no-truncation rule) — only the length
+     *  is logged. False = not delivered (caller keeps the text + goes red). */
+    fun sendTextInput(text: String): Boolean {
+        val ok = sendControlInput(ClientMessage.Input(event = "text", text = text))
+        DiagLog.log("os", "typed text (${text.length} chars) → ${if (ok) "sent" else "NOT sent"}")
+        return ok
+    }
+
+    /** Soft Reset (Workstream 5) — refresh the GLASSES connection, KEEPING the
+     *  WebSocket: the recoverSession-style BLE recovery with keepWs=true.
+     *  Reconnect → cold-launch → [maybeColdLaunch]'s re-attach repaints the new
+     *  renderer from the server. Works with no prior BLE session too (just
+     *  starts a connect). Also invoked by the server's `glasses_reset`. */
+    fun softReset() {
+        if (recovering) {
+            DiagLog.log("recover", "soft reset ignored — a recovery is already in progress")
+            setStatus("Soft reset ignored — recovery already in progress.")
+            return
+        }
+        if (left == null && right == null && !_launched.value) {
+            // Glasses were never connected this run — nothing to tear down.
+            if (_connecting.value) {
+                DiagLog.log("recover", "soft reset: a scan is already hunting for the glasses — letting it run")
+                setStatus("Soft reset: already scanning for glasses…")
+                return
+            }
+            DiagLog.log("recover", "SOFT RESET with no BLE session — starting a fresh connect")
+            setStatus("Soft reset: connecting to glasses…")
+            reconnect()   // direct to cached lenses if we have them, else a fresh scan
+            return
+        }
+        recovering = true
+        needsRelaunch = false
+        lastRecoverMs = System.currentTimeMillis()
+        DiagLog.log("recover", "SOFT RESET — BLE-only teardown + reconnect + cold-launch (WS kept)")
+        setStatus("Soft reset: refreshing the glasses connection…")
+        teardown(keepWs = true)
+        reconnect()   // status narration continues via startClients/maybeColdLaunch
+    }
+
+    /** Hard Reset (Workstream 5) — ask the SERVER to clean-slate the entire
+     *  system; it broadcasts `hard_reset` back to every surface (including us —
+     *  [hardResetLocal] runs from that broadcast). If the WS is down the server
+     *  can't orchestrate: do the LOCAL half only, loudly labelled as such —
+     *  the reconnect loop finds the server whenever it's back. */
+    fun requestHardReset() {
+        val sent = connection?.send(ClientMessage.Reset(kind = "hard")) ?: false
+        if (sent) {
+            DiagLog.log("os", "hard reset requested — awaiting the server's hard_reset broadcast")
+            setStatus("Hard reset requested — server restarting…")
+            return
+        }
+        DiagLog.log("os", "hard reset: WS DOWN — LOCAL-ONLY teardown + mode re-entry (the server was NOT reached)")
+        setStatus("Hard reset: server unreachable — resetting locally…")
+        hardResetLocal("local-only, WS down")
+    }
+
+    /** The local half of a Hard Reset: FULL teardown (BLE + WS), then auto
+     *  re-enter the mode(s) that were active. Sequencing mirrors
+     *  [recoverSession]: teardown() shuts the old ConnectionManager down
+     *  (killing its reconnect loop) BEFORE re-entry builds a fresh one — so the
+     *  server terminating the socket right after broadcasting can't race a
+     *  zombie reconnect; exactly one manager owns the retry loop. */
+    private fun hardResetLocal(origin: String) {
+        // Capture BEFORE teardown. Control mode is not cleared by teardown (only a
+        // manual disconnect clears it) but read it up front with the BLE state.
+        val control = _controlMode.value
+        val wasBridging = _launched.value || _connecting.value || left != null || right != null
+        DiagLog.log("os", "═══ HARD RESET ($origin) — full teardown; re-enter: control=$control bridging=$wasBridging ═══")
+        setStatus("Hard reset — tearing down…")
+        teardown()
+        _scene.value = null   // clean slate on the mirror until the fresh attach paints
+        when {
+            control -> {
+                enterControlMode()
+                // The previous mode was BOTH (glasses BLE-live while control mode was
+                // on) → bring the BLE bridge back too; its cold-launch re-attaches to
+                // the control WS (plan W5 lists the two re-entries independently).
+                if (wasBridging) connect()
+            }
+            wasBridging -> connect()
+            else -> {
+                DiagLog.log("os", "hard reset: no mode was active — staying idle")
+                setStatus("Hard reset done — idle.")
+            }
+        }
     }
 
     private fun onServerMessage(msg: ServerMessage) {
@@ -651,11 +878,28 @@ class ConnectionService : Service(), TestHarness {
                 if (msg.action == "stop") PhoneLocator.stop(applicationContext)
                 else PhoneLocator.start(applicationContext)
             }
+            is ServerMessage.GlassesReset -> {
+                // Soft Reset, server-orchestrated (the PC page's button): refresh the
+                // glasses BLE session KEEPING this WebSocket. softReset() guards
+                // re-entry and narrates via the status flow.
+                DiagLog.log("os", "glasses_reset from server → soft reset (BLE recovery, WS kept)")
+                softReset()
+            }
+            is ServerMessage.HardReset -> {
+                // The server is about to clean-slate itself and terminate every
+                // socket. Full local teardown, then auto re-enter the previous
+                // mode(s) — the fresh ConnectionManager's reconnect loop finds the
+                // rebuilt server.
+                DiagLog.log("os", "═══ HARD RESET broadcast from server ═══")
+                hardResetLocal("server broadcast")
+            }
             is ServerMessage.Error -> {
                 // The MESSAGE TEXT must surface (review 2026-06-11b): the old
                 // catch-all logged only the class name, discarding the server's
-                // explanation — against loud-and-proud.
+                // explanation — against loud-and-proud. R2: it ALSO flows to the
+                // control UI (typed-text discards restore the input field there).
                 DiagLog.log("os", "server error: ${msg.message}")
+                _serverErrors.tryEmit(msg.message)
             }
             else -> {
                 // config_snapshot / dispatch_target_list / etc. — not used in OS mode.
@@ -876,6 +1120,16 @@ class ConnectionService : Service(), TestHarness {
                     recovering = false
                     DiagLog.log("recover", "reconnect + cold-launch OK after silent drop")
                 }
+                // Multi-surface (2026-07-13): the WS may ALREADY be live — control
+                // mode running glasses-less, or a keepWs soft reset. enterServerMode()
+                // below no-ops on its guard then, so re-send os_attach here: the
+                // server answers ANY os_attach with a full re-render (idempotent
+                // re-attach), painting the brand-new renderer instead of leaving the
+                // splash up until the next organic render.
+                if (_serverMode.value) {
+                    val sent = connection?.send(ClientMessage.OsAttach(surface = "phone")) ?: false
+                    DiagLog.log("os", "glasses joined a live WS → re-attach os_attach ${if (sent) "sent" else "DROPPED (ws not ready — onConnected attach will cover it)"}")
+                }
                 // v1.7 (Adam 2026-06-11): Connect = straight into the DE. The
                 // splash above is momentary; the server scene replaces it as
                 // soon as the WS auths. enterServerMode() is idempotent
@@ -997,16 +1251,21 @@ class ConnectionService : Service(), TestHarness {
     }
 
     /** Auto-recovery. The silent app-drop leaves the BLE link "up"; only a FRESH BLE session
-     *  revives it. Force a full teardown + reconnect + cold-launch; server mode re-enters
-     *  unconditionally with the cold-launch (v1.7 — no remembered flag needed). */
+     *  revives it. Force a teardown + reconnect + cold-launch; server mode re-enters
+     *  unconditionally with the cold-launch (v1.7 — no remembered flag needed).
+     *  Control mode (multi-surface 2026-07-13): keep the WS across the recovery —
+     *  the phone mirror stays live while BLE rebuilds, and the cold-launch's
+     *  re-attach repaints the fresh renderer. Without control mode the teardown
+     *  is the historical full one, provably unchanged. */
     private fun recoverSession() {
         if (recovering) return
         recovering = true
         needsRelaunch = false
         lastRecoverMs = System.currentTimeMillis()
-        DiagLog.log("recover", "SILENT DROP — auto-recovering: teardown + reconnect + cold-launch + server mode")
+        val keepWs = _controlMode.value
+        DiagLog.log("recover", "SILENT DROP — auto-recovering: teardown${if (keepWs) " (BLE only — control mode keeps the WS)" else ""} + reconnect + cold-launch + server mode")
         setStatus("Auto-recovering (silent drop)…")
-        teardown()        // full BLE teardown (clears launched/serverMode, cancels jobs; keeps cached devices)
+        teardown(keepWs = keepWs)   // BLE teardown (cancels jobs; keeps cached devices; keepWs spares the WS/pump)
         reconnect()       // DIRECT reconnect to cached lenses (no rescan) -> Ready -> maybeColdLaunch (clears `recovering`)
     }
 
@@ -1058,13 +1317,24 @@ class ConnectionService : Service(), TestHarness {
 
     // ----------------------------------------------------------------- teardown
 
-    private fun teardown() {
+    /** Teardown. keepWs=false (the default) is line-for-line the historical FULL
+     *  teardown — BLE + WS + everything. keepWs=true (multi-surface 2026-07-13)
+     *  is the BLE-ONLY teardown for control mode / Soft Reset: the WS, render
+     *  pump, mirror clock, audio/media/locator wiring and `_serverMode` all
+     *  survive so the phone mirror keeps working while the glasses session is
+     *  rebuilt; every BLE job still dies, the renderer is aborted and nulled,
+     *  and `_launched`/`_connecting` drop so a reconnect can cold-launch. */
+    private fun teardown(keepWs: Boolean = false) {
         tearingDown = true   // our own shutdownBle() disconnects must NOT trigger auto-recovery
         renderer?.abort("teardown", force = true)   // BLE dies next — release every park + queued op
         keepaliveJob?.cancel(); keepaliveJob = null
         clockJob?.cancel(); clockJob = null
-        renderConsumerJob?.cancel(); renderConsumerJob = null
-        sceneCh?.close(); sceneCh = null
+        if (!keepWs) {
+            renderConsumerJob?.cancel(); renderConsumerJob = null
+            sceneCh?.close(); sceneCh = null
+            mirrorClockJob?.cancel(); mirrorClockJob = null
+            lastWire = null
+        }
         syncJob?.cancel(); syncJob = null
         watchdogJob?.cancel(); watchdogJob = null
         renewalJob?.cancel(); renewalJob = null
@@ -1073,11 +1343,13 @@ class ConnectionService : Service(), TestHarness {
         testJob?.cancel(); testJob = null
         sessionGen++   // invalidate any in-flight cold-launch/test coroutine that completes after this
         stateJobs.forEach { it.cancel() }; stateJobs.clear()
-        audioStreamer?.stop(); audioStreamer = null   // mic OFF with the session (never left running)
-        MediaBridge.unsubscribe()                     // release the MediaController callback (don't outlive the session)
-        PhoneLocator.stop(applicationContext)         // silence any in-progress find-my-phone ring
-        connection?.shutdown(); connection = null
-        _serverMode.value = false
+        if (!keepWs) {
+            audioStreamer?.stop(); audioStreamer = null   // mic OFF with the session (never left running)
+            MediaBridge.unsubscribe()                     // release the MediaController callback (don't outlive the session)
+            PhoneLocator.stop(applicationContext)         // silence any in-progress find-my-phone ring
+            connection?.shutdown(); connection = null
+            _serverMode.value = false
+        }
         _testing.value = false
         scanner?.stop(); scanner = null
         left?.shutdownBle(); right?.shutdownBle()
@@ -1245,6 +1517,16 @@ class ConnectionService : Service(), TestHarness {
     companion object {
         const val NOTIF_ID = 0xCC2C
         const val ACTION_CONNECT = "com.g2cc.g2cc.action.CONNECT"
+        /** Enter phone-screen CONTROL mode (multi-surface 2026-07-13) — WS only,
+         *  NO BLE connect. The glasses may join later via a normal Connect. */
+        const val ACTION_CONTROL = "com.g2cc.g2cc.action.CONTROL"
+        /** Re-enter exactly the persisted mode(s) — control and/or BLE bridge
+         *  (F9). Used by BootReceiver; the START_STICKY null-intent relaunch
+         *  runs the same branch. */
+        const val ACTION_RESUME = "com.g2cc.g2cc.action.RESUME"
+        private const val PREFS_FILE = "g2cc-service"
+        private const val KEY_CONTROL_MODE = "controlMode"
+        private const val KEY_BRIDGING = "bridging"
 
         // Recovery tunables (tune from factory diag). WATCHDOG_BAD_THRESHOLD counts 1 s ticks of
         // no R-lens acks AFTER the gap already exceeds 3 s, so 6 ≈ ~9 s of silence before a silent-
@@ -1295,6 +1577,24 @@ class ConnectionService : Service(), TestHarness {
         /** Start the FG service and tell it to connect. Survives Activity unbind / background. */
         fun startAndConnect(context: Context) {
             val intent = Intent(context, ConnectionService::class.java).apply { action = ACTION_CONNECT }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+            else @Suppress("DEPRECATION") context.startService(intent)
+        }
+
+        /** Start the FG service in phone-screen CONTROL mode (multi-surface
+         *  2026-07-13) — the WS + mirror with NO BLE required. ControlActivity
+         *  calls this from onStart so control works with the glasses absent. */
+        fun startForControl(context: Context) {
+            val intent = Intent(context, ConnectionService::class.java).apply { action = ACTION_CONTROL }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+            else @Suppress("DEPRECATION") context.startService(intent)
+        }
+
+        /** Start the FG service and re-enter the persisted mode(s) — control
+         *  and/or bridge (F9). BootReceiver's path: a boot after a pure
+         *  control-mode evening must NOT hunt BLE for glasses in the case. */
+        fun startAndResume(context: Context) {
+            val intent = Intent(context, ConnectionService::class.java).apply { action = ACTION_RESUME }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
             else @Suppress("DEPRECATION") context.startService(intent)
         }

@@ -886,6 +886,33 @@ class PaperclipsEngine {
     this.save()
     return this.saveChain
   }
+
+  /** Hard Reset (multi-surface 2026-07-13): save, then drop the process-lifetime
+   *  jsdom entirely so the NEXT open rebuilds from the persisted save — the
+   *  "kill everything cleanly" contract. Loud; safe when never started.
+   *  An IN-FLIGHT start() is awaited first (review 2026-07-13 F15): the old
+   *  early-return saw win/jsdom still null mid-boot and skipped the teardown,
+   *  so the boot completed AFTER the reset — a zombie engine + pacer +
+   *  autosave ticking behind the freshly rebuilt system. */
+  async shutdown(reason: string): Promise<void> {
+    if (this.starting) {
+      console.log(`[paperclips] shutdown (${reason}) — a boot is in flight; awaiting it so the teardown has something real to kill`)
+      try { await this.starting } catch { /* boot failed — nothing came up; fall through to the null-checks */ }
+    }
+    if (!this.win && !this.jsdom) return
+    console.log(`[paperclips] shutdown (${reason}) — flushing save + dropping the jsdom`)
+    try { await this.flush() } catch (e) {
+      console.error(`[paperclips] shutdown flush failed (continuing teardown): ${e instanceof Error ? e.message : String(e)}`)
+    }
+    if (this.pacer) { clearInterval(this.pacer); this.pacer = null }
+    const old = this.jsdom
+    this.win = null
+    this.jsdom = null
+    this.starting = null   // a later open() boots fresh from the save
+    try { old?.window.close() } catch (e) {
+      console.error(`[paperclips] shutdown: closing window threw: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
 }
 
 interface ProjectObj { id: string; title?: string; priceTag?: string; description?: string; cost?: () => unknown; effect?: () => void }

@@ -4,7 +4,7 @@
 // Pure move out of os-windows.ts; behaviour unchanged. See docs/WINDOW_API.md.
 
 import { basename } from 'node:path'
-import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
+import { DE_CONTENT_W, DE_CONTENT_H, type SurfaceView } from '@g2cc/shared'
 import type { WmContext, WinView } from './types.js'
 import { BROWSE_PAGE, MORE_ROW, PREV_ROW } from './_browse.js'
 import { cycleNext, fmtStamp, oneLine, fbPagePx } from './_util.js'
@@ -829,13 +829,19 @@ class SessionLevel {
     if (intent.kind === 'findphone') {
       // Phase 15: ring the phone to find it. Loud both ends; the client maxes
       // STREAM_ALARM + plays a tone (~30 s, self-stopping; cancels on touch).
+      // Multi-surface: phoneLocate returns false when NO phone surface is
+      // attached — the old unconditional "Ringing your phone" would be a
+      // fabricated success (the loud-failure rule).
       if (this.ctx.phoneLocate) {
-        this.ctx.phoneLocate('start')
-        this.ctx.log('[intent] FIND PHONE — ring requested')
-        await this.setDoc([
-          { t: 'heading', text: 'Ringing your phone', meta: '🔊' },
-          { t: 'para', text: 'Playing a loud tone for ~30 s. Touch the phone to silence it.' },
-        ])
+        if (this.ctx.phoneLocate('start')) {
+          this.ctx.log('[intent] FIND PHONE — ring requested')
+          await this.setDoc([
+            { t: 'heading', text: 'Ringing your phone', meta: '🔊' },
+            { t: 'para', text: 'Playing a loud tone for ~30 s. Touch the phone to silence it.' },
+          ])
+        } else {
+          this.showError('No phone attached — the ring was NOT sent.', 'The phone app is not connected to the server right now.')
+        }
       } else {
         this.showError('Phone-finder unsupported by this client build.', 'Update the app to use it.')
       }
@@ -1041,6 +1047,33 @@ class SessionLevel {
     ]))
     this.page = 0
     this.requestRender()
+  }
+
+  /** PC-native view (multi-surface 2026-07-13): the session doc (prompt +
+   *  streamed response) unpaginated, for the PC page's transcript pane.
+   *  In-memory only (this.doc is already the render source). */
+  surfaceView(): SurfaceView {
+    return {
+      kind: 'session',
+      window: this.windowId,
+      title: `${this.who} · ${basename(this.projectPath)}`,
+      body: blocksToText(this.doc),
+      state: this.phase(),
+    }
+  }
+
+  /** Multi-surface typed text (2026-07-13, Adam's call): a typed line from the
+   *  PC page / phone keyboard goes STRAIGHT through — Enter IS the confirm.
+   *  The dictation confirm card exists because Parakeet mangles words and
+   *  nothing should reach CC unread; typed text is exact and user-authored.
+   *  Any in-flight dictation/suggestion yields to it (stopDictation — same
+   *  policy as every other deliberate action), and intents (`timer:`/`memo:`/
+   *  `note:`, Aria only) keep parity because tryIntent is the confirm-ACCEPT
+   *  hook and typed == accepted. */
+  async onTypedText(text: string): Promise<void> {
+    this.stopDictation('typed input')
+    if (await this.tryIntent(text)) return
+    await this.prompt(text)
   }
 
   async onSttError(error: string): Promise<void> {

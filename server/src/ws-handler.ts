@@ -48,7 +48,7 @@ import { ChannelRouter } from './channel-router.js'
 import { notify, markSeenByKey, type NotifyPriority } from './os-notify.js'
 import { probeScene, gTextScene, gImageScene, ensureRendered, isRate, testKind, testLabel, errorScene } from './os-display.js'
 import { menuScene, ensureMenuRendered, menuItemLabel, MENU_ITEM_COUNT } from './os-menu.js'
-import { WindowManager } from './window-manager.js'
+import { getOsSession, type OsSurface } from './os-session.js'
 import { type MemoAudio } from './memo.js'
 import { segmentUtterances } from './voice.js'
 
@@ -91,9 +91,8 @@ export interface WSClient {
   mode: PermissionMode
   streamBuffer: string
   streamTimer: ReturnType<typeof setTimeout> | null
-  /** Server-side state for in-flight confirm_on_hud requests (Phase 7 wires the client side).
-   *  Keyed by requestId; resolves the awaiting promise when ConfirmOnHudResponseMsg arrives. */
-  confirmCallbacks: Map<string, (result: 'confirmed' | 'rejected') => void>
+  // confirm_on_hud callbacks moved to OsSession (sessionized 2026-07-13):
+  // asked on one surface, answerable from any; they survive socket closes.
   /** Phase 3A heartbeat: server-driven hb cadence + activity tracking. */
   hbInterval: ReturnType<typeof setInterval> | null
   livenessInterval: ReturnType<typeof setInterval> | null
@@ -116,16 +115,12 @@ export interface WSClient {
   /** Current menu selection (menu screen) — moved by antenna-scroll focus events. */
   osMenuSel: number
   osGTimer: ReturnType<typeof setInterval> | null
-  /** The DE window manager (osScreen 'de'); created on os_attach. */
-  wm: WindowManager | null
-  /** Latest phone battery % from client_hb (Phase 9; null until reported). */
-  phoneBattery: number | null
-  /** Latest GLASSES battery % from client_hb (Adam 2026-06-12; [U]). */
-  g2Battery: number | null
-  /** The raw PCM (+ format) of the most recent SUCCESSFUL dictation — kept so a
-   *  `memo:` intent (Phase 14) can save the clip at confirm time. Overwritten
-   *  each dictation; only the last is held. null until the first one. */
-  lastDictationAudio: MemoAudio | null
+  /** Multi-surface (2026-07-13): this connection's attachment to THE persistent
+   *  OsSession (os-session.ts). Set on os_attach (osScreen 'de'), detached on
+   *  ws close — the session itself lives on. The old per-connection
+   *  `wm: WindowManager` and phone-fed state (batteries, lastDictationAudio)
+   *  moved to the OsSession. */
+  surface: OsSurface | null
 }
 
 export interface AudioFormat {
@@ -202,7 +197,6 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     mode: config.claude.defaultMode,
     streamBuffer: '',
     streamTimer: null,
-    confirmCallbacks: new Map(),
     hbInterval: null,
     livenessInterval: null,
     lastAppActivityMs: Date.now(),
@@ -214,10 +208,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     osFFilled: 0,
     osMenuSel: 0,
     osGTimer: null,
-    wm: null,
-    phoneBattery: null,
-    g2Battery: null,
-    lastDictationAudio: null,
+    surface: null,
   }
 
   pool.on('background_alert', (alert: { sessionId: string; alertType: string; details?: string }) => {
@@ -325,33 +316,31 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     // Drop the crash-loop listener registered for this client (else the global
     // Watchdog accumulates one dead closure per past connection).
     watchdog?.off('crash_loop', onCrashLoop)
-    // Reject any in-flight confirm_on_hud promises — loud failure, not silent.
-    for (const [, resolve] of client.confirmCallbacks) {
-      // The caller awaits 'confirmed' | 'rejected'. On socket close we surface as 'rejected'
-      // with an attached log so the calling code knows why.
-      console.warn(`[ws] client closed (code=${code} reason="${String(reason)}") with confirm pending`)
-      resolve('rejected')
-    }
-    client.confirmCallbacks.clear()
+    // confirm_on_hud (sessionized): pending confirms are session-owned and
+    // deliberately SURVIVE this close — asked on the glasses, answerable from
+    // the browser after the phone drops. They wait forever by design.
     // Phase 7: in-flight Channel Router acks all fall to 'unverified'.
     client.router.onClientDisconnect()
-    // Phase 4: detach the WM from the global notification hub + kill its popup
-    // timer — a dead WM must not accumulate listeners across reconnects.
-    client.wm?.dispose()
-    // Kill all CC subprocesses owned by this client. The pool is per-client
-    // (created in handleConnection), so once the WebSocket closes there's no
-    // route for these CC processes to send their output anywhere. Leaving them
-    // alive orphans them past the WS close (g2code's bug we inherited).
-    // Explicit policy: kill on disconnect. The "persist + auto-resume on
-    // reconnect" alternative is documented in HOLDS.md but not implemented here.
-    // Capture count BEFORE the kill loop — after it runs, client.pool.count is 0
-    // and the log would always say "killed 0 sessions" (4th-pass L4).
+    // Multi-surface (2026-07-13): detach this connection's surface from THE
+    // persistent OsSession — the WindowManager, its window state, and every DE
+    // CC subprocess LIVE ON. This replaces the old kill-on-disconnect policy
+    // (client.wm.dispose() + DE pool kill): reconnecting any surface resumes
+    // the same window mid-state. The WM is disposed only at server shutdown /
+    // hard reset (index.ts / os-session.ts).
+    if (client.surface) {
+      getOsSession().detach(client.surface.id)
+      client.surface = null
+    }
+    // Kill the LEGACY per-connection pool's CC subprocesses (dispatch-menu
+    // path only — the DE pool is session-owned and survives). Once the socket
+    // closes there's no route for a legacy session's output anywhere. For a
+    // DE-only connection this pool is empty (count 0).
     const killedCount = client.pool.count
     for (const entry of client.pool.allEntries()) {
       watchdog?.unregister(entry.id)
       client.pool.closeSession(entry.id)
     }
-    console.log(`[ws] client closed (code=${code} reason="${String(reason)}") — killed ${killedCount} sessions`)
+    console.log(`[ws] client closed (code=${code} reason="${String(reason)}") — surface detached; killed ${killedCount} LEGACY sessions`)
   })
 
   liveClients.add(client)
@@ -391,12 +380,18 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // Glasses battery (Adam 2026-06-12) — decoded client-side from the
       // 09-00/09-01 device-info frames ([U] until the on-glass batch).
       if (typeof msg.g2Battery === 'number' && msg.g2Battery >= 0 && msg.g2Battery <= 100) {
-        client.g2Battery = msg.g2Battery
+        getOsSession().g2Battery = msg.g2Battery
+      }
+      // Multi-surface: the phone reports whether the glasses are BLE-live —
+      // feeds os_status so the PC page can say "live on glasses" (pre-1.18
+      // APKs omit it; the session keeps null = unknown).
+      if (typeof msg.g2Connected === 'boolean') {
+        getOsSession().setG2Connected(msg.g2Connected)
       }
       if (typeof msg.battery === 'number' && msg.battery >= 0 && msg.battery <= 100) {
         const prev = lastKnownPhoneBattery
         lastKnownPhoneBattery = msg.battery
-        client.phoneBattery = msg.battery
+        getOsSession().phoneBattery = msg.battery
         if (msg.battery <= 15 && (prev === null || prev > 15)) {
           console.warn(`[ws] phone battery LOW: ${msg.battery}%`)
           void notify({
@@ -494,49 +489,51 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       break
     }
 
+    // Phone-data pushes (Phase 4a/4b/6/7) — routed to THE session WM (it always
+    // exists now, boot-created). Only the authed phone app sends these; the old
+    // `if (client.wm)` gate meant "this connection os_attach'd", which no longer
+    // maps to anything (the WM is shared) — data updates apply unconditionally.
     case 'notification_reply_result': {
       // Phase 4a: the phone reported the inline-reply outcome → Notices renders it.
-      if (client.wm) client.wm.onNotificationReplyResult(msg.key, msg.ok === true, typeof msg.error === 'string' ? msg.error : null)
-      else console.log(`[ws] notification_reply_result (no WM): key=${msg.key.slice(0, 40)} ok=${msg.ok}`)
+      getOsSession().wm.onNotificationReplyResult(msg.key, msg.ok === true, typeof msg.error === 'string' ? msg.error : null)
       break
     }
 
     case 'sms_send_result': {
       // D6: the phone reported the REAL SMS send outcome (sentIntent) → the SMS
       // window updates its result card in place. Old APKs never send this.
-      if (client.wm) client.wm.onSmsSendResult(msg.address, msg.ok === true, typeof msg.error === 'string' ? msg.error : null)
-      else console.log(`[ws] sms_send_result (no WM): ${msg.address} ok=${msg.ok}${msg.error ? ` err=${msg.error}` : ''}`)
+      getOsSession().wm.onSmsSendResult(msg.address, msg.ok === true, typeof msg.error === 'string' ? msg.error : null)
       break
     }
 
     case 'media_state': {
       // Phase 7: now-playing snapshot pushed by the phone → the Media window.
       client.lastAppActivityMs = Date.now()
-      if (client.wm) client.wm.onMediaState(msg.state)
+      getOsSession().wm.onMediaState(msg.state)
       break
     }
 
     case 'sms_threads_reply': {
       // Phase 4b: the phone (data provider) answered a thread-list query.
-      if (client.wm) client.wm.onSmsThreads(msg.threads, msg.offset, msg.total, typeof msg.error === 'string' ? msg.error : null)
+      getOsSession().wm.onSmsThreads(msg.threads, msg.offset, msg.total, typeof msg.error === 'string' ? msg.error : null)
       break
     }
 
     case 'sms_thread_reply': {
       // Phase 4b: the phone answered a single-thread query.
-      if (client.wm) client.wm.onSmsThread(msg.threadId, msg.name, msg.address, msg.messages, msg.page, msg.totalPages, typeof msg.error === 'string' ? msg.error : null)
+      getOsSession().wm.onSmsThread(msg.threadId, msg.name, msg.address, msg.messages, msg.page, msg.totalPages, typeof msg.error === 'string' ? msg.error : null)
       break
     }
 
     case 'nav_update': {
       // Phase 6: a live Maps nav line → pinned on glass until nav_clear.
       client.lastAppActivityMs = Date.now()
-      if (client.wm) client.wm.onNavUpdate(msg.text, msg.eta)
+      getOsSession().wm.onNavUpdate(msg.text, msg.eta)
       break
     }
 
     case 'nav_clear': {
-      if (client.wm) client.wm.onNavClear()
+      getOsSession().wm.onNavClear()
       break
     }
 
@@ -991,12 +988,16 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // 4th-pass review LOW: user tapped confirm/reject — clear app-activity
       // signal so a long confirmation window doesn't trigger app-silence kick.
       client.lastAppActivityMs = Date.now()
-      const cb = client.confirmCallbacks.get(msg.requestId)
-      if (cb) {
-        client.confirmCallbacks.delete(msg.requestId)
-        cb(msg.result)
+      // Sessionized (2026-07-13): the question broadcast to every surface —
+      // the FIRST response wins; the delete makes any later one land in the
+      // existing unknown-requestId warn (loud, harmless).
+      const session = getOsSession()
+      const pending = session.confirmCallbacks.get(msg.requestId)
+      if (pending) {
+        session.confirmCallbacks.delete(msg.requestId)
+        pending.resolve(msg.result)
       } else {
-        console.warn(`[ws] confirm_on_hud_response for unknown requestId ${msg.requestId}`)
+        console.warn(`[ws] confirm_on_hud_response for unknown requestId ${msg.requestId} (already answered by another surface?)`)
       }
       break
     }
@@ -1021,9 +1022,9 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // into the window manager, a phone-side mic failure left the DE's
       // dictation state machine waiting forever (review 2026-06-10): no
       // audio_start ever arrives, so no stt_result/stt_error can fire.
-      if (client.osMode && client.osScreen === 'de' && client.wm && msg.text.includes('[audio-error]')) {
+      if (client.osMode && client.osScreen === 'de' && msg.text.includes('[audio-error]')) {
         const reason = msg.text.slice(msg.text.indexOf('[audio-error]') + '[audio-error]'.length).trim()
-        void client.wm.onSttError(reason || 'mic capture failed (see client diag)')
+        void getOsSession().wm.onSttError(reason || 'mic capture failed (see client diag)')
       }
       break
     }
@@ -1039,30 +1040,16 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       client.osMenuSel = 0
       try {
         if (client.osScreen === 'de') {
-          if (!client.wm) {
-            client.wm = new WindowManager({
-              send: (scene) => sendMsg(client, { type: 'render', scene }),
-              audio: (action, mode) => sendMsg(client, { type: 'audio_request', action, mode }),
-              displayReload: () => sendMsg(client, { type: 'display_reload' }),
-              log: (msg) => console.log(msg),
-              pool: client.pool,
-              config,
-              registerWatchdog: (entry) => watchdog?.register(entry.id, entry.session, entry.projectPath),
-              unregisterWatchdog: (entryId) => watchdog?.unregister(entryId),
-              phoneBattery: () => client.phoneBattery,
-              g2Battery: () => client.g2Battery,
-              lastDictationAudio: () => client.lastDictationAudio,
-              dismissPhoneNotification: (key) => sendMsg(client, { type: 'notification_cancel', key }),
-              replyToNotification: (key, text) => sendMsg(client, { type: 'notification_reply', key, text }),   // Phase 4a
-              mediaCommand: (cmd) => sendMsg(client, { type: 'media_cmd', cmd }),                                // Phase 7
-              requestSmsThreads: (offset, limit) => sendMsg(client, { type: 'sms_threads_request', offset, limit }),  // Phase 4b
-              requestSmsThread: (threadId, page) => sendMsg(client, { type: 'sms_thread_request', threadId, page }),  // Phase 4b
-              sendSms: (address, text) => sendMsg(client, { type: 'sms_send', address, text }),                  // Phase 4b
-              phoneLocate: (action) => sendMsg(client, { type: 'phone_locate', action }),                       // Phase 15
-            })
-          }
-          client.wm.requestRender()
-          console.log('[ws] os_attach — DE window manager ON (Main)')
+          // Multi-surface (2026-07-13): attach this connection to THE persistent
+          // OsSession as a surface. The WindowManager was created at boot
+          // (os-session.ts) with ctx closures that broadcast to all surfaces /
+          // route phone-only capabilities to the phone surface. Idempotent:
+          // the app re-sends os_attach after a BLE cold-launch to force a full
+          // repaint of the current state.
+          const session = getOsSession()
+          client.surface = session.attach(client.ws, msg.surface ?? 'phone')
+          session.wm.onSurfaceAttached()
+          console.log(`[ws] os_attach — surface ${client.surface.id} (${client.surface.kind}); DE session resumed`)
         } else if (client.osScreen === 'menu') {
           await ensureMenuRendered() // rasterize + cache all menu tiles once (~1s first time)
           sendMsg(client, { type: 'render', scene: menuScene(0) })
@@ -1087,32 +1074,67 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         break
       }
       if (client.osScreen === 'de') {
-        const wm = client.wm
-        if (!wm) { console.warn('[ws] DE input before window manager exists — ignoring'); break }
+        // Multi-surface: input from ANY attached surface drives the one WM,
+        // serialized in ARRIVAL ORDER via the session input chain (two
+        // surfaces' events must not interleave at handler await points).
+        if (!client.surface) { console.warn('[ws] DE input before this connection attached a surface — ignoring'); break }
+        const session = getOsSession()
+        const wm = session.wm
         if (msg.event === 'hub_select') {
           // The firmware reports the tapped row: widgetType = our container NAME
           // ('menu' or 'browse'), index = the row (omitted f4 ⇒ 0 handled client-side).
           const region = msg.widgetType ?? '?'
           const index = msg.index ?? 0
           console.log(`[ws] DE select ${region}[${index}]`)
-          await wm.onSelect(region, index)
+          await session.enqueueInput(`select ${region}[${index}]`, () => wm.onSelect(region, index))
         } else if (msg.event === 'double_tap' || (msg.event === 'hub_gesture' && msg.code === 3)) {
           console.log('[ws] DE back (double-tap)')
-          await wm.onBackGesture()
+          await session.enqueueInput('back', () => wm.onBackGesture())
         } else if (msg.event === 'tap') {
           // Sys tap — no DE consumer since the Files antenna revert (2026-06-11);
           // the WM keeps the blanked guard + loud no-op log (the blank scene's
           // wake antenna still produces these). Phase 2: at the ribbon root a tap
           // = enter the highlighted window (wm.onTapGesture routes it).
-          await wm.onTapGesture()
+          await session.enqueueInput('tap', () => wm.onTapGesture())
         } else if (msg.event === 'focus') {
           // Phase 2: the ribbon strip is a scroll=true antenna — each scroll notch
           // fires a focus event carrying the f3 DIRECTION (1=up, 2=down; confirmed
           // 2026-06-10, docs/G2_BLE_PROTOCOL.md §6.6). The WM moves the ribbon
           // cursor; it is a no-op in menu mode / inside a window / blanked.
-          if (msg.value === 1) await wm.onScroll('up')
-          else if (msg.value === 2) await wm.onScroll('down')
+          if (msg.value === 1) await session.enqueueInput('scroll up', () => wm.onScroll('up'))
+          else if (msg.value === 2) await session.enqueueInput('scroll down', () => wm.onScroll('down'))
           else console.log(`[ws] DE focus unknown f3=${msg.value} — not scrolling`)
+        } else if (msg.event === 'text') {
+          // Multi-surface (2026-07-13): a typed line from the PC page / phone
+          // control keyboard → the active window (Enter IS the confirm for
+          // exact, user-authored text). NEVER truncated. A DISCARD reports
+          // back to the ORIGINATING surface (F4) — its input bar already
+          // cleared on socket-send success, so a server-log-only discard was
+          // silent data loss; the error carries the full text for recovery.
+          if (typeof msg.text === 'string') {
+            const text = msg.text
+            console.log(`[ws] DE typed text (${text.length} chars) from surface ${client.surface?.id}`)
+            let discardReason: string | null = null
+            const outcome = await session.enqueueInput('typed text', async () => {
+              // Re-review R3: a hard reset mid-flight (or one that swapped the
+              // WM while this waited) must refuse truthfully — running against
+              // the retired world staged text into dead windows and reported
+              // 'delivered'.
+              if (session.hardResetInProgress || session.wm !== wm) {
+                discardReason = 'a Hard Reset rebuilt the system — resend after it settles'
+                return
+              }
+              discardReason = await wm.onTypedText(text)
+            })
+            if (outcome === 'dropped' && discardReason === null) {
+              discardReason = 'a Hard Reset rebuilt the system while your text waited — resend it'
+            }
+            if (discardReason) {
+              sendMsg(client, { type: 'error', message: `typed text NOT delivered: ${discardReason} — your text: ${text}` })
+            }
+          } else {
+            console.warn('[ws] input event \'text\' without a text field — ignored')
+          }
         } else {
           // Firmware-list scrolls move the on-glass ring silently; nothing to do
           // server-side until a tap reports the chosen index.
@@ -1173,6 +1195,33 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         // Log everything else (incl. focus on the antenna tests) without advancing.
         const detail = msg.value !== undefined ? `(${msg.region ?? '?'}:${msg.value})` : msg.code !== undefined ? `(${msg.code})` : ''
         console.log(`[ws] ${msg.event}${detail} on ${testLabel(client.osTest)}`)
+      }
+      break
+    }
+
+    case 'reset': {
+      // Multi-surface (2026-07-13): the Soft/Hard Reset buttons (PC page /
+      // phone control mode). Soft = refresh the GLASSES connection — routed to
+      // the phone surface; without one the requester gets a loud error.
+      client.lastAppActivityMs = Date.now()
+      if (msg.kind === 'soft') {
+        console.log(`[ws] SOFT RESET requested by surface ${client.surface?.id ?? '(unattached)'}`)
+        if (!getOsSession().toPhone({ type: 'glasses_reset' }, 'glasses_reset (Soft Reset)')) {
+          sendMsg(client, { type: 'error', message: 'Soft Reset failed: no phone attached — the glasses connection lives on the phone.' })
+        } else {
+          // Pre-1.18 APKs decode-fail-and-ignore glasses_reset (transitional
+          // until the v1.18 sideload) — say what we actually know.
+          console.log('[ws] glasses_reset handed to the phone (requires APK v1.18+; older apps log-and-ignore it)')
+        }
+      } else if (msg.kind === 'hard') {
+        // EXPLICIT match only (review 2026-07-13 F2): the destructive action
+        // must never be the default branch of an unvalidated wire field — a
+        // garbled/missing kind used to fall through to hardReset().
+        console.warn(`[ws] HARD RESET requested by surface ${client.surface?.id ?? '(unattached)'}`)
+        await getOsSession().hardReset()
+      } else {
+        console.error(`[ws] reset with unknown kind '${String((msg as { kind?: unknown }).kind)}' — REFUSED (nothing reset)`)
+        sendMsg(client, { type: 'error', message: `Reset refused: unknown kind '${String((msg as { kind?: unknown }).kind)}' (expected 'soft' or 'hard'). Nothing was reset.` })
       }
       break
     }
@@ -1451,11 +1500,11 @@ async function handleAudio(
       return
     }
     if (isHandsfree) {
-      if (client.osMode && client.osScreen === 'de' && client.wm) {
+      if (client.osMode && client.osScreen === 'de') {
         console.log(`[ws] handsfree voice → "${text}"`)
-        void client.wm.onVoiceCommand(text)
+        void getOsSession().wm.onVoiceCommand(text)
       } else {
-        console.log(`[ws] handsfree transcript but no DE window manager — dropped: "${text}"`)
+        console.log(`[ws] handsfree transcript from a non-DE client — dropped: "${text}"`)
       }
     } else {
       sttResult(client, text, memoAudio)
@@ -1497,18 +1546,18 @@ function sttResult(client: WSClient, text: string, audio?: MemoAudio): void {
   // intent can save the clip at confirm time. Only on a real result (a failed
   // transcription routes through sttError and never sets pendingStt, so a stale
   // buffer here is unreachable anyway).
-  if (audio) client.lastDictationAudio = audio
+  if (audio) getOsSession().lastDictationAudio = audio
   sendMsg(client, { type: 'stt_result', text })
-  if (client.osMode && client.osScreen === 'de' && client.wm) {
+  if (client.osMode && client.osScreen === 'de') {
     console.log(`[ws] DE stt → active window: "${text}"`)
-    void client.wm.onStt(text)
+    void getOsSession().wm.onStt(text)
   }
 }
 
 function sttError(client: WSClient, error: string): void {
   sendMsg(client, { type: 'stt_error', error })
-  if (client.osMode && client.osScreen === 'de' && client.wm) {
-    void client.wm.onSttError(error)
+  if (client.osMode && client.osScreen === 'de') {
+    void getOsSession().wm.onSttError(error)
   }
 }
 
@@ -1542,28 +1591,37 @@ function handlePrompt(client: WSClient, text: string): void {
   }
 }
 
-/** Phase 7 entry point — server-side request to ask the HUD a yes/no question.
- *  Returns a Promise that resolves when the client sends back ConfirmOnHudResponseMsg.
- *  No timeout — the user gets as long as they need. If the WebSocket disconnects
- *  before a response arrives, the in-flight callback is invoked with 'rejected'
- *  (loud, logged, not silent).
+/** The live WSClient owning a given socket (surface → client back-map; the
+ *  OsSession stores raw sockets so it can't create a ws-handler module cycle). */
+function clientForWs(ws: WebSocket): WSClient | null {
+  for (const c of liveClients) if (c.ws === ws) return c
+  return null
+}
+
+/** Sessionized (2026-07-13) entry point — ask the OS session a yes/no question.
+ *  The question BROADCASTS to every attached surface; the first
+ *  ConfirmOnHudResponseMsg wins. No timeout — and a socket closing no longer
+ *  rejects: asked on the glasses, answerable from the browser tomorrow.
  *
- *  Phase 7 fix #2: also tags the requestId with the Channel Router so when the
- *  phone's `BleAckMsg` arrives, delivery status is tracked. The returned promise
- *  ONLY surfaces the user's confirm/reject choice — delivery status is a separate
- *  concern that callers can opt into via `awaitDeliveryAck` if they care. */
+ *  Delivery-ack stays a PHONE concern (BLE is the only unverified hop): with a
+ *  phone surface attached the requestId is tracked on ITS Channel Router; with
+ *  none, delivery resolves 'unverified' with the reason — truthful, not silent. */
 export function confirmOnHudWithDelivery(
-  client: WSClient,
   text: string,
 ): { response: Promise<'confirmed' | 'rejected'>; delivery: Promise<{ status: 'verified' | 'unverified'; reason?: string }> } {
+  const session = getOsSession()
   const requestId = `cfh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  // Register the delivery ack waiter BEFORE sendMsg so a fast inbound BleAck
-  // (e.g. WiFi loopback latency under load) can't fire before awaitAck binds.
-  // Same logic applies to confirmCallbacks: register the resolver first.
-  const delivery = client.router.awaitAck(requestId)
+  const phone = session.phoneSurface()
+  const phoneClient = phone ? clientForWs(phone.ws) : null
+  // Register the delivery ack waiter BEFORE the broadcast so a fast inbound
+  // BleAck can't fire before awaitAck binds. Same for the resolver.
+  const delivery = phoneClient
+    ? phoneClient.router.awaitAck(requestId)
+    : Promise.resolve({ status: 'unverified' as const, reason: 'no phone surface' })
   const response = new Promise<'confirmed' | 'rejected'>((resolve) => {
-    client.confirmCallbacks.set(requestId, resolve)
-    sendMsg(client, { type: 'confirm_on_hud', requestId, text })
+    session.confirmCallbacks.set(requestId, { text, resolve })
+    const n = session.broadcast({ type: 'confirm_on_hud', requestId, text })
+    if (n === 0) console.warn(`[ws] confirm ${requestId} asked with ZERO surfaces attached — it re-delivers on the next attach and waits`)
   })
   return { response, delivery }
 }
@@ -1596,25 +1654,20 @@ function startHeartbeat(client: WSClient): void {
   }, HEARTBEAT_INTERVAL_MS)
 }
 
-/** Phase 7 entry point — server-side request to ask the HUD a yes/no question.
- *  Returns a Promise that resolves when the client sends back ConfirmOnHudResponseMsg.
- *  No timeout — the user gets as long as they need. If the WebSocket disconnects
- *  before a response arrives, the in-flight callback is invoked with 'rejected'
- *  (loud, logged, not silent).
- *
- *  Phase 7 fix #2: tags the requestId with the Channel Router so the BLE
- *  delivery ack (BleAckMsg from phone) is tracked. The returned promise still
- *  resolves only with the user's choice; delivery status is consumed via the
- *  router's fireAndForget bookkeeping. Callers wanting both can use
- *  `confirmOnHudWithDelivery` instead. */
-export function confirmOnHud(client: WSClient, text: string): Promise<'confirmed' | 'rejected'> {
+/** Sessionized (2026-07-13) — as confirmOnHudWithDelivery but the caller only
+ *  wants the user's choice; BLE delivery bookkeeping is fire-and-forget on the
+ *  phone's router when one is attached. */
+export function confirmOnHud(text: string): Promise<'confirmed' | 'rejected'> {
+  const session = getOsSession()
   const requestId = `cfh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  // Register both BEFORE sendMsg so a fast inbound BleAck or confirm response
-  // can't race past the resolvers. (See confirmOnHudWithDelivery for the same
-  // ordering concern.)
-  client.router.fireAndForget(requestId)
+  const phone = session.phoneSurface()
+  const phoneClient = phone ? clientForWs(phone.ws) : null
+  // Register both BEFORE the broadcast so a fast inbound BleAck or confirm
+  // response can't race past the resolvers.
+  phoneClient?.router.fireAndForget(requestId)
   return new Promise<'confirmed' | 'rejected'>((resolve) => {
-    client.confirmCallbacks.set(requestId, resolve)
-    sendMsg(client, { type: 'confirm_on_hud', requestId, text })
+    session.confirmCallbacks.set(requestId, { text, resolve })
+    const n = session.broadcast({ type: 'confirm_on_hud', requestId, text })
+    if (n === 0) console.warn(`[ws] confirm ${requestId} asked with ZERO surfaces attached — it re-delivers on the next attach and waits`)
   })
 }

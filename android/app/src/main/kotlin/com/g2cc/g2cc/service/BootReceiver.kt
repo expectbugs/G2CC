@@ -48,8 +48,11 @@ class BootReceiver : BroadcastReceiver() {
             postBatteryOptRevokedNotification(context.applicationContext)
             return
         }
-        Log.i(TAG, "auto-starting ConnectionService (connect)")
-        ConnectionService.startAndConnect(context.applicationContext)
+        // F9 (review 2026-07-13): resume the persisted mode(s) — a boot after a
+        // pure control-mode evening must not start a forever BLE hunt for
+        // glasses that are in the case.
+        Log.i(TAG, "auto-starting ConnectionService (resume persisted modes)")
+        ConnectionService.startAndResume(context.applicationContext)
     }
 
     private fun postBatteryOptRevokedNotification(context: Context) {

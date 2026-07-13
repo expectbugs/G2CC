@@ -284,6 +284,24 @@ export class NoticesWindow implements OsWindow {
     this.requestRender()
   }
 
+  /** Typed text (multi-surface 2026-07-13): with a reply flow OPEN (any
+   *  pre-send stage) the typed line lands at the CONFIRM stage — firing a real
+   *  notification reply keeps its one-tap confirm (it guards the SEND). With
+   *  no reply in flight: loud discard (tap Reply on a notice first — there is
+   *  no target to reply to otherwise). */
+  async onTypedText(text: string): Promise<void> {
+    if (this.replyStage === 'idle' || this.replyStage === 'sending' || this.replyStage === 'result') {
+      this.ctx.log(`[os] notices: typed text with no reply in flight (stage=${this.replyStage}) — REFUSED (tap Reply on a notice first): "${text.slice(0, 60)}"`)
+      this.requestRender()
+      throw new Error('tap Reply on a notice first — there is no reply target')
+    }
+    if (this.replyStage === 'listening' || this.replyStage === 'transcribing') this.ctx.audio('stop')
+    this.replyText = text.trim()
+    this.replyStage = 'confirm'
+    this.ctx.log(`[os] notices: typed reply staged for CONFIRM (${text.length} chars)`)
+    this.requestRender()
+  }
+
   async onSttError(error: string): Promise<void> {
     if (this.replyStage === 'idle') { this.ctx.log(`[os] notices: stt error with no reply in flight — ${error}`); return }
     this.ctx.log(`[os] notices: reply dictation failed — ${error}`)
