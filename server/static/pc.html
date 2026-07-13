@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G2CC · PC</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0d0a; color: #9fdf9f;
+    font: 14px/1.45 "DejaVu Sans", system-ui, sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 8px 14px; border-bottom: 1px solid #1e2e1e; background: #0d120d;
+  }
+  header .brand { color: #4cf04c; font-weight: 700; letter-spacing: 1px; }
+  .ok { color: #4cf04c; } .warn { color: #e0c040; } .bad { color: #ff5050; font-weight: 600; }
+  #err-line { display: none; color: #ff5050; }
+  #surfaces, #render-age, #unknown-count { color: #6a8f6a; }
+  header .spacer { flex: 1; }
+  header button {
+    background: #101a10; color: #9fdf9f; border: 1px solid #2a452a;
+    border-radius: 4px; padding: 4px 10px; cursor: pointer; font: inherit;
+  }
+  header button:hover { background: #162416; border-color: #3a5f3a; }
+  header button.danger { color: #ff9060; border-color: #5f3a2a; }
+  header label { color: #6a8f6a; cursor: pointer; user-select: none; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #screen-wrap {
+    flex: 0 0 auto; display: flex; align-items: flex-start; justify-content: center;
+    padding: 18px;
+  }
+  canvas#screen {
+    width: 1152px; height: 576px; max-width: 100%;
+    image-rendering: pixelated; image-rendering: crisp-edges;
+    background: #000; border: 1px solid #1e2e1e; border-radius: 6px;
+    outline: none;
+  }
+  @media (max-width: 1750px) { canvas#screen { width: 864px; height: 432px; } }
+  #panel {
+    flex: 1 1 auto; min-width: 260px; display: flex; flex-direction: column;
+    border-left: 1px solid #1e2e1e; background: #0c100c; min-height: 0;
+  }
+  #panel-title { padding: 8px 14px; color: #4cf04c; border-bottom: 1px solid #1e2e1e; }
+  #panel-body {
+    flex: 1; overflow: auto; padding: 14px; white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .panel-pre { font: 13px/1.5 "DejaVu Sans Mono", monospace; }
+  .panel-reader { font: 19px/1.7 Georgia, "DejaVu Serif", serif; color: #cfe8cf; max-width: 72ch; }
+  footer {
+    display: flex; gap: 8px; align-items: center;
+    padding: 8px 14px; border-top: 1px solid #1e2e1e; background: #0d120d;
+  }
+  #target-hint { color: #6a8f6a; white-space: nowrap; }
+  #text-input {
+    flex: 1; background: #050805; color: #c8f0c8; border: 1px solid #2a452a;
+    border-radius: 4px; padding: 7px 10px; font: inherit;
+  }
+  #text-input:focus { border-color: #4cf04c; box-shadow: 0 0 6px #143814; outline: none; }
+  #send-btn {
+    background: #12240f; color: #9fdf9f; border: 1px solid #2a452a;
+    border-radius: 4px; padding: 7px 16px; cursor: pointer; font: inherit;
+  }
+  footer .hint { color: #47604a; font-size: 12px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">G2CC</span>
+  <span id="conn-state" class="warn">booting</span>
+  <span id="render-age">no render yet</span>
+  <span id="surfaces">surfaces: —</span>
+  <span id="unknown-count"></span>
+  <span id="err-line"></span>
+  <span class="spacer"></span>
+  <label><input type="checkbox" id="toggle-bounds"> bounds</label>
+  <label><input type="checkbox" id="toggle-metrics"> grid</label>
+  <button id="soft-reset" title="Refresh the glasses BLE connection (via the phone)">Soft Reset</button>
+  <button id="hard-reset" class="danger" title="Kill + rebuild the entire live system (durable data kept)">Hard Reset</button>
+</header>
+<main>
+  <div id="screen-wrap">
+    <canvas id="screen" width="1152" height="576"></canvas>
+  </div>
+  <div id="panel">
+    <div id="panel-title">full text</div>
+    <div id="panel-body" class="panel-pre">(waiting for the first render)</div>
+  </div>
+</main>
+<footer>
+  <span id="target-hint">typing to: ?</span>
+  <input id="text-input" type="text" placeholder="type here — Enter sends to the active window (Esc releases keys to nav)" autocomplete="off" spellcheck="false">
+  <button id="send-btn">Send</button>
+  <span class="hint">wheel/↑↓ scroll · Enter/click select · Esc/right-click back</span>
+</footer>
+<script type="module" src="/pc/assets/app.js"></script>
+</body>
+</html>

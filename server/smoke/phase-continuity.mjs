@@ -103,6 +103,13 @@ async function waitRender(client, pred, what, ms = 8000) {
   }
 }
 
+// Earlier suite tests run REAL in-process WindowManagers against the shared
+// smoke DB — their switchTo calls persist active_window (correct behavior!),
+// which this server would faithfully restore at boot and land the first
+// attach INSIDE a window instead of at the ribbon root. Clear the pointer
+// BEFORE booting so part 1 starts from the true boot default.
+await query("DELETE FROM os_state WHERE key = 'active_window'").catch(() => { /* table may not exist yet — fine */ })
+
 let state = startServer()
 try {
   await waitListening(state)
