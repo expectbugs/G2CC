@@ -348,14 +348,10 @@ function shutdown(): void {
   try {
     const session = getOsSession()
     session.wm.dispose()
-    // Flush the resume index BEFORE killing — persistSessionMeta reads the
-    // LIVE session map (ccSessionIds); after the kill loop it would be empty.
-    session.pool.persistSessionMeta()
-    const deCount = session.pool.count
-    for (const entry of session.pool.allEntries()) {
-      watchdogInstance.unregister(entry.id)
-      session.pool.closeSession(entry.id)
-    }
+    // One shared reap (persist-first + per-entry try/catch) — review F12: the
+    // old inline copy here aborted on the first throwing closeSession,
+    // orphaning the rest past server exit.
+    const deCount = session.reapPool('shutdown')
     if (deCount > 0) console.log(`[g2cc-server] reaped ${deCount} DE CC session(s) for shutdown (resume index flushed first)`)
   } catch (err) {
     console.error('[g2cc-server] OS-session shutdown reap failed:', err)

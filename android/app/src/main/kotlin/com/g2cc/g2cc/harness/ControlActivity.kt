@@ -304,6 +304,23 @@ class ControlActivity : AppCompatActivity() {
                 mirror.setScene(sc, ExpectedMirror.render(sc, outlines = false))
             }
         }
+        // Server error messages (re-review R2): show them RED here, and when
+        // one is a typed-text delivery discard, restore THE FAILED TEXT into
+        // the (already cleared) input field — parsed from the message, so an
+        // earlier queued line can't restore as a later one.
+        uiJobs += lifecycleScope.launch {
+            s.serverErrors.collect { m ->
+                showError(m)
+                if (m.startsWith("typed text NOT delivered")) {
+                    val marker = " — your text: "
+                    val at = m.indexOf(marker)
+                    if (at != -1 && input.text.isEmpty()) {
+                        input.setText(m.substring(at + marker.length))
+                        if (inputRow.visibility != View.VISIBLE) inputRow.visibility = View.VISIBLE
+                    }
+                }
+            }
+        }
     }
 
     private fun bindToService() {

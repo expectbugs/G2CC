@@ -291,9 +291,9 @@ export class NoticesWindow implements OsWindow {
    *  no target to reply to otherwise). */
   async onTypedText(text: string): Promise<void> {
     if (this.replyStage === 'idle' || this.replyStage === 'sending' || this.replyStage === 'result') {
-      this.ctx.log(`[os] notices: typed text with no reply in flight (stage=${this.replyStage}) — DISCARDED (tap Reply on a notice first): "${text.slice(0, 60)}"`)
+      this.ctx.log(`[os] notices: typed text with no reply in flight (stage=${this.replyStage}) — REFUSED (tap Reply on a notice first): "${text.slice(0, 60)}"`)
       this.requestRender()
-      return
+      throw new Error('tap Reply on a notice first — there is no reply target')
     }
     if (this.replyStage === 'listening' || this.replyStage === 'transcribing') this.ctx.audio('stop')
     this.replyText = text.trim()

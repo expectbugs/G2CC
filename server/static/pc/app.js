@@ -177,6 +177,17 @@ const net = new Net(TOKEN, {
         nativeView = msg.view
         renderNativeView()
         break
+      case 'confirm_on_hud':
+        // A session-wide yes/no question — answerable from ANY surface; the
+        // first response wins (a late answer gets the server's unknown-id
+        // warn). DEDUP by requestId (re-review R1): the server re-delivers
+        // pending questions on every attach, so this page's own reconnects
+        // would otherwise stack duplicate banners of the same question.
+        if (activeConfirm?.requestId !== msg.requestId && !confirmQueue.some((c) => c.requestId === msg.requestId)) {
+          confirmQueue.push({ requestId: msg.requestId, text: msg.text })
+          showNextConfirm()
+        }
+        break
       case 'display_reload':
         flushImageCache()
         paint()
@@ -184,10 +195,26 @@ const net = new Net(TOKEN, {
         break
       case 'hard_reset':
         setState('reconnecting', 'HARD RESET — system restarting')
+        // The server rejected every pending confirm — a banner would be a
+        // zombie (its answer lands in the unknown-requestId warn).
+        confirmQueue.length = 0
+        activeConfirm = null
+        $('confirm-banner').style.display = 'none'
         break
-      case 'error':
+      case 'error': {
         setError(`server: ${msg.message}`)
+        // A typed line the server could not deliver (overlay up / ribbon root /
+        // text-less window / hard reset): put THE FAILED TEXT back in the bar —
+        // it was cleared on send. Parsed from the message itself (re-review
+        // R5: restoring the LAST-sent line put the wrong text back when an
+        // earlier queued line was the one refused).
+        if (msg.message.startsWith('typed text NOT delivered')) {
+          const marker = ' — your text: '
+          const at = msg.message.indexOf(marker)
+          if (at !== -1 && !textBar.value) textBar.value = msg.message.slice(at + marker.length)
+        }
         break
+      }
       case 'stt_result':
         setError('')
         console.log(`[pc] stt: "${msg.text}"`)
@@ -266,12 +293,31 @@ canvas.addEventListener('mousemove', (ev) => {
 })
 canvas.addEventListener('mouseleave', () => { if (hoverRow) { hoverRow = null; paint() } })
 
+// ---- confirm_on_hud banner (one at a time; answerable from any surface) ----
+const confirmQueue = []
+let activeConfirm = null
+function showNextConfirm() {
+  if (activeConfirm || confirmQueue.length === 0) return
+  activeConfirm = confirmQueue.shift()
+  $('confirm-text').textContent = activeConfirm.text
+  $('confirm-banner').style.display = 'flex'
+}
+function answerConfirm(result) {
+  if (!activeConfirm) return
+  net.send({ type: 'confirm_on_hud_response', requestId: activeConfirm.requestId, result })
+  activeConfirm = null
+  $('confirm-banner').style.display = 'none'
+  showNextConfirm()
+}
+$('confirm-yes').addEventListener('click', () => answerConfirm('confirmed'))
+$('confirm-no').addEventListener('click', () => answerConfirm('rejected'))
+
 // ---- text bar ----
 function sendText() {
   const text = textBar.value
   if (!text.trim()) return
   if (net.send({ type: 'input', event: 'text', text })) {
-    textBar.value = ''
+    textBar.value = ''   // restored from the error message on a delivery discard
   } else {
     setError('text NOT sent — reconnecting; your text is kept in the bar')
   }
@@ -302,9 +348,9 @@ setInterval(() => {
 }, 1000)
 
 // Reconnect promptly when the tab regains focus (background throttling may
-// have slowed the liveness tick).
+// have stretched a pending backoff wait far past its nominal delay).
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) net.livenessCheck()
+  if (!document.hidden) net.reconnectNow()
 })
 
 if (!TOKEN) {

@@ -56,7 +56,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -149,6 +151,12 @@ class ConnectionService : Service(), TestHarness {
     // ---- observable state for the bound UI (HarnessActivity) -----------------
     private val _status = MutableStateFlow("Disconnected")
     val status = _status.asStateFlow()
+    /** Server `error` messages for the CONTROL UI (re-review R2: the typed-text
+     *  delivery discard used to die in the Diag log while ControlActivity had
+     *  already cleared the input field — silent data loss from the typist's
+     *  chair). Buffered so a burst can't suspend the WS reader. */
+    private val _serverErrors = MutableSharedFlow<String>(extraBufferCapacity = 8, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
+    val serverErrors = _serverErrors.asSharedFlow()
     private val _launched = MutableStateFlow(false)
     val launched = _launched.asStateFlow()
     private val _connecting = MutableStateFlow(false)
@@ -246,6 +254,13 @@ class ConnectionService : Service(), TestHarness {
     private fun controlPrefs() = getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
     private fun readControlModePref(): Boolean = controlPrefs().getBoolean(KEY_CONTROL_MODE, false)
     private fun writeControlModePref(v: Boolean) { controlPrefs().edit().putBoolean(KEY_CONTROL_MODE, v).apply() }
+    /** Was the BLE bridge active? (review 2026-07-13 F9: the sticky/boot
+     *  relaunch used to hunt BLE unconditionally — a battery-draining forever-
+     *  scan when the service was running in pure glasses-less control mode.)
+     *  Default TRUE: pre-pref installs behave exactly like today (bridge daily
+     *  = auto-reconnect); a manual disconnect() clears both prefs. */
+    private fun readBridgingPref(): Boolean = controlPrefs().getBoolean(KEY_BRIDGING, true)
+    private fun writeBridgingPref(v: Boolean) { controlPrefs().edit().putBoolean(KEY_BRIDGING, v).apply() }
 
     /** Phase 9: forward a phone notification (from [com.g2cc.g2cc.service.NotifyListener])
      *  to the server. Loud no-op when the WS isn't up — missed phone
@@ -402,12 +417,17 @@ class ConnectionService : Service(), TestHarness {
             // Control mode (multi-surface): phone-screen surface, NO BLE connect —
             // this path must work with the glasses absent entirely.
             intent?.action == ACTION_CONTROL -> enterControlMode()
-            intent == null -> {
-                // START_STICKY relaunch: re-enter the mode(s) that were active —
-                // control mode via the persisted pref, plus the historical
-                // unconditional connect() (idempotent; guards launched/connecting).
-                if (readControlModePref()) enterControlMode()
-                connect()
+            // Sticky relaunch AND boot/update resume share the same dual-pref
+            // re-entry (review 2026-07-13 F9): re-enter exactly the mode(s)
+            // that were active — pure control mode must NOT start a BLE hunt
+            // for glasses that are at home in the case.
+            intent == null || intent.action == ACTION_RESUME -> {
+                val ctl = readControlModePref()
+                val bridge = readBridgingPref()
+                DiagLog.log("svc", "resume relaunch: control=$ctl bridge=$bridge")
+                if (ctl) enterControlMode()
+                if (bridge) connect()
+                if (!ctl && !bridge) DiagLog.log("svc", "resume with neither mode persisted — idling in foreground (open the app to connect)")
             }
             intent.action == ACTION_CONNECT -> connect()
         }
@@ -431,6 +451,7 @@ class ConnectionService : Service(), TestHarness {
 
     fun connect() {
         if (_launched.value || _connecting.value) return
+        writeBridgingPref(true)   // F9: the sticky/boot resume re-enters BLE only when it was active
         _connecting.value = true
         setStatus("Scanning for Even G2…")
         DiagLog.log("conn", "scan start")
@@ -447,6 +468,7 @@ class ConnectionService : Service(), TestHarness {
         // "Disconnect" means ALL the way down, not "…but come back as control".
         _controlMode.value = false
         writeControlModePref(false)
+        writeBridgingPref(false)   // F9: nor "…but come back scanning"
         teardown()
         setStatus("Disconnected.")
         _scene.value = null
@@ -874,8 +896,10 @@ class ConnectionService : Service(), TestHarness {
             is ServerMessage.Error -> {
                 // The MESSAGE TEXT must surface (review 2026-06-11b): the old
                 // catch-all logged only the class name, discarding the server's
-                // explanation — against loud-and-proud.
+                // explanation — against loud-and-proud. R2: it ALSO flows to the
+                // control UI (typed-text discards restore the input field there).
                 DiagLog.log("os", "server error: ${msg.message}")
+                _serverErrors.tryEmit(msg.message)
             }
             else -> {
                 // config_snapshot / dispatch_target_list / etc. — not used in OS mode.
@@ -1496,8 +1520,13 @@ class ConnectionService : Service(), TestHarness {
         /** Enter phone-screen CONTROL mode (multi-surface 2026-07-13) — WS only,
          *  NO BLE connect. The glasses may join later via a normal Connect. */
         const val ACTION_CONTROL = "com.g2cc.g2cc.action.CONTROL"
+        /** Re-enter exactly the persisted mode(s) — control and/or BLE bridge
+         *  (F9). Used by BootReceiver; the START_STICKY null-intent relaunch
+         *  runs the same branch. */
+        const val ACTION_RESUME = "com.g2cc.g2cc.action.RESUME"
         private const val PREFS_FILE = "g2cc-service"
         private const val KEY_CONTROL_MODE = "controlMode"
+        private const val KEY_BRIDGING = "bridging"
 
         // Recovery tunables (tune from factory diag). WATCHDOG_BAD_THRESHOLD counts 1 s ticks of
         // no R-lens acks AFTER the gap already exceeds 3 s, so 6 ≈ ~9 s of silence before a silent-
@@ -1557,6 +1586,15 @@ class ConnectionService : Service(), TestHarness {
          *  calls this from onStart so control works with the glasses absent. */
         fun startForControl(context: Context) {
             val intent = Intent(context, ConnectionService::class.java).apply { action = ACTION_CONTROL }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+            else @Suppress("DEPRECATION") context.startService(intent)
+        }
+
+        /** Start the FG service and re-enter the persisted mode(s) — control
+         *  and/or bridge (F9). BootReceiver's path: a boot after a pure
+         *  control-mode evening must NOT hunt BLE for glasses in the case. */
+        fun startAndResume(context: Context) {
+            val intent = Intent(context, ConnectionService::class.java).apply { action = ACTION_RESUME }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
             else @Suppress("DEPRECATION") context.startService(intent)
         }

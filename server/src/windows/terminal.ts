@@ -697,10 +697,13 @@ export class TerminalWindow implements OsWindow {
   }
 
   /** Typed text (multi-surface 2026-07-13). Kbd OPEN → the typed line REPLACES
-   *  the tap-typing buffer (Run/Done as usual). Otherwise it lands as
-   *  pendingText at the CONFIRM view — shell execution is destructive, so the
-   *  one-tap Confirm stays (it guards the RUN, not the transcription). A hot
-   *  mic yields; an in-flight newSession dictation keeps its purpose. */
+   *  the tap-typing buffer (Run/Done as usual). At the session VIEW (a live
+   *  target exists) → pendingText at the CONFIRM view — shell execution is
+   *  destructive, so the one-tap Confirm stays (it guards the RUN, not the
+   *  transcription). Mid-newSession-dictation → the typed line is the session
+   *  name at ITS confirm. Anywhere else (session picker idle / keys / slash):
+   *  LOUD discard — staging a confirm there rendered '→ null' or an invisible
+   *  pending state that ambushed later (review 2026-07-13 F10). */
   async onTypedText(text: string): Promise<void> {
     if (this.level === 'kbd') {
       this.kbdBuf = text
@@ -710,12 +713,27 @@ export class TerminalWindow implements OsWindow {
       this.requestRender()
       return
     }
+    if (this.dictating() && this.dictPurpose === 'newSession') {
+      // Mirror the newSession dictation landing: the typed line is the name.
+      if (this.listening || this.transcribing) this.ctx.audio('stop')
+      this.listening = false
+      this.transcribing = false
+      this.pendingText = text.trim()
+      this.ctx.log(`[os] term: typed session name staged for CONFIRM ("${text.slice(0, 40)}")`)
+      this.requestRender()
+      return
+    }
+    if (this.level !== 'view' || !this.session) {
+      this.ctx.log(`[os] term: typed text outside a live session view (level=${this.level}, session=${this.session ?? 'none'}) — DISCARDED (open a session first): "${text.slice(0, 60)}"`)
+      this.requestRender()
+      throw new Error(`the Tmux window has no live session view to type into (at '${this.level}') — open a session first`)
+    }
     if (this.listening || this.transcribing) this.ctx.audio('stop')
     this.listening = false
     this.transcribing = false
-    this.dictPurpose = this.dictPurpose ?? 'send'
+    this.dictPurpose = 'send'
     this.pendingText = text.trim()
-    this.ctx.log(`[os] term: typed text staged for CONFIRM (${this.dictPurpose}; ${text.length} chars)`)
+    this.ctx.log(`[os] term: typed text staged for CONFIRM (send; ${text.length} chars)`)
     this.requestRender()
   }
 

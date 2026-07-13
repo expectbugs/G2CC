@@ -62,6 +62,10 @@ export class OsSession {
    *  would be a module cycle): terminate every live WS client. */
   private terminateClients: () => number = () => 0
   private hardResetting = false
+  /** Readable for input paths (re-review R3): typed text processed while the
+   *  reset is mid-flight must get a truthful refusal, not run against the
+   *  half-dead old world and report 'delivered'. */
+  get hardResetInProgress(): boolean { return this.hardResetting }
 
   // ---- phone-fed session state (moved off the per-connection WSClient) ----
   phoneBattery: number | null = null
@@ -72,22 +76,43 @@ export class OsSession {
   /** The raw PCM (+ format) of the most recent SUCCESSFUL dictation — kept so a
    *  `memo:` intent can save the clip at confirm time. */
   lastDictationAudio: MemoAudio | null = null
-  /** In-flight confirm_on_hud resolvers (sessionized 2026-07-13): the question
-   *  broadcasts to EVERY surface; the FIRST response wins; a socket closing no
-   *  longer rejects — asked on the glasses, answerable from the browser, and
-   *  it waits forever by design (NO TIMEOUTS). Hard reset rejects them loudly. */
-  confirmCallbacks = new Map<string, (result: 'confirmed' | 'rejected') => void>()
+  /** In-flight confirm_on_hud questions (sessionized 2026-07-13): broadcast to
+   *  EVERY surface; the FIRST response wins; a socket closing no longer
+   *  rejects — asked on the glasses, answerable from the browser, waiting
+   *  forever by design (NO TIMEOUTS). The TEXT is kept so attach() can
+   *  RE-DELIVER pending questions to late-joining surfaces (review 2026-07-13
+   *  F11: a question asked while nobody was attached was permanently
+   *  unanswerable). Hard reset rejects them loudly. */
+  confirmCallbacks = new Map<string, { text: string; resolve: (result: 'confirmed' | 'rejected') => void }>()
   /** DE input serialization (the _session captureChain pattern): with input
    *  now arriving from MULTIPLE surfaces, events apply strictly in arrival
    *  order — two surfaces' taps can't interleave at a handler's await points.
-   *  Handler failures log loudly and never poison the chain. */
+   *  Handler failures log loudly and never poison the chain.
+   *  inputEpoch (review 2026-07-13 F3): hardReset bumps it, so handlers still
+   *  QUEUED behind a slow one at reset time are dropped loudly instead of
+   *  running against the old world (the WM's own `retired` flag fences the
+   *  one already running). */
   private inputChain: Promise<void> = Promise.resolve()
-  enqueueInput(what: string, fn: () => Promise<void>): Promise<void> {
-    const next = this.inputChain.then(fn).catch((e: unknown) => {
+  private inputEpoch = 0
+  /** Resolves 'ran' when fn actually executed; 'dropped' when a hard reset
+   *  rebuilt the session while the handler waited in the queue (re-review R3:
+   *  callers with user data in hand — typed text — must be able to tell the
+   *  typist instead of silently losing the line). */
+  enqueueInput(what: string, fn: () => Promise<void>): Promise<'ran' | 'dropped'> {
+    const epoch = this.inputEpoch
+    let outcome: 'ran' | 'dropped' = 'dropped'
+    const next = this.inputChain.then(() => {
+      if (epoch !== this.inputEpoch) {
+        console.warn(`[os-session] queued input (${what}) DROPPED — a hard reset rebuilt the session while it waited`)
+        return
+      }
+      outcome = 'ran'
+      return fn()
+    }).catch((e: unknown) => {
       console.error(`[os-session] input handler (${what}) failed: ${e instanceof Error ? e.message : String(e)}`)
     })
     this.inputChain = next
-    return next
+    return next.then(() => outcome)
   }
 
   constructor(readonly config: G2CCConfig) {
@@ -116,6 +141,14 @@ export class OsSession {
     this.surfaces.set(surface.id, surface)
     console.log(`[os-session] surface ${surface.id} (${kind}) attached — ${this.surfaces.size} attached`)
     this.broadcastOsStatus()
+    // Re-deliver pending confirm questions (F11): a question asked while this
+    // surface was away must not be permanently unanswerable from it.
+    for (const [requestId, pending] of this.confirmCallbacks) {
+      console.log(`[os-session] re-delivering pending confirm ${requestId} to ${surface.id}`)
+      if (surface.ws.readyState === 1) {
+        surface.ws.send(JSON.stringify({ type: 'confirm_on_hud', requestId, text: pending.text }))
+      }
+    }
     return surface
   }
 
@@ -125,6 +158,17 @@ export class OsSession {
     if (!s) return
     this.surfaces.delete(surfaceId)
     console.log(`[os-session] surface ${surfaceId} (${s.kind}) detached — ${this.surfaces.size} remain; session lives on`)
+    // Phone-fed state is only as live as a phone surface (review 2026-07-13
+    // F6): without this, os_status kept asserting 'glasses LIVE' and the
+    // chrome kept stale battery percentages forever after the phone dropped —
+    // a fabricated status. null = unknown, the truthful value.
+    if (s.kind === 'phone' && this.phoneSurface() === null) {
+      this.phoneBattery = null
+      this.g2Battery = null
+      this.g2Connected = null
+      console.log('[os-session] last phone surface gone — phone-fed state (batteries, g2Connected) reset to unknown')
+      this.wm.requestRender()   // refresh the battery cluster / chrome
+    }
     this.broadcastOsStatus()
   }
 
@@ -198,6 +242,25 @@ export class OsSession {
     return true
   }
 
+  /** Kill every DE CC subprocess, flushing the resume index FIRST (it reads
+   *  the LIVE session map — after the kill loop it would be empty). Per-entry
+   *  try/catch: one throwing closeSession must not orphan the rest (review
+   *  2026-07-13 F12 — shutdown and hardReset had drifted copies; this is the
+   *  single robust one). Returns how many were killed. */
+  reapPool(reason: string): number {
+    try { this.pool.persistSessionMeta() } catch (e) {
+      console.error(`[os-session] ${reason}: resume-index flush failed (continuing): ${e instanceof Error ? e.message : String(e)}`)
+    }
+    const n = this.pool.count
+    for (const entry of this.pool.allEntries()) {
+      this.watchdog?.unregister(entry.id)
+      try { this.pool.closeSession(entry.id) } catch (e) {
+        console.error(`[os-session] ${reason}: closing session ${entry.id} threw (continuing): ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+    return n
+  }
+
   /** The phone reported (or changed) glasses-BLE state via client_hb. */
   setG2Connected(v: boolean): void {
     if (this.g2Connected === v) return
@@ -261,11 +324,17 @@ export class OsSession {
       audio: (action, mode) => {
         if (!this.toPhone({ type: 'audio_request', action, mode }, `audio_request(${action})`)) {
           // Synthesize the failure into the window's dictation-error channel —
-          // deferred a microtask so a ctx.audio call from inside a window
-          // handler can't re-enter that same window synchronously.
-          queueMicrotask(() => {
-            void this.wm.onSttError('No phone attached — dictation needs the phone. Type from the PC page / phone keyboard instead.')
-          })
+          // but ONLY for 'start' (review 2026-07-13 F1): every onSttError /
+          // stopDictation implementation defensively calls audio('stop'), so
+          // synthesizing an error for a failed STOP formed an unbounded
+          // microtask recursion (stop-fails → onSttError → stop-fails → …)
+          // that starved the event loop and froze the whole server. A stop
+          // with no phone is a harmless no-op — toPhone already logged it.
+          if (action === 'start') {
+            queueMicrotask(() => {
+              void this.wm.onSttError('No phone attached — dictation needs the phone. Type from the PC page / phone keyboard instead.')
+            })
+          }
         }
       },
       displayReload: () => {
@@ -332,6 +401,9 @@ export class OsSession {
     this.hardResetting = true
     try {
       console.warn('[os-session] ═══ HARD RESET ═══ killing all live state (durable user data preserved)')
+      // Fence the input chain FIRST (F3): anything still queued behind a slow
+      // handler belongs to the old world and is dropped loudly when it drains.
+      this.inputEpoch++
       // 1. Courtesy heads-up so UIs can show "restarting" before their socket
       //    drops (v1.18 phones also run a full local teardown on it), then one
       //    event-loop turn so the frames actually flush before terminate().
@@ -339,16 +411,7 @@ export class OsSession {
       await new Promise<void>((resolve) => setImmediate(resolve))
       // 2. Flush the CC resume index while sessions are still alive (it reads
       //    the LIVE session map), then kill every DE CC subprocess.
-      try { this.pool.persistSessionMeta() } catch (e) {
-        console.error(`[os-session] hard reset: resume-index flush failed (continuing): ${e instanceof Error ? e.message : String(e)}`)
-      }
-      const nSessions = this.pool.count
-      for (const entry of this.pool.allEntries()) {
-        this.watchdog?.unregister(entry.id)
-        try { this.pool.closeSession(entry.id) } catch (e) {
-          console.error(`[os-session] hard reset: closing session ${entry.id} threw: ${e instanceof Error ? e.message : String(e)}`)
-        }
-      }
+      const nSessions = this.reapPool('hard reset')
       console.warn(`[os-session] hard reset: killed ${nSessions} DE CC session(s) (resume index flushed first)`)
       // 3. Dispose the WM — hub listeners, pacers, window resources (Terminal
       //    poll), the scout live sink.
@@ -368,9 +431,9 @@ export class OsSession {
       //    truthful 'rejected', never a hang into a rebuilt world), then
       //    terminate every client socket — the phone's five-defence reconnect
       //    and the PC page's backoff loop bring every surface back fresh.
-      for (const [id, resolve] of this.confirmCallbacks) {
+      for (const [id, pending] of this.confirmCallbacks) {
         console.warn(`[os-session] hard reset: pending confirm ${id} resolved 'rejected'`)
-        resolve('rejected')
+        pending.resolve('rejected')
       }
       this.confirmCallbacks.clear()
       const nClients = this.terminateClients()

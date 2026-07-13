@@ -992,10 +992,10 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // the FIRST response wins; the delete makes any later one land in the
       // existing unknown-requestId warn (loud, harmless).
       const session = getOsSession()
-      const cb = session.confirmCallbacks.get(msg.requestId)
-      if (cb) {
+      const pending = session.confirmCallbacks.get(msg.requestId)
+      if (pending) {
         session.confirmCallbacks.delete(msg.requestId)
-        cb(msg.result)
+        pending.resolve(msg.result)
       } else {
         console.warn(`[ws] confirm_on_hud_response for unknown requestId ${msg.requestId} (already answered by another surface?)`)
       }
@@ -1107,11 +1107,31 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         } else if (msg.event === 'text') {
           // Multi-surface (2026-07-13): a typed line from the PC page / phone
           // control keyboard → the active window (Enter IS the confirm for
-          // exact, user-authored text). NEVER truncated.
+          // exact, user-authored text). NEVER truncated. A DISCARD reports
+          // back to the ORIGINATING surface (F4) — its input bar already
+          // cleared on socket-send success, so a server-log-only discard was
+          // silent data loss; the error carries the full text for recovery.
           if (typeof msg.text === 'string') {
             const text = msg.text
             console.log(`[ws] DE typed text (${text.length} chars) from surface ${client.surface?.id}`)
-            await session.enqueueInput('typed text', () => wm.onTypedText(text))
+            let discardReason: string | null = null
+            const outcome = await session.enqueueInput('typed text', async () => {
+              // Re-review R3: a hard reset mid-flight (or one that swapped the
+              // WM while this waited) must refuse truthfully — running against
+              // the retired world staged text into dead windows and reported
+              // 'delivered'.
+              if (session.hardResetInProgress || session.wm !== wm) {
+                discardReason = 'a Hard Reset rebuilt the system — resend after it settles'
+                return
+              }
+              discardReason = await wm.onTypedText(text)
+            })
+            if (outcome === 'dropped' && discardReason === null) {
+              discardReason = 'a Hard Reset rebuilt the system while your text waited — resend it'
+            }
+            if (discardReason) {
+              sendMsg(client, { type: 'error', message: `typed text NOT delivered: ${discardReason} — your text: ${text}` })
+            }
           } else {
             console.warn('[ws] input event \'text\' without a text field — ignored')
           }
@@ -1188,10 +1208,20 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         console.log(`[ws] SOFT RESET requested by surface ${client.surface?.id ?? '(unattached)'}`)
         if (!getOsSession().toPhone({ type: 'glasses_reset' }, 'glasses_reset (Soft Reset)')) {
           sendMsg(client, { type: 'error', message: 'Soft Reset failed: no phone attached — the glasses connection lives on the phone.' })
+        } else {
+          // Pre-1.18 APKs decode-fail-and-ignore glasses_reset (transitional
+          // until the v1.18 sideload) — say what we actually know.
+          console.log('[ws] glasses_reset handed to the phone (requires APK v1.18+; older apps log-and-ignore it)')
         }
-      } else {
+      } else if (msg.kind === 'hard') {
+        // EXPLICIT match only (review 2026-07-13 F2): the destructive action
+        // must never be the default branch of an unvalidated wire field — a
+        // garbled/missing kind used to fall through to hardReset().
         console.warn(`[ws] HARD RESET requested by surface ${client.surface?.id ?? '(unattached)'}`)
         await getOsSession().hardReset()
+      } else {
+        console.error(`[ws] reset with unknown kind '${String((msg as { kind?: unknown }).kind)}' — REFUSED (nothing reset)`)
+        sendMsg(client, { type: 'error', message: `Reset refused: unknown kind '${String((msg as { kind?: unknown }).kind)}' (expected 'soft' or 'hard'). Nothing was reset.` })
       }
       break
     }
@@ -1589,8 +1619,9 @@ export function confirmOnHudWithDelivery(
     ? phoneClient.router.awaitAck(requestId)
     : Promise.resolve({ status: 'unverified' as const, reason: 'no phone surface' })
   const response = new Promise<'confirmed' | 'rejected'>((resolve) => {
-    session.confirmCallbacks.set(requestId, resolve)
-    session.broadcast({ type: 'confirm_on_hud', requestId, text })
+    session.confirmCallbacks.set(requestId, { text, resolve })
+    const n = session.broadcast({ type: 'confirm_on_hud', requestId, text })
+    if (n === 0) console.warn(`[ws] confirm ${requestId} asked with ZERO surfaces attached — it re-delivers on the next attach and waits`)
   })
   return { response, delivery }
 }
@@ -1635,7 +1666,8 @@ export function confirmOnHud(text: string): Promise<'confirmed' | 'rejected'> {
   // response can't race past the resolvers.
   phoneClient?.router.fireAndForget(requestId)
   return new Promise<'confirmed' | 'rejected'>((resolve) => {
-    session.confirmCallbacks.set(requestId, resolve)
-    session.broadcast({ type: 'confirm_on_hud', requestId, text })
+    session.confirmCallbacks.set(requestId, { text, resolve })
+    const n = session.broadcast({ type: 'confirm_on_hud', requestId, text })
+    if (n === 0) console.warn(`[ws] confirm ${requestId} asked with ZERO surfaces attached — it re-delivers on the next attach and waits`)
   })
 }

@@ -1071,9 +1071,9 @@ export class FilesWindow implements OsWindow {
    *  (Files navigation is tap-driven; use Rename/New folder first). */
   async onTypedText(text: string): Promise<void> {
     if (this.level !== 'name') {
-      this.ctx.log(`[os] files: typed text outside name entry (level=${this.level}) — DISCARDED (use Rename/New folder first): "${text.slice(0, 60)}"`)
+      this.ctx.log(`[os] files: typed text outside name entry (level=${this.level}) — REFUSED (use Rename/New folder first): "${text.slice(0, 60)}"`)
       this.requestRender()
-      return
+      throw new Error('use Rename or New folder first — typed text is the name')
     }
     if (this.listening || this.transcribing) this.ctx.audio('stop')
     this.listening = false

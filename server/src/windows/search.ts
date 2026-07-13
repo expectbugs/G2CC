@@ -316,9 +316,9 @@ export class SearchWindow implements OsWindow {
    *  from the results/read levels starts a fresh search — the natural read. */
   async onTypedText(text: string): Promise<void> {
     if (this.searching) {
-      this.ctx.log(`[os] search: typed query while a search is running — IGNORED (wait or Cancel): "${text.slice(0, 60)}"`)
+      this.ctx.log(`[os] search: typed query while a search is running — REFUSED (wait or Cancel): "${text.slice(0, 60)}"`)
       this.requestRender()
-      return
+      throw new Error('a search is already running — wait for it or Cancel')
     }
     if (this.listening || this.transcribing) this.ctx.audio('stop')
     this.listening = false

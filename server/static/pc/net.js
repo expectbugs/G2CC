@@ -54,7 +54,15 @@ export class Net {
     ws.onmessage = (ev) => {
       this.lastInboundAt = Date.now()
       let msg
-      try { msg = JSON.parse(ev.data) } catch { return }   // binary/garbage — not ours
+      try {
+        msg = JSON.parse(ev.data)
+      } catch (e) {
+        // The server sends only JSON on this socket — a malformed frame is a
+        // real bug, never swallowed silently (the loud-failure rule).
+        console.error(`[pc-net] malformed server frame (${String(ev.data).length} chars): ${e.message}`)
+        this.handlers.onState('error', 'malformed server frame — see console')
+        return
+      }
       if (msg.type === 'auth_result') {
         if (msg.success) {
           this.backoffMs = BACKOFF_START_MS
@@ -96,12 +104,28 @@ export class Net {
     this.sendRaw({ type: 'client_hb', now: Date.now() })
   }
 
+  /** The 5 s periodic tick: cycles an OPEN-but-silent socket. Deliberately
+   *  does NOT touch a closed socket — that would defeat the exponential
+   *  backoff (re-review R4); reconnectNow() below is the explicit
+   *  user-signal path for that. */
   livenessCheck() {
     if (!this.ws || this.ws.readyState !== 1) return
     if (Date.now() - this.lastInboundAt > SILENCE_LIMIT_MS) {
       this.handlers.onState('reconnecting', 'inbound silence > 30s — cycling the socket')
       try { this.ws.close() } catch { /* onclose reconnects */ }
     }
+  }
+
+  /** Reconnect a dead/absent socket IMMEDIATELY, skipping the rest of a
+   *  (possibly background-throttled) backoff wait. Driven by an explicit
+   *  user signal only — the tab regaining focus (F14) — so the backoff still
+   *  governs unattended retries. */
+  reconnectNow() {
+    if (this.closedByUs) return
+    if (this.ws && this.ws.readyState !== 3 /* CLOSED */) return   // open/connecting/closing — leave it be
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null }
+    this.handlers.onState('reconnecting', 'now (tab focused with the socket down)')
+    this.connect()
   }
 
   /** True when the message actually went into an OPEN socket. */

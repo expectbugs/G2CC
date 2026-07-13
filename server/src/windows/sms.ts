@@ -337,14 +337,14 @@ export class SmsWindow implements OsWindow {
    *  reply mic yields to it; mid-send/result states refuse loudly. */
   async onTypedText(text: string): Promise<void> {
     if (this.level !== 'thread') {
-      this.ctx.log(`[os] sms: typed text outside an open thread (level=${this.level}) — DISCARDED (open a thread first): "${text.slice(0, 60)}"`)
+      this.ctx.log(`[os] sms: typed text outside an open thread (level=${this.level}) — REFUSED (open a thread first): "${text.slice(0, 60)}"`)
       this.requestRender()
-      return
+      throw new Error('open a thread first — there is nothing to reply to')
     }
     if (this.replyStage === 'sending' || this.replyStage === 'result') {
-      this.ctx.log(`[os] sms: typed text while a send is ${this.replyStage} — IGNORED (finish that first): "${text.slice(0, 60)}"`)
+      this.ctx.log(`[os] sms: typed text while a send is ${this.replyStage} — REFUSED (finish that first): "${text.slice(0, 60)}"`)
       this.requestRender()
-      return
+      throw new Error(`a send is ${this.replyStage} — finish that first`)
     }
     if (this.replyStage === 'listening' || this.replyStage === 'transcribing') this.ctx.audio('stop')
     this.replyText = text.trim()

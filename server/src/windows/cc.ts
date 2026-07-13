@@ -276,8 +276,9 @@ export class CcWindow implements OsWindow {
    *  Enter is the confirm. At the directory picker there is no session yet:
    *  loud discard (pick a directory first; the picker is tap-driven). */
   async onTypedText(text: string): Promise<void> {
-    if (this.current) await this.current.onTypedText(text)
-    else this.ctx.log(`[os] cc: typed text with no session — DISCARDED (pick a directory first): "${text.slice(0, 60)}"`)
+    if (this.current) { await this.current.onTypedText(text); return }
+    this.ctx.log(`[os] cc: typed text with no session — REFUSED (pick a directory first): "${text.slice(0, 60)}"`)
+    throw new Error('pick a project directory first — the typed text becomes the prompt')
   }
   /** PC-native view: the picked session's transcript pane (picker → fallback). */
   surfaceView() { return this.current?.surfaceView() ?? null }

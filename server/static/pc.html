@@ -29,6 +29,15 @@
   header button.danger { color: #ff9060; border-color: #5f3a2a; }
   header label { color: #6a8f6a; cursor: pointer; user-select: none; }
   main { flex: 1; display: flex; min-height: 0; }
+  #confirm-banner {
+    display: flex; gap: 12px; align-items: center; padding: 10px 16px;
+    background: #1c1a06; border-bottom: 1px solid #5f5a2a; color: #f0e68c;
+  }
+  #confirm-text { flex: 1; white-space: pre-wrap; }
+  #confirm-banner button {
+    background: #24240f; color: #f0e68c; border: 1px solid #5f5a2a;
+    border-radius: 4px; padding: 5px 14px; cursor: pointer; font: inherit;
+  }
   #screen-wrap {
     flex: 0 0 auto; display: flex; align-items: flex-start; justify-content: center;
     padding: 18px;
@@ -88,6 +97,11 @@
   <button id="soft-reset" title="Refresh the glasses BLE connection (via the phone)">Soft Reset</button>
   <button id="hard-reset" class="danger" title="Kill + rebuild the entire live system (durable data kept)">Hard Reset</button>
 </header>
+<div id="confirm-banner" style="display:none">
+  <span id="confirm-text"></span>
+  <button id="confirm-yes">✓ Confirm</button>
+  <button id="confirm-no">✗ Reject</button>
+</div>
 <main>
   <div id="screen-wrap">
     <canvas id="screen" width="1152" height="576"></canvas>

@@ -494,9 +494,9 @@ export class MailWindow implements OsWindow {
    *  Reply/Compose first; reading and lists are tap-driven). */
   async onTypedText(text: string): Promise<void> {
     if (this.level !== 'compose' || this.composeStage !== 'body') {
-      this.ctx.log(`[os] mail: typed text outside a compose body (level=${this.level}, stage=${this.composeStage}) — DISCARDED (start a Reply/Compose first): "${text.slice(0, 60)}"`)
+      this.ctx.log(`[os] mail: typed text outside a compose body (level=${this.level}, stage=${this.composeStage}) — REFUSED (start a Reply/Compose first): "${text.slice(0, 60)}"`)
       this.requestRender()
-      return
+      throw new Error('start a Reply or Compose first — typed text is the message body')
     }
     if (this.listening || this.transcribing) this.ctx.audio('stop')
     this.listening = false

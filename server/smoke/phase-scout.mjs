@@ -18,7 +18,13 @@ import { parseMarkdown, splitDocForPages } from '../dist/os-content.js'
 import { SessionLevel } from '../dist/windows/_session.js'
 import { ScoutWindow } from '../dist/windows/scout.js'
 import { kbdModel, KBD_GROUPS } from '../dist/windows/_kbd.js'
-import { deliverLiveFrame, scoutLiveStatus } from '../dist/scout-live.js'
+import { deliverLiveFrame, scoutLiveStatus, setScoutSurfacesProvider } from '../dist/scout-live.js'
+
+// Multi-surface truthfulness (F5): deliverLiveFrame now rejects outright when
+// ZERO display surfaces are attached — this harness drives an in-process
+// ScoutWindow with no OsSession, so stub one attached surface (the pre-F5
+// world this file's assertions were written against).
+setScoutSurfacesProvider(() => 1)
 import {
   composeScene, composeFullBleedScene, estimateLayoutFrameBytes, LAYOUT_FRAME_BUDGET_BYTES,
   fwTextWidth,
@@ -192,8 +198,16 @@ try {
     assert.ok(!v.scrollContent, 'initial view is NOT scroll-read (menued-first)')
     assertComposable(v, 'initial view')
 
+    // ZERO surfaces attached → truthful reject BEFORE anything else (F5: the
+    // boot-lifetime sink must not fabricate 'displayed' with nobody looking).
+    setScoutSurfacesProvider(() => 0)
+    let r = await deliverLiveFrame({ kind: 'text', text: 'nobody is looking' })
+    assert.equal(r.ok, false, 'zero-surface live frame rejected')
+    assert.ok(r.detail.includes('no display surface attached'), 'reject reason names the no-surface rule')
+    setScoutSurfacesProvider(() => 1)
+
     // Live frame while idle → truthful reject.
-    let r = await deliverLiveFrame({ kind: 'text', text: 'too early' })
+    r = await deliverLiveFrame({ kind: 'text', text: 'too early' })
     assert.equal(r.ok, false, 'idle live frame rejected')
     assert.ok(r.detail.includes('no Scout turn in flight'), 'reject reason names the rule')
 
