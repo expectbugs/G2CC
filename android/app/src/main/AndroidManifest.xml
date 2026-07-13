@@ -72,6 +72,16 @@
             </intent-filter>
         </activity>
 
+        <!-- Phone control mode (multi-surface 2026-07-13): landscape-fullscreen
+             mirror + touch/keyboard input surface. Launched from the harness'
+             "Phone Control" button only — not exported. Locked landscape: the
+             576×288 (2:1) mirror is the whole point of the screen. -->
+        <activity
+            android:name=".harness.ControlActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:label="G2CC Control" />
+
         <!-- Owns the BLE connection loop (scan/auth/keepalive/sync/watchdog/renewal/render/
              auto-recovery); survives the Activity being backgrounded or destroyed. -->
         <service

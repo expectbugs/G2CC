@@ -51,6 +51,7 @@ class HarnessActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var connectBtn: Button
     private lateinit var disconnectBtn: Button
+    private lateinit var controlBtn: Button
     private lateinit var notifAccessBtn: Button
     private lateinit var diagCheck: CheckBox
     private lateinit var boundsCheck: CheckBox
@@ -102,6 +103,10 @@ class HarnessActivity : AppCompatActivity() {
         boundsCheck.setOnCheckedChangeListener { _, _ -> updateMirror(lastScene) }
         connectBtn.setOnClickListener { DiagLog.log("btn", "Connect tapped"); onConnectTap() }
         disconnectBtn.setOnClickListener { DiagLog.log("btn", "Disconnect tapped (MANUAL)"); onDisconnectTap() }
+        controlBtn.setOnClickListener {
+            DiagLog.log("btn", "Phone Control tapped")
+            startActivity(Intent(this, ControlActivity::class.java))
+        }
         notifAccessBtn.setOnClickListener {
             DiagLog.log("btn", "Notification access tapped")
             try {
@@ -166,6 +171,12 @@ class HarnessActivity : AppCompatActivity() {
         val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         row.addView(connectBtn, lp); row.addView(disconnectBtn, lp)
         root.addView(row)
+
+        // Phone control mode (multi-surface 2026-07-13): the landscape mirror +
+        // touch surface. Always enabled — it works with NO glasses (the service
+        // enters control mode and runs the WS renderer-less).
+        controlBtn = Button(this).apply { text = "Phone Control (landscape mirror — works without glasses)" }
+        root.addView(controlBtn)
 
         // Phase 9: the one-time "Notification access" grant row (prime-directive
         // compliant: one tap at home, then the phone goes back in the pocket).

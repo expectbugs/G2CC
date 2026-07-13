@@ -4,6 +4,35 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-13 — **APK v1.18: phone control mode (multi-surface Workstream 3)**
+
+The phone screen becomes a G2 surface of its own: new landscape-fullscreen
+`ControlActivity` (immersive, keep-screen-on, launched from the harness' "Phone
+Control" button) draws the live mirror FIT-scaled and drives the SAME persistent
+OS session with ring-parity touch — tap a drawn list row → `hub_select{row}`,
+tap elsewhere → `tap`, double-tap → back, drag → one `focus{1|2}` per 48
+scene-px (pixels-not-timers pacing; drag up = 2 = next, ws-handler f3
+semantics) — plus a summonable keyboard row that sends whole typed lines as the
+new `input{event:'text'}` (Enter IS the confirm; failed sends keep the text).
+Overlay ⟳ Soft / ⏻ Hard Reset buttons, both AlertDialog-confirmed.
+
+Service-side, BLE became OPTIONAL where it used to gate everything:
+`enterServerMode()` kept its exact guard but delegates to the extracted
+`startServerWs()`; new `enterControlMode()` (FGS `ACTION_CONTROL`,
+`startForControl()`, pref-persisted for the sticky relaunch) runs the WS with
+no glasses. The render pump now decodes BEFORE the renderer check (mirror-only
+scenes land in `sceneFlow`; the glasses path stays order-identical), a 1 s
+mirror-clock job re-decodes the last wire scene on minute ticks while
+renderer-less, and `teardown(keepWs)` splits BLE-only from full teardown —
+`recoverSession()` keeps the WS in control mode, and the new `softReset()`
+(= server `glasses_reset`) refreshes the glasses BLE session under a live WS,
+repainted via the idempotent `os_attach{surface:'phone'}` re-attach in
+`maybeColdLaunch`. `hard_reset` → full local teardown + auto re-entry into the
+previous mode(s). `client_hb` now reports `g2Connected` (R-lens Ready).
+New pure modules `MirrorGeometry` (adaptive list pitch min(34, h/n), shared by
+ExpectedMirror DRAWING and hit-testing so taps land on drawn rows) +
+`ControlInputMapper`; unit suite 150 → 189.
+
 ## (unstamped) — 2026-07-09 (later still) — **Billing audit: subscription is structural now**
 
 Adam flagged the dollar figures in the turn logs. Verified end-to-end: **no API billing ever
