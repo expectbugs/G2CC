@@ -4,7 +4,7 @@
 // so every window module and the host import from one place. `implements
 // OsWindow` is the enforced API (TypeScript strict). See docs/WINDOW_API.md.
 
-import type { WireScene } from '@g2cc/shared'
+import type { WireScene, SurfaceView } from '@g2cc/shared'
 import type { SessionPool, PoolEntry } from '../session-pool.js'
 import type { G2CCConfig } from '../config.js'
 import type { MemoAudio } from '../memo.js'
@@ -63,6 +63,11 @@ export interface WmContext {
    *  mutates; the next attach re-renders everything). Absent = assume yes —
    *  keeps in-process smoke-test WmContext stubs working unchanged. */
   hasDisplay?(): boolean
+  /** PC-native views (2026-07-13): push the active window's full-fidelity pane
+   *  content to BROWSER surfaces (null = no native view — the page falls back
+   *  to its scene-derived text panel). Wired by os-session; absent in smoke
+   *  stubs. */
+  sendSurfaceView?(view: SurfaceView | null): void
 }
 
 /** Main's category-launcher groups (upgrades.md v2 Phase 11, XFCE-style). Each
@@ -147,6 +152,12 @@ export interface OsWindow {
    *  WM falls back to onStt (which accepts only mid-dictation and self-
    *  discards loudly otherwise), else logs a loud no-consumer line. */
   onTypedText?(text: string): Promise<void>
+  /** PC-native views (2026-07-13): the window's full-fidelity pane content for
+   *  big screens, computed per render and broadcast to browser surfaces. MUST
+   *  be cheap + side-effect-free (the preview() cost class: in-memory fields
+   *  ONLY — no DB, no subprocess, no phone request). null/absent = the PC page
+   *  falls back to its scene-derived text panel. */
+  surfaceView?(): SurfaceView | null
   /** Release any window-held resource (timers, pollers) on ws-close. The WM
    *  calls it for every window in dispose(). Absent = nothing to release. */
   dispose?(): void

@@ -945,6 +945,19 @@ export class WindowManager {
           if (this.activeOverlay && view === this.activeOverlay) this.overlayRendered = true
           this.lastBlankSurface = null   // B1: a non-blank frame goes on glass
           this.ctx.send(scene)
+          // PC-native views (2026-07-13): the active window's full-fidelity
+          // pane rides beside every window render (browser surfaces only —
+          // os-session gates it). Cheap by contract (in-memory fields only);
+          // an overlay keeps the underlying window's pane (the mirror shows
+          // the overlay; the pane is a reading aid). Failure-isolated.
+          if (this.ctx.sendSurfaceView) {
+            try {
+              this.ctx.sendSurfaceView(this.active.surfaceView?.() ?? null)
+            } catch (e) {
+              this.ctx.log(`[os] surfaceView failed (${this.active.id}): ${(e as Error).message}`)
+              this.ctx.sendSurfaceView(null)
+            }
+          }
           // Phase 4 queue flush: promote ONE pending overlay once nothing
           // blocks. Setting state + renderQueued re-iterates the already-
           // serialized do/while — no reentrancy (B5).
@@ -1022,6 +1035,9 @@ export class WindowManager {
           this.lastView = null   // the ribbon has no menu/browse list — taps are tap=enter, scroll=focus
           this.lastBlankSurface = null   // B1: a non-blank frame goes on glass
           this.ctx.send(scene)
+          // At the ribbon root no window is on screen — clear the PC pane to
+          // its scene-derived fallback.
+          this.ctx.sendSurfaceView?.(null)
           // Queue flush at the ribbon (review 2026-07-05): a queued timer/call
           // alarm must not stall while the ribbon is the surface. Promoting sets
           // activeOverlay, so requestRender falls through to the WINDOW loop

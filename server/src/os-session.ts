@@ -265,6 +265,7 @@ export class OsSession {
       g2Battery: () => this.g2Battery,
       lastDictationAudio: () => this.lastDictationAudio,
       hasDisplay: () => this.hasDisplay(),
+      sendSurfaceView: (view) => { this.broadcastToBrowsers({ type: 'surface_view', view }) },
       dismissPhoneNotification: (key) => {
         this.toPhone({ type: 'notification_cancel', key }, 'notification_cancel')
         // No reply channel — the phone's cancel is idempotent and best-effort

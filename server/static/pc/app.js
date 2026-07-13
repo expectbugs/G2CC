@@ -104,20 +104,47 @@ function updatePanel() {
   panelBody.className = 'panel-pre'
 }
 
+let readerFontPx = Number(localStorage.getItem('pc-reader-font') ?? 19)
 function renderNativeView() {
   if (!nativeView) { updatePanel(); return }
   if (nativeView.kind === 'reader') {
     panelTitle.textContent = `📖 ${nativeView.title ?? 'Reader'} · ${nativeView.progress ?? ''}`
-    panelBody.textContent = nativeView.body ?? ''
+    // Only reset the text (and the scroll position) when the CHAPTER changed —
+    // page turns within a chapter just re-sync the scroll. Cheap fingerprint,
+    // not the whole body, as the identity key.
+    const chapterKey = `${nativeView.title}|${nativeView.body?.length ?? 0}|${(nativeView.body ?? '').slice(0, 48)}`
+    if (panelBody.dataset.chapter !== chapterKey) {
+      panelBody.textContent = nativeView.body ?? ''
+      panelBody.dataset.chapter = chapterKey
+    }
     panelBody.className = 'panel-reader'
+    panelBody.style.fontSize = `${readerFontPx}px`
+    // Scroll-sync to exactly where the glasses are (per-page char offsets).
+    const off = nativeView.pageOffsets?.[nativeView.page] ?? 0
+    const frac = (nativeView.body?.length ?? 0) > 0 ? off / nativeView.body.length : 0
+    panelBody.scrollTop = Math.max(0, frac * (panelBody.scrollHeight - panelBody.clientHeight))
   } else if (nativeView.kind === 'session') {
     panelTitle.textContent = `💬 ${nativeView.title ?? 'Session'}${nativeView.state ? ` · ${nativeView.state}` : ''}`
     panelBody.textContent = nativeView.body ?? ''
     panelBody.className = 'panel-pre'
+    panelBody.style.fontSize = ''
+    delete panelBody.dataset.chapter
+    // A streaming session reads newest-at-the-bottom — follow it.
+    panelBody.scrollTop = panelBody.scrollHeight
   } else {
     updatePanel()
   }
 }
+$('font-minus').addEventListener('click', () => {
+  readerFontPx = Math.max(12, readerFontPx - 2)
+  localStorage.setItem('pc-reader-font', String(readerFontPx))
+  renderNativeView()
+})
+$('font-plus').addEventListener('click', () => {
+  readerFontPx = Math.min(36, readerFontPx + 2)
+  localStorage.setItem('pc-reader-font', String(readerFontPx))
+  renderNativeView()
+})
 
 // ---- typing-target hint ----
 function updateTargetHint() {

@@ -44,7 +44,13 @@
     flex: 1 1 auto; min-width: 260px; display: flex; flex-direction: column;
     border-left: 1px solid #1e2e1e; background: #0c100c; min-height: 0;
   }
-  #panel-title { padding: 8px 14px; color: #4cf04c; border-bottom: 1px solid #1e2e1e; }
+  #panel-head { display: flex; align-items: center; border-bottom: 1px solid #1e2e1e; }
+  #panel-title { flex: 1; padding: 8px 14px; color: #4cf04c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .font-btns { padding-right: 10px; display: flex; gap: 4px; }
+  .font-btns button {
+    background: #101a10; color: #9fdf9f; border: 1px solid #2a452a;
+    border-radius: 4px; padding: 2px 8px; cursor: pointer; font: 12px inherit;
+  }
   #panel-body {
     flex: 1; overflow: auto; padding: 14px; white-space: pre-wrap;
     word-break: break-word;
@@ -87,7 +93,10 @@
     <canvas id="screen" width="1152" height="576"></canvas>
   </div>
   <div id="panel">
-    <div id="panel-title">full text</div>
+    <div id="panel-head">
+      <div id="panel-title">full text</div>
+      <span class="font-btns"><button id="font-minus" title="smaller reader text">A−</button><button id="font-plus" title="bigger reader text">A+</button></span>
+    </div>
     <div id="panel-body" class="panel-pre">(waiting for the first render)</div>
   </div>
 </main>

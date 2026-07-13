@@ -116,5 +116,43 @@ const hasRegion = (sc, name) => !!sc?.regions.find((r) => r.name === name)
   console.error('  2b. aria `timer:` intent parity (typed == confirm-accepted) ✓')
 }
 
+// ---- Part 3: PC-native views (surface_view) ----
+{
+  const views = []
+  const scenes = []
+  const wm = new WindowManager({
+    send: (sc) => scenes.push(sc),
+    audio: () => {}, displayReload: () => {},
+    log: (m) => console.error(`      ${m}`),
+    pool: { count: 0 },
+    config: { claude: { model: 'opus', effort: 'max', defaultMode: 'bypassPermissions' }, de: { rootNav: 'ribbon' } },
+    registerWatchdog: () => {}, unregisterWatchdog: () => {},
+    sendSurfaceView: (v) => views.push(v),
+  })
+  wm.requestRender()
+  await settle(() => scenes[scenes.length - 1], (sc) => hasRegion(sc, 'strip'), 'ribbon render (part 3)')
+  assert.ok(views.length > 0 && views[views.length - 1] === null, 'the ribbon root must clear the PC pane (null view)')
+  wm.switchTo('reader')   // no book open → surfaceView() returns null → fallback
+  await settle(() => scenes[scenes.length - 1], (sc) => !hasRegion(sc, 'strip'), 'reader render')
+  assert.equal(views[views.length - 1], null, 'reader with no book must send a null view (fallback panel)')
+  wm.dispose()
+  console.error('  3a. surface_view: ribbon + bookless reader send null (fallback) ✓')
+
+  // SessionLevel.surfaceView is real content with zero subprocess involvement.
+  const ctx = {
+    send: () => {}, audio: () => {}, displayReload: () => {}, log: () => {},
+    pool: { count: 0 },
+    config: { claude: { model: 'opus', effort: 'max', defaultMode: 'bypassPermissions' }, de: {} },
+    registerWatchdog: () => {}, unregisterWatchdog: () => {},
+  }
+  const s = new SessionLevel(ctx, '/home/user/G2CC', { model: 'opus', effort: 'max' }, () => {}, 'Scout', 'Ask', 'scout')
+  const sv = s.surfaceView()
+  assert.equal(sv.kind, 'session')
+  assert.equal(sv.window, 'scout')
+  assert.ok(sv.title.includes('Scout') && sv.title.includes('G2CC'), 'title carries who + project')
+  assert.ok(sv.body.includes('Ready.'), 'body is the unpaginated session doc')
+  console.error('  3b. SessionLevel.surfaceView: kind/window/title/body ✓')
+}
+
 console.log('phase-typed: ALL OK')
 await getPool().end()

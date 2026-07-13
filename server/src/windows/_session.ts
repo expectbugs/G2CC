@@ -4,7 +4,7 @@
 // Pure move out of os-windows.ts; behaviour unchanged. See docs/WINDOW_API.md.
 
 import { basename } from 'node:path'
-import { DE_CONTENT_W, DE_CONTENT_H } from '@g2cc/shared'
+import { DE_CONTENT_W, DE_CONTENT_H, type SurfaceView } from '@g2cc/shared'
 import type { WmContext, WinView } from './types.js'
 import { BROWSE_PAGE, MORE_ROW, PREV_ROW } from './_browse.js'
 import { cycleNext, fmtStamp, oneLine, fbPagePx } from './_util.js'
@@ -1047,6 +1047,19 @@ class SessionLevel {
     ]))
     this.page = 0
     this.requestRender()
+  }
+
+  /** PC-native view (multi-surface 2026-07-13): the session doc (prompt +
+   *  streamed response) unpaginated, for the PC page's transcript pane.
+   *  In-memory only (this.doc is already the render source). */
+  surfaceView(): SurfaceView {
+    return {
+      kind: 'session',
+      window: this.windowId,
+      title: `${this.who} · ${basename(this.projectPath)}`,
+      body: blocksToText(this.doc),
+      state: this.phase(),
+    }
   }
 
   /** Multi-surface typed text (2026-07-13, Adam's call): a typed line from the

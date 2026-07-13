@@ -808,6 +808,37 @@ export interface GlassesResetMsg { type: 'glasses_reset' }
  *  page shows "system restarting" and lets its reconnect loop re-attach. */
 export interface HardResetMsg { type: 'hard_reset' }
 
+/** PC-native views (multi-surface 2026-07-13): the active window's optional
+ *  FULL-FIDELITY content for big screens, broadcast to BROWSER surfaces
+ *  alongside each render. The glasses scene stays the source of interaction;
+ *  these are richer READ panes (in-memory only — the preview() cost class). */
+export interface SurfaceViewReader {
+  kind: 'reader'
+  window: 'reader'
+  title: string
+  /** The WHOLE current chapter (pages joined) — never truncated. */
+  body: string
+  /** Current glasses page index + each page's char offset into body, so the
+   *  pane can scroll-sync to exactly where the glasses are. */
+  page: number
+  pageOffsets: number[]
+  progress: string
+}
+export interface SurfaceViewSession {
+  kind: 'session'
+  window: string
+  title: string
+  /** The session doc (prompt + streamed response), unpaginated. */
+  body: string
+  /** Live phase line (thinking/tool/writing…) or null when idle. */
+  state: string | null
+}
+export type SurfaceView = SurfaceViewReader | SurfaceViewSession
+export interface SurfaceViewMsg {
+  type: 'surface_view'
+  view: SurfaceView | null
+}
+
 export type ServerMessage =
   | AuthResultMsg
   | HbMsg
@@ -844,3 +875,4 @@ export type ServerMessage =
   | OsStatusMsg
   | GlassesResetMsg
   | HardResetMsg
+  | SurfaceViewMsg

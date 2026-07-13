@@ -223,4 +223,6 @@ export class AriaWindow implements OsWindow {
   /** Typed text (multi-surface 2026-07-13): straight to the session — Enter is
    *  the confirm; intents (`timer:`/`memo:`/`note:`) keep parity via tryIntent. */
   async onTypedText(text: string): Promise<void> { await this.session.onTypedText(text) }
+  /** PC-native view: the session transcript pane. */
+  surfaceView() { return this.session.surfaceView() }
 }

@@ -279,4 +279,6 @@ export class CcWindow implements OsWindow {
     if (this.current) await this.current.onTypedText(text)
     else this.ctx.log(`[os] cc: typed text with no session — DISCARDED (pick a directory first): "${text.slice(0, 60)}"`)
   }
+  /** PC-native view: the picked session's transcript pane (picker → fallback). */
+  surfaceView() { return this.current?.surfaceView() ?? null }
 }
