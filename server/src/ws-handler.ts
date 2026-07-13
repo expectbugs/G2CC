@@ -1074,40 +1074,44 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         break
       }
       if (client.osScreen === 'de') {
-        // Multi-surface: input from ANY attached surface drives the one WM.
+        // Multi-surface: input from ANY attached surface drives the one WM,
+        // serialized in ARRIVAL ORDER via the session input chain (two
+        // surfaces' events must not interleave at handler await points).
         if (!client.surface) { console.warn('[ws] DE input before this connection attached a surface — ignoring'); break }
-        const wm = getOsSession().wm
+        const session = getOsSession()
+        const wm = session.wm
         if (msg.event === 'hub_select') {
           // The firmware reports the tapped row: widgetType = our container NAME
           // ('menu' or 'browse'), index = the row (omitted f4 ⇒ 0 handled client-side).
           const region = msg.widgetType ?? '?'
           const index = msg.index ?? 0
           console.log(`[ws] DE select ${region}[${index}]`)
-          await wm.onSelect(region, index)
+          await session.enqueueInput(`select ${region}[${index}]`, () => wm.onSelect(region, index))
         } else if (msg.event === 'double_tap' || (msg.event === 'hub_gesture' && msg.code === 3)) {
           console.log('[ws] DE back (double-tap)')
-          await wm.onBackGesture()
+          await session.enqueueInput('back', () => wm.onBackGesture())
         } else if (msg.event === 'tap') {
           // Sys tap — no DE consumer since the Files antenna revert (2026-06-11);
           // the WM keeps the blanked guard + loud no-op log (the blank scene's
           // wake antenna still produces these). Phase 2: at the ribbon root a tap
           // = enter the highlighted window (wm.onTapGesture routes it).
-          await wm.onTapGesture()
+          await session.enqueueInput('tap', () => wm.onTapGesture())
         } else if (msg.event === 'focus') {
           // Phase 2: the ribbon strip is a scroll=true antenna — each scroll notch
           // fires a focus event carrying the f3 DIRECTION (1=up, 2=down; confirmed
           // 2026-06-10, docs/G2_BLE_PROTOCOL.md §6.6). The WM moves the ribbon
           // cursor; it is a no-op in menu mode / inside a window / blanked.
-          if (msg.value === 1) await wm.onScroll('up')
-          else if (msg.value === 2) await wm.onScroll('down')
+          if (msg.value === 1) await session.enqueueInput('scroll up', () => wm.onScroll('up'))
+          else if (msg.value === 2) await session.enqueueInput('scroll down', () => wm.onScroll('down'))
           else console.log(`[ws] DE focus unknown f3=${msg.value} — not scrolling`)
         } else if (msg.event === 'text') {
           // Multi-surface (2026-07-13): a typed line from the PC page / phone
           // control keyboard → the active window (Enter IS the confirm for
           // exact, user-authored text). NEVER truncated.
           if (typeof msg.text === 'string') {
-            console.log(`[ws] DE typed text (${msg.text.length} chars) from surface ${client.surface?.id}`)
-            await wm.onTypedText(msg.text)
+            const text = msg.text
+            console.log(`[ws] DE typed text (${text.length} chars) from surface ${client.surface?.id}`)
+            await session.enqueueInput('typed text', () => wm.onTypedText(text))
           } else {
             console.warn('[ws] input event \'text\' without a text field — ignored')
           }

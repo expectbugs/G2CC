@@ -176,6 +176,10 @@ sealed interface ClientMessage {
          *  09-00/09-01 device-info frames (G2_BLE_PROTOCOL.md §10 f4.f12).
          *  Default null = omitted; old servers ignore it. [U] on-glass. */
         val g2Battery: Int? = null,
+        /** Are the glasses BLE-connected right now? (multi-surface 2026-07-13,
+         *  APK v1.18+ — the R lens Ready signal). Default null = omitted; old
+         *  servers ignore it, new servers feed it to the PC page's os_status. */
+        val g2Connected: Boolean? = null,
     ) : ClientMessage
 
     /** A phone notification forwarded by NotifyListener (Phase 9, READ-ONLY —
@@ -282,21 +286,40 @@ sealed interface ClientMessage {
     data class Diag(val text: String) : ClientMessage
 
     /** Opt into Glasses-OS mode — the server then drives the display via
-     *  `render` and reacts to `input` (Phase 1). */
+     *  `render` and reacts to `input` (Phase 1). Multi-surface (2026-07-13):
+     *  [surface] declares what kind of surface this connection is ('phone' |
+     *  'browser'); the phone always sends "phone". Default null omits the field
+     *  (encodeDefaults=false), preserving the pre-1.18 bare wire shape
+     *  `{"type":"os_attach"}` which old servers treat as 'phone'. Re-sending on
+     *  an attached connection is an idempotent re-attach → full re-render (used
+     *  after a BLE cold-launch joins a live control-mode WS). */
     @Serializable @SerialName("os_attach")
-    data object OsAttach : ClientMessage
+    data class OsAttach(val surface: String? = null) : ClientMessage
 
     /** A ring/gesture input event (from EventParser) forwarded to the PC.
      *  Optional fields carry per-variant payloads. */
     @Serializable @SerialName("input")
     data class Input(
-        val event: String,                  // tap|double_tap|scroll_up|scroll_down|scroll_focus|hub_select|hub_gesture|focus
+        val event: String,                  // tap|double_tap|scroll_up|scroll_down|scroll_focus|hub_select|hub_gesture|focus|text
         val widgetType: String? = null,     // hub_select
         val index: Int? = null,             // hub_select
         val code: Int? = null,              // hub_gesture
         val region: String? = null,         // focus — the focused region's name
         val value: Int? = null,             // focus — raw f3 (observed 1/2)
+        /** event 'text' (multi-surface 2026-07-13): one Enter-submitted line/
+         *  paragraph from the control-mode keyboard. Arbitrary length — NEVER
+         *  truncated (the no-truncation rule). */
+        val text: String? = null,
     ) : ClientMessage
+
+    /** Ask the server to reset things (multi-surface 2026-07-13).
+     *  'soft' = refresh the GLASSES connection (server routes `glasses_reset`
+     *  to the phone surface; the phone sends this only if it ever wants the
+     *  server-orchestrated path — its local button calls softReset() directly).
+     *  'hard' = clean-slate the ENTIRE system (server broadcasts `hard_reset`
+     *  then rebuilds in-process; ALL durable user data is kept). */
+    @Serializable @SerialName("reset")
+    data class Reset(val kind: String) : ClientMessage   // 'soft' | 'hard'
 
     /** Result of a Phase-4a inline reply we attempted (loud either way). */
     @Serializable @SerialName("notification_reply_result")
@@ -499,4 +522,19 @@ sealed interface ServerMessage {
     /** Ring the phone to find it (Phase 15). */
     @Serializable @SerialName("phone_locate")
     data class PhoneLocate(val action: String) : ServerMessage   // 'start' | 'stop'
+
+    /** Soft Reset, server-orchestrated (multi-surface 2026-07-13 — e.g. the PC
+     *  page's button): refresh the glasses BLE connection KEEPING the WebSocket.
+     *  The app runs its keepWs session recovery, then re-sends os_attach — the
+     *  server answers any os_attach with a full re-render. */
+    @Serializable @SerialName("glasses_reset")
+    data object GlassesReset : ServerMessage
+
+    /** Hard Reset broadcast (multi-surface 2026-07-13) — sent to ALL surfaces
+     *  immediately BEFORE the server clean-slates itself in-process and
+     *  terminates every socket. The phone reacts with a full local teardown
+     *  (BLE + WS) then auto re-enters its previous mode; the reconnect loop
+     *  finds the rebuilt server. */
+    @Serializable @SerialName("hard_reset")
+    data object HardReset : ServerMessage
 }

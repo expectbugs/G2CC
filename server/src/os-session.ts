@@ -77,6 +77,18 @@ export class OsSession {
    *  longer rejects — asked on the glasses, answerable from the browser, and
    *  it waits forever by design (NO TIMEOUTS). Hard reset rejects them loudly. */
   confirmCallbacks = new Map<string, (result: 'confirmed' | 'rejected') => void>()
+  /** DE input serialization (the _session captureChain pattern): with input
+   *  now arriving from MULTIPLE surfaces, events apply strictly in arrival
+   *  order — two surfaces' taps can't interleave at a handler's await points.
+   *  Handler failures log loudly and never poison the chain. */
+  private inputChain: Promise<void> = Promise.resolve()
+  enqueueInput(what: string, fn: () => Promise<void>): Promise<void> {
+    const next = this.inputChain.then(fn).catch((e: unknown) => {
+      console.error(`[os-session] input handler (${what}) failed: ${e instanceof Error ? e.message : String(e)}`)
+    })
+    this.inputChain = next
+    return next
+  }
 
   constructor(readonly config: G2CCConfig) {
     this.pool = new SessionPool()
