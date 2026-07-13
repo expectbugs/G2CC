@@ -23,6 +23,7 @@ import { homedir } from 'node:os'
 import { loadConfig } from './config.js'
 import { startDiscovery, stopDiscovery } from './discovery.js'
 import { handleConnection, setWatchdog, closeAllClients } from './ws-handler.js'
+import { initOsSession, getOsSession } from './os-session.js'
 import { Watchdog } from './watchdog.js'
 import { renderSetupPage, getLocalInterfaces, isTailscaleOrLoopbackAddr } from './setup-page.js'
 import { getEndpointJson } from './endpoints.js'
@@ -57,6 +58,13 @@ watchdogInstance.on('crash_loop', (sessionId: string) => {
   console.error(`[g2cc-server] Session ${sessionId} in crash loop — stopped respawning`)
 })
 setWatchdog(watchdogInstance)
+
+// Multi-surface persistence (2026-07-13): THE OS session — WindowManager +
+// DE SessionPool — is created at boot and survives every client disconnect.
+// Connections attach to it as surfaces (phone / PC browser) via os_attach.
+// closeAllClients is injected for hardReset (a direct import from os-session
+// would be a ws-handler module cycle).
+initOsSession(config, watchdogInstance, closeAllClients)
 
 const server = Fastify({ logger: false })
 
@@ -274,6 +282,25 @@ function shutdown(): void {
   // shutdown hung forever after this log line. The app auto-reconnects.
   const nClients = closeAllClients()
   if (nClients > 0) console.log(`[g2cc-server] terminated ${nClients} live WS client(s) for shutdown`)
+  // Multi-surface persistence: the DE pool is session-owned (survives client
+  // disconnects), so SHUTDOWN must reap it — kill every CC subprocess, flush
+  // the resume index, and dispose the WM (hub listeners, pacers, window
+  // resources like the Terminal poll). Loud counts; nothing silent.
+  try {
+    const session = getOsSession()
+    session.wm.dispose()
+    // Flush the resume index BEFORE killing — persistSessionMeta reads the
+    // LIVE session map (ccSessionIds); after the kill loop it would be empty.
+    session.pool.persistSessionMeta()
+    const deCount = session.pool.count
+    for (const entry of session.pool.allEntries()) {
+      watchdogInstance.unregister(entry.id)
+      session.pool.closeSession(entry.id)
+    }
+    if (deCount > 0) console.log(`[g2cc-server] reaped ${deCount} DE CC session(s) for shutdown (resume index flushed first)`)
+  } catch (err) {
+    console.error('[g2cc-server] OS-session shutdown reap failed:', err)
+  }
   // Bug fix #9: catch close rejection — otherwise we'd hang on signal if
   // server.close() rejects (rare but possible: stuck connection). Loud-and-
   // proud per the no-silent-failure rule.

@@ -61,16 +61,29 @@ export function unregisterScoutLiveSink(s: ScoutLiveSink): void {
 }
 
 export interface ScoutLiveStatus {
+  /** Multi-surface (2026-07-13): the WM is boot-created now, so the sink is
+   *  registered from boot — this field truthfully means "a ScoutWindow sink
+   *  exists", no longer "a phone is connected". See surfacesAttached for that. */
   clientConnected: boolean
+  /** How many display surfaces (phone / browser) are attached to the OS
+   *  session right now. 0 = a frame will be accepted+held/rendered but nobody
+   *  is looking at it. Provided by os-session at boot (avoids a module cycle). */
+  surfacesAttached: number
   windowActive: boolean
   turnBusy: boolean
   frameHeld: boolean
 }
 
+/** Injected by os-session.ts at boot (a provider fn, not an import — the
+ *  registry chain scout.ts → scout-live.ts must not import os-session back). */
+let surfacesProvider: (() => number) | null = null
+export function setScoutSurfacesProvider(fn: () => number): void { surfacesProvider = fn }
+
 export function scoutLiveStatus(): ScoutLiveStatus {
   const s = sink
-  if (!s) return { clientConnected: false, windowActive: false, turnBusy: false, frameHeld: false }
-  return { clientConnected: true, ...s.liveStatus() }
+  const surfacesAttached = surfacesProvider ? surfacesProvider() : 0
+  if (!s) return { clientConnected: false, surfacesAttached, windowActive: false, turnBusy: false, frameHeld: false }
+  return { clientConnected: true, surfacesAttached, ...s.liveStatus() }
 }
 
 /** One server-log line per frame outcome (Adam's testing 2026-07-09: the

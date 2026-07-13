@@ -54,8 +54,15 @@ export interface WmContext {
   requestSmsThread?(threadId: string, page: number): void
   /** Phase 4b: send an SMS (after the dictation confirm; needs SEND_SMS). */
   sendSms?(address: string, text: string): void
-  /** Phase 15: ring the phone to find it (start/stop). */
-  phoneLocate?(action: 'start' | 'stop'): void
+  /** Phase 15: ring the phone to find it (start/stop). Multi-surface: returns
+   *  false when no phone surface is attached (the ring did NOT happen) so the
+   *  caller can render the truthful failure instead of "Ringing your phone". */
+  phoneLocate?(action: 'start' | 'stop'): boolean
+  /** Multi-surface (2026-07-13): is ANY display surface attached? The render
+   *  pumps skip composing when nothing can show the frame (state still
+   *  mutates; the next attach re-renders everything). Absent = assume yes —
+   *  keeps in-process smoke-test WmContext stubs working unchanged. */
+  hasDisplay?(): boolean
 }
 
 /** Main's category-launcher groups (upgrades.md v2 Phase 11, XFCE-style). Each

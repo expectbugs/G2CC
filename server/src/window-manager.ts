@@ -603,8 +603,21 @@ export class WindowManager {
     }, 30_000)
   }
 
-  /** Detach from the global hub + kill timers (called on ws close — a dead WM
-   *  must not accumulate hub listeners or fire orphan popups/pacers). */
+  /** Multi-surface (2026-07-13): a surface just attached (os_attach — first
+   *  attach OR the app's re-attach after a BLE cold-launch). Force a full
+   *  repaint of the current state to every surface. Clearing lastBlankSurface
+   *  is MANDATORY: sendBlank dedupes byte-identical blank frames, so a surface
+   *  attaching while the screen is blanked would otherwise receive NOTHING
+   *  (dark glass, no state) until the next wake. */
+  onSurfaceAttached(): void {
+    this.lastBlankSurface = null
+    this.requestRender()
+  }
+
+  /** Detach from the global hub + kill timers (called at server shutdown /
+   *  hard reset — a dead WM must not accumulate hub listeners or fire orphan
+   *  popups/pacers). Multi-surface: NOT called on ws close any more — the
+   *  session outlives its surfaces. */
   dispose(): void {
     notifyHub.off('notification', this.onHubNotification)
     notifyHub.off('seen', this.onHubSeen)
@@ -632,6 +645,10 @@ export class WindowManager {
    *  is byte-identical to what the glass already shows; otherwise sends and
    *  records. Cache set only AFTER a successful send. */
   private sendBlank(scene: WireScene): void {
+    // Multi-surface: no surface → no send AND no cache write (a stale cache
+    // could otherwise dedupe away the first real blank after an attach;
+    // onSurfaceAttached clears it anyway — belt and braces).
+    if (this.ctx.hasDisplay && !this.ctx.hasDisplay()) return
     const surface = JSON.stringify(scene)
     if (surface === this.lastBlankSurface) return   // glass already shows exactly this
     this.ctx.send(scene)
@@ -774,6 +791,11 @@ export class WindowManager {
    *  one in flight, at most one queued (the latest state wins — view() always
    *  reads current state, so collapsing intermediate renders is correct). */
   requestRender(): void {
+    // Multi-surface: with ZERO surfaces attached there is nothing to paint —
+    // skip the compose entirely (the 30 s dashboard pacer would otherwise keep
+    // running view() DB queries into the void all day). State still mutates;
+    // onSurfaceAttached() re-renders everything on the next attach.
+    if (this.ctx.hasDisplay && !this.ctx.hasDisplay()) return
     if (this.blanked && !this.activeOverlay) {
       // Stay dark until the user double-taps back (background events keep
       // updating state; the wake render re-derives everything). A blanked
@@ -944,6 +966,8 @@ export class WindowManager {
    *  preview text then sends the shell's scene. */
   private renderRibbon(): void {
     if (!this.ribbon) return
+    // Multi-surface: nothing attached → nothing to paint (see requestRender).
+    if (this.ctx.hasDisplay && !this.ctx.hasDisplay()) return
     if (this.ribbonRendering) { this.ribbonRenderQueued = true; return }
     this.ribbonRendering = true
     void (async () => {

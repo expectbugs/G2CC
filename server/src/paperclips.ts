@@ -886,6 +886,25 @@ class PaperclipsEngine {
     this.save()
     return this.saveChain
   }
+
+  /** Hard Reset (multi-surface 2026-07-13): save, then drop the process-lifetime
+   *  jsdom entirely so the NEXT open rebuilds from the persisted save — the
+   *  "kill everything cleanly" contract. Loud; safe when never started. */
+  async shutdown(reason: string): Promise<void> {
+    if (!this.win && !this.jsdom) return
+    console.log(`[paperclips] shutdown (${reason}) — flushing save + dropping the jsdom`)
+    try { await this.flush() } catch (e) {
+      console.error(`[paperclips] shutdown flush failed (continuing teardown): ${e instanceof Error ? e.message : String(e)}`)
+    }
+    if (this.pacer) { clearInterval(this.pacer); this.pacer = null }
+    const old = this.jsdom
+    this.win = null
+    this.jsdom = null
+    this.starting = null   // a later open() boots fresh from the save
+    try { old?.window.close() } catch (e) {
+      console.error(`[paperclips] shutdown: closing window threw: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
 }
 
 interface ProjectObj { id: string; title?: string; priceTag?: string; description?: string; cost?: () => unknown; effect?: () => void }

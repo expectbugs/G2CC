@@ -829,13 +829,19 @@ class SessionLevel {
     if (intent.kind === 'findphone') {
       // Phase 15: ring the phone to find it. Loud both ends; the client maxes
       // STREAM_ALARM + plays a tone (~30 s, self-stopping; cancels on touch).
+      // Multi-surface: phoneLocate returns false when NO phone surface is
+      // attached — the old unconditional "Ringing your phone" would be a
+      // fabricated success (the loud-failure rule).
       if (this.ctx.phoneLocate) {
-        this.ctx.phoneLocate('start')
-        this.ctx.log('[intent] FIND PHONE — ring requested')
-        await this.setDoc([
-          { t: 'heading', text: 'Ringing your phone', meta: '🔊' },
-          { t: 'para', text: 'Playing a loud tone for ~30 s. Touch the phone to silence it.' },
-        ])
+        if (this.ctx.phoneLocate('start')) {
+          this.ctx.log('[intent] FIND PHONE — ring requested')
+          await this.setDoc([
+            { t: 'heading', text: 'Ringing your phone', meta: '🔊' },
+            { t: 'para', text: 'Playing a loud tone for ~30 s. Touch the phone to silence it.' },
+          ])
+        } else {
+          this.showError('No phone attached — the ring was NOT sent.', 'The phone app is not connected to the server right now.')
+        }
       } else {
         this.showError('Phone-finder unsupported by this client build.', 'Update the app to use it.')
       }
