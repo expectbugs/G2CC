@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocket } from 'ws'
-import { getPool } from '../dist/store.js'
+import { query, getPool } from '../dist/store.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PORT = 7398
@@ -144,9 +144,48 @@ try {
   c2.ws.terminate()
   await sleep(200)
 
+  // ---- Part 2: restart resume (os-state pointer across a server restart) ----
+  // The tap above persisted active_window='main' (the boot default — restoring
+  // it is a no-op), so verify the WRITE happened, then point it at a real
+  // window and restart: the fresh process must reopen it. (Driving the ribbon
+  // drawer to reach Timers by taps would be UI-fragile; rewriting the pointer
+  // tests exactly the persist/restore contract.)
+  const t2 = Date.now()
+  let persisted = null
+  while (persisted === null && Date.now() - t2 < 5000) {
+    const r = await query("SELECT value FROM os_state WHERE key = 'active_window'")
+    persisted = r.rows[0]?.value ?? null
+    if (persisted === null) await sleep(100)
+  }
+  assert.equal(persisted, 'main', `switchTo must persist the active window (got ${JSON.stringify(persisted)})`)
+  console.error('  active_window persisted on switchTo ✓')
+
+  await query(`UPDATE os_state SET value = to_jsonb('timers'::text) WHERE key = 'active_window'`)
+  await stopServer(state)
+  assert.ok(state.log.includes('Shutting down'), 'graceful shutdown must run')
+  state = startServer()
+  await waitListening(state)
+  console.error('  server restarted on the same HOME/DB ✓')
+
+  const c3 = await attachSurface('phone')
+  // The restore is an async DB load racing the attach — wait for the Timers
+  // scene (title contains 'Timers'), whether it is the first render or follows
+  // a root paint.
+  await waitRender(c3, (s) => {
+    const title = s.regions.find((r) => r.name === 'title')?.content?.text ?? ''
+    return !hasStrip(s) && title.includes('Timers')
+  }, 'restored Timers window after restart')
+  assert.ok(state.log.includes('restart-resume → timers'), `restore must log its switch:\n${state.log.slice(-400)}`)
+  console.error('  restart → attach lands in the RESTORED window (Timers) ✓')
+  c3.ws.terminate()
+  await sleep(200)
+
   console.log('phase-continuity: ALL OK')
 } finally {
   await stopServer(state)
+  // Drop the pointer — a leftover row would make the NEXT run's part-1 boot
+  // restore a window and fail the "attach → ribbon root" assertion.
+  try { await query("DELETE FROM os_state WHERE key = 'active_window'") } catch (e) { console.error(`  cleanup failed: ${e.message}`) }
   rmSync(home, { recursive: true, force: true })
   await getPool().end()
 }

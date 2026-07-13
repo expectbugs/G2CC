@@ -38,6 +38,7 @@ import type { Watchdog } from './watchdog.js'
 import { notify } from './os-notify.js'
 import { setScoutSurfacesProvider } from './scout-live.js'
 import { paperclips } from './paperclips.js'
+import { loadActiveWindow, clearActiveWindow } from './os-state.js'
 
 export interface OsSurface {
   id: string
@@ -211,6 +212,18 @@ export class OsSession {
     this.buildWm()
     // /scout/live/status truthfulness: how many surfaces are actually looking.
     setScoutSurfacesProvider(() => this.surfaces.size)
+    // Restart resume (os-state): reopen the last active window. Fire-and-forget
+    // — a down DB logs loudly and the WM simply stays at the root; the restore
+    // self-guards against racing a user who navigated first (restoreActiveWindow).
+    if (this.config.de.resumeWindow !== false) {
+      void loadActiveWindow().then((id) => {
+        if (id) this.wm.restoreActiveWindow(id)
+      }).catch((e: unknown) => {
+        console.error(`[os-session] restart-resume load failed (staying at the root): ${e instanceof Error ? e.message : String(e)}`)
+      })
+    } else {
+      console.log('[os-session] restart-resume disabled (de.resumeWindow=false)')
+    }
   }
 
   /** Per-pool-instance event wiring (re-run after hardReset swaps the pool). */
@@ -328,9 +341,11 @@ export class OsSession {
       //    next open rebuilds from the persisted save.
       await paperclips.shutdown('hard reset')
       // 5. Clear the resume-window pointer so the rebuilt WM boots at the root
-      //    (set by os-state.ts; a down DB logs loudly and the pointer simply
-      //    survives — acceptable, the reset still happened).
-      await this.clearResumePointer()
+      //    (a down DB logs loudly and the pointer simply survives — acceptable,
+      //    the reset still happened).
+      try { await clearActiveWindow() } catch (e) {
+        console.error(`[os-session] hard reset: clearing the resume pointer failed (it will survive): ${e instanceof Error ? e.message : String(e)}`)
+      }
       // 6. Terminate every client socket — the phone's five-defence reconnect
       //    and the PC page's backoff loop bring every surface back fresh.
       const nClients = this.terminateClients()
@@ -350,9 +365,6 @@ export class OsSession {
     }
   }
 
-  /** Hook for os-state.ts (W1-B) — replaced at bootstrap once the module
-   *  exists; a no-op default keeps hardReset self-contained. */
-  clearResumePointer: () => Promise<void> = async () => {}
 }
 
 let session: OsSession | null = null

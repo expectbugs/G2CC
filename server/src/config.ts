@@ -103,6 +103,11 @@ export interface G2CCConfig {
      *  budget binds first for prose (~12 rows), so this only caps SPARSE content (poetry /
      *  lists / short lines). Ribbon+fullBleed only. Clamped 1–100. */
     readerScrollRows?: number
+    /** Multi-surface restart resume (2026-07-13): reopen the last active window
+     *  after a server restart (os-state.ts pointer; windows self-restore their
+     *  content). Default true. false = always boot at the root — the escape
+     *  hatch if a wedged window ever survives restarts it shouldn't. */
+    resumeWindow: boolean
   }
 }
 
@@ -186,6 +191,7 @@ function defaultConfig(): G2CCConfig {
       rootNav: 'menu',
       recentsDepth: 4,
       fullBleed: false,
+      resumeWindow: true,
     },
   }
 }
@@ -290,6 +296,10 @@ export function loadConfig(): G2CCConfig {
   if (typeof merged.de.fullBleed !== 'boolean') {
     console.error('[config] de.fullBleed is not a boolean — using the default false')
     merged.de.fullBleed = defaults.de.fullBleed
+  }
+  if (typeof merged.de.resumeWindow !== 'boolean') {
+    console.error('[config] de.resumeWindow is not a boolean — using the default true')
+    merged.de.resumeWindow = defaults.de.resumeWindow
   }
   // §3.5 probe knob — optional; a garbage value is ignored (falls back to 7), never throws.
   if (merged.de.readerScrollRows !== undefined

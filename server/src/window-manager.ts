@@ -42,6 +42,7 @@ import { MediaWindow } from './windows/media.js'
 import { NoticesWindow } from './windows/notices.js'
 import { RibbonShell } from './ribbon.js'
 import { loadWindowUsage, persistWindowUsage } from './window-usage.js'
+import { saveActiveWindow } from './os-state.js'
 
 /** How long a notification FLASH holds a BLANKED screen before auto-returning
  *  to blank. 10 s → 5 s (Adam 2026-06-12, Phase 2: "i use blank mode when
@@ -614,6 +615,24 @@ export class WindowManager {
     this.requestRender()
   }
 
+  /** Restart resume (os-state, 2026-07-13): reopen the persisted active window
+   *  after a server restart. The pointer load is async at boot, so this
+   *  self-guards: it applies AT MOST once, and never after a real navigation
+   *  (switchTo sets restoreConsumed) or when the WM has already left the boot
+   *  default — a user who beat the DB query keeps their place. */
+  restoreActiveWindow(id: string): void {
+    if (this.restoreConsumed) { this.ctx.log(`[os] restart-resume '${id}' skipped — already navigated`); return }
+    this.restoreConsumed = true
+    if (id === 'main') return   // the boot default anyway
+    if (this.active.id !== 'main') { this.ctx.log(`[os] restart-resume '${id}' skipped — '${this.active.id}' already active`); return }
+    if (!this.windows.some((w) => w.id === id)) { this.ctx.log(`[os] restart-resume: unknown window '${id}' (retired?) — staying at the root`); return }
+    this.ctx.log(`[os] restart-resume → ${id}`)
+    this.switchTo(id)
+  }
+
+  /** True once a restore was applied OR any real navigation happened. */
+  private restoreConsumed = false
+
   /** Detach from the global hub + kill timers (called at server shutdown /
    *  hard reset — a dead WM must not accumulate hub listeners or fire orphan
    *  popups/pacers). Multi-surface: NOT called on ws close any more — the
@@ -1064,6 +1083,10 @@ export class WindowManager {
   }
 
   switchTo(id: string): void {
+    // Restart resume (os-state): any real navigation supersedes a pending
+    // boot-restore — the restore must never yank the user off a window they
+    // just opened (the load is async; see restoreActiveWindow).
+    this.restoreConsumed = true
     const w = this.windows.find((x) => x.id === id)
     if (!w) { this.ctx.log(`[os] switchTo unknown window '${id}'`); this.requestRender(); return }
     // §3.4 re-entry: re-selecting the SAME window you parked from (it was active at
@@ -1082,6 +1105,11 @@ export class WindowManager {
     this.winMenuCursor = 0                                 // §3.3: the new window's menu starts at cell 0
     this.lastFbMenuKey = null                              // fresh window → the first render re-keys the menu
     this.active = w
+    // Multi-surface restart resume: persist "what is open" on every switch
+    // (incl. Main — switching home must overwrite a stale Reader pointer).
+    // Capture path: fire-and-forget; a down DB loses only the pointer.
+    void saveActiveWindow(id).catch((e: unknown) =>
+      this.ctx.log(`[os] persist active-window(${id}) failed: ${e instanceof Error ? e.message : String(e)}`))
     if (id !== 'main') {
       this.lastUsed.set(id, ++this.useCounter)                    // Phase 11 MRU (monotonic, distinct)
       const n = (this.useCount.get(id) ?? 0) + 1                  // Phase 3 §3.1 frequency
