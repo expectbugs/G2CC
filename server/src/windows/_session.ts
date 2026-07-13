@@ -1049,6 +1049,20 @@ class SessionLevel {
     this.requestRender()
   }
 
+  /** Multi-surface typed text (2026-07-13, Adam's call): a typed line from the
+   *  PC page / phone keyboard goes STRAIGHT through — Enter IS the confirm.
+   *  The dictation confirm card exists because Parakeet mangles words and
+   *  nothing should reach CC unread; typed text is exact and user-authored.
+   *  Any in-flight dictation/suggestion yields to it (stopDictation — same
+   *  policy as every other deliberate action), and intents (`timer:`/`memo:`/
+   *  `note:`, Aria only) keep parity because tryIntent is the confirm-ACCEPT
+   *  hook and typed == accepted. */
+  async onTypedText(text: string): Promise<void> {
+    this.stopDictation('typed input')
+    if (await this.tryIntent(text)) return
+    await this.prompt(text)
+  }
+
   async onSttError(error: string): Promise<void> {
     const hadDictation = this.listening || this.transcribing || this.pendingStt
     // ALWAYS tell the phone to stop the mic (idempotent no-op when idle). Every

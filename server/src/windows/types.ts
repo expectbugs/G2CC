@@ -139,6 +139,14 @@ export interface OsWindow {
   interruptible?(): boolean
   onStt?(text: string): Promise<void>
   onSttError?(error: string): Promise<void>
+  /** Multi-surface typed text (2026-07-13): one Enter-submitted line/paragraph
+   *  from a surface keyboard (PC page text bar / phone control mode). Typed
+   *  text is EXACT and user-authored — windows should act on it directly
+   *  (session windows send it as the prompt with NO confirm card; destructive
+   *  actions like SMS-send/terminal-exec keep their own confirm). Absent → the
+   *  WM falls back to onStt (which accepts only mid-dictation and self-
+   *  discards loudly otherwise), else logs a loud no-consumer line. */
+  onTypedText?(text: string): Promise<void>
   /** Release any window-held resource (timers, pollers) on ws-close. The WM
    *  calls it for every window in dispose(). Absent = nothing to release. */
   dispose?(): void

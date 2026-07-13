@@ -1104,6 +1104,16 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
           if (msg.value === 1) await wm.onScroll('up')
           else if (msg.value === 2) await wm.onScroll('down')
           else console.log(`[ws] DE focus unknown f3=${msg.value} — not scrolling`)
+        } else if (msg.event === 'text') {
+          // Multi-surface (2026-07-13): a typed line from the PC page / phone
+          // control keyboard → the active window (Enter IS the confirm for
+          // exact, user-authored text). NEVER truncated.
+          if (typeof msg.text === 'string') {
+            console.log(`[ws] DE typed text (${msg.text.length} chars) from surface ${client.surface?.id}`)
+            await wm.onTypedText(msg.text)
+          } else {
+            console.warn('[ws] input event \'text\' without a text field — ignored')
+          }
         } else {
           // Firmware-list scrolls move the on-glass ring silently; nothing to do
           // server-side until a tap reports the chosen index.

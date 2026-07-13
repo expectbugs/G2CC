@@ -220,4 +220,7 @@ export class AriaWindow implements OsWindow {
   async onReload(): Promise<void> { await this.session.onReload(); this.focus = 'content' }
   async onStt(text: string): Promise<void> { await this.session.onStt(text) }
   async onSttError(error: string): Promise<void> { await this.session.onSttError(error) }
+  /** Typed text (multi-surface 2026-07-13): straight to the session — Enter is
+   *  the confirm; intents (`timer:`/`memo:`/`note:`) keep parity via tryIntent. */
+  async onTypedText(text: string): Promise<void> { await this.session.onTypedText(text) }
 }

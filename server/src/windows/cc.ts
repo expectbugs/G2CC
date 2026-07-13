@@ -272,4 +272,11 @@ export class CcWindow implements OsWindow {
     if (this.current) await this.current.onSttError(error)
     else this.ctx.log(`[os] cc: STT error with no session — ${error}`)
   }
+  /** Typed text (multi-surface 2026-07-13): straight to the picked session —
+   *  Enter is the confirm. At the directory picker there is no session yet:
+   *  loud discard (pick a directory first; the picker is tap-driven). */
+  async onTypedText(text: string): Promise<void> {
+    if (this.current) await this.current.onTypedText(text)
+    else this.ctx.log(`[os] cc: typed text with no session — DISCARDED (pick a directory first): "${text.slice(0, 60)}"`)
+  }
 }

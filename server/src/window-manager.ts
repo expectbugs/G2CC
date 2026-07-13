@@ -1532,6 +1532,57 @@ export class WindowManager {
     }
   }
 
+  /** Multi-surface typed text (2026-07-13): one Enter-submitted line from a
+   *  surface keyboard (PC page / phone control mode). Routing mirrors the tap
+   *  policy: an overlay loud-ignores it (overlay actions are taps, and typed
+   *  words must never act blind on a card); the ribbon root loud-ignores
+   *  ("enter a window first"); BLANKED wakes and delivers (the typist is
+   *  looking at a live mirror, not the dark glass). Delivery: the window's
+   *  onTypedText, else the onStt fallback (accepts exactly when the window is
+   *  mid-dictation — a typed substitute for a garbled transcript), else a
+   *  loud no-consumer log. NEVER truncated. */
+  async onTypedText(text: string): Promise<void> {
+    if (!text || text.trim().length === 0) {
+      this.ctx.log('[os] typed text EMPTY — ignored')
+      return
+    }
+    if (this.activeOverlay) {
+      this.ctx.log(`[os] typed text during a notification overlay — IGNORED (act on the overlay first): "${text.slice(0, 60)}"`)
+      this.requestRender()
+      return
+    }
+    if (this.blanked) {
+      this.clearPopupTimer()
+      this.blankFlash = null
+      this.blanked = false
+      this.ctx.log('[os] screen WAKE (typed text)')
+      // fall through — the wake render happens via the delivery below
+    }
+    if (this.rootNav === 'ribbon' && this.atRibbon) {
+      this.ctx.log(`[os] typed text at the ribbon root — IGNORED (enter a window first): "${text.slice(0, 60)}"`)
+      this.renderRibbon()
+      return
+    }
+    try {
+      if (this.active.onTypedText) {
+        this.ctx.log(`[os] typed text → ${this.active.id} (${text.length} chars)`)
+        await this.active.onTypedText(text)
+      } else if (this.active.onStt) {
+        // Mid-dictation substitute; SessionLevel-style guards self-discard
+        // loudly when the window isn't transcribing.
+        this.ctx.log(`[os] typed text → ${this.active.id} via the onStt fallback (${text.length} chars)`)
+        await this.active.onStt(text)
+      } else {
+        this.ctx.log(`[os] typed text for '${this.active.id}' which takes no text — DISCARDED (${text.length} chars): "${text.slice(0, 80)}"`)
+        this.requestRender()
+      }
+    } catch (e) {
+      if (e instanceof SwitchTo) { await this.handleSwitchTo(e); return }
+      this.ctx.log(`[os] typed-text handler failed (${this.active.id}): ${(e as Error).message}`)
+      this.requestRender()
+    }
+  }
+
   // ---- Phase 9: voice-command routing (handsfree transcripts) ----
 
   /** A handsfree utterance was transcribed (Phase 9). Tries the "butterscotch"
