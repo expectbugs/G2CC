@@ -18,7 +18,8 @@
 import Fastify from 'fastify'
 import websocket from '@fastify/websocket'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { loadConfig } from './config.js'
 import { startDiscovery, stopDiscovery } from './discovery.js'
@@ -169,6 +170,64 @@ server.get('/apk', async (req, reply) => {
     .type('application/vnd.android.package-archive')
     .header('Content-Disposition', 'attachment; filename="g2cc-harness.apk"')
     .send(apk)
+})
+
+// PC control page (multi-surface 2026-07-13) — a browser surface for THE OS
+// session: live canvas mirror + keyboard/mouse input + typed text + resets.
+// Gated exactly like /apk: Tailscale/loopback interface + token (?token= or
+// Bearer). Assets are interface-gated only (static logic, no secrets — the
+// token rides the page URL) and WHITELISTED by exact name: no path traversal.
+// Files are read per request (edit-and-reload dev; the /apk readFileSync
+// precedent) from server/static/ (dist/index.js → ../static).
+const STATIC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'static')
+const PC_ASSETS: Record<string, string> = {
+  'app.js': 'text/javascript',
+  'net.js': 'text/javascript',
+  'render.js': 'text/javascript',
+  'geometry.js': 'text/javascript',
+  'gray4bmp.js': 'text/javascript',
+  'input.js': 'text/javascript',
+}
+server.get('/pc', async (req, reply) => {
+  if (!setupInterfaceAllowed(req.raw.socket.localAddress, req.ip, '/pc')) {
+    reply.code(403).send({ error: 'the PC page is served on the Tailscale interface only' })
+    return
+  }
+  const token = (req.query as { token?: string } | undefined)?.token
+  const bearer = req.headers.authorization
+  const tokenOk = typeof token === 'string' && timingSafeEqualStr(token, config.authToken)
+  const bearerOk = typeof bearer === 'string' && timingSafeEqualStr(bearer, `Bearer ${config.authToken}`)
+  if (!tokenOk && !bearerOk) {
+    reply.code(401).send({ error: 'unauthorized — open /pc from the /setup page link (it carries the token)' })
+    return
+  }
+  const path = join(STATIC_DIR, 'pc.html')
+  if (!existsSync(path)) {
+    console.error(`[g2cc-server] /pc requested but ${path} is missing — the static page did not ship with this build`)
+    reply.code(404).send({ error: 'pc.html missing from server/static — broken deployment' })
+    return
+  }
+  reply.type('text/html').send(readFileSync(path, 'utf-8'))
+})
+server.get('/pc/assets/:name', async (req, reply) => {
+  if (!setupInterfaceAllowed(req.raw.socket.localAddress, req.ip, '/pc/assets')) {
+    reply.code(403).send({ error: 'Tailscale interface only' })
+    return
+  }
+  const name = (req.params as { name: string }).name
+  const mime = PC_ASSETS[name]
+  if (!mime) {
+    console.error(`[g2cc-server] /pc/assets/${name} DENIED — not in the whitelist`)
+    reply.code(404).send({ error: 'no such asset' })
+    return
+  }
+  const path = join(STATIC_DIR, 'pc', name)
+  if (!existsSync(path)) {
+    console.error(`[g2cc-server] /pc/assets/${name} missing at ${path} — broken deployment`)
+    reply.code(404).send({ error: 'asset missing from server/static/pc — broken deployment' })
+    return
+  }
+  reply.type(mime).send(readFileSync(path, 'utf-8'))
 })
 
 // Scout live-display channel (docs/SCOUT.md) — the Scout CC subprocess pushes

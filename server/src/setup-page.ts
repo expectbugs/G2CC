@@ -163,6 +163,12 @@ export async function renderSetupPage(port: number, token: string): Promise<stri
     <p class="subtitle">Sideload the glasses bridge: Connect goes straight into the DE (server mode); Disconnect, the Diag toggle, the one-time notification-access row, and a pixel-perfect on-phone preview of what the glasses should show.</p>
   </div>
 
+  <div class="box">
+    <strong>PC Control</strong><br>
+    <a href="/pc?token=${encodeURIComponent(token)}#token=${encodeURIComponent(token)}">🖥 Open the PC page (/pc)</a>
+    <p class="subtitle">Live browser surface for the SAME OS session: the glasses screen mirrored on canvas, keyboard/mouse input (wheel/arrows scroll, Enter/click select, Esc back), a text bar that types straight into the active window, and Soft/Hard Reset buttons. Glasses on the charger? Keep going here.</p>
+  </div>
+
   <h3>Endpoints (refetched at runtime)</h3>
   <p class="subtitle">The Android client fetches <code>/endpoints</code> on each successful auth and tries them in priority order: Tailscale/WireGuard first, then Ethernet/WiFi, then other.</p>
 </body>
