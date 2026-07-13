@@ -310,6 +310,24 @@ export class SearchWindow implements OsWindow {
     this.requestRender()
   }
 
+  /** Typed text (multi-surface 2026-07-13): the typed query RUNS directly —
+   *  read-only search, Enter is the confirm (the dictation confirm guards
+   *  Parakeet mangling, not the search). Any dictation state yields; typing
+   *  from the results/read levels starts a fresh search — the natural read. */
+  async onTypedText(text: string): Promise<void> {
+    if (this.searching) {
+      this.ctx.log(`[os] search: typed query while a search is running — IGNORED (wait or Cancel): "${text.slice(0, 60)}"`)
+      this.requestRender()
+      return
+    }
+    if (this.listening || this.transcribing) this.ctx.audio('stop')
+    this.listening = false
+    this.transcribing = false
+    this.pendingQuery = null
+    this.ctx.log(`[os] search: typed query runs directly: "${text.slice(0, 80)}"`)
+    this.beginSearch(text.trim())
+  }
+
   async onSttError(error: string): Promise<void> {
     if (this.listening || this.transcribing) this.ctx.audio('stop')
     const had = this.listening || this.transcribing || this.pendingQuery !== null

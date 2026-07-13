@@ -59,13 +59,14 @@ const hasRegion = (sc, name) => !!sc?.regions.find((r) => r.name === name)
     'a hook-less window must discard typed text LOUDLY')
   console.error('  1b. no-consumer window → loud discard ✓')
 
-  // a window with onStt but no onTypedText (search): the fallback routes it,
-  // and search's own not-transcribing guard discards it loudly (no crash).
+  // search (D2): a typed query RUNS directly — read-only, Enter is the confirm.
+  // (The onStt-fallback branch in wm.onTypedText is now purely defensive: every
+  // in-tree onStt window gained a real onTypedText in D2.)
   wm.switchTo('search')
   await settle(last, (sc) => !hasRegion(sc, 'strip') && JSON.stringify(sc).includes('Search'), 'search window render')
-  await wm.onTypedText('fallback probe')
-  assert.ok(logs.some((l) => l.includes('via the onStt fallback')), 'onStt fallback must be taken when onTypedText is absent')
-  console.error('  1c. onStt fallback for a hook-less-but-dictating window ✓')
+  await wm.onTypedText('typed query probe')
+  assert.ok(logs.some((l) => l.includes('search: typed query runs directly')), 'search must run the typed query directly')
+  console.error('  1c. search: typed query runs directly ✓')
   wm.dispose()
 }
 

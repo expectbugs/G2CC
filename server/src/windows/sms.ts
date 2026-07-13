@@ -330,6 +330,28 @@ export class SmsWindow implements OsWindow {
     }
     this.replyText = text.trim(); this.replyStage = 'confirm'; this.requestRender()
   }
+
+  /** Typed text (multi-surface 2026-07-13): with a thread OPEN, the typed line
+   *  lands as the reply at the CONFIRM stage — sending a real SMS stays behind
+   *  the one-tap confirm (it guards the SEND, not the transcription). A hot
+   *  reply mic yields to it; mid-send/result states refuse loudly. */
+  async onTypedText(text: string): Promise<void> {
+    if (this.level !== 'thread') {
+      this.ctx.log(`[os] sms: typed text outside an open thread (level=${this.level}) — DISCARDED (open a thread first): "${text.slice(0, 60)}"`)
+      this.requestRender()
+      return
+    }
+    if (this.replyStage === 'sending' || this.replyStage === 'result') {
+      this.ctx.log(`[os] sms: typed text while a send is ${this.replyStage} — IGNORED (finish that first): "${text.slice(0, 60)}"`)
+      this.requestRender()
+      return
+    }
+    if (this.replyStage === 'listening' || this.replyStage === 'transcribing') this.ctx.audio('stop')
+    this.replyText = text.trim()
+    this.replyStage = 'confirm'
+    this.ctx.log(`[os] sms: typed reply staged for CONFIRM (${text.length} chars)`)
+    this.requestRender()
+  }
   async onSttError(error: string): Promise<void> {
     if (this.replyStage === 'idle') { this.ctx.log(`[os] sms: stt error with no reply in flight — ${error}`); return }
     this.ctx.log(`[os] sms: reply dictation failed — ${error}`)
