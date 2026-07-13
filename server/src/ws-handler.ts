@@ -91,9 +91,8 @@ export interface WSClient {
   mode: PermissionMode
   streamBuffer: string
   streamTimer: ReturnType<typeof setTimeout> | null
-  /** Server-side state for in-flight confirm_on_hud requests (Phase 7 wires the client side).
-   *  Keyed by requestId; resolves the awaiting promise when ConfirmOnHudResponseMsg arrives. */
-  confirmCallbacks: Map<string, (result: 'confirmed' | 'rejected') => void>
+  // confirm_on_hud callbacks moved to OsSession (sessionized 2026-07-13):
+  // asked on one surface, answerable from any; they survive socket closes.
   /** Phase 3A heartbeat: server-driven hb cadence + activity tracking. */
   hbInterval: ReturnType<typeof setInterval> | null
   livenessInterval: ReturnType<typeof setInterval> | null
@@ -198,7 +197,6 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     mode: config.claude.defaultMode,
     streamBuffer: '',
     streamTimer: null,
-    confirmCallbacks: new Map(),
     hbInterval: null,
     livenessInterval: null,
     lastAppActivityMs: Date.now(),
@@ -318,14 +316,9 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     // Drop the crash-loop listener registered for this client (else the global
     // Watchdog accumulates one dead closure per past connection).
     watchdog?.off('crash_loop', onCrashLoop)
-    // Reject any in-flight confirm_on_hud promises — loud failure, not silent.
-    for (const [, resolve] of client.confirmCallbacks) {
-      // The caller awaits 'confirmed' | 'rejected'. On socket close we surface as 'rejected'
-      // with an attached log so the calling code knows why.
-      console.warn(`[ws] client closed (code=${code} reason="${String(reason)}") with confirm pending`)
-      resolve('rejected')
-    }
-    client.confirmCallbacks.clear()
+    // confirm_on_hud (sessionized): pending confirms are session-owned and
+    // deliberately SURVIVE this close — asked on the glasses, answerable from
+    // the browser after the phone drops. They wait forever by design.
     // Phase 7: in-flight Channel Router acks all fall to 'unverified'.
     client.router.onClientDisconnect()
     // Multi-surface (2026-07-13): detach this connection's surface from THE
@@ -995,12 +988,16 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // 4th-pass review LOW: user tapped confirm/reject — clear app-activity
       // signal so a long confirmation window doesn't trigger app-silence kick.
       client.lastAppActivityMs = Date.now()
-      const cb = client.confirmCallbacks.get(msg.requestId)
+      // Sessionized (2026-07-13): the question broadcast to every surface —
+      // the FIRST response wins; the delete makes any later one land in the
+      // existing unknown-requestId warn (loud, harmless).
+      const session = getOsSession()
+      const cb = session.confirmCallbacks.get(msg.requestId)
       if (cb) {
-        client.confirmCallbacks.delete(msg.requestId)
+        session.confirmCallbacks.delete(msg.requestId)
         cb(msg.result)
       } else {
-        console.warn(`[ws] confirm_on_hud_response for unknown requestId ${msg.requestId}`)
+        console.warn(`[ws] confirm_on_hud_response for unknown requestId ${msg.requestId} (already answered by another surface?)`)
       }
       break
     }
@@ -1560,28 +1557,36 @@ function handlePrompt(client: WSClient, text: string): void {
   }
 }
 
-/** Phase 7 entry point — server-side request to ask the HUD a yes/no question.
- *  Returns a Promise that resolves when the client sends back ConfirmOnHudResponseMsg.
- *  No timeout — the user gets as long as they need. If the WebSocket disconnects
- *  before a response arrives, the in-flight callback is invoked with 'rejected'
- *  (loud, logged, not silent).
+/** The live WSClient owning a given socket (surface → client back-map; the
+ *  OsSession stores raw sockets so it can't create a ws-handler module cycle). */
+function clientForWs(ws: WebSocket): WSClient | null {
+  for (const c of liveClients) if (c.ws === ws) return c
+  return null
+}
+
+/** Sessionized (2026-07-13) entry point — ask the OS session a yes/no question.
+ *  The question BROADCASTS to every attached surface; the first
+ *  ConfirmOnHudResponseMsg wins. No timeout — and a socket closing no longer
+ *  rejects: asked on the glasses, answerable from the browser tomorrow.
  *
- *  Phase 7 fix #2: also tags the requestId with the Channel Router so when the
- *  phone's `BleAckMsg` arrives, delivery status is tracked. The returned promise
- *  ONLY surfaces the user's confirm/reject choice — delivery status is a separate
- *  concern that callers can opt into via `awaitDeliveryAck` if they care. */
+ *  Delivery-ack stays a PHONE concern (BLE is the only unverified hop): with a
+ *  phone surface attached the requestId is tracked on ITS Channel Router; with
+ *  none, delivery resolves 'unverified' with the reason — truthful, not silent. */
 export function confirmOnHudWithDelivery(
-  client: WSClient,
   text: string,
 ): { response: Promise<'confirmed' | 'rejected'>; delivery: Promise<{ status: 'verified' | 'unverified'; reason?: string }> } {
+  const session = getOsSession()
   const requestId = `cfh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  // Register the delivery ack waiter BEFORE sendMsg so a fast inbound BleAck
-  // (e.g. WiFi loopback latency under load) can't fire before awaitAck binds.
-  // Same logic applies to confirmCallbacks: register the resolver first.
-  const delivery = client.router.awaitAck(requestId)
+  const phone = session.phoneSurface()
+  const phoneClient = phone ? clientForWs(phone.ws) : null
+  // Register the delivery ack waiter BEFORE the broadcast so a fast inbound
+  // BleAck can't fire before awaitAck binds. Same for the resolver.
+  const delivery = phoneClient
+    ? phoneClient.router.awaitAck(requestId)
+    : Promise.resolve({ status: 'unverified' as const, reason: 'no phone surface' })
   const response = new Promise<'confirmed' | 'rejected'>((resolve) => {
-    client.confirmCallbacks.set(requestId, resolve)
-    sendMsg(client, { type: 'confirm_on_hud', requestId, text })
+    session.confirmCallbacks.set(requestId, resolve)
+    session.broadcast({ type: 'confirm_on_hud', requestId, text })
   })
   return { response, delivery }
 }
@@ -1614,25 +1619,19 @@ function startHeartbeat(client: WSClient): void {
   }, HEARTBEAT_INTERVAL_MS)
 }
 
-/** Phase 7 entry point — server-side request to ask the HUD a yes/no question.
- *  Returns a Promise that resolves when the client sends back ConfirmOnHudResponseMsg.
- *  No timeout — the user gets as long as they need. If the WebSocket disconnects
- *  before a response arrives, the in-flight callback is invoked with 'rejected'
- *  (loud, logged, not silent).
- *
- *  Phase 7 fix #2: tags the requestId with the Channel Router so the BLE
- *  delivery ack (BleAckMsg from phone) is tracked. The returned promise still
- *  resolves only with the user's choice; delivery status is consumed via the
- *  router's fireAndForget bookkeeping. Callers wanting both can use
- *  `confirmOnHudWithDelivery` instead. */
-export function confirmOnHud(client: WSClient, text: string): Promise<'confirmed' | 'rejected'> {
+/** Sessionized (2026-07-13) — as confirmOnHudWithDelivery but the caller only
+ *  wants the user's choice; BLE delivery bookkeeping is fire-and-forget on the
+ *  phone's router when one is attached. */
+export function confirmOnHud(text: string): Promise<'confirmed' | 'rejected'> {
+  const session = getOsSession()
   const requestId = `cfh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  // Register both BEFORE sendMsg so a fast inbound BleAck or confirm response
-  // can't race past the resolvers. (See confirmOnHudWithDelivery for the same
-  // ordering concern.)
-  client.router.fireAndForget(requestId)
+  const phone = session.phoneSurface()
+  const phoneClient = phone ? clientForWs(phone.ws) : null
+  // Register both BEFORE the broadcast so a fast inbound BleAck or confirm
+  // response can't race past the resolvers.
+  phoneClient?.router.fireAndForget(requestId)
   return new Promise<'confirmed' | 'rejected'>((resolve) => {
-    client.confirmCallbacks.set(requestId, resolve)
-    sendMsg(client, { type: 'confirm_on_hud', requestId, text })
+    session.confirmCallbacks.set(requestId, resolve)
+    session.broadcast({ type: 'confirm_on_hud', requestId, text })
   })
 }

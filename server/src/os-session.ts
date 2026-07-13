@@ -72,6 +72,11 @@ export class OsSession {
   /** The raw PCM (+ format) of the most recent SUCCESSFUL dictation — kept so a
    *  `memo:` intent can save the clip at confirm time. */
   lastDictationAudio: MemoAudio | null = null
+  /** In-flight confirm_on_hud resolvers (sessionized 2026-07-13): the question
+   *  broadcasts to EVERY surface; the FIRST response wins; a socket closing no
+   *  longer rejects — asked on the glasses, answerable from the browser, and
+   *  it waits forever by design (NO TIMEOUTS). Hard reset rejects them loudly. */
+  confirmCallbacks = new Map<string, (result: 'confirmed' | 'rejected') => void>()
 
   constructor(readonly config: G2CCConfig) {
     this.pool = new SessionPool()
@@ -347,8 +352,15 @@ export class OsSession {
       try { await clearActiveWindow() } catch (e) {
         console.error(`[os-session] hard reset: clearing the resume pointer failed (it will survive): ${e instanceof Error ? e.message : String(e)}`)
       }
-      // 6. Terminate every client socket — the phone's five-defence reconnect
+      // 6. Reject pending confirm_on_hud questions LOUDLY (their askers get a
+      //    truthful 'rejected', never a hang into a rebuilt world), then
+      //    terminate every client socket — the phone's five-defence reconnect
       //    and the PC page's backoff loop bring every surface back fresh.
+      for (const [id, resolve] of this.confirmCallbacks) {
+        console.warn(`[os-session] hard reset: pending confirm ${id} resolved 'rejected'`)
+        resolve('rejected')
+      }
+      this.confirmCallbacks.clear()
       const nClients = this.terminateClients()
       console.warn(`[os-session] hard reset: terminated ${nClients} client socket(s) (they auto-reconnect)`)
       this.surfaces.clear()   // close events also detach; explicit for determinism
