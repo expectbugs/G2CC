@@ -102,6 +102,12 @@ function updatePanel() {
   panelTitle.textContent = content ? `full text · ${content.name}` : 'full text'
   panelBody.textContent = content?.content?.text ?? '(no scrollable text on this page)'
   panelBody.className = 'panel-pre'
+  // This fallback just overwrote the pane with NON-chapter content — the
+  // reader's chapter key MUST invalidate with it (live bug 2026-07-15: park
+  // to the ribbon → re-enter the SAME chapter → the key still matched, the
+  // repaint was skipped, and the pane sat frozen on one stale fallback page
+  // while the scroll-sync ran against the wrong content).
+  delete panelBody.dataset.chapter
 }
 
 let readerFontPx = Number(localStorage.getItem('pc-reader-font') ?? 19)
@@ -111,9 +117,12 @@ function renderNativeView() {
     panelTitle.textContent = `📖 ${nativeView.title ?? 'Reader'} · ${nativeView.progress ?? ''}`
     // Only reset the text (and the scroll position) when the CHAPTER changed —
     // page turns within a chapter just re-sync the scroll. Cheap fingerprint,
-    // not the whole body, as the identity key.
+    // not the whole body, as the identity key. The className check is the
+    // belt-and-braces twin of updatePanel's key invalidation: if ANY path ever
+    // writes foreign content without clearing the key, the class mismatch
+    // still forces the repaint (the 2026-07-15 frozen-pane bug class).
     const chapterKey = `${nativeView.title}|${nativeView.body?.length ?? 0}|${(nativeView.body ?? '').slice(0, 48)}`
-    if (panelBody.dataset.chapter !== chapterKey) {
+    if (panelBody.dataset.chapter !== chapterKey || panelBody.className !== 'panel-reader') {
       panelBody.textContent = nativeView.body ?? ''
       panelBody.dataset.chapter = chapterKey
     }
