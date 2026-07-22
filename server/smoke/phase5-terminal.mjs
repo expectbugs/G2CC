@@ -218,4 +218,35 @@ try {
   try { execFileSync('tmux', ['-L', SOCK, 'kill-server'], { stdio: 'ignore' }) } catch (e) { console.error(`  cleanup failed (tmux kill-server): ${e.message}`) }
   await getPool().end()   // review 2026-07-05: pool leak = ~10 s idle tail per phase
 }
+
+// 4. stripCcInputBox — chrome fixtures (2026-07-22). The MODERN fixture is the
+// GROUND-TRUTH capture of CC 2.1.217 (tmux capture-pane, Adam's live session);
+// the mis-fire fixture reproduces the 'Focus stuck on old content' bug (box-
+// drawing deep in a scrollback must NOT anchor a cut).
+{
+  const { stripCcInputBox } = await import('../dist/windows/terminal.js')
+  const RULE = '─'.repeat(58)
+  const modern = [
+    '⏺ Working on it.', '  ⎿  Running…', '', '· Newspapering… (3m 55s · ↓ 11.2k tokens)', '',
+    RULE, '❯ ', RULE,
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc t…',
+    '                                           679054 tokens',
+    '                      current: 2.1.217 · latest: 2.1.218',
+  ].join('\n')
+  const m = stripCcInputBox(modern)
+  assert.ok(!m.includes('❯'), 'modern: the ❯ prompt line is stripped')
+  assert.ok(!m.includes('⏵⏵') && !m.includes('current: 2.1.217'), 'modern: footer stripped')
+  assert.ok(m.includes('679054 tokens'), 'modern: the token count is KEPT (Adam 2026-07-22)')
+  assert.ok(m.includes('⏺ Working on it.') && m.includes('Newspapering'), 'modern: transcript + spinner above the chrome survive')
+  const legacy = ['out1', '╭──────╮', '│ > hi │', '╰──────╯', '  ? for shortcuts'].join('\n')
+  assert.equal(stripCcInputBox(legacy), 'out1', 'legacy box chrome still stripped')
+  // Deep-scrollback mis-fire guard: a transcript containing box-drawing + '│ >'
+  // ABOVE the bottom scan window must pass through UNTOUCHED when no real
+  // chrome sits at the bottom (the old code cut here — Focus showed only
+  // pre-box history).
+  const hist = ['╭─ quoted code ─╮', '│ > example    │', '╰───────────────╯',
+    ...Array.from({ length: 20 }, (_, i) => `history line ${i}`)].join('\n')
+  assert.equal(stripCcInputBox(hist), hist, 'box-drawing deep in scrollback does NOT anchor a cut')
+  console.error('  4. stripCcInputBox: modern 2.1.217 chrome + legacy box + scrollback mis-fire guard ✓')
+}
 console.log('phase5-terminal: ALL OK')

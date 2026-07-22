@@ -278,11 +278,24 @@ export async function transcribeDjiBt(
   const tmpPath = sttTmpPath('g2cc-djibt')
   try {
     writeFileSync(tmpPath, wavBuffer)
-    const result = (await getParakeetDaemon(config).transcribe(tmpPath, {
+    let result = (await getParakeetDaemon(config).transcribe(tmpPath, {
       adaptive: true,
       alpha: config.stt.djiBtAlpha ?? DJI_BT_ALPHA,
     })).trim()
     console.log(`[stt] dji-bt(NR) result (${result.length} chars): "${result}"`)
+    // RAW-RETRY fallback (2026-07-22, live-diagnosed: two normal-voice clips with
+    // ~9 s of VAD speech each transcribed to "" — at quiet-speech SNR the α=1.5
+    // Wiener can gut the speech before Parakeet ever sees it, and the dictation
+    // died as a bogus 'No speech detected'). When the FILTERED transcript comes
+    // back empty but the VAD measured real speech, transcribe the SAME clip raw
+    // (no NR) and take that instead. Costs one extra warm-daemon pass (~1-2 s),
+    // only on the failure path; both outcomes log loudly for the tuning record.
+    if (!result && (opts.speechMs ?? 0) >= HALLUCINATION_SPEECH_MS) {
+      console.warn(`[stt] dji-bt: adaptive NR yielded an EMPTY transcript despite ${opts.speechMs} ms of VAD speech — retrying RAW (filter bypassed)`)
+      result = (await getParakeetDaemon(config).transcribe(tmpPath)).trim()
+      if (result) console.warn(`[stt] dji-bt: RAW retry recovered ${result.length} chars — the filter is destroying quiet speech on clips like this`)
+      else console.warn('[stt] dji-bt: RAW retry ALSO empty — genuinely untranscribable audio')
+    }
     return applyHallucinationVerdict(result, opts.speechMs, 'dji-bt')
   } finally {
     if (existsSync(tmpPath)) {

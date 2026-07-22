@@ -124,31 +124,60 @@ function collapseRules(text: string): string {
   }).join('\n')
 }
 
-// Claude Code's REPL draws its input PROMPT as a rounded box at the BOTTOM of the
-// pane (╭──╮ / │ > … │ / ╰──╯) followed by a status footer (the permission-mode line
-// ⏵⏵, the token/context count, the version). On the tiny G2 surface that fixed chrome
-// is pure waste — only the live transcript ABOVE it matters (Adam 2026-06-30: "remove
-// the input box and everything below it"). Drop the input box AND everything below it
-// by cutting from the LAST box-TOP border to the end. The input box is always the
-// bottommost box (the prompt), so live tool-result boxes ABOVE it survive. Guarded by a
-// '│ >' prompt check below the border so a NON-CC pane (a plain shell whose tail just
-// happens to end in a box) is left untouched — fail-safe: no match → no change.
-function stripCcInputBox(text: string): string {
+// Claude Code's REPL draws fixed input/footer CHROME at the BOTTOM of the pane.
+// On the tiny G2 surface that chrome is pure waste — only the live transcript
+// above it matters, PLUS the token count (Adam 2026-06-30 + 2026-07-22: "remove
+// the input box and everything underneath it except the token count").
+//
+// TWO chrome generations are recognized (fail-safe: no match → no change):
+//   MODERN (CC ≥ ~2.1.2xx, ground-truthed against 2.1.217 on 2026-07-22): no box —
+//     a full-width ─ rule, a '❯' prompt line, another rule, then the footer
+//     (⏵⏵ permission line · '123456 tokens' · version). Cut anchors at the rule
+//     directly above the '❯'; the token-count line from the cut region is KEPT.
+//   LEGACY (pre-2.1.2xx): the rounded box ╭──╮ / │ > │ / ╰──╯ + footer — the
+//     original matcher, kept for old CC / other box-drawing REPLs.
+//
+// BOTTOM-BOUNDED (the 2026-07-22 'Focus stuck on old content' fix): only the
+// last CC_CHROME_SCAN_LINES may anchor a cut. The old matcher scanned the WHOLE
+// capture for the last box-top — in a 1000-line scrollback, box-drawing INSIDE
+// the transcript (quoted code, server logs, old redraw frames) mis-fired it and
+// chopped everything below an ancient artifact, leaving Focus showing only
+// stale history. Real chrome lives in the last few visible lines, period.
+const CC_CHROME_SCAN_LINES = 12
+
+/** Exported for the phase5-terminal smoke (chrome fixtures are hardware-truth). */
+export function stripCcInputBox(text: string): string {
   const lines = text.split('\n')
+  const lo = Math.max(0, lines.length - CC_CHROME_SCAN_LINES)
   let cut = -1
-  for (let i = lines.length - 1; i >= 0; i--) {
+  for (let i = lines.length - 1; i >= lo && cut < 0; i--) {
     const t = lines[i].trim()
-    // a rounded/square box TOP border: starts ╭/┌, ends ╮/┐, every char a rule glyph.
-    if (t.length >= 3 && /^[╭┌].*[╮┐]$/u.test(t) && [...t].every((ch) => RULE_CHARS.has(ch))) { cut = i; break }
+    // MODERN: a '❯' prompt line (bare or with typed text after it). Anchor at the
+    // rule directly above it (the real chrome always has one; ≤3 lines of slack),
+    // else at the prompt line itself. '❯' (U+276F) is CC's glyph — ASCII '>' is
+    // deliberately NOT matched (quoted diffs/prose would mis-fire).
+    if (t === '❯' || t.startsWith('❯ ')) {
+      cut = i
+      for (let j = i - 1; j >= Math.max(lo, i - 3); j--) {
+        if (ruleChar(lines[j]) !== null) { cut = j; break }
+      }
+      break
+    }
+    // LEGACY: a rounded/square box TOP border (starts ╭/┌, ends ╮/┐, every char a
+    // rule glyph) with a '│ >' prompt line somewhere below it.
+    if (t.length >= 3 && /^[╭┌].*[╮┐]$/u.test(t) && [...t].every((ch) => RULE_CHARS.has(ch))) {
+      if (/[│|]\s*>/.test(lines.slice(i).join('\n'))) { cut = i; break }
+    }
   }
   if (cut < 0) return text
-  // Only strip when what follows actually looks like CC's prompt box (a '│ >' line) —
-  // otherwise a stray trailing box in some other TUI would be eaten.
-  if (!/[│|]\s*>/.test(lines.slice(cut).join('\n'))) return text
-  // CC pane: cut the input box + everything below it, AND drop the standalone
-  // horizontal RULE lines above it (CC's ─ output separators — Adam 2026-06-30: they
-  // waste whole rows on glass). Only pure-rule lines go; '│ text │' rows stay.
+  // The token count survives the cut (Adam: "except the token count") — the
+  // footer's right-aligned '679054 tokens' line, trimmed onto one row.
+  const tokenLine = lines.slice(cut).find((l) => /\b\d[\d,.]*\s*tokens?\b/i.test(l))
+  // Cut the chrome + everything below it, AND drop standalone horizontal RULE
+  // lines above it (CC's ─ separators — they waste whole rows on glass). Only
+  // pure-rule lines go; '│ text │' rows stay.
   const kept = lines.slice(0, cut).filter((l) => ruleChar(l) === null)
+  if (tokenLine) kept.push(tokenLine.trim())
   return kept.join('\n').replace(/\n+$/u, '')
 }
 const QUICK_KEYS: { label: string; keys: string[] }[] = [
@@ -767,6 +796,10 @@ export class TerminalWindow implements OsWindow {
     this.listening = false; this.transcribing = false; this.pendingText = null; this.dictPurpose = null
     if (!had) { this.ctx.log(`[os] term: stt error with no dictation — ${error}`); this.requestRender(); return }
     this.ctx.log(`[os] term: dictation failed — ${error}`)
+    // ON-GLASS, not just the log (2026-07-22: a failed dictation "just went
+    // away with no confirm window" — the unwind was invisible from the glasses).
+    // The notice rides the next view's title (titled()/the sessions header).
+    this.notice = `dictation failed: ${error}`
     this.level = back === 'newSession' ? 'sessions' : 'view'
     if (this.level === 'view') this.ensurePoll()
     this.requestRender()
