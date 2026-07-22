@@ -1576,6 +1576,17 @@ export class WindowManager {
     }
   }
 
+  /** Mic-live feedback (2026-07-22): the first audio frame of the current
+   *  capture arrived — route to the active window's optional hook (Terminal
+   *  flips "Mic connecting…" → "Mic LIVE"). Never throws. */
+  onAudioFlowing(): void {
+    try {
+      this.active.onDictationAudioFlowing?.()
+    } catch (e) {
+      this.ctx.log(`[os] onDictationAudioFlowing failed (${this.active.id}): ${(e as Error).message}`)
+    }
+  }
+
   /** Multi-surface typed text (2026-07-13): one Enter-submitted line from a
    *  surface keyboard (PC page / phone control mode). Routing mirrors the tap
    *  policy: an overlay loud-ignores it (overlay actions are taps, and typed

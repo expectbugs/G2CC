@@ -144,6 +144,12 @@ export interface OsWindow {
   interruptible?(): boolean
   onStt?(text: string): Promise<void>
   onSttError?(error: string): Promise<void>
+  /** Mic-live feedback (2026-07-22): the FIRST audio frame of the current
+   *  capture reached the server — the phone's mic route (BT-SCO to the DJI)
+   *  is actually delivering. Dictating windows flip their listening card from
+   *  "connecting" to "LIVE" here so the user doesn't speak into the ~0.5-1.5 s
+   *  SCO settle gap (that speech is unrecoverable). Optional; no-op default. */
+  onDictationAudioFlowing?(): void
   /** Multi-surface typed text (2026-07-13): one Enter-submitted line/paragraph
    *  from a surface keyboard (PC page text bar / phone control mode). Typed
    *  text is EXACT and user-authored — windows should act on it directly

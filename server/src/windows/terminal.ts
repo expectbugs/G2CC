@@ -235,6 +235,12 @@ export class TerminalWindow implements OsWindow {
   private dictPurpose: 'send' | 'newSession' | null = null
   private listening = false
   private transcribing = false
+  /** Mic-live (2026-07-22): true once the server saw the FIRST audio frame of
+   *  the current capture — the BT-SCO route to the DJI takes ~0.5-1.5 s to
+   *  settle after 'Dictate', and words spoken before it are simply GONE. The
+   *  listening card shows "connecting" until this flips, so Adam knows when
+   *  the mic can actually hear him. Reset per capture (startDictation). */
+  private micLive = false
   private pendingText: string | null = null
   // paced capture poll (tail, active only) — a gen-guarded setTimeout chain
   private pollGen = 0
@@ -248,7 +254,7 @@ export class TerminalWindow implements OsWindow {
   }
 
   statusLine(): string | null {
-    if (this.listening) return 'listening…'
+    if (this.listening) return this.micLive ? 'listening…' : 'mic connecting…'
     if (this.transcribing) return 'transcribing…'
     if (this.pendingText !== null) return 'confirm?'
     return this.session
@@ -379,7 +385,14 @@ export class TerminalWindow implements OsWindow {
 
   private dictView(): WinView {
     const ses = this.dictPurpose === 'newSession' ? 'new session' : `→ ${this.session}`
-    if (this.listening) return { mode: 'text', title: `Tmux · ${ses} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: `Listening — speak the ${this.dictPurpose === 'newSession' ? 'session name' : 'text to type'}, then Done.` }
+    if (this.listening) {
+      const what = this.dictPurpose === 'newSession' ? 'session name' : 'text to type'
+      // Mic-live (2026-07-22): words spoken before the BT-SCO route settles are
+      // lost — say so instead of inviting speech into the gap.
+      return this.micLive
+        ? { mode: 'text', title: `Tmux · ${ses} · listening…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: `● Mic LIVE — speak the ${what}, then Done.` }
+        : { mode: 'text', title: `Tmux · ${ses} · mic connecting…`, menu: ['Done', 'Cancel', 'Reload', 'Main'], text: `Connecting the DJI mic (Bluetooth)…\nWait for "Mic LIVE" — words spoken before it are lost.` }
+    }
     if (this.transcribing) return { mode: 'text', title: `Tmux · ${ses} · transcribing…`, menu: ['Cancel', 'Reload', 'Main'], text: 'Transcribing…' }
     const verb = this.dictPurpose === 'newSession' ? 'New session' : 'Type (sent + RUN on Confirm)'
     return { mode: 'text', title: `Tmux · ${ses} · confirm?`, menu: ['Confirm', 'Re-record', 'Cancel', 'Reload', 'Main'], text: `${verb}:\n${'─'.repeat(20)}\n${clampConfirmBody(this.pendingText ?? '')}\n${'─'.repeat(20)}\nConfirm · Re-record · Cancel` }
@@ -612,9 +625,19 @@ export class TerminalWindow implements OsWindow {
     this.pendingText = null
     this.transcribing = false
     this.listening = true
+    this.micLive = false   // fresh capture — LIVE only when its first frame arrives
     if (purpose === 'send') this.level = 'view'
     this.ctx.audio('start')
     this.requestRender()
+  }
+
+  /** The first audio frame of this capture reached the server — the mic route
+   *  is delivering. Flip the listening card to LIVE (see micLive). */
+  onDictationAudioFlowing(): void {
+    if (this.listening && !this.micLive) {
+      this.micLive = true
+      this.requestRender()
+    }
   }
 
   private stopDictation(why: string): void {
