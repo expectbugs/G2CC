@@ -1,12 +1,22 @@
-"""dfn_polish — DeepFilterNet polish layer for cleaned mono speech.
+"""dfn_polish — DeepFilterNet polish layer (OFFLINE TOOL — not on the live path).
 
-Applies after NLMS to clean residual ambient noise (any non-machine,
-non-mechanical hum the adaptive filter didn't catch). Lazy-loaded with a
-threading.Lock — same shape as /home/user/aria/whisper_engine.py:121-181 so
+EVALUATED ON REAL CAPTURES 2026-07-22 (DFN3, torch 2.12 CUDA, RTF 0.043) and it
+LOST: on the careful-voice capture (test2-1784759746333) the DFN'd transcript
+was WORSE than both raw and adaptive-Wiener; on the quiet normal-voice capture
+(normalvoice-1784760800249) DFN muted the clip to an empty transcript — that
+clip contains almost no voiced speech (2/10 voicing on the loudest frames;
+the DJI TX-side gate/NC is the suspected upstream killer). Do NOT wire DFN
+into the live BT path without NEW captures showing a win. Kept as an offline
+analysis tool.
+
+INSTALL NOTE: deepfilternet==0.5.6 is installed --no-deps (its numpy<2 pin
+would DOWNGRADE the venv's numpy 2.4 and break NeMo). df.io imports
+torchaudio module paths that were REMOVED in torchaudio 2.1+, so _ensure_model
+installs a minimal torchaudio SHIM for the import and removes it after —
+NeMo's own lazy torchaudio import must keep seeing a real ImportError.
+
+Lazy-loaded with a threading.Lock — same shape as aria/whisper_engine.py so
 GPU access is single-threaded.
-
-Phase 3B writes this with sane defaults; Phase 8 may tune (e.g. attenuation
-floor) once real captures show the residual character.
 
 Module CLI:
   python -m pipeline.dfn_polish --import-check  verify lazy-load class shape
@@ -39,7 +49,28 @@ class DfnPolisher:
             return
         # Lazy import — DeepFilterNet pulls torch + a CUDA wheel. Keep it out
         # of the hot import path so other tools (capture, sanity_listen) don't
-        # pay the load cost.
+        # pay the load cost. The torchaudio SHIM (see module docstring) exists
+        # only for the duration of the df import: df.io binds its references at
+        # import time and our tensor path never calls them.
+        import sys as _sys
+        import types as _types
+        if 'df' not in _sys.modules and 'torchaudio' not in _sys.modules:
+            def _never(*_a, **_k):  # noqa: ANN002, ANN003
+                raise RuntimeError('torchaudio shim: df.io file helpers must never be called')
+            _ta = _types.ModuleType('torchaudio'); _ta.__version__ = '0.0-g2cc-shim'; _ta.__path__ = []
+            _be = _types.ModuleType('torchaudio.backend'); _be.__path__ = []
+            _co = _types.ModuleType('torchaudio.backend.common'); _co.AudioMetaData = type('AudioMetaData', (), {})
+            _fu = _types.ModuleType('torchaudio.functional'); _fu.resample = _never
+            _ta.backend = _be; _be.common = _co; _ta.functional = _fu
+            _ta.load = _never; _ta.save = _never; _ta.info = _never
+            _shim = {'torchaudio': _ta, 'torchaudio.backend': _be,
+                     'torchaudio.backend.common': _co, 'torchaudio.functional': _fu}
+            _sys.modules.update(_shim)
+            try:
+                import df.enhance  # noqa: F401 — bind df's torchaudio refs under the shim
+            finally:
+                for _k in _shim:   # NeMo must keep seeing a REAL ImportError for torchaudio
+                    _sys.modules.pop(_k, None)
         from df.enhance import enhance, init_df       # type: ignore
         import torch                                  # noqa: WPS433
         log.info('Loading DeepFilterNet on %s ...', self.device)
@@ -95,12 +126,15 @@ class DfnPolisher:
         with self._lock:
             self._ensure_model()
             assert self._model is not None and self._df_state is not None
-            # DeepFilterNet's enhance() expects torch tensors of shape (1, n_samples).
+            # DeepFilterNet's enhance() expects torch tensors of shape (1, n_samples)
+            # ON CPU — verified empirically 2026-07-22 against the installed 0.5.6:
+            # enhance() moves data to the model's device itself, and a CUDA input
+            # tensor makes its internal df_features() numpy conversion throw
+            # ("can't convert cuda:0 device type tensor to numpy"). The earlier
+            # review note claiming the tensor must ride the model device was
+            # written blind, pre-install — the opposite is true.
             import torch                              # noqa: WPS433 — lazy to avoid hot import
-            # 4th-pass review HIGH: tensor MUST be on the same device as the
-            # model. Without .to(device), a CUDA model would either eat a
-            # hidden HtoD memcpy on every call or raise device-mismatch.
-            t = torch.from_numpy(mono).unsqueeze(0).to(next(self._model.parameters()).device)
+            t = torch.from_numpy(mono).unsqueeze(0)
             out = self._enhance(self._model, self._df_state, t)
             return out.squeeze(0).cpu().numpy().astype(np.float32, copy=False)
 
