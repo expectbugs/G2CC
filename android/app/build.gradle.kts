@@ -49,6 +49,24 @@ android {
         buildConfigField("int", "SERVER_PORT", harnessProps.getProperty("serverPort", "7300"))
     }
 
+    // THE signing identity (2026-07-22 — ends the "App not installed" roulette).
+    // TWO default debug keystores existed on this box (~/.android/debug.keystore,
+    // Jun 4 + ~/.config/.android/debug.keystore, Jun 1) and gradle picked one by
+    // the SESSION'S environment — so ~1 in 5 staged builds carried the cert the
+    // phone doesn't trust and the sideload failed with the generic dialog. The
+    // phone's install lineage is the Jun-1 key; it now lives CANONICALLY at
+    // ~/.g2cc/g2cc-debug.keystore and is pinned here EXPLICITLY. Deliberately NO
+    // exists() fallback: a missing keystore must FAIL THE BUILD loudly, never
+    // silently sign with whatever ambient key the environment resolves.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("/home/user/.g2cc/g2cc-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
