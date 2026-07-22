@@ -9,6 +9,10 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AudioEffect
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -111,7 +115,7 @@ class MicCapture(private val context: Context) {
                 onEvent(Event.Failure("DJI Mic unavailable (no USB receiver; no Bluetooth TX connected) — phone-mic fallback is disabled by policy"))
                 return
             }
-            val (rec, source, sampleRate, channels, encoding) = attempt
+            val (rec, source, sampleRate, channels, encoding, expectedDevice, effects) = attempt
             record = rec
             isCapturing = true
 
@@ -123,6 +127,7 @@ class MicCapture(private val context: Context) {
                 // the instance is sticky-true and subsequent start() calls
                 // return "already capturing" — mic permanently wedged.
                 isCapturing = false
+                releaseEffects(effects)
                 releaseLocked()
                 return
             }
@@ -132,21 +137,27 @@ class MicCapture(private val context: Context) {
             val myGen = captureGen.incrementAndGet()
             captureJob = scope.launch {
                 try {
-                    runReadLoop(rec, encoding, onEvent)
+                    runReadLoop(rec, encoding, expectedDevice, onEvent)
                 } finally {
-                    // A-H1: if runReadLoop exited via an error path (USB unplug,
-                    // read returning ERROR_DEAD_OBJECT, etc.) isCapturing is still
-                    // true and resources are still held. Own the cleanup here so
-                    // the instance isn't permanently wedged. stop() flips
-                    // isCapturing=false first then cancels this job, so the check
-                    // below avoids double-release in the user-stopped path.
-                    // gen check (review 2026-07-05): after a rapid stop()->start()
-                    // this stale finally must NOT release the NEW capture.
+                    // The LOOP owns release now (2026-07-22 drain-on-stop): stop()
+                    // no longer releases, so the loop can drain the buffered tail
+                    // after record.stop() — the final word's samples used to be
+                    // discarded. Local resources (rec, effects) release
+                    // UNCONDITIONALLY (they belong to THIS capture); the SHARED
+                    // state (record field, comms route, isCapturing) stays
+                    // gen-guarded so a rapid stop()->start()'s stale finally
+                    // can't touch the NEW capture (review 2026-07-05 pattern).
+                    releaseEffects(effects)
+                    try { rec.release() } catch (e: Exception) { Log.w(TAG, "release threw", e) }
                     synchronized(this@MicCapture) {
-                        if (isCapturing && myGen == captureGen.get()) {
-                            Log.w(TAG, "read-loop exited while isCapturing=true — cleaning up")
-                            isCapturing = false
-                            releaseLocked()
+                        if (myGen == captureGen.get()) {
+                            if (isCapturing) {
+                                Log.w(TAG, "read-loop exited while isCapturing=true — cleaning up")
+                                isCapturing = false
+                            }
+                            if (record === rec) record = null
+                            captureJob = null
+                            clearCommsRouteLocked()
                         }
                     }
                     onEvent(Event.Stopped)
@@ -159,9 +170,17 @@ class MicCapture(private val context: Context) {
         synchronized(this) {
             if (!isCapturing) return
             isCapturing = false
+            // Stop (NOT release) the record: a blocking read returns promptly
+            // after stop() and buffered samples stay readable — the read loop
+            // drains them (the dictation's final word) and then owns the
+            // release + comms-route restore in its finally (2026-07-22).
             try { record?.stop() } catch (e: Exception) { Log.w(TAG, "stop threw", e) }
-            captureJob?.cancel()
-            releaseLocked()
+        }
+    }
+
+    private fun releaseEffects(effects: List<AudioEffect>) {
+        for (fx in effects) {
+            try { fx.release() } catch (e: Exception) { Log.w(TAG, "effect release threw", e) }
         }
     }
 
@@ -358,8 +377,46 @@ class MicCapture(private val context: Context) {
             Log.w(TAG, "AudioRecord state != INITIALIZED for BT-SCO; falling through")
             return null
         }
+        // 2026-07-22 accuracy pass: VOICE_COMMUNICATION drags in the platform's
+        // AEC/NS/AGC ("the OS applies its own DSP that we cannot disable here" —
+        // partially wrong: the audiofx control interfaces CAN ask them off).
+        // Double noise-suppression (platform NS before the server's Wiener) and
+        // AGC pumping are exactly the phonetic-mush makers; disable whatever the
+        // device lets us, loudly logging what stuck.
+        val effects = disablePlatformVoiceDsp(rec.audioSessionId)
         Log.i(TAG, "BT-SCO capture: '${btDevice.productName}' type=${btDevice.type} @ ${sampleRate}Hz mono")
-        return AttemptResult(rec, Source.DjiBluetooth, sampleRate, 1, encoding)
+        return AttemptResult(rec, Source.DjiBluetooth, sampleRate, 1, encoding, expectedDevice = btDevice, effects = effects)
+    }
+
+    /** Ask the platform's voice-call DSP (AEC / NS / AGC) OFF for this capture
+     *  session. Whether each toggle takes effect is device-dependent — every
+     *  outcome is logged so "is the OS still crushing the DJI audio?" is
+     *  answerable from logcat instead of guessed. Returned handles are held
+     *  (releasing an AudioEffect can re-enable the stage) until capture end. */
+    private fun disablePlatformVoiceDsp(sessionId: Int): List<AudioEffect> {
+        val held = ArrayList<AudioEffect>(3)
+        fun tryDisable(name: String, available: Boolean, create: () -> AudioEffect?) {
+            if (!available) {
+                Log.i(TAG, "$name: not exposed on this device — nothing to disable")
+                return
+            }
+            try {
+                val fx = create()
+                if (fx == null) {
+                    Log.w(TAG, "$name: create() returned null — cannot control it")
+                    return
+                }
+                val status = fx.setEnabled(false)
+                held += fx
+                Log.i(TAG, "$name: setEnabled(false) status=$status, enabled now=${fx.enabled}")
+            } catch (e: Exception) {
+                Log.w(TAG, "$name: disable threw — platform DSP stays as-is", e)
+            }
+        }
+        tryDisable("AcousticEchoCanceler", AcousticEchoCanceler.isAvailable()) { AcousticEchoCanceler.create(sessionId) }
+        tryDisable("NoiseSuppressor", NoiseSuppressor.isAvailable()) { NoiseSuppressor.create(sessionId) }
+        tryDisable("AutomaticGainControl", AutomaticGainControl.isAvailable()) { AutomaticGainControl.create(sessionId) }
+        return held
     }
 
     // PARKED (Adam 2026-06-11): phone-mic capture is disabled by policy — kept only
@@ -401,7 +458,20 @@ class MicCapture(private val context: Context) {
         return AttemptResult(rec, Source.PhoneMic, sampleRate, 1, encoding)
     }
 
-    private fun runReadLoop(rec: AudioRecord, encoding: Int, onEvent: (Event) -> Unit) {
+    /** Is the record's LIVE route the device we selected? Compared by BT type +
+     *  address when both sides expose one (the comms-device object and the
+     *  input-role routed object are different AudioDeviceInfo instances, so id
+     *  equality is NOT reliable — match on what identifies the physical device). */
+    private fun routedToExpected(rec: AudioRecord, expected: AudioDeviceInfo): Boolean {
+        val routed = rec.routedDevice ?: return false
+        val btType = routed.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || routed.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+        if (!btType) return false
+        val expAddr = expected.address
+        val gotAddr = routed.address
+        return expAddr.isNullOrEmpty() || gotAddr.isNullOrEmpty() || expAddr == gotAddr
+    }
+
+    private fun runReadLoop(rec: AudioRecord, encoding: Int, expected: AudioDeviceInfo?, onEvent: (Event) -> Unit) {
         // Bug fix #7: rate-aware frame size. Target ~20ms of audio per WebSocket
         // binary frame regardless of sample rate / channel count / encoding —
         // gives consistent ~50 Hz update rate to the server.
@@ -420,6 +490,48 @@ class MicCapture(private val context: Context) {
         val align = bytesPerSample * channels
         val frameSize = (targetBytes / align) * align
         Log.i(TAG, "frameSize=$frameSize bytes (~${TARGET_FRAME_MS}ms @ ${sampleRate}Hz × $channels ch × $bytesPerSample bytes)")
+
+        // ROUTE VERIFICATION (2026-07-22 accuracy pass, BT-SCO path): until the
+        // record's live route lands on the selected DJI device, frames are the
+        // WRONG MIC — setCommunicationDevice() is asynchronous, and the settle
+        // window used to ship phone-mic/silence bytes labeled 'dji-bt' (a
+        // straight DJI-only-policy violation, and mush for Parakeet). Wrong-mic
+        // frames are DROPPED (never sent); if the route never engages within
+        // ~ROUTE_SETTLE_MAX_FRAMES of audio, LOUD-FAIL — the server shows the
+        // error card instead of transcribing pocket audio. Frame-count-based
+        // supervision, not an I/O timeout: reads keep their no-timeout shape.
+        var routeVerified = expected == null
+        var droppedForRoute = 0
+        val routeStartMs = System.currentTimeMillis()
+        // Returns true when the frame may be emitted; false while pre-route
+        // (dropped) — and fails the capture when the route never arrives.
+        fun routeGate(): Boolean {
+            if (routeVerified) return true
+            if (routedToExpected(rec, expected!!)) {
+                routeVerified = true
+                Log.i(
+                    TAG,
+                    "route VERIFIED on '${rec.routedDevice?.productName}' after " +
+                        "${System.currentTimeMillis() - routeStartMs}ms ($droppedForRoute pre-route frame(s) dropped)",
+                )
+                return true
+            }
+            droppedForRoute++
+            if (droppedForRoute >= ROUTE_SETTLE_MAX_FRAMES) {
+                val routed = rec.routedDevice
+                onEvent(
+                    Event.Failure(
+                        "BT-SCO route never engaged after ${System.currentTimeMillis() - routeStartMs}ms — " +
+                            "audio is coming from '${routed?.productName ?: "(no route)"}' (type=${routed?.type ?: -1}), " +
+                            "not the DJI. Refusing to ship wrong-mic audio (DJI-only policy). " +
+                            "Check the DJI TX Bluetooth connection and try again.",
+                    ),
+                )
+                // The Failure path stops the streamer → stop() → drain/cleanup.
+                return false
+            }
+            return false
+        }
 
         // ENCODING_PCM_FLOAT REQUIRES the float[] overload: the byte[] read returns
         // ERROR_INVALID_OPERATION unconditionally for float records (AOSP
@@ -442,10 +554,29 @@ class MicCapture(private val context: Context) {
                     return
                 }
                 if (read == 0) continue
+                if (!routeGate()) { if (droppedForRoute >= ROUTE_SETTLE_MAX_FRAMES) return else continue }
                 byteBuf.clear()
                 for (k in 0 until read) byteBuf.putFloat(floatBuf[k])
                 onEvent(Event.Frame(byteBuf.array().copyOf(read * 4), System.currentTimeMillis()))
             }
+            // DRAIN (2026-07-22, float path — see the int16 drain below). Only a
+            // VERIFIED route's tail is worth keeping (pre-route = wrong mic).
+            var fDrains = 0
+            var fDrained = 0
+            while (routeVerified && fDrains < DRAIN_MAX_READS) {
+                val read = try {
+                    rec.read(floatBuf, 0, floatBuf.size, AudioRecord.READ_NON_BLOCKING)
+                } catch (e: Exception) {
+                    break
+                }
+                if (read <= 0) break
+                byteBuf.clear()
+                for (k in 0 until read) byteBuf.putFloat(floatBuf[k])
+                fDrained += read * 4
+                onEvent(Event.Frame(byteBuf.array().copyOf(read * 4), System.currentTimeMillis()))
+                fDrains++
+            }
+            if (fDrained > 0) Log.i(TAG, "drained $fDrained tail bytes after stop ($fDrains read(s))")
             return
         }
         val frameBytes = ByteArray(frameSize)
@@ -461,9 +592,28 @@ class MicCapture(private val context: Context) {
                 return
             }
             if (read == 0) continue
+            if (!routeGate()) { if (droppedForRoute >= ROUTE_SETTLE_MAX_FRAMES) return else continue }
             val out = if (read == frameBytes.size) frameBytes.copyOf() else frameBytes.copyOf(read)
             onEvent(Event.Frame(out, System.currentTimeMillis()))
         }
+        // DRAIN (2026-07-22): stop() stopped the record but buffered samples —
+        // the dictation's final syllables — stay readable. Bounded non-blocking
+        // reads flush them so the tail isn't discarded (it always was before).
+        // Only a VERIFIED route's tail is worth keeping (pre-route = wrong mic).
+        var drains = 0
+        var drained = 0
+        while (routeVerified && drains < DRAIN_MAX_READS) {
+            val read = try {
+                rec.read(frameBytes, 0, frameBytes.size, AudioRecord.READ_NON_BLOCKING)
+            } catch (e: Exception) {
+                break
+            }
+            if (read <= 0) break
+            drained += read
+            onEvent(Event.Frame(frameBytes.copyOf(read), System.currentTimeMillis()))
+            drains++
+        }
+        if (drained > 0) Log.i(TAG, "drained $drained tail bytes after stop ($drains read(s))")
     }
 
     private data class AttemptResult(
@@ -472,6 +622,13 @@ class MicCapture(private val context: Context) {
         val sampleRate: Int,
         val channels: Int,
         val encoding: Int,
+        /** The device frames MUST come from (BT-SCO path) — the read loop drops
+         *  frames until AudioRecord.getRoutedDevice() lands on it and LOUD-FAILS
+         *  if it never does. null = no verification (USB uses setPreferredDevice). */
+        val expectedDevice: AudioDeviceInfo? = null,
+        /** Platform voice-DSP handles (AEC/NS/AGC) held DISABLED for this
+         *  capture's session; released by the read loop's finally. */
+        val effects: List<AudioEffect> = emptyList(),
     )
 
     companion object {
@@ -482,5 +639,12 @@ class MicCapture(private val context: Context) {
         private const val TARGET_FRAME_MS = 20
         private const val MIN_FRAME_BYTES = 256
         private const val MAX_FRAME_BYTES = 16 * 1024
+        /** Route-settle budget (2026-07-22): ~20 ms frames × 100 ≈ 2 s for the
+         *  comms route to land on the DJI before the capture LOUD-FAILS.
+         *  Frame-count supervision, not a clock-bound I/O timeout. */
+        private const val ROUTE_SETTLE_MAX_FRAMES = 100
+        /** Post-stop tail-drain bound: ≤25 non-blocking reads (~0.5 s of audio)
+         *  flush the buffered final syllables, then the loop releases. */
+        private const val DRAIN_MAX_READS = 25
     }
 }

@@ -47,6 +47,14 @@ class AudioStreamer(
     // the MicCapture callback thread, read under the streamer lock.
     @Volatile private var startSent = false
 
+    // Drain-aware stop (2026-07-22): stop() asks the mic to stop, but the capture
+    // loop then DRAINS its buffered tail (the dictation's final syllables) and
+    // emits those frames before Event.Stopped. audio_end therefore rides the
+    // Stopped event — not stop() itself — so the tail lands INSIDE the
+    // start→end window instead of being dropped by an already-sent end.
+    // While `stopping`, isStreaming stays true so drained Frames still pass.
+    private var stopping = false
+
     // Handsfree windowing state (touched only under the streamer lock): the
     // announced format to re-emit audio_start, and a running byte count toward
     // the next window flush.
@@ -114,7 +122,9 @@ class AudioStreamer(
                             // Handsfree: re-cut the WS framing every ~WINDOW_MS so the server
                             // gets discrete buffers to VAD-gate + transcribe live. The mic
                             // never stops — only the audio_end/audio_start markers move.
-                            if (handsfree && winLimit > 0) {
+                            // Not while stopping: a drain-window flush would re-open a
+                            // window AFTER the final audio_end (protocol violation).
+                            if (handsfree && winLimit > 0 && !stopping) {
                                 winBytes += event.pcm.size
                                 if (winBytes >= winLimit) {
                                     connection.send(ClientMessage.AudioEnd)
@@ -159,6 +169,18 @@ class AudioStreamer(
                         else Log.w(TAG, "capture failure after stop — not reported: ${event.reason}")
                     }
                     is MicCapture.Event.Stopped -> {
+                        // Drain-aware audio_end (2026-07-22): the capture loop has
+                        // emitted its LAST frame (tail drained) — close the window
+                        // now. The Failure path already closed it (isStreaming
+                        // false), so this gate makes the duplicate impossible.
+                        synchronized(this@AudioStreamer) {
+                            if (isStreaming) {
+                                if (startSent) connection.send(ClientMessage.AudioEnd)
+                                isStreaming = false
+                                startSent = false
+                            }
+                            stopping = false
+                        }
                         Log.i(TAG, "capture stopped")
                     }
                 }
@@ -168,14 +190,26 @@ class AudioStreamer(
 
     fun stop() {
         synchronized(this) {
-            val was = isStreaming
-            isStreaming = false
             // ALWAYS stop the mic (idempotent): a Failure that already cleared isStreaming
             // could leave the capture loop running while the early-return skipped
             // mic.stop() — the read loop then ran forever (review 2026-06-11).
+            if (!isStreaming) {
+                mic.stop()
+                stopping = false
+                startSent = false
+                return
+            }
+            if (stopping) {
+                mic.stop()   // duplicate stop — idempotent nudge, the drain finishes on its own
+                return
+            }
+            // Drain-aware (2026-07-22): keep isStreaming TRUE so the frames the
+            // capture loop drains after record.stop() still pass the Frame gate;
+            // Event.Stopped (post-drain) sends audio_end + clears the state. If
+            // the capture never started a loop (pre-Started failure), the Failure
+            // handler already cleared isStreaming and we never reach here.
+            stopping = true
             mic.stop()
-            if (was && startSent) connection.send(ClientMessage.AudioEnd)   // don't send a bogus end if start never went out
-            startSent = false
         }
     }
 
