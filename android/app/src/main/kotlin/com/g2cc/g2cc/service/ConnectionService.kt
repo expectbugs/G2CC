@@ -1228,6 +1228,9 @@ class ConnectionService : Service(), TestHarness {
         watchdogJob = scope.launch {
             var lastWarn = 0L
             var bad = 0
+            // PROBE state (2026-07-22): >0 while a probe write's ack window is
+            // open; the probe's HubAck resets lastNotifyMs like any response.
+            var probeTicks = 0
             while (isActive) {
                 delay(1000)
                 val gap = System.currentTimeMillis() - lastNotifyMs
@@ -1237,14 +1240,43 @@ class ConnectionService : Service(), TestHarness {
                         DiagLog.log("watch", "NO glasses response for ${gap}ms (bad=$bad) — possible SILENT app-drop")
                         lastWarn = System.currentTimeMillis()
                     }
-                    // Sustained no-acks → auto-recover (silent drop: link up, slot dead). Threshold
-                    // stays above the ~6 s heavy-render ack pause to avoid false fires; tune from diag.
+                    // Sustained no-acks → PROBE, then recover (2026-07-22). The old
+                    // straight-to-recovery loop assumed keepalive acks prove slot
+                    // life — but the firmware can WEDGE keepalive-acking OFF while
+                    // the slot still renders + acks real writes (observed live
+                    // 2026-07-21 13:22: a native SYSTEM_EXIT killed f1=12 acks
+                    // permanently; result was a teardown/cold-launch loop every
+                    // ~26-50 s all day — 1,639 reconnects — thrashing the BT radio
+                    // the DJI SCO mic shares). A cheap acked f1=5 clock re-push
+                    // distinguishes 'slot dead' (no ack → recover) from
+                    // 'keepalive-ack wedge' (ack arrives → healthy, loop broken).
                     if (bad >= WATCHDOG_BAD_THRESHOLD && !recovering &&
                         System.currentTimeMillis() - lastRecoverMs > RECOVERY_RATELIMIT_MS) {
-                        recoverSession()
+                        if (probeTicks == 0) {
+                            val r = renderer
+                            if (r?.currentScene?.region(OsLayout.CLOCK_NAME) != null) {
+                                probeTicks = PROBE_GRACE_TICKS
+                                DiagLog.log("watch", "probing the slot (clock f1=5) before recovery — keepalive acks alone are not proof of death")
+                                r.setText(OsLayout.CLOCK_NAME, nowClock()) { }
+                            } else {
+                                probeTicks = 1   // nothing probeable (no scene) — recover next tick
+                            }
+                        } else if (--probeTicks <= 0) {
+                            if (audioStreamer?.isStreaming == true) {
+                                // A live DICTATION rides phone↔DJI↔WS — none of it
+                                // needs the glasses. Recovery would tear the WS +
+                                // BT mid-capture to fix a display: defer until the
+                                // capture ends (re-checked every tick).
+                                probeTicks = 1
+                                DiagLog.log("watch", "slot looks dead but a dictation is LIVE — recovery deferred until the capture ends")
+                            } else {
+                                recoverSession()
+                            }
+                        }
                     }
                 } else {
                     bad = 0
+                    probeTicks = 0
                 }
             }
         }
@@ -1533,6 +1565,10 @@ class ConnectionService : Service(), TestHarness {
         // drop recovery (was effectively ~14 s). Kept above the ~6 s heavy-render ack pause.
         const val WATCHDOG_BAD_THRESHOLD = 6
         const val RECOVERY_RATELIMIT_MS = 10_000L   // min between watchdog-triggered recoveries (was 30 s)
+        /** Ticks a probe write gets to draw its ack before recovery proceeds
+         *  (2026-07-22). 4 s ≈ generous vs the ~62 ms healthy f1=5 ack and still
+         *  under the ~6 s heavy-render pause the threshold already absorbs. */
+        const val PROBE_GRACE_TICKS = 4
 
         // Process-level liveness flag so the Activity can decide whether to bind-to-observe
         // an already-running (background) service on reopen. @Volatile: read off the main
