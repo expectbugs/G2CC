@@ -17,7 +17,7 @@
 
 import Fastify from 'fastify'
 import websocket from '@fastify/websocket'
-import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
@@ -91,7 +91,7 @@ server.get('/setup', async (req, reply) => {
     reply.code(403).send({ error: 'setup is served on the Tailscale interface only' })
     return
   }
-  const html = await renderSetupPage(config.port, config.authToken)
+  const html = await renderSetupPage(config.port, config.authToken, stagedApkInfo())
   reply.type('text/html').send(html)
 })
 
@@ -143,6 +143,30 @@ server.post('/diag', async (req, reply) => {
 // the staged build. /tmp kept as a fallback for older build instructions.
 const APK_PATH = join(homedir(), '.g2cc', 'g2cc-harness.apk')
 const APK_PATH_LEGACY = '/tmp/g2cc-harness.apk'
+
+/** Build stamp for the staged APK from its mtime (local time) — rides the
+ *  download FILENAME so every staged build saves distinctly on the phone
+ *  (2026-07-22: a static 'g2cc-harness.apk' name piled up as '(1)…(5).apk' in
+ *  Downloads with no way to tell fresh from stale, and the APK's own
+ *  versionCode was historically static — 'App not installed' debugging was
+ *  guesswork). Server-side stat only; no APK parsing. */
+function stagedApkStamp(path: string): string {
+  const m = statSync(path).mtime
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${m.getFullYear()}${p(m.getMonth() + 1)}${p(m.getDate())}-${p(m.getHours())}${p(m.getMinutes())}`
+}
+
+/** Human line for /setup: which staged build the download link serves. */
+function stagedApkInfo(): string {
+  const path = existsSync(APK_PATH) ? APK_PATH : APK_PATH_LEGACY
+  if (!existsSync(path)) return 'NOT STAGED — rebuild + copy to ~/.g2cc/g2cc-harness.apk'
+  try {
+    const st = statSync(path)
+    return `staged ${stagedApkStamp(path)} · ${(st.size / (1024 * 1024)).toFixed(1)} MB — saves as g2cc-harness-${stagedApkStamp(path)}.apk`
+  } catch (err) {
+    return `stat failed: ${err instanceof Error ? err.message : String(err)}`
+  }
+}
 server.get('/apk', async (req, reply) => {
   if (!setupInterfaceAllowed(req.raw.socket.localAddress, req.ip, '/apk')) {
     reply.code(403).send({ error: 'apk is served on the Tailscale interface only' })
@@ -166,9 +190,17 @@ server.get('/apk', async (req, reply) => {
   // failed" with no reason. The ~17 MB sync read is a few ms on a rare manual download — not worth a
   // streaming regression. (Review finding #apk-readFileSync intentionally NOT applied; see HANDOFF.)
   const apk = readFileSync(path)
+  // Versioned filename (2026-07-22): every staged build downloads under a
+  // distinct name (build mtime), so a stale file in the phone's Downloads can
+  // never be mistaken for the fresh one. See stagedApkStamp.
+  let stamp = 'unstamped'
+  try { stamp = stagedApkStamp(path) } catch (err) {
+    console.error(`[g2cc-server] /apk stamp failed (serving as 'unstamped'): ${err instanceof Error ? err.message : String(err)}`)
+  }
+  console.log(`[g2cc-server] /apk served: ${apk.length} B as g2cc-harness-${stamp}.apk`)
   reply
     .type('application/vnd.android.package-archive')
-    .header('Content-Disposition', 'attachment; filename="g2cc-harness.apk"')
+    .header('Content-Disposition', `attachment; filename="g2cc-harness-${stamp}.apk"`)
     .send(apk)
 })
 

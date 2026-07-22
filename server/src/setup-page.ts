@@ -107,7 +107,7 @@ async function renderQr(iface: NetIface, port: number, token: string): Promise<R
   return { iface, appUrl, qrDataUrl, warning }
 }
 
-export async function renderSetupPage(port: number, token: string): Promise<string> {
+export async function renderSetupPage(port: number, token: string, apkInfo = ''): Promise<string> {
   const ifaces = getLocalInterfaces()
   const qrs = await Promise.all(ifaces.map(i => renderQr(i, port, token)))
 
@@ -159,8 +159,9 @@ export async function renderSetupPage(port: number, token: string): Promise<stri
 
   <div class="box">
     <strong>G2CC Bridge APK</strong><br>
-    <a href="/apk?token=${encodeURIComponent(token)}">⬇ Download g2cc-harness.apk</a>
-    <p class="subtitle">Sideload the glasses bridge: Connect goes straight into the DE (server mode); Disconnect, the Diag toggle, the one-time notification-access row, and a pixel-perfect on-phone preview of what the glasses should show.</p>
+    <a href="/apk?token=${encodeURIComponent(token)}">⬇ Download the staged APK</a>
+    ${apkInfo ? `<p class="subtitle">📦 ${apkInfo}</p>` : ''}
+    <p class="subtitle">Sideload the glasses bridge: Connect goes straight into the DE (server mode); Disconnect, the Diag toggle, the one-time notification-access row, and a pixel-perfect on-phone preview of what the glasses should show. The download filename carries the build stamp — if the install fails, check the tapped file's stamp matches the line above (old copies in Downloads are stale builds).</p>
   </div>
 
   <div class="box">
