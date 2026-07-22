@@ -4,6 +4,54 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-22 — **STT accuracy pass: the tmux-dictation investigation → fixes end-to-end (server + APK v1.19)**
+
+Adam: "voice dictation for tmux is worse than ever." The investigation found TWO stacked
+problems and a set of accuracy holes along the whole capture→ASR chain; the NR/ASR math
+itself (validated 2026-06-23) was diff-verified UNCHANGED and left alone.
+
+**The churn (root cause, proven from receipts):** a native SYSTEM_EXIT on the glasses
+(Jul 21 13:22:09 — fgExit code 5 → SYSTEM_EXIT code 7, the accidental long-press class,
+right as the glasses sat at battery=100) permanently wedged the firmware's f1=12
+keepalive ACKS off while the slot stayed alive (launch/text/list acks all still flow —
+77,240 keepalive acks before that instant, zero after). The app watchdog's only
+idle-screen liveness signal was that 4 s ack cadence → silent-drop recovery
+(teardown+reconnect+cold-launch+WS bounce) every ~26-50 s, all day: **1,639 reconnects
+in 51 h**, BT-radio thrash under the DJI's SCO mic, one 11-refusal "DJI Mic unavailable"
+burst, and mid-listen captures at constant risk. Glasses have NO power switch, so the
+firmware wedge has no reboot escape — the fix is app-side immunity:
+- **Watchdog probes before declaring death** (v1.19): on threshold, ONE cheap acked
+  f1=5 clock re-push; ack → healthy (loop broken; probes only ever fire while the
+  keepalive wedge persists); no ack in 4 s → recover as before. Recovery also DEFERS
+  while a dictation is streaming — the mic path never needed the glasses.
+
+**Capture integrity (v1.19, the accuracy core):**
+- **SCO route verified**: setCommunicationDevice() is async and frames before the route
+  lands are the PHONE mic shipped as 'dji-bt' (policy violation + shop-noise mush).
+  Frames now DROP until getRoutedDevice() is the DJI; ~2 s of audio without it →
+  LOUD-FAIL. The first frame the server sees is now always DJI audio.
+- **Platform AEC/NS/AGC asked OFF** via audiofx on the VOICE_COMMUNICATION session
+  (double-NR under the server Wiener was live on every clip; outcomes logged).
+- **Tail drain**: stop() used to discard the buffered final syllables; the read loop now
+  drains post-stop and audio_end rides Event.Stopped (post-drain).
+
+**Server (deploy = restart):**
+- **Rejected dictations are LOUD**: every stt_error now console.errors (they were
+  glasses-only — Adam's rejects were invisible in the log); WS-close mid-capture logs
+  the discarded bytes; the last phone surface detaching fires onSttError so a
+  listening…/transcribing… window can't hang forever on a mic that left.
+- **VAD-gated hallucination denylist**: "thanks"/"bye"/"you" as REAL short dictations
+  were eaten as "No speech detected". ≥350 ms of VAD speech now accepts (loudly);
+  silent clips keep the reject. Smoke: phase9-voice #6.
+- **Mic LIVE cue (term)**: the listening card shows "Connecting the DJI mic… wait for
+  Mic LIVE" until the capture's first frame reaches the server (the SCO settle ate the
+  head of speech when Adam spoke at 'Listening'); plus per-clip [stt] telemetry
+  (duration, VAD speech ms, rms/peak dBFS, CLIPPING flag).
+
+Lesson (the investigation): the log blind spots WERE the mystery — sttError logged
+nothing, pre-restart history truncates, and the phone capture path has no diag tags.
+The raw-capture tee is armed ('live') for a ground-truth WAV of the next dictation.
+
 ## (unstamped) — 2026-07-13 — **APK v1.18: phone control mode (multi-surface Workstream 3)**
 
 The phone screen becomes a G2 surface of its own: new landscape-fullscreen

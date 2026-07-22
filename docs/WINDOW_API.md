@@ -90,6 +90,7 @@ interface OsWindow {
   dispose?(): void                     // ws-close: release timers/pollers. Host calls it for every window.
   onStt?(text: string): Promise<void>          // a confirmed dictation transcript arrived
   onSttError?(error: string): Promise<void>    // dictation failed
+  onDictationAudioFlowing?(): void             // first audio frame of the capture arrived — flip "connecting"→"Mic LIVE" (2026-07-22)
   onOpen?(open: WindowOpen): Promise<void>     // open a specific item post-switch (Search/voice hand-off)
 }
 ```
