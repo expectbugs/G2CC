@@ -167,6 +167,14 @@ export class OsSession {
       this.g2Battery = null
       this.g2Connected = null
       console.log('[os-session] last phone surface gone — phone-fed state (batteries, g2Connected) reset to unknown')
+      // Dictation unwind (2026-07-22): the mic lives on the phone — with no
+      // phone surface, a window sitting in listening…/transcribing… waits on
+      // audio that can never arrive (the WM is session-owned now, so that
+      // state survives the disconnect). Every window's onSttError guards the
+      // no-dictation case quietly, so firing this on ordinary churn detaches
+      // is a cheap no-op; mid-dictation it converts a silent forever-hang
+      // into a visible error card.
+      void this.wm.onSttError('the phone disconnected — any live dictation was lost (mic gone); re-record when it reconnects')
       this.wm.requestRender()   // refresh the battery cluster / chrome
     }
     this.broadcastOsStatus()

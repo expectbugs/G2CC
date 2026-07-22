@@ -102,6 +102,12 @@ export interface WSClient {
   /** Bug-fix-pass-2 #8: format the phone announced on audio_start. Drives
    *  the route taken in audio_end (handleAudio). */
   audioFormat: AudioFormat | null
+  /** Mic-live feedback (2026-07-22): true once the FIRST binary frame of the
+   *  current capture arrived — the moment the phone's mic route is actually
+   *  delivering audio (BT-SCO settle can take ~0.5-1.5 s after audio_start, and
+   *  speech before that is lost). Reset on every audio_start; the one-shot
+   *  signal drives wm.onAudioFlowing → the Terminal's "Mic LIVE" cue. */
+  audioLiveSignaled: boolean
   /** Glasses-OS capability probe — set by os_attach. osTest = current test index
    *  (double-tap steps), osFFilled = filled containers in the F fill-test,
    *  osGTimer = the G rate-test interval (cleared on test-change + ws-close). */
@@ -202,6 +208,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
     lastAppActivityMs: Date.now(),
     router: new ChannelRouter(),
     audioFormat: null,
+    audioLiveSignaled: false,
     osMode: false,
     osScreen: 'de',
     osTest: 0,
@@ -272,6 +279,16 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
           sttError(client, `audio stream exceeded ${MAX_AUDIO_BYTES} bytes without audio_end; discarded`)
         } else {
           client.audioChunks.push(chunk)
+          // Mic-live one-shot (2026-07-22): the first frame of a capture proves
+          // the phone's mic route is actually delivering — the Terminal flips
+          // "Mic connecting…" → "Mic LIVE" so Adam doesn't speak into the
+          // BT-SCO settle gap (speech before this instant never reaches us).
+          if (!client.audioLiveSignaled) {
+            client.audioLiveSignaled = true
+            if (client.osMode && client.osScreen === 'de') {
+              getOsSession().wm.onAudioFlowing()
+            }
+          }
         }
       } else {
         // Loud-fail per LOUD AND PROUD rule: a binary frame outside the
@@ -308,6 +325,17 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
 
   ws.on('close', (code: number, reason: Buffer) => {
     liveClients.delete(client)
+    // A capture cut off by the socket dying loses its audio — say so (2026-07-22:
+    // this discard was fully silent; with the phone's recovery churn it is a REAL
+    // recurring path). The WM-side dictation unwind rides the surface detach
+    // below (os-session fires onSttError when the last phone surface drops).
+    if (client.collectingAudio) {
+      console.error(`[ws] client closed MID-CAPTURE — ${client.audioBytes} B of dictation audio discarded (no audio_end will come)`)
+      client.collectingAudio = false
+      client.audioChunks = []
+      client.audioBytes = 0
+      client.audioFormat = null
+    }
     if (client.authTimer) clearTimeout(client.authTimer)
     if (client.streamTimer) clearTimeout(client.streamTimer)
     if (client.hbInterval) clearInterval(client.hbInterval)
@@ -666,6 +694,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       client.audioChunks = []
       client.audioBytes = 0
       client.collectingAudio = true
+      client.audioLiveSignaled = false   // re-arm the mic-live one-shot per capture
       client.audioFormat = {
         sampleRate: sr,
         channels: ch,
@@ -1475,19 +1504,51 @@ async function handleAudio(
     pcm: pcmBuffer, sampleRate: format.sampleRate, channels: format.channels, encoding: format.encoding,
   }
 
+  // Per-clip telemetry + VAD speech measure (2026-07-22 accuracy pass; int16-mono
+  // — the live DJI-BT path). ONE loud line per dictation so level/clipping/dead-air
+  // problems are visible the day they start (a clipped shout and an AGC-crushed
+  // whisper both mangle Parakeet invisibly otherwise). speechMs feeds the
+  // hallucination-denylist gate in stt.ts (real short answers must not be eaten)
+  // and the handsfree silence gate below (one VAD pass, both consumers).
+  let speechMs: number | undefined
+  if (isLegacyShape) {
+    try {
+      const i16 = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, Math.floor(pcmBuffer.length / 2))
+      let sumSq = 0
+      let peak = 0
+      let clipped = 0
+      for (let i = 0; i < i16.length; i++) {
+        const v = i16[i]
+        const a = v < 0 ? -v : v
+        sumSq += v * v
+        if (a > peak) peak = a
+        if (a >= 32700) clipped++
+      }
+      const durS = i16.length / format.sampleRate
+      const rmsDb = 20 * Math.log10(Math.sqrt(sumSq / Math.max(1, i16.length)) / 32768 || 1e-9)
+      const peakDb = 20 * Math.log10(peak / 32768 || 1e-9)
+      const clipPct = (clipped / Math.max(1, i16.length)) * 100
+      const utts = segmentUtterances(i16, format.sampleRate)
+      speechMs = Math.round(utts.reduce((n, u) => n + (u.end - u.start), 0) / format.sampleRate * 1000)
+      console.log(
+        `[stt] clip: ${durS.toFixed(1)}s, speech ${speechMs}ms in ${utts.length} utterance(s), ` +
+        `rms ${rmsDb.toFixed(1)} dBFS, peak ${peakDb.toFixed(1)} dBFS` +
+        (clipPct > 0.1 ? `, CLIPPING ${clipPct.toFixed(1)}% of samples — input too hot (accuracy suffers)` : ''),
+      )
+      if (speechMs === 0 && !isHandsfree) {
+        console.warn('[stt] clip: VAD found NO speech in a dictation clip — wrong mic routed, or speech started before Mic LIVE?')
+      }
+    } catch (e) {
+      console.warn(`[ws] clip stats failed (transcribing anyway): ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   // Phase 9 handsfree VAD gate (int16-mono only): drop silent buffers WITHOUT a
   // Parakeet call — 8 h of factory silence must not hammer the GPU. No detected
   // utterance → return quietly (silence is normal in handsfree, not an error).
-  if (isHandsfree && isLegacyShape) {
-    try {
-      const i16 = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, Math.floor(pcmBuffer.length / 2))
-      if (segmentUtterances(i16, format.sampleRate).length === 0) {
-        console.log('[ws] handsfree: no speech (VAD-gated) — skipped')
-        return
-      }
-    } catch (e) {
-      console.warn(`[ws] handsfree VAD gate failed (transcribing anyway): ${e instanceof Error ? e.message : String(e)}`)
-    }
+  if (isHandsfree && isLegacyShape && speechMs === 0) {
+    console.log('[ws] handsfree: no speech (VAD-gated) — skipped')
+    return
   }
 
   // Deliver a transcript: handsfree → the voice grammar (onVoiceCommand);
@@ -1532,10 +1593,10 @@ async function handleAudio(
   // ~halve WER at a realistic spot; ~neutral point-blank). config.stt.djiBtFilter
   // is the kill-switch — set false to fall back to raw transcribe().
   if (config.stt.engine === 'parakeet' && config.stt.djiBtFilter !== false) {
-    try { onText(await transcribeDjiBt(pcmBuffer, format, config)) } catch (err) { onErr(err) }
+    try { onText(await transcribeDjiBt(pcmBuffer, format, config, { speechMs })) } catch (err) { onErr(err) }
     return
   }
-  try { onText(await transcribe(pcmBuffer, config)) } catch (err) { onErr(err) }
+  try { onText(await transcribe(pcmBuffer, config, { speechMs })) } catch (err) { onErr(err) }
 }
 
 /** Deliver an STT result: in DE mode it routes to the active window (the
@@ -1555,6 +1616,10 @@ function sttResult(client: WSClient, text: string, audio?: MemoAudio): void {
 }
 
 function sttError(client: WSClient, error: string): void {
+  // LOUD server-side too (2026-07-22): rejected dictations used to reach the
+  // glasses via stt_error with ZERO server console trace — "the ones that are
+  // rejected, you have not seen" (Adam). Every reject is now greppable.
+  console.error(`[stt] REJECTED dictation: ${error}`)
   sendMsg(client, { type: 'stt_error', error })
   if (client.osMode && client.osScreen === 'de') {
     void getOsSession().wm.onSttError(error)
