@@ -22,9 +22,12 @@ import java.util.Locale
  * wrap/clip on the real glasses, then tune this one number.
  */
 object OsLayout {
-    /** Bump on EVERY APK build so Adam can confirm on-glass that the new build installed.
-     *  Shown in the top-left antenna ("G2 OS vX.Y") + the connect splash. */
-    const val OS_VERSION = "1.19"
+    /** The app version shown on-glass (top-left antenna "G2 OS vX.Y" + the
+     *  connect splash) so Adam can confirm the new build installed. Sourced
+     *  from gradle's versionName (2026-07-22): bump versionCode+versionName in
+     *  app/build.gradle.kts on EVERY build — one bump drives the installer's
+     *  upgrade check AND this display string. */
+    const val OS_VERSION = com.g2cc.g2cc.BuildConfig.VERSION_NAME
     const val CLOCK_ID = 1
     const val CLOCK_NAME = "clock"
     // 33 = the DE title-bar height (DE_BAR_H in shared/src/constants.ts) — heights must

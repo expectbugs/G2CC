@@ -30,8 +30,16 @@ android {
         minSdk = 29
         // Target SDK 35 = Android 15.
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.0.1"
+        // THE version source of truth (2026-07-22 — was a static 1/"0.0.1" on
+        // every APK ever shipped, so Android couldn't tell builds apart and a
+        // stale Downloads-folder file was indistinguishable from a fresh one).
+        // Bump BOTH on every build Adam will install: versionCode = major*100
+        // + minor (1.19 → 119) so upgrades are monotonic and an old download
+        // now REFUSES to install over a newer build (a loud downgrade error
+        // beats silently running old code). OsLayout.OS_VERSION reads
+        // BuildConfig.VERSION_NAME — one bump updates the splash/antenna too.
+        versionCode = 119
+        versionName = "1.19"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
