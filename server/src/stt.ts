@@ -66,6 +66,48 @@ export function isLikelyHallucination(text: string): boolean {
   return HALLUCINATION_DENYLIST.has(normalize(text))
 }
 
+/** Minimum VAD-detected speech (ms) for a denylisted transcript to be ACCEPTED
+ *  anyway. The denylist exists for SILENT/noise-only clips (its comment above);
+ *  applying it unconditionally rejected REAL short dictations ("thanks", "bye",
+ *  "you" as a literal tmux answer) as "No speech detected" — a false-reject
+ *  class Adam hit live (2026-07-22: "even the ones that are rejected").
+ *  With measurable speech in the clip, the words are almost certainly real. */
+export const HALLUCINATION_SPEECH_MS = 350
+
+/** Pure accept/reject verdict for a transcript given the clip's VAD-measured
+ *  speech duration (undefined = caller couldn't measure → legacy behavior,
+ *  denylist rejects unconditionally). Exported for smoke coverage. */
+export function hallucinationVerdict(
+  text: string, speechMs: number | undefined,
+): 'accept' | 'accept-despite-denylist' | 'reject' {
+  if (!isLikelyHallucination(text)) return 'accept'
+  if (speechMs !== undefined && speechMs >= HALLUCINATION_SPEECH_MS) return 'accept-despite-denylist'
+  return 'reject'
+}
+
+/** Apply the verdict LOUDLY: returns the transcript or throws the stt_error.
+ *  One place so every engine path (parakeet daemon / dji / faster-whisper)
+ *  agrees on the accept-despite-denylist semantics. */
+function applyHallucinationVerdict(result: string, speechMs: number | undefined, path: string): string {
+  const verdict = hallucinationVerdict(result, speechMs)
+  if (verdict === 'accept-despite-denylist') {
+    console.warn(`[stt] ${path}: transcript "${result}" is on the hallucination denylist but the clip has ${speechMs} ms of VAD speech — ACCEPTED (real dictation)`)
+    return result
+  }
+  if (verdict === 'reject') {
+    console.warn(`[stt] ${path}: rejected hallucination "${result}" (VAD speech: ${speechMs === undefined ? 'unmeasured' : `${speechMs} ms`})`)
+    throw new Error('No speech detected (likely background noise)')
+  }
+  return result
+}
+
+/** Per-clip transcription options (2026-07-22 accuracy pass). `speechMs` is the
+ *  VAD-measured speech duration ws-handler computes on int16-mono clips — it
+ *  gates the hallucination denylist (see hallucinationVerdict). */
+export interface TranscribeOpts {
+  speechMs?: number
+}
+
 /** Extract the transcript from a Python CLI's stdout when the CLI uses the
  *  ___G2CC_RESULT_BEGIN___ / ___G2CC_RESULT_END___ sentinels. Loud-fails if
  *  the sentinels are missing — caller's catch surfaces it to the client.
@@ -89,7 +131,7 @@ export function extractSentinelResult(stdout: string): string {
  *  Input: 16 kHz, signed 16-bit LE, mono PCM (from G2 mic or DJI fallback path).
  *  Throws if the result is a known hallucination — caller surfaces stt_error.
  */
-export async function transcribe(pcmBuffer: Buffer, config: G2CCConfig): Promise<string> {
+export async function transcribe(pcmBuffer: Buffer, config: G2CCConfig, opts: TranscribeOpts = {}): Promise<string> {
   const processed = await preprocessAudio(pcmBuffer)
   const wavBuffer = pcmToWav(processed, 16000, 16, 1)
   const tmpPath = sttTmpPath('g2cc-stt')
@@ -99,9 +141,9 @@ export async function transcribe(pcmBuffer: Buffer, config: G2CCConfig): Promise
     // (it used to orphan the partial file — review 2026-06-11).
     writeFileSync(tmpPath, wavBuffer)
     if (config.stt.engine === 'parakeet') {
-      return await transcribeParakeet(tmpPath, config)
+      return await transcribeParakeet(tmpPath, config, opts)
     }
-    return await transcribeFasterWhisper(tmpPath, config)
+    return await transcribeFasterWhisper(tmpPath, config, opts)
   } finally {
     // Loud cleanup per docs/FORBIDDEN_PATTERN_AUDIT.md §3: if the tmpfile is
     // missing the cleanup is a no-op; if unlink fails for any other reason
@@ -113,7 +155,7 @@ export async function transcribe(pcmBuffer: Buffer, config: G2CCConfig): Promise
   }
 }
 
-async function transcribeFasterWhisper(wavPath: string, config: G2CCConfig): Promise<string> {
+async function transcribeFasterWhisper(wavPath: string, config: G2CCConfig, opts: TranscribeOpts = {}): Promise<string> {
   const { whisperModel, whisperDevice, whisperCompute, language, pythonPath } = config.stt
   // Mirrors /home/user/aria/whisper_engine.py:155-161 exactly (VAD + beam 5).
   const script = [
@@ -141,11 +183,7 @@ async function transcribeFasterWhisper(wavPath: string, config: G2CCConfig): Pro
 
   console.log(`[stt] faster-whisper result (${result.length} chars): "${result}"`)
 
-  if (isLikelyHallucination(result)) {
-    console.warn(`[stt] Rejected hallucination: "${result}"`)
-    throw new Error('No speech detected (likely background noise)')
-  }
-  return result
+  return applyHallucinationVerdict(result, opts.speechMs, 'faster-whisper')
 }
 
 /** Phase 8: DJI Mic 3 path — 48 kHz / 2 ch / float32 audio through the full
@@ -228,6 +266,7 @@ export async function transcribeDjiBt(
   pcmBuffer: Buffer,
   format: { sampleRate: number; channels: number; encoding: string },
   config: G2CCConfig,
+  opts: TranscribeOpts = {},
 ): Promise<string> {
   if (format.encoding !== 'int16') {
     throw new Error(`transcribeDjiBt expects int16, got ${format.encoding}`)
@@ -244,11 +283,7 @@ export async function transcribeDjiBt(
       alpha: config.stt.djiBtAlpha ?? DJI_BT_ALPHA,
     })).trim()
     console.log(`[stt] dji-bt(NR) result (${result.length} chars): "${result}"`)
-    if (isLikelyHallucination(result)) {
-      console.warn(`[stt] Rejected hallucination: "${result}"`)
-      throw new Error('No speech detected (likely background noise)')
-    }
-    return result
+    return applyHallucinationVerdict(result, opts.speechMs, 'dji-bt')
   } finally {
     if (existsSync(tmpPath)) {
       try { unlinkSync(tmpPath) }
@@ -417,12 +452,8 @@ export async function warmParakeet(config: G2CCConfig): Promise<void> {
 /** Phase 8: Parakeet TDT 0.6B v2 via the WARM pipeline/parakeet_daemon.py
  *  (persistent — model loaded once). No timeout; the daemon is supervised by the
  *  server lifecycle. REQUIRES `nemo_toolkit[asr]` in audio/venv. */
-async function transcribeParakeet(wavPath: string, config: G2CCConfig): Promise<string> {
+async function transcribeParakeet(wavPath: string, config: G2CCConfig, opts: TranscribeOpts = {}): Promise<string> {
   const result = (await getParakeetDaemon(config).transcribe(wavPath)).trim()
   console.log(`[stt] parakeet result (${result.length} chars): "${result}"`)
-  if (isLikelyHallucination(result)) {
-    console.warn(`[stt] Rejected hallucination: "${result}"`)
-    throw new Error('No speech detected (likely background noise)')
-  }
-  return result
+  return applyHallucinationVerdict(result, opts.speechMs, 'parakeet')
 }

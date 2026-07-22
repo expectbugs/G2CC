@@ -134,5 +134,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   console.error('  5. voice read OPENS the item (mail newest + SMS by contact name) ✓')
 }
 
+// 6. VAD-gated hallucination denylist (2026-07-22 accuracy pass): a denylisted
+// transcript with REAL measured speech is accepted; without speech evidence it
+// stays rejected; unmeasured (undefined) keeps the legacy unconditional reject.
+{
+  const { hallucinationVerdict, HALLUCINATION_SPEECH_MS } = await import('../dist/stt.js')
+  assert.equal(hallucinationVerdict('please run the smoke suite', 2000), 'accept', 'normal transcript accepts')
+  assert.equal(hallucinationVerdict('Thank you.', HALLUCINATION_SPEECH_MS), 'accept-despite-denylist',
+    'denylisted text WITH VAD speech is a real dictation — accepted')
+  assert.equal(hallucinationVerdict('Thanks for watching!', 40), 'reject', 'denylisted text with ~no speech stays rejected')
+  assert.equal(hallucinationVerdict('thank you', undefined), 'reject', 'unmeasured clip keeps the legacy reject')
+  assert.equal(hallucinationVerdict('bye', 0), 'reject', 'zero speech stays rejected')
+  console.error('  6. VAD-gated hallucination verdict (accuracy pass) ✓')
+}
+
 console.log('phase9-voice: ALL OK')
 await getPool().end()
