@@ -49,7 +49,8 @@ scroll to move a server‑drawn cursor, tap to enter, double‑tap for alt‑tab
 render borderless and full‑width; a categorized drawer holds everything else.
 
 **Input by voice:** speech is captured on the phone, transcribed by a local [NVIDIA
-Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) ASR model on the PC, and shown back for a
+Canary-Qwen](https://huggingface.co/nvidia/canary-qwen-2.5b) ASR model on the PC (the engine is a
+config choice; chosen by an 8-model shootout on real captures), and shown back for a
 confirm step before anything acts on it — because on‑glass mistakes are annoying to undo.
 
 ### Feature spotlight: the Reader
@@ -99,7 +100,8 @@ Your reading position is stored as a real anchor, bookmark‑able from the menu,
 - **Client:** Kotlin / Android — a foreground service, a BLE driver, notification mirroring, and the frame
   renderer. Zero app‑side state.
 - **Audio/STT:** a Python pipeline — noise reduction (learned‑profile spectral subtraction, with a two‑mic
-  adaptive‑filter fallback) + DeepFilterNet polish + Parakeet ASR, CUDA‑accelerated.
+  adaptive‑filter front end, evidence‑tuned on real captures) + a config‑selected NeMo ASR
+  model (Canary‑Qwen 2.5B today), CUDA‑accelerated.
 
 ## Repository layout
 

@@ -454,6 +454,14 @@ The G2 app and the audio/STT upgrade are being built together. This part capture
 
 ## B1. ASR Model — NVIDIA Parakeet TDT 0.6B v2
 
+> **REVISION 2026-07-23 (the ASR shootout):** the engine is now a CONFIG choice
+> (`config.stt.parakeetModel` → daemon env `G2CC_ASR_MODEL`). Deployed model:
+> **`nvidia/canary-qwen-2.5b`** — won an 8-model × 27-real-capture shootout
+> (halved the field's WER on hard audio; filter-agnostic; clean hallucination
+> probes; latency irrelevant by Adam's decree). Parakeet TDT 0.6B v2 (below)
+> remains the documented baseline and is one config flip back. Rule learned:
+> validate any engine change as a model×NR-front-end PAIRING on real captures.
+
 Verified from NVIDIA's model card on 2026-04-27. English-only, runs locally on GPU via NeMo.
 
 ### Why it beats Whisper large-v3

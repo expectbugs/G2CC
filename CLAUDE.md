@@ -6,7 +6,7 @@ System-wide rules in `~/.claude/CLAUDE.md` apply here too. This file holds G2CC-
 
 This project covers TWO joined initiatives Adam is implementing together:
 - **Part A — G2 Custom App.** Direct-BLE Android app that replaces the Even Hub companion-app dance. Talks BLE to the Even G2 glasses and WebSocket to the home server. Server bridges to a **Claude Code subprocess** (vanilla CC initially; swarm Code specialist when the swarm exists). See `g2_custom_app_spec.md` Part A and `/home/user/G2 Custom/PLAN.md`.
-- **Part B — Audio + STT Upgrade.** DJI Mic 3 mono TX2 + learned-profile spectral subtraction (two-mic NLMS retained as fallback) + DeepFilterNet polish + Parakeet TDT 0.6B v2 ASR on the server. See `g2_custom_app_spec.md` Part B (with the §8 revision note) and `/home/user/aria/docs/stt_upgrade.md`.
+- **Part B — Audio + STT Upgrade.** DJI Mic 3 mono TX2 → per-utterance ADAPTIVE Wiener (the 2026-06-23-validated BT path; learned-profile + NLMS retained as fallbacks) → a CONFIG-SELECTED NeMo ASR model (`config.stt.parakeetModel` — **canary-qwen-2.5b since the 2026-07-23 shootout**; parakeet-tdt-0.6b-v2 one flip back). DeepFilterNet was evaluated on real captures and LOST twice — offline tool only (`dfn_polish.py`). See `g2_custom_app_spec.md` Part B (§8 revision notes) and the CHANGELOG 2026-07-22/23 entries.
 
 ## Dispatch-target architecture (load-bearing)
 
@@ -92,11 +92,11 @@ Audio-side (Python):
 
 **Default pipeline shifted from two-mic NLMS to single-mic learned-profile after the May 28 phone-recording analysis** showed textbook stationarity (PSD drift 0.4 ± 1.4 dB over 60 s, 2.96 s cycle). See `audio/pipeline/README.md` for the canonical order. NLMS stays in-tree as the fallback for non-stationary noise scenarios.
 
-- **Default order:** DJI TX2 mono → notch_filter (at learned peak freqs) → spectral_subtract (Wiener with learned PSD) → DeepFilterNet polish → Parakeet ASR. NLMS fallback only.
+- **Default order (DJI-over-BT daily path, re-validated 2026-07-23 with TX NC OFF):** DJI TX2 mono → per-utterance ADAPTIVE Wiener (α 1.5) → config-selected ASR (canary-qwen-2.5b), with the RAW-RETRY net when the filter zeroes VAD-heard speech. The notch→learned-PSD chain remains the USB/receiver path + the re-learn option (`learn_noise_from_dictations.py`) if the noise character changes — it LOST to adaptive on real NC-off captures (per-clip re-leveling). DeepFilterNet: offline analysis only (lost twice on real captures). NLMS fallback only.
 - **Tune pipeline parameters on real DJI captures**, not synthetic audio. Wiener α default 1.5 (raise to 2.0-2.5 if residual machine noise audible; the May sweep showed +1-2 dB more reduction per +0.5 α at <0.2 dB extra speech impact at +18 dB SNR). NLMS fallback parameters: μ 0.01-0.05, 1024 taps at 48 kHz, high-pass <60 Hz on reference channel.
 - **Learn the noise profile with the same mic that captures speech.** Phone recordings are acceptable for prototyping; production profile MUST be re-recorded with the DJI TX2 itself, so capsule + codec match the live capture path. Otherwise the profile leaves residue.
 - **(NLMS fallback only) never mute or scrub the reference channel.** TX1's job is high-SNR-of-noise pickup. The DJI's onboard NC corrupting it is the single most common NLMS failure mode.
-- **Parakeet swap is independent from the noise-reduction work.** Validate spectral_subtract + DFN on faster-whisper first to isolate the noise-reduction win. Then swap ASR.
+- **The ASR model and the noise-reduction front end must be validated as a PAIRING, never separately** (2026-07-23: parakeet-v3 won on raw audio and collapsed 0.045→0.333 WER on the adaptive-filtered audio the live path actually produces). Any engine/filter change re-runs the shootout harness on real captures.
 - **Preserve 32-bit float boundaries when shipping to the server.** No clipping headroom loss between DJI's internal recording and the server's input.
 
 ## Android App Discipline

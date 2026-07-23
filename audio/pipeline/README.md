@@ -2,7 +2,21 @@
 
 Server-side audio processing for the G2CC build.
 
-## Default pipeline (single-mic + learned-profile)
+> **LIVE PATH AS DEPLOYED (2026-07-23, the dictation war):** DJI TX2 (Two-Level
+> NC **OFF** on the TX — it silently re-enables; check it first on quiet-voice
+> regressions) → BT HFP/SCO → phone (APK v1.19: route-verified, platform DSP
+> off, tail-drained) → 16 kHz mono int16 → **per-utterance ADAPTIVE Wiener
+> (α 1.5, `denoise.adaptive_denoise`)** → **config-selected ASR in the warm
+> daemon** (`config.stt.parakeetModel`, env `G2CC_ASR_MODEL` — **canary-qwen-2.5b**,
+> shootout-verified; parakeet-tdt-0.6b-v2 one flip back), with a RAW-RETRY when
+> the filter zeroes VAD-heard speech. Evidence: CHANGELOG 2026-07-22/23.
+> The learned-profile chain below remains the USB/receiver design + the
+> re-learn path (`tools/learn_noise_from_dictations.py`) — it LOST to adaptive
+> on real NC-off BT captures (per-clip re-leveling mismatch). DeepFilterNet:
+> **offline analysis tool only** — lost twice on real captures (see
+> `dfn_polish.py`'s docstring for the verdict + the install/shim notes).
+
+## Learned-profile pipeline (single-mic; USB/receiver path + fallback)
 
 ```
 noise-only recording  →  learn_noise_profile.py  →  profiles/<name>.npz
@@ -77,19 +91,21 @@ from pipeline.dfn_polish import polish
 polished = polish(audio_mono, sample_rate=48000)
 ```
 
-DeepFilterNet polish — generic residual denoising after the profile-based
-pipeline. Lazy-loads DFN3 on first call inside a `threading.Lock`; mirrors
-`/home/user/aria/whisper_engine.py:121-181` exactly.
+DeepFilterNet polish — **OFFLINE ANALYSIS TOOL ONLY** (evaluated on real
+captures 2026-07-22/23 and lost twice; the verdict + the --no-deps install and
+torchaudio-shim notes live in the module docstring). Lazy-loads DFN3 on first
+call inside a `threading.Lock`.
 
 Class shape check: `python -m pipeline.dfn_polish --import-check`
 
-### `parakeet_engine.py` (Phase 8 ONLY — not yet shipping)
+### `parakeet_engine.py` (LIVE — the warm-daemon engine)
 
-Will mirror `dfn_polish.py`'s lazy-load + lock pattern, internals replaced by
-`from nemo.collections.asr.models import EncDecRNNTBPEModel` (verify exact
-class against the Parakeet model card BEFORE writing — do not guess). Input
-shape validated against a clean LibriSpeech sample with known WER (1.69%)
-before plugging into the live pipeline.
+Lazy-load + lock wrapper over NeMo. TWO load/inference branches, both verified
+live: classic CTC/RNNT/TDT via `ASRModel.from_pretrained` + `.transcribe()`,
+and SALM (canary-qwen) via `speechlm2.models.SALM` + `.generate()` with
+duration-scaled `max_new_tokens` (long dictations never truncate). The model
+name comes from `get_engine(model_name=…)` — the daemon passes
+`G2CC_ASR_MODEL` (set by stt.ts from `config.stt.parakeetModel`).
 
 ### `nlms.py` (FALLBACK — not on default path)
 
@@ -136,6 +152,7 @@ rg "except.*:\s*pass|except\s*:" audio/          # must be empty
 - **Learn the noise profile with the same mic that will capture speech.** The
   May phone-recording is acceptable for prototyping; production profile should
   be re-recorded with DJI TX2 at the workplace.
-- **The Parakeet swap is independent from the ANC work.** Validate
-  spectral_subtract + DFN on faster-whisper first to isolate the noise-
-  reduction win, then swap ASR.
+- **Validate the ASR model and the NR front end as a PAIRING** (2026-07-23:
+  parakeet-v3 won on raw audio and collapsed on the filtered audio the live
+  path actually produces). Any engine or filter change re-runs the shootout
+  harness against the real captures in `audio/samples/`.

@@ -80,3 +80,22 @@ exercising the fallback.
 
 Phase 2B's tools and Phase 3B's evaluation framework write only to this directory.
 No mic-output paths trigger automatically.
+
+
+## 2026-07-22/23 — the dictation-war capture set (tee'd via the LIVE path)
+
+All 16 kHz mono int16, DJI TX2 → BT SCO → phone → server (the real daily path):
+
+```
+live-1784755854880.wav         pre-v1.19 chain, TX NC ON  — band-crushed evidence (0.19% >4 kHz)
+test2-1784759746333.wav        v1.19, TX NC ON  — the Fresh Prince test (careful voice, sung)
+normalvoice-1784760800249.wav  v1.19, TX NC ON  — normal voice GATED to ~nothing (2/10 voicing)
+txcheck-1784764253122.wav      v1.19, TX NC OFF — voicing 10/10; the alternating-register demo
+nc-off-test-1784764658788.wav  v1.19, TX NC OFF — careful-voice reference clip (known text)
+```
+
+The June `exp-/away-/pos-/test-` clips are PANGRAM tests ("the quick brown fox…"
++ "testing one two three…"), TX NC unknowingly ON — usable as references for
+model comparison, but they are NOT current-reality (NC-off) audio. The 2026-07-23
+ASR shootout + the NR shootouts were scored on this set; verdicts in the
+CHANGELOG and `~/.claude/projects/-home-user-G2CC/memory/g2cc-stt-accuracy-pass.md`.

@@ -4,6 +4,58 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## (unstamped) — 2026-07-22/23 — **The dictation war, part 2: signing roulette ended, tmux fixes, the NC discovery, and canary-qwen takes the engine**
+
+The same marathon continued through the night. Four arcs, each evidence-driven:
+
+**The APK "App not installed" roulette — SOLVED FOREVER.** v1.19 wouldn't sideload; the
+recurring ~1-in-5 failure Adam remembered ("you always immediately realize what you did
+wrong") had never been written down by any session. Root cause: TWO debug keystores
+(~/.config/.android Jun 1 — the phone's lineage — vs ~/.android Jun 4), picked by the
+session's environment. Fixed structurally: the Jun-1 key lives at ~/.g2cc/g2cc-debug.keystore,
+pinned via explicit signingConfig with NO exists()-fallback (c3424ec); real versionCode
+discipline (major*100+minor, OsLayout reads BuildConfig.VERSION_NAME — a431549); build-stamped
+download filenames + a 📦 staged-build line on /setup (4fc2ef4). Diagnostic for next time:
+`apksigner verify --print-certs` FIRST — expect 93a0fffd….
+
+**Tmux bugfix pass (dc4cae9):** CC ≥2.1.2xx dropped the ╭─╮ input box (ground-truthed against
+2.1.217: ─ rule + '❯' + footer) so the chrome strip silently died — rewritten with modern+legacy
+matchers, BOTTOM-BOUNDED so box-drawing inside the scrollback can't chop Focus at ancient
+artifacts (the "stuck on old content" bug), token count KEPT through the cut. Quiet-speech
+dictations that died as bogus 'No speech detected' (the α=1.5 Wiener zeroed ~9 s of real VAD
+speech) now RETRY RAW; dictation errors ride the title notice instead of vanishing.
+
+**The NC discovery (the quiet-voice cliff).** The normal-voice capture held almost no voiced
+speech (2/10 voicing) — an upstream gate. Adam checked: the DJI TX's Two-Level NC was ON
+(binary setting; it silently re-enables — check it FIRST on any quiet-voice regression).
+NC-off trade measured: voice +8 dB (voicing 10/10) but floor +8 dB too. The retune shootout
+that followed (learn_noise_from_dictations.py pools noise-only STFT frames from teed captures;
+the ~3.1 s / ~19.3-cycles-per-minute machine cycle confirmed; 590dd20): the learned profile
+LOST to the live adaptive filter (per-clip re-leveling mismatch, June's finding reconfirmed),
+and DFN3 — made operational as an offline tool (--no-deps install so its numpy<2 pin can't
+break NeMo; scoped torchaudio shim; 4e4e6ec) — lost TWICE, incl. on natural NC-off audio.
+Adaptive α1.5 + raw-retry = the measured local optimum for the front-end.
+
+**The ASR model shootout → canary-qwen-2.5b deployed (2a05b89).** 8 models × 27 real captures,
+accuracy-only ranking (Adam: latency doesn't vote): canary-qwen-2.5b halved the field's WER on
+the hard June grid (0.517 vs 0.744+ mean pangram-head WER; the June clips turned out to be
+pangram tests), matched the leaders on current-reality clips, passed both hallucination probes
+(empty on pure noise + the voiceless clip), and is FILTER-AGNOSTIC — where parakeet-v3, the
+raw-audio runner-up, COLLAPSED on adaptive-filtered audio (0.045→0.333 WER). Lesson in bold:
+test the model×filter PAIRING, never the model alone. Wiring: SALM branch in parakeet_engine
+(generate() with duration-scaled max_new_tokens), daemon reads G2CC_ASR_MODEL, stt.ts sets it
+from config.stt.parakeetModel — the engine is a CONFIG CHOICE now; parakeet-v2 is one flip
+back. First live dictation on qwen: essentially perfect. **Adam's closing verdict
+(2026-07-23): ~95% accurate at NORMAL voice in normal noise, given decent mic positioning —
+"good enough." The dictation war is won.**
+
+Ops lessons the hard way: `ss -ltnp 'sport = :7300'` — ALWAYS port-filtered — when grabbing
+the server pid (an unfiltered grab nearly killed a random service); archive /tmp/g2cc-server.log
+before restarts (nohup truncates — pre-restart history now lands in ~/.g2cc/logs/); never
+restart the server while a download is in flight; and don't print copyrighted lyrics in
+responses (an output content-filter 400 ate a reply mid-session — sung content gets scored by
+anchors/consensus).
+
 ## (unstamped) — 2026-07-22 — **STT accuracy pass: the tmux-dictation investigation → fixes end-to-end (server + APK v1.19)**
 
 Adam: "voice dictation for tmux is worse than ever." The investigation found TWO stacked
