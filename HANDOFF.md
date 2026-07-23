@@ -1,4 +1,7 @@
-# G2CC — Fresh-Session Handoff (2026-07-23, post dictation-war)
+# G2CC — Fresh-Session Handoff (2026-07-22 evening, post dictation-war)
+
+> Timestamp note: the war ran INSIDE ONE shift (~15:00–21:00 CDT, 2026-07-22). Commits and
+> tool timestamps after ~19:00 CDT read "07-23" in UTC — one workday, not two.
 
 **Read this first, whole.** Then: `~/.claude/CLAUDE.md` (Adam's global rules), `CLAUDE.md`
 (project rules), `docs/README.md` (the docs index — live contracts vs history). History lives
@@ -51,9 +54,9 @@ anything Adam doesn't own.
    previews, `fitFrameToBudget` on passive chrome, the Tmux CC-chrome strip (chrome ≠ content;
    the token count is kept by Adam's spec).
 
-## 3. Current state (2026-07-23, end of the dictation war)
+## 3. Current state (2026-07-22 end-of-evening, post dictation-war)
 
-- **Dictation WORKS at Adam's normal voice** (~95% by his verdict, 2026-07-23). The stack that
+- **Dictation WORKS at Adam's normal voice** (~95% by his verdict, 2026-07-22 evening). The stack that
   got it there, outside-in:
   - **DJI TX Two-Level NC: OFF** (it was silently ON and gating quiet speech to nothing — check
     it FIRST on any quiet-voice regression; it can re-enable on its own).
@@ -64,7 +67,7 @@ anything Adam doesn't own.
     speech + VAD-gated hallucination denylist + per-clip `[stt] clip:` telemetry + the Mic LIVE
     cue (Terminal shows "connecting" until the first frame actually arrives).
   - **ASR engine: `nvidia/canary-qwen-2.5b`** (config.stt.parakeetModel → daemon env
-    G2CC_ASR_MODEL; SALM branch in parakeet_engine). Shootout-verified 2026-07-23: halved the
+    G2CC_ASR_MODEL; SALM branch in parakeet_engine). Shootout-verified 2026-07-22 evening: halved the
     field's WER on hard audio, filter-agnostic, clean hallucination probes. parakeet-tdt-0.6b-v2
     is one config flip back. Warm load ~24 s cached; +6-7 GB VRAM; seconds per clip (accuracy
     outranks latency by Adam's decree).
@@ -77,7 +80,7 @@ anything Adam doesn't own.
   f1=12 acks; no power switch → no reboot escape). The v1.19 watchdog probe makes the app
   immune (0 reconnect churn since). If acks ever resume, nothing changes — probes simply stop
   firing.
-- **Everything is committed AND PUSHED** (Adam's go, 2026-07-23).
+- **Everything is committed AND PUSHED** (Adam's go, same evening).
 
 ## 4. How to build, verify, deploy
 

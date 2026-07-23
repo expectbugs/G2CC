@@ -4,9 +4,11 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
-## (unstamped) — 2026-07-22/23 — **The dictation war, part 2: signing roulette ended, tmux fixes, the NC discovery, and canary-qwen takes the engine**
+## (unstamped) — 2026-07-22 (evening) — **The dictation war, part 2: signing roulette ended, tmux fixes, the NC discovery, and canary-qwen takes the engine**
 
-The same marathon continued through the night. Four arcs, each evidence-driven:
+The same marathon continued through the SAME afternoon/evening shift (all of it one
+workday, ~15:00–21:00 CDT; commit/doc timestamps after ~19:00 CDT stamp as 07-23 in
+UTC — do not read them as a second day). Four arcs, each evidence-driven:
 
 **The APK "App not installed" roulette — SOLVED FOREVER.** v1.19 wouldn't sideload; the
 recurring ~1-in-5 failure Adam remembered ("you always immediately realize what you did
@@ -46,8 +48,8 @@ test the model×filter PAIRING, never the model alone. Wiring: SALM branch in pa
 (generate() with duration-scaled max_new_tokens), daemon reads G2CC_ASR_MODEL, stt.ts sets it
 from config.stt.parakeetModel — the engine is a CONFIG CHOICE now; parakeet-v2 is one flip
 back. First live dictation on qwen: essentially perfect. **Adam's closing verdict
-(2026-07-23): ~95% accurate at NORMAL voice in normal noise, given decent mic positioning —
-"good enough." The dictation war is won.**
+(2026-07-22 ~20:45 CDT): ~95% accurate at NORMAL voice in normal noise, given decent mic
+positioning — "good enough." The dictation war was fought and won inside one shift.**
 
 Ops lessons the hard way: `ss -ltnp 'sport = :7300'` — ALWAYS port-filtered — when grabbing
 the server pid (an unfiltered grab nearly killed a random service); archive /tmp/g2cc-server.log
