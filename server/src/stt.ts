@@ -326,7 +326,7 @@ class ParakeetDaemon {
   private queue: Array<{ line: string; resolve: (t: string) => void; reject: (e: Error) => void }> = []
   private inflight: { resolve: (t: string) => void; reject: (e: Error) => void } | null = null
 
-  constructor(private pythonPath: string, private cwd: string) {}
+  constructor(private pythonPath: string, private cwd: string, private modelName: string) {}
 
   /** Transcribe a WAV. A bare path → transcribe only (warm-up, legacy). With
    *  `opts.profile` → send a JSON job so the WARM daemon applies notch+Wiener
@@ -347,7 +347,13 @@ class ParakeetDaemon {
   private ensureProc(): void {
     if (this.proc) return
     // -u: unbuffered stdio so each request line is read and each result flushed now.
-    const proc = spawn(this.pythonPath, ['-u', '-m', 'pipeline.parakeet_daemon'], { cwd: this.cwd })
+    // G2CC_ASR_MODEL (2026-07-23): the shootout made the ASR model a CONFIG
+    // choice (stt.parakeetModel) — canary-qwen-2.5b won on hard audio; the
+    // parakeets remain one config flip away.
+    const proc = spawn(this.pythonPath, ['-u', '-m', 'pipeline.parakeet_daemon'], {
+      cwd: this.cwd,
+      env: { ...process.env, G2CC_ASR_MODEL: this.modelName },
+    })
     this.proc = proc
     this.buf = ''
     proc.stdout.setEncoding('utf-8')
@@ -439,7 +445,7 @@ class ParakeetDaemon {
 
 let parakeetDaemon: ParakeetDaemon | null = null
 function getParakeetDaemon(config: G2CCConfig): ParakeetDaemon {
-  if (!parakeetDaemon) parakeetDaemon = new ParakeetDaemon(config.stt.pythonPath, '/home/user/G2CC/audio')
+  if (!parakeetDaemon) parakeetDaemon = new ParakeetDaemon(config.stt.pythonPath, '/home/user/G2CC/audio', config.stt.parakeetModel)
   return parakeetDaemon
 }
 

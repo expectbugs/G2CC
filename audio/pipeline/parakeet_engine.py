@@ -85,19 +85,32 @@ class ParakeetEngine:
         self._model: Any | None = None
         self._lock = threading.Lock()
 
+    def _is_salm(self) -> bool:
+        """SALM-family model (canary-qwen)? Decides load + inference API."""
+        return 'canary-qwen' in self.model_name.lower()
+
     def _ensure_model(self):
         """Load model on first use. Caller MUST hold self._lock."""
         if self._model is not None:
             return
         # Lazy import — NeMo pulls PyTorch + the full NVIDIA speech stack
         # (~3 GB). Keep out of the hot import path so non-ASR tools don't pay.
-        from nemo.collections.asr.models import ASRModel  # type: ignore[import-not-found]
-        log.info("Loading Parakeet model %s on %s ...", self.model_name, self.device)
+        log.info("Loading ASR model %s on %s ...", self.model_name, self.device)
         start = time.time()
-        # ASRModel.from_pretrained handles both HF-hub IDs and NeMo-cached paths.
-        # If the model is not yet cached, this downloads. Network access required
-        # on first run; subsequent runs use the local cache.
-        self._model = ASRModel.from_pretrained(model_name=self.model_name)
+        # SALM models (canary-qwen — the 2026-07-23 shootout champion on hard
+        # audio: half everyone's WER on the June grid, filter-agnostic, clean on
+        # both hallucination probes) load via the speechlm2 collection and
+        # transcribe via generate(); classic CTC/RNNT/TDT models keep the
+        # ASRModel path. Both APIs verified live in the shootout harness.
+        if self._is_salm():
+            from nemo.collections.speechlm2.models import SALM  # type: ignore[import-not-found]
+            self._model = SALM.from_pretrained(self.model_name)
+        else:
+            from nemo.collections.asr.models import ASRModel  # type: ignore[import-not-found]
+            # ASRModel.from_pretrained handles both HF-hub IDs and NeMo-cached paths.
+            # If the model is not yet cached, this downloads. Network access required
+            # on first run; subsequent runs use the local cache.
+            self._model = ASRModel.from_pretrained(model_name=self.model_name)
         # Ensure CUDA placement (NeMo defaults to current torch.cuda.current_device()).
         if self.device.startswith("cuda"):
             self._model = self._model.to(self.device)
@@ -167,6 +180,29 @@ class ParakeetEngine:
                 # model class: for RNNT models it's hypothesis.text; for hybrid
                 # models the API is consistent. Verify against NeMo's source for
                 # the exact Parakeet-TDT release at install time.
+                if self._is_salm():
+                    # canary-qwen (SALM): prompt-driven generate. max_new_tokens
+                    # scales with duration (256 was the eval floor; ~4 tok/s of
+                    # audio + headroom, capped) so a LONG dictation is never
+                    # silently truncated mid-transcript (the no-truncation rule).
+                    import torch  # type: ignore[import-not-found]
+                    dur_est = self._estimate_duration(audio_path)
+                    max_toks = min(4096, max(256, int(dur_est * 6) + 64))
+                    with torch.no_grad():
+                        out = self._model.generate(
+                            prompts=[[{
+                                "role": "user",
+                                "content": f"Transcribe the following: {self._model.audio_locator_tag}",
+                                "audio": [str(audio_path)],
+                            }]],
+                            max_new_tokens=max_toks,
+                        )
+                    text = self._model.tokenizer.ids_to_text(out[0].cpu())
+                    elapsed = time.time() - start
+                    return TranscriptResult(
+                        text=text, segments=[], language="en", language_probability=1.0,
+                        duration=round(dur_est, 2), processing_time=round(elapsed, 3),
+                    )
                 hyps = self._model.transcribe([str(audio_path)])
                 # hyps may be a list[Hypothesis] OR a tuple of (best, all_beams).
                 # Defensive unwrap:

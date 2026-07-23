@@ -145,7 +145,15 @@ def main() -> int:
     # The singleton lazy-loads the model on the first transcribe() call. The
     # server sends a tiny silence WAV right after spawn to force that load up
     # front (warm-up), so the first REAL voice command is already fast.
-    engine = get_engine()
+    # Model selection rides G2CC_ASR_MODEL (stt.ts sets it from
+    # config.stt.parakeetModel) — the 2026-07-23 shootout made the model a
+    # config choice, not a code constant. Absent → the engine default.
+    model_name = os.environ.get("G2CC_ASR_MODEL", "").strip()
+    if model_name:
+        print(f"parakeet_daemon: model {model_name}", file=sys.stderr)
+        engine = get_engine(model_name=model_name)
+    else:
+        engine = get_engine()
 
     # Read WAV paths until the server closes stdin. No timeout — the server owns
     # this process's lifecycle and kills it on shutdown.
