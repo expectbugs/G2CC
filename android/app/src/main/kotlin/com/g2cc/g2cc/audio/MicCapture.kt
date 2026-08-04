@@ -66,7 +66,12 @@ class MicCapture(private val context: Context) {
         data object Stopped : Event
     }
 
-    enum class Source { DjiUsb, DjiBluetooth, PhoneMic }
+    enum class Source { DjiUsb, DjiBluetooth, Earbud, PhoneMic }
+
+    /** Which BT comms mic to capture from (earbud 2026-08-04 — the
+     *  DJI-retirement switch). Set from config_snapshot.micSource; default
+     *  'earbud' (Adam retired the collar mic). 'dji' = the intact legacy pick. */
+    @Volatile var micSource: String = "earbud"
 
     private var record: AudioRecord? = null
     private var captureJob: Job? = null
@@ -112,7 +117,7 @@ class MicCapture(private val context: Context) {
             val attempt = startUsb(onEvent)
                 ?: startBluetoothSco(onEvent)
             if (attempt == null) {
-                onEvent(Event.Failure("DJI Mic unavailable (no USB receiver; no Bluetooth TX connected) — phone-mic fallback is disabled by policy"))
+                onEvent(Event.Failure("No BT mic available (no earbud/DJI comms device connected; no USB receiver) — phone-mic fallback is disabled by policy"))
                 return
             }
             val (rec, source, sampleRate, channels, encoding, expectedDevice, effects) = attempt
@@ -307,18 +312,31 @@ class MicCapture(private val context: Context) {
             it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
                 it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
         }
-        // DJI-only policy (review 2026-06-11b): prefer the DJI TX by product
-        // name — `firstOrNull` could silently capture a car kit / earbuds and
-        // announce it to the server as "dji-bt". A non-DJI device is still
-        // usable as a last resort (name heuristics can miss), but LOUDLY.
-        val btDevice = comms.firstOrNull { it.productName?.toString()?.contains("DJI", ignoreCase = true) == true }
-            ?: comms.firstOrNull()
+        // Device-role pick (earbud 2026-08-04, replaces the blind firstOrNull):
+        //   micSource 'earbud' (default — the DJI is retired): prefer a
+        //     non-DJI comms device, Buds-named first; a DJI is used only when
+        //     it is the ONLY comms device (loudly, labeled dji-bt honestly).
+        //   micSource 'dji' (the one-flip undo): the legacy DJI-name pick,
+        //     non-DJI last resort — the proven pre-retirement behavior.
+        // Either way the ANNOUNCED source matches the actual capsule (the
+        // model×filter pairing rule needs true provenance).
+        fun isDji(d: AudioDeviceInfo) = d.productName?.toString()?.contains("DJI", ignoreCase = true) == true
+        val btDevice = if (micSource == "dji") {
+            comms.firstOrNull(::isDji) ?: comms.firstOrNull()
+        } else {
+            val nonDji = comms.filterNot(::isDji)
+            nonDji.firstOrNull { it.productName?.toString()?.contains("Buds", ignoreCase = true) == true }
+                ?: nonDji.firstOrNull()
+                ?: comms.firstOrNull()
+        }
         if (btDevice == null) {
             Log.i(TAG, "no Bluetooth comms (SCO/LE) device paired; falling through")
             return null
         }
-        if (btDevice.productName?.toString()?.contains("DJI", ignoreCase = true) != true) {
-            Log.w(TAG, "BT comms device '${btDevice.productName}' does not look like the DJI TX — capturing from it anyway (only comms device available); check the pairing if dictation sounds wrong")
+        val deviceIsDji = isDji(btDevice)
+        val wantedDji = micSource == "dji"
+        if (deviceIsDji != wantedDji) {
+            Log.w(TAG, "micSource='$micSource' but capturing from '${btDevice.productName}' (${if (deviceIsDji) "the DJI" else "a non-DJI device"} — only comms option present); the announced source stays HONEST")
         }
 
         // Take over the comms route. MODE_IN_COMMUNICATION is what brings the SCO
@@ -384,8 +402,9 @@ class MicCapture(private val context: Context) {
         // AGC pumping are exactly the phonetic-mush makers; disable whatever the
         // device lets us, loudly logging what stuck.
         val effects = disablePlatformVoiceDsp(rec.audioSessionId)
-        Log.i(TAG, "BT-SCO capture: '${btDevice.productName}' type=${btDevice.type} @ ${sampleRate}Hz mono")
-        return AttemptResult(rec, Source.DjiBluetooth, sampleRate, 1, encoding, expectedDevice = btDevice, effects = effects)
+        val source = if (deviceIsDji) Source.DjiBluetooth else Source.Earbud
+        Log.i(TAG, "BT-SCO capture: '${btDevice.productName}' type=${btDevice.type} @ ${sampleRate}Hz mono → source=$source")
+        return AttemptResult(rec, source, sampleRate, 1, encoding, expectedDevice = btDevice, effects = effects)
     }
 
     /** Ask the platform's voice-call DSP (AEC / NS / AGC) OFF for this capture
@@ -523,8 +542,8 @@ class MicCapture(private val context: Context) {
                     Event.Failure(
                         "BT-SCO route never engaged after ${System.currentTimeMillis() - routeStartMs}ms — " +
                             "audio is coming from '${routed?.productName ?: "(no route)"}' (type=${routed?.type ?: -1}), " +
-                            "not the DJI. Refusing to ship wrong-mic audio (DJI-only policy). " +
-                            "Check the DJI TX Bluetooth connection and try again.",
+                            "not the selected BT mic. Refusing to ship wrong-mic audio (BT-mic-only policy). " +
+                            "Check the earbud (or DJI) Bluetooth connection and try again.",
                     ),
                 )
                 // The Failure path stops the streamer → stop() → drain/cleanup.

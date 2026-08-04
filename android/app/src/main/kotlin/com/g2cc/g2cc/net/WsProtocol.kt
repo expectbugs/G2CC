@@ -164,7 +164,13 @@ data class WireScene(
 @Serializable
 sealed interface ClientMessage {
     @Serializable @SerialName("auth")
-    data class Auth(val token: String) : ClientMessage
+    data class Auth(
+        val token: String,
+        /** Earbud 2026-08-04 (v1.20+): capability flags. The server sends NO
+         *  earbud-family message (speak/chime/media_open/binary speech) to a
+         *  client that didn't announce the matching cap. */
+        val caps: List<String>? = null,
+    ) : ClientMessage
 
     @Serializable @SerialName("client_hb")
     data class ClientHb(
@@ -211,7 +217,7 @@ sealed interface ClientMessage {
         val sampleRate: Int = 16_000,
         val channels: Int = 1,
         val encoding: String = "int16",          // "int16" | "float32"
-        val source: String? = null,              // "phone-mic" | "dji-usb" | "dji-bt"
+        val source: String? = null,              // "phone-mic" | "dji-usb" | "dji-bt" | "earbud-bt" (2026-08-04)
         val mode: String? = null,                // "dictate" (default) | "handsfree" (Phase 9)
     ) : ClientMessage
 
@@ -310,6 +316,32 @@ sealed interface ClientMessage {
          *  paragraph from the control-mode keyboard. Arbitrary length — NEVER
          *  truncated (the no-truncation rule). */
         val text: String? = null,
+        /** event 'media_button' (earbud 2026-08-04): the transport action the
+         *  owned MediaSession received (play|pause|play_pause|next|prev|stop).
+         *  The SERVER owns the gesture semantics. */
+        val button: String? = null,
+    ) : ClientMessage
+
+    /** Earbud 2026-08-04: honest speech-delivery report. 'played' = a verified
+     *  BT route drained the utterance; 'failed' = the route guard refused or
+     *  playback errored (reason says why). route = the ACTUAL routed output
+     *  device — the v1.19 SCO-verification discipline, output edition. */
+    @Serializable @SerialName("speak_ack")
+    data class SpeakAck(
+        val id: String,
+        val status: String,                    // 'played' | 'failed'
+        val reason: String? = null,
+        val route: String? = null,
+    ) : ClientMessage
+
+    /** Earbud 2026-08-04: music-lane player state, reported honestly (never
+     *  fabricated). 'ended' advances the server's queue; 'error' carries why. */
+    @Serializable @SerialName("media_event")
+    data class MediaEvent(
+        val id: String,
+        val state: String,                     // 'playing' | 'paused' | 'ended' | 'error'
+        val posMs: Long? = null,
+        val reason: String? = null,
     ) : ClientMessage
 
     /** Ask the server to reset things (multi-surface 2026-07-13).
@@ -386,8 +418,12 @@ sealed interface ServerMessage {
     @Serializable @SerialName("hb")
     data class Hb(val now: Long) : ServerMessage
 
+    /** Initial config snapshot after auth. micSource (earbud 2026-08-04, the
+     *  DJI-retirement switch): 'earbud' = capture from the first non-DJI BT
+     *  comms device (Pixel Buds 2a), announced 'earbud-bt'; 'dji' = the legacy
+     *  DJI-name-matched pick. null (old server) = the built-in default. */
     @Serializable @SerialName("config_snapshot")
-    data object ConfigSnapshot : ServerMessage
+    data class ConfigSnapshot(val micSource: String? = null) : ServerMessage
 
     @Serializable @SerialName("dispatch_target_list")
     data class DispatchTargetList(val targets: List<DispatchTarget>) : ServerMessage
@@ -537,4 +573,58 @@ sealed interface ServerMessage {
      *  finds the rebuilt server. */
     @Serializable @SerialName("hard_reset")
     data object HardReset : ServerMessage
+
+    // ---- Earbud audio lane (2026-08-04, docs/EARBUD_SPEC.md §C5). ALL of
+    // these are CAPS-GATED server-side: they arrive only because THIS build
+    // announced the matching cap in Auth.caps.
+
+    /** A TTS utterance is about to stream as binary frames (tag 0x11, header
+     *  [tag u8][num u32BE][seq u32BE], payload PCM16LE @ 24 kHz mono). music =
+     *  what the media lane does meanwhile ('duck' by duckDb | 'pause'). */
+    @Serializable @SerialName("speak_start")
+    data class SpeakStart(
+        val id: String,
+        val num: Long,                          // u32 on the wire
+        val music: String,                      // 'duck' | 'pause'
+        val duckDb: Double? = null,
+        val durMs: Double? = null,
+    ) : ServerMessage
+
+    /** The utterance is fully sent; chunks = binary frame count (hole
+     *  detection), totalMs = authoritative PCM duration. Ack after playback. */
+    @Serializable @SerialName("speak_end")
+    data class SpeakEnd(
+        val id: String,
+        val num: Long,
+        val chunks: Int,
+        val totalMs: Double,
+    ) : ServerMessage
+
+    /** Stop speech NOW (barge-in / flush). num omitted = all utterances. The
+     *  cancelled utterance still acks honestly (played+cancelled if audio had
+     *  started, failed+cancelled if it never did). */
+    @Serializable @SerialName("speak_cancel")
+    data class SpeakCancel(val num: Long? = null) : ServerMessage
+
+    /** Play a local earcon asset (instant, no round-trip). */
+    @Serializable @SerialName("chime")
+    data class Chime(val name: String) : ServerMessage   // rec_start|rec_stop|done|error|timer|notify
+
+    /** Load + play a music-lane track in ExoPlayer. url is SERVER-RELATIVE
+     *  (path + query, token included) — prefix the configured host:port. */
+    @Serializable @SerialName("media_open")
+    data class MediaOpen(
+        val id: String,
+        val url: String,
+        val title: String,
+        val artist: String? = null,
+        val album: String? = null,
+        val durMs: Long? = null,
+        val startMs: Long? = null,
+    ) : ServerMessage
+
+    /** Music-lane transport. seek value = ms; volume value = 0-100
+     *  (STREAM_MUSIC absolute); duck/unduck value = dB for the speech ramp. */
+    @Serializable @SerialName("media_ctl")
+    data class MediaCtl(val cmd: String, val value: Double? = null) : ServerMessage
 }

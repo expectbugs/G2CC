@@ -78,6 +78,10 @@ class ConnectionManager(
     /** Glasses BLE-live? supplier (multi-surface 2026-07-13, v1.18 — see
      *  ClientHb.g2Connected). Null provider/sample omits the field. */
     private val g2Connected: (() -> Boolean?)? = null,
+    /** Earbud 2026-08-04: inbound binary frames (TTS speech PCM, tag 0x11).
+     *  Pre-auth frames never reach this (dropped below). Default: loud warn —
+     *  the pre-1.20 behavior. */
+    private val onBinary: (ByteString) -> Unit = { Log.w(TAG, "unexpected binary frame size=${it.size}") },
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -317,7 +321,8 @@ class ConnectionManager(
             }
             lastMessageReceivedAt = System.currentTimeMillis()
             // Send auth FIRST.
-            send(ClientMessage.Auth(authToken))
+            // caps (earbud 2026-08-04): this build carries the full audio lane.
+            send(ClientMessage.Auth(authToken, caps = listOf("audio-out", "media-lane", "earbud-buttons")))
             ensureLivenessWatchdog()
             ensureClientHbTimer()
         }
@@ -390,8 +395,14 @@ class ConnectionManager(
         }
 
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-            // Phase 6 doesn't expect server→client binary frames; surface loudly if they appear.
-            Log.w(TAG, "unexpected binary frame size=${bytes.size}")
+            // Earbud 2026-08-04: downstream binary = TTS speech frames. Same
+            // pre-auth discipline as text: a frame before auth_result is
+            // dropped LOUDLY (mirror of the server's collectingAudio guard).
+            if (!_connected.value) {
+                Log.w(TAG, "binary frame before auth (${bytes.size} B) — dropped")
+                return
+            }
+            onBinary(bytes)
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {

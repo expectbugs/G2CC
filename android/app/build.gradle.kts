@@ -38,8 +38,8 @@ android {
         // now REFUSES to install over a newer build (a loud downgrade error
         // beats silently running old code). OsLayout.OS_VERSION reads
         // BuildConfig.VERSION_NAME — one bump updates the splash/antenna too.
-        versionCode = 119
-        versionName = "1.19"
+        versionCode = 120
+        versionName = "1.20"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -119,6 +119,9 @@ dependencies {
     // Phase 6: WebSocket client + JSON serialization.
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
+    // Earbud media lane (2026-08-04): ExoPlayer for the server's opus-mono
+    // /media/track streams (Range-capable HTTP; ogg/opus native).
+    implementation(libs.media3.exoplayer)
 
     // ZXing core for QR decode (no-op dependency-wise; activated when QR scan path is wired).
     implementation(libs.zxing.core)

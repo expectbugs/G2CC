@@ -89,6 +89,7 @@ class AudioStreamer(
                         val sourceName = when (event.source) {
                             MicCapture.Source.DjiUsb -> "dji-usb"
                             MicCapture.Source.DjiBluetooth -> "dji-bt"
+                            MicCapture.Source.Earbud -> "earbud-bt"   // 2026-08-04 — honest capsule provenance
                             MicCapture.Source.PhoneMic -> "phone-mic"
                         }
                         // Stash the format so handsfree windowing can re-emit audio_start.

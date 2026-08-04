@@ -17,8 +17,10 @@ import androidx.core.app.NotificationCompat
 import com.g2cc.g2cc.BuildConfig
 import com.g2cc.g2cc.G2CCApp
 import com.g2cc.g2cc.R
+import com.g2cc.g2cc.audio.AudioOutController
 import com.g2cc.g2cc.audio.AudioStreamer
 import com.g2cc.g2cc.audio.MicCapture
+import com.g2cc.g2cc.audio.SpeechFrame
 import com.g2cc.g2cc.ble.BleScanner
 import com.g2cc.g2cc.ble.ConnectionState
 import com.g2cc.g2cc.ble.EvenHub
@@ -132,6 +134,12 @@ class ConnectionService : Service(), TestHarness {
     private var syncMsgId = 0x20
     @Volatile private var connection: ConnectionManager? = null   // read off the NLS ioScope (C1) — publish writes
     private var audioStreamer: AudioStreamer? = null      // server-driven dictation (audio_request)
+    /** Earbud 2026-08-04: the output coordinator (speech + media + chimes +
+     *  the owned MediaSession). Lazy; survives WS reconnects. */
+    private var audioOut: AudioOutController? = null
+    /** Which BT mic to capture from — config_snapshot.micSource ('earbud'
+     *  default = the DJI-retirement decision; 'dji' = the one-flip undo). */
+    @Volatile private var micSource: String = "earbud"
     // Did startForeground succeed WITH the microphone FGS type? When the mic-typed start
     // is denied (background START_STICKY restart on Android 12+/14) we fall back to
     // connectedDevice-only — and Android 14+ then feeds AudioRecord SILENCE instead of
@@ -441,6 +449,10 @@ class ConnectionService : Service(), TestHarness {
             DiagLog.log("svc", "btStateReceiver unregister failed: $e")
         }
         teardown()
+        // Earbud 2026-08-04: the output stack dies with the service (player,
+        // MediaSession, SoundPool, speech thread) — never leaks past destroy.
+        audioOut?.shutdown()
+        audioOut = null
         releaseWakeLock()
         DiagLog.stop()
         scope.cancel()
@@ -655,6 +667,22 @@ class ConnectionService : Service(), TestHarness {
                     // hours. stop() is an idempotent no-op when not streaming.
                     audioStreamer?.stop()
                     audioStreamer = null
+                    // Earbud 2026-08-04: in-flight speech dies with the WS too —
+                    // its acks have nowhere to go and the server re-speaks what
+                    // matters after reattach. Media keeps playing (HTTP is a
+                    // separate connection; the server's queue state survives).
+                    audioOut?.speech?.cancel(null)
+                }
+            },
+            // Earbud 2026-08-04: downstream binary = TTS speech frames
+            // [0x11][num u32BE][seq u32BE][PCM16LE]. Parsed + routed here;
+            // malformed frames are LOUD.
+            onBinary = { bytes ->
+                val frame = SpeechFrame.parse(bytes.toByteArray())
+                if (frame == null) {
+                    DiagLog.log("audio", "unparseable binary frame (${bytes.size} B, tag=${if (bytes.size > 0) bytes[0].toInt() else -1}) — dropped LOUDLY")
+                } else {
+                    ensureAudioOut().onSpeechFrame(frame.num, frame.pcm)
                 }
             },
         )
@@ -824,16 +852,23 @@ class ConnectionService : Service(), TestHarness {
                         // Capture failures go back to the server as an [audio-error] diag —
                         // logcat-only failures left the server waiting forever (review 2026-06-10).
                         val handsfree = msg.mode == "handsfree"
-                        val s = AudioStreamer(MicCapture(applicationContext), conn, onFailure = { reason ->
+                        val mic = MicCapture(applicationContext)
+                        mic.micSource = micSource   // earbud 2026-08-04: the DJI-retirement switch
+                        val s = AudioStreamer(mic, conn, onFailure = { reason ->
                             DiagLog.log("os", "audio capture FAILED: $reason")
                             conn.send(ClientMessage.Diag("[audio-error] $reason"))
                         }, handsfree = handsfree)
                         audioStreamer = s
-                        DiagLog.log("os", "audio_request start → mic streaming${if (handsfree) " (handsfree)" else ""}")
+                        DiagLog.log("os", "audio_request start → mic streaming${if (handsfree) " (handsfree)" else ""} (micSource=$micSource)")
+                        // Glanceless dictation feedback (earbud 2026-08-04): a local
+                        // earcon at capture start — no round-trip, no glasses glance.
+                        // Dictate only: handsfree re-cuts would chime every 3 s.
+                        if (!handsfree) ensureAudioOut().chime("rec_start")
                         s.start()
                     }
                     "stop" -> {
                         DiagLog.log("os", "audio_request stop")
+                        if (audioStreamer?.isStreaming == true) ensureAudioOut().chime("rec_stop")
                         audioStreamer?.stop()
                     }
                     else -> DiagLog.log("os", "audio_request unknown action '${msg.action}' — ignored (LOUD)")
@@ -901,11 +936,41 @@ class ConnectionService : Service(), TestHarness {
                 DiagLog.log("os", "server error: ${msg.message}")
                 _serverErrors.tryEmit(msg.message)
             }
+            // ---- earbud audio lane (2026-08-04, docs/EARBUD_SPEC.md §C7) ----
+            is ServerMessage.ConfigSnapshot -> {
+                // micSource: the DJI-retirement switch. Applied to every future
+                // MicCapture (each dictation builds a fresh one).
+                msg.micSource?.let {
+                    if (it != micSource) DiagLog.log("audio", "micSource ← '$it' (config_snapshot)")
+                    micSource = it
+                }
+            }
+            is ServerMessage.SpeakStart -> ensureAudioOut().onSpeakStart(msg)
+            is ServerMessage.SpeakEnd -> ensureAudioOut().onSpeakEnd(msg)
+            is ServerMessage.SpeakCancel -> ensureAudioOut().onSpeakCancel(msg)
+            is ServerMessage.Chime -> ensureAudioOut().chime(msg.name)
+            is ServerMessage.MediaOpen -> ensureAudioOut().onMediaOpen(msg)
+            is ServerMessage.MediaCtl -> ensureAudioOut().onMediaCtl(msg)
             else -> {
-                // config_snapshot / dispatch_target_list / etc. — not used in OS mode.
+                // dispatch_target_list / etc. — not used in OS mode.
                 DiagLog.log("os", "ignored server msg ${msg::class.simpleName}")
             }
         }
+    }
+
+    /** Earbud 2026-08-04: the output coordinator, built lazily (survives WS
+     *  reconnects — sendToServer reads the CURRENT connection). */
+    private fun ensureAudioOut(): AudioOutController {
+        audioOut?.let { return it }
+        val out = AudioOutController(
+            applicationContext,
+            serverBase = "http://${BuildConfig.SERVER_HOST}:${BuildConfig.SERVER_PORT}",
+            sendToServer = { m -> connection?.send(m) ?: false },
+            sendInput = { input -> sendControlInput(input) },
+        )
+        audioOut = out
+        DiagLog.log("audio", "AudioOutController up (speech lane + media lane + chimes + MediaSession)")
+        return out
     }
 
     // ----------------------------------------------------------------- connect flow
@@ -1466,15 +1531,21 @@ class ConnectionService : Service(), TestHarness {
         // a server audio_request. NET-7: a background-initiated start with a mic type can
         // throw on Android 12+/14 — log loudly and stop cleanly, never crash silent.
         try {
+            // mediaPlayback added 2026-08-04 (the earbud lane: TTS + music must
+            // survive backgrounding). The mask is FIXED at startForeground —
+            // it must be in the INITIAL mask, not upgraded later.
             val typeMask = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
             } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
             }
             startForeground(NOTIF_ID, buildNotification(_status.value), typeMask)
             micFgsGranted = true
         } catch (e: Exception) {
-            DiagLog.log("svc", "startForeground with mic type FAILED (${e.message}) — retrying connectedDevice-only (dictation unavailable this run)")
+            DiagLog.log("svc", "startForeground with mic+media types FAILED (${e.message}) — retrying connectedDevice-only (dictation + earbud audio unavailable this run)")
             micFgsGranted = false
             // C4 (review 2026-06-13): the fallback start can ALSO throw (e.g.
             // ForegroundServiceStartNotAllowedException on a background-initiated
