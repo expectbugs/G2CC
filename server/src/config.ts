@@ -71,9 +71,17 @@ export interface G2CCConfig {
     duckDb: number
     /** Phone-local earcons (dictation start/stop, done, error, timer). */
     chimes: boolean
-    /** Allow playback with NO Bluetooth output route (phone speaker) — home
-     *  bench ONLY. Default false: at work, no earbud = no sound, ever. */
+    /** RESERVED (deep-review #10): the phone currently HARD-refuses any
+     *  non-Bluetooth output route unconditionally — this flag is documented
+     *  intent, not yet wired across the wire. Flipping it changes nothing
+     *  until a future APK consults it. */
     allowSpeaker: boolean
+    /** Ears (2026-08-04 field fix): always-on wake-word listening. The
+     *  supervisor runs handsfree capture whenever a capable phone is attached,
+     *  no dictation is live, and music is NOT playing (continuous SCO capture
+     *  suspends A2DP on the classic-BT Buds 2a — music wins the radio; pause
+     *  the music and "butterscotch" works). Default true. */
+    earsOn: boolean
     /** Per-priority spoken-notification policy (notifyHub priorities).
      *  'speak' = chime + spoken line; 'chime' = earcon only; 'chime+name' =
      *  earcon + sender name only (SMS privacy on the floor — body on request);
@@ -225,6 +233,7 @@ function defaultConfig(): G2CCConfig {
       duckDb: -12,
       chimes: true,
       allowSpeaker: false,
+      earsOn: true,
       notify: {
         call: 'speak',
         timer: 'speak',
@@ -455,6 +464,10 @@ export function loadConfig(): G2CCConfig {
   if (typeof merged.audioOut.allowSpeaker !== 'boolean') {
     console.error('[config] audioOut.allowSpeaker is not a boolean — using false (earbud-or-nothing)')
     merged.audioOut.allowSpeaker = defaults.audioOut.allowSpeaker
+  }
+  if (typeof merged.audioOut.earsOn !== 'boolean') {
+    console.error('[config] audioOut.earsOn is not a boolean — using true')
+    merged.audioOut.earsOn = defaults.audioOut.earsOn
   }
   {
     const validNotify = ['speak', 'chime', 'chime+name', 'silent']

@@ -59,6 +59,16 @@ export class EarbudWindow implements OsWindow {
    *  Callers log/render the honest offline state on null. */
   private audio(): EarbudAudioService | null { return tryGetEarbud() }
 
+  /** THE queue-level row array — view() and onBrowseSelect() MUST paginate
+   *  identical rows or byte-aware page boundaries diverge and taps misroute
+   *  (deep-review #16/#27). Row i>=0 maps to musicQueue[i] iff non-empty. */
+  private queueRows(): string[] {
+    const e = this.audio()
+    if (!e) return ['(audio lane offline)']
+    if (e.musicQueue.length === 0) return ['(queue empty — Music to pick something)']
+    return e.musicQueue.map((t, i) => `${i === e.musicIdx ? '▶ ' : ''}${t.title}`)
+  }
+
   constructor(private ctx: WmContext, private requestRender: () => void) {
     // Stub-config tolerance (the hasDisplay precedent): in-process smoke
     // harnesses hand-build minimal configs without the earbud sections. Fall
@@ -78,7 +88,7 @@ export class EarbudWindow implements OsWindow {
         systemPrompt: COMPANION_PROMPT_ADDENDUM,
         mcpConfig: join(homedir(), '.g2cc', 'companion-mcp.json'),
         onAssistantText: (text) => { this.speakReply(text) },
-        extraIdleMenu: ['Music', 'Queue', 'Speak'],
+        extraIdleMenu: ['Music', 'Queue', 'Speak', 'Ears'],
       },
       requestRender,
       'Companion',
@@ -160,10 +170,7 @@ export class EarbudWindow implements OsWindow {
     }
     if (this.level === 'queue') {
       const e = this.audio()
-      const rows = e && e.musicQueue.length
-        ? e.musicQueue.map((t, i) => `${i === e.musicIdx ? '▶ ' : ''}${t.title}`)
-        : [e ? '(queue empty — Music to pick something)' : '(audio lane offline)']
-      const { items } = browsePageItems(rows, this.queueOffset)
+      const { items } = browsePageItems(this.queueRows(), this.queueOffset)
       return { mode: 'browse', menuMode, title: `Earbud · queue ${e?.status().queuePos ?? '—'}`, menu: ['Reload', 'Main'], items }
     }
     if (this.level === 'prompts') {
@@ -213,6 +220,19 @@ export class EarbudWindow implements OsWindow {
       this.requestRender()
       return
     }
+    if (label === 'Ears') {
+      // Toggle always-on wake-word listening (2026-08-04 field fix). The
+      // supervisor arbitrates vs music/dictation; this is the master switch.
+      const e = this.audio()
+      if (!e) { this.ctx.log('[earbud-win] Ears toggle: audio lane offline — ignored'); return }
+      const next = !e.earsOn()
+      e.setEarsOn(next, 'window toggle')
+      try { saveConfig(this.ctx.config) } catch (err) {
+        this.ctx.log(`[earbud-win] earsOn persist failed (live value still ${next}): ${(err as Error).message}`)
+      }
+      this.requestRender()
+      return
+    }
     if (label === 'Talk') {
       // Warm the Companion in parallel with the mic (open is idempotent).
       void this.session.open().catch((e: unknown) => {
@@ -257,8 +277,7 @@ export class EarbudWindow implements OsWindow {
       return
     }
     if (this.level === 'queue') {
-      const rows = e.musicQueue.length ? e.musicQueue.map((t) => t.title) : ['(empty)']
-      const { map, prevOffset, nextOffset } = browsePageItems(rows, this.queueOffset)
+      const { map, prevOffset, nextOffset } = browsePageItems(this.queueRows(), this.queueOffset)
       const m = map[index]
       if (m === undefined) { this.ctx.log(`[earbud-win] queue: index ${index} out of range`); return }
       if (m === -1) { this.queueOffset = prevOffset; this.requestRender(); return }
@@ -277,6 +296,14 @@ export class EarbudWindow implements OsWindow {
       if (this.focus === 'content') { this.focus = 'menu'; this.requestRender(); return true }
       this.focus = 'content'
       this.level = 'session'
+      // Deep-review #26: leaving the music level with a search capture armed
+      // must stop the mic AND clear the flag — otherwise the mic stays live
+      // and a later transcript is eaten as a music query.
+      if (this.musicSearchPending) {
+        this.musicSearchPending = false
+        this.ctx.audio('stop')
+        this.ctx.log('[earbud-win] music search abandoned (Back) — mic stopped, flag cleared')
+      }
       this.requestRender()
       return true
     }
@@ -291,8 +318,9 @@ export class EarbudWindow implements OsWindow {
     // Review 2026-08-04 #8: a stale music-search flag would eat a LATER
     // unrelated transcript (e.g. a companion PTT hours on) as a music query.
     if (this.musicSearchPending) {
-      this.ctx.log('[earbud-win] leaving window with music search pending — cleared')
+      this.ctx.log('[earbud-win] leaving window with music search pending — mic stopped, flag cleared')
       this.musicSearchPending = false
+      this.ctx.audio('stop')
     }
   }
 
@@ -395,7 +423,10 @@ export class EarbudWindow implements OsWindow {
     this.ctx.log(`[earbud-win] confidence ${conf.toFixed(2)} < ${threshold} — confirming ("${text.slice(0, 60)}")`)
     if (this.visible && (this.ctx.hasDisplay?.() ?? true)) {
       // Glasses in view → the classic Confirm/Re-record/Cancel card.
-      await this.session.onStt(text)
+      // presentTranscript, NOT onStt (deep-review #25): SessionLevel.onStt
+      // discards transcripts that arrive while ITS transcribing flag is false
+      // — which is always, for a PTT-originated capture it never started.
+      this.session.presentTranscript(text)
       this.requestRender()
       return
     }

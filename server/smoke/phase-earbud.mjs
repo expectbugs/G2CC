@@ -1,5 +1,8 @@
 // Earbud-lane smoke (2026-08-04, docs/EARBUD_SPEC.md) — hermetic, no phone,
-// no glasses, no claude subprocess:
+// no glasses, no claude subprocess. HONEST COVERAGE NOTE (deep-review #31):
+// the /media/track HTTP handler and the phone lanes are NOT exercised here —
+// those were verified live at deploy (curl 206/200; on-glass music playback
+// 2026-08-04 evening). This phase covers the pure/in-process layers:
 //   Part 1: config — new sections exist in defaults, validators log+fallback
 //   Part 2: estimateSttConfidence heuristic shape
 //   Part 3: EarbudAudioService against a FAKE phone — caps gating, speech
@@ -107,10 +110,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   assert.equal(sentBinary.length, 0, 'no frames from a failed synth')
   assert.equal(SPEECH_FRAME_TAG, 0x11)
 
-  // Phone detach: state honest, in-flight acks resolve unverified.
+  // Phone detach (deep-review #14): the music MODEL is RETAINED — the
+  // ExoPlayer keeps streaming over its own HTTP connection, so forcing 'idle'
+  // made the re-attached phone's honest 'ended' look stale and the queue
+  // never advanced. Only speech acks die with the WS.
   svc.notePhoneCaps(null)
+  assert.notEqual(svc.status().music, 'idle', 'music model survives a WS blip')
+  // A stop AFTER reattach still clears it (the explicit path).
+  svc.notePhoneCaps(['audio-out', 'media-lane'])
+  svc.stopMusic('smoke')
   assert.equal(svc.status().music, 'idle')
-  console.error('  3. EarbudAudioService caps/etiquette/half-duplex/honest-failure ✓')
+  console.error('  3. EarbudAudioService caps/etiquette/half-duplex/honest-failure/blip-retention ✓')
 }
 
 // ---- Part 4: REAL Kokoro synthesis via the daemon protocol ----

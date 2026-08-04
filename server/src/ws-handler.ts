@@ -278,6 +278,9 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
           // peer must not OOM the single-threaded server. Loud-fail + discard.
           console.warn(`[ws] audio buffer hit ${client.audioBytes}B without audio_end — discarding`)
           client.collectingAudio = false
+          // Deep-review #1: without this release the earbud half-duplex gate
+          // latched forever — speech queue frozen, music stuck paused.
+          if (client.audioFormat?.mode !== 'handsfree') getEarbud().onCaptureState(false)
           client.audioChunks = []
           client.audioBytes = 0
           client.audioFormat = null
@@ -722,6 +725,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         mode: msg.mode === 'handsfree' ? 'handsfree' : undefined,   // Phase 9
       }
       console.log(`[ws] audio_start sr=${client.audioFormat.sampleRate} ch=${client.audioFormat.channels} enc=${client.audioFormat.encoding} src=${client.audioFormat.source ?? '?'}${client.audioFormat.mode === 'handsfree' ? ' mode=handsfree' : ''}`)
+      if (handsfree) getEarbud().noteHandsfreeStarted()   // ears truth anchor (2026-08-04 field fix)
       // Earbud half-duplex (2026-08-04): a live DICTATE capture kills speech
       // (echo — AEC is deliberately off) and pauses the music lane. Handsfree
       // is EXEMPT: its 3 s window re-cuts would flap the music pause; ambient
@@ -746,9 +750,11 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         // sttResult/sttError; the stray stays loud in the log only.
         if (client.sttInFlightCount > 0) {
           console.warn(`[ws] duplicate audio_end while ${client.sttInFlightCount} transcription(s) in flight — logged only (the live pipeline owns the WM state)`)
+          getEarbud().onCaptureState(false)   // idempotent belt-and-braces gate release (deep-review #1)
           break
         }
         console.warn(`[ws] audio_end without prior audio_start — ignoring`)
+        getEarbud().onCaptureState(false)     // idempotent gate release (deep-review #1)
         sttError(client, 'audio_end without prior audio_start')
         break
       }
@@ -1093,7 +1099,18 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // audio_start ever arrives, so no stt_result/stt_error can fire.
       if (client.osMode && client.osScreen === 'de' && msg.text.includes('[audio-error]')) {
         const reason = msg.text.slice(msg.text.indexOf('[audio-error]') + '[audio-error]'.length).trim()
-        void getOsSession().wm.onSttError(reason || 'mic capture failed (see client diag)')
+        const session = getOsSession()
+        // Deep-review #1/#3: a capture that never starts still releases the
+        // half-duplex gate and the companion-PTT voice-target latch — and the
+        // error feedback goes to the window that OWNS the failed capture.
+        getEarbud().onCaptureState(false)
+        if (session.voiceTarget === 'earbud') {
+          session.voiceTarget = 'active'
+          console.warn('[ws] companion PTT mic failure — voice-target override reset; error routed to the Earbud window')
+          void session.wm.onSttErrorFor('earbud', reason || 'mic capture failed (see client diag)')
+        } else {
+          void session.wm.onSttError(reason || 'mic capture failed (see client diag)')
+        }
       }
       break
     }
@@ -1719,10 +1736,14 @@ function sttError(client: WSClient, error: string): void {
   if (client.osMode && client.osScreen === 'de') {
     const session = getOsSession()
     // A failed companion-PTT dictation must not leave the override latched
-    // for a later ring dictation (earbud 2026-08-04).
+    // (earbud 2026-08-04) — and its error belongs to the EARBUD window (the
+    // voice-confirm loop waits there), not whatever window happens to be
+    // active (deep-review #29).
     if (session.voiceTarget === 'earbud') {
       session.voiceTarget = 'active'
-      console.warn('[ws] companion PTT dictation failed — voice-target override reset')
+      console.warn('[ws] companion PTT dictation failed — voice-target override reset; error → Earbud window')
+      void session.wm.onSttErrorFor('earbud', error)
+      return
     }
     void session.wm.onSttError(error)
   }

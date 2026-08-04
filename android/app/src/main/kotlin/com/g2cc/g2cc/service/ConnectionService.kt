@@ -677,12 +677,15 @@ class ConnectionService : Service(), TestHarness {
             // Earbud 2026-08-04: downstream binary = TTS speech frames
             // [0x11][num u32BE][seq u32BE][PCM16LE]. Parsed + routed here;
             // malformed frames are LOUD.
+            // Deep-review #19: hop binary frames through the SAME scope the
+            // text path uses — launches enqueue FIFO, so a frame can never
+            // overtake its own speak_start (which rides a text message).
             onBinary = { bytes ->
                 val frame = SpeechFrame.parse(bytes.toByteArray())
                 if (frame == null) {
                     DiagLog.log("audio", "unparseable binary frame (${bytes.size} B, tag=${if (bytes.size > 0) bytes[0].toInt() else -1}) — dropped LOUDLY")
                 } else {
-                    ensureAudioOut().onSpeechFrame(frame.num, frame.pcm)
+                    scope.launch { ensureAudioOut().onSpeechFrame(frame.num, frame.pcm) }
                 }
             },
         )
@@ -776,6 +779,10 @@ class ConnectionService : Service(), TestHarness {
         val wasBridging = _launched.value || _connecting.value || left != null || right != null
         DiagLog.log("os", "═══ HARD RESET ($origin) — full teardown; re-enter: control=$control bridging=$wasBridging ═══")
         setStatus("Hard reset — tearing down…")
+        // Deep-review #5 (phone half): the ExoPlayer + speech lane must not
+        // keep playing through a clean-slate. Fresh controller rebuilds lazily.
+        audioOut?.shutdown()
+        audioOut = null
         teardown()
         _scene.value = null   // clean slate on the mirror until the fresh attach paints
         when {
@@ -830,10 +837,29 @@ class ConnectionService : Service(), TestHarness {
                 }
                 when (msg.action) {
                     "start" -> {
-                        if (audioStreamer?.isStreaming == true) {
-                            // Surface to the SERVER, not just the diag log — its dictation
-                            // state machine is waiting for an audio_start that will never
-                            // come (review 2026-06-11).
+                        val live = audioStreamer
+                        if (live?.isStreaming == true) {
+                            // Ears 2026-08-04: a DICTATE start while the HANDSFREE
+                            // listener runs is the normal PTT handoff — swap
+                            // streamers instead of refusing (the refusal used to
+                            // kill the incoming dictation). Paced wait on the
+                            // drain, supervised by the stop we just issued.
+                            if (live.isHandsfree && msg.mode != "handsfree") {
+                                DiagLog.log("os", "audio_request start(dictate) over live handsfree — swapping streamers")
+                                live.stop()
+                                scope.launch {
+                                    var waited = 0
+                                    while (live.isStreaming && waited < 100) { delay(50); waited++ }
+                                    if (live.isStreaming) {
+                                        DiagLog.log("os", "handsfree streamer did not drain after stop (~5 s) — refusing the dictate start LOUDLY")
+                                        conn.send(ClientMessage.Diag("[audio-error] handsfree capture would not release the mic — Reload to clear it"))
+                                    } else {
+                                        onServerMessage(ServerMessage.AudioRequest(action = "start", mode = msg.mode))
+                                    }
+                                }
+                                return
+                            }
+                            // Same-mode duplicate / dictate-over-dictate: refuse as before.
                             DiagLog.log("os", "audio_request start — already streaming (refused)")
                             conn.send(ClientMessage.Diag("[audio-error] audio_request start refused: a previous capture is still streaming — Reload to clear it"))
                             return
@@ -959,7 +985,10 @@ class ConnectionService : Service(), TestHarness {
     }
 
     /** Earbud 2026-08-04: the output coordinator, built lazily (survives WS
-     *  reconnects — sendToServer reads the CURRENT connection). */
+     *  reconnects — sendToServer reads the CURRENT connection). @Synchronized
+     *  (deep-review #18): first-touch races between the OkHttp reader (binary
+     *  frames) and the main scope must not build two controllers. */
+    @Synchronized
     private fun ensureAudioOut(): AudioOutController {
         audioOut?.let { return it }
         val out = AudioOutController(

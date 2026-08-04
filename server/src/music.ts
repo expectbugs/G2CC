@@ -63,24 +63,27 @@ export function toEarbudTrack(r: TrackRow): EarbudTrack {
 
 // ---- indexing ----
 
-async function* walkAudioFiles(dir: string): AsyncGenerator<string> {
+async function* walkAudioFiles(dir: string, onError?: (dir: string) => void): AsyncGenerator<string> {
   let entries
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true })
   } catch (e) {
     console.error(`[music] cannot read ${dir}: ${e instanceof Error ? e.message : String(e)}`)
+    onError?.(dir)
     return
   }
   for (const ent of entries) {
     const p = join(dir, ent.name)
     if (ent.isDirectory()) {
       if (ent.name === 'lost+found' || ent.name.startsWith('.')) continue
-      yield* walkAudioFiles(p)
+      yield* walkAudioFiles(p, onError)
     } else if (ent.isFile() && AUDIO_EXTS.has(extname(ent.name).toLowerCase())) {
       yield p
     }
   }
 }
+
+// (walk recursion threads onError through subdirectory failures too)
 
 interface ProbeResult { title: string; artist: string | null; album: string | null; durMs: number | null }
 
@@ -157,8 +160,10 @@ async function doScan(config: G2CCConfig): Promise<ScanSummary> {
     if (next) { active++; next() }
   }
 
+  const failedRoots = new Set<string>()
   for (const dir of config.music.libraryDirs) {
-    for await (const path of walkAudioFiles(dir)) {
+    let walkFailed = false
+    for await (const path of walkAudioFiles(dir, () => { walkFailed = true })) {
       summary.scanned++
       seen.add(path)
       const stat = await fsp.stat(path).catch(() => null)
@@ -191,6 +196,7 @@ async function doScan(config: G2CCConfig): Promise<ScanSummary> {
         }
       })())
     }
+    if (walkFailed) failedRoots.add(dir)
   }
   await Promise.all(pending)
 
@@ -198,10 +204,16 @@ async function doScan(config: G2CCConfig): Promise<ScanSummary> {
   // walked. A scan configured with different libraryDirs (a smoke temp dir, a
   // narrowed config) must never delete rows outside its own roots (caught
   // live 2026-08-04: a temp-dir smoke scan removed every other row in its DB).
-  const roots = config.music.libraryDirs.map((d) => (d.endsWith('/') ? d : `${d}/`))
+  // Deep-review #24: an UNMOUNTED/unreadable root walks to zero files — its
+  // rows would all look vanished and the whole index for that disk would be
+  // wiped. Any root whose walk errored is EXCLUDED from deletion entirely.
+  const deletableRoots = config.music.libraryDirs
+    .filter((d) => !failedRoots.has(d) && existsSync(d))
+    .map((d) => (d.endsWith('/') ? d : `${d}/`))
+  if (failedRoots.size > 0) console.warn(`[music] ${failedRoots.size} unreadable root(s) EXCLUDED from vanished-row deletion: ${[...failedRoots].join(', ')}`)
   for (const [path, info] of known) {
     if (seen.has(path)) continue
-    if (!roots.some((r) => path.startsWith(r))) continue
+    if (!deletableRoots.some((r) => path.startsWith(r))) continue
     await query('DELETE FROM tracks WHERE id=$1', [info.id])
       .then(() => { summary.removed++ })
       .catch((e: unknown) => console.error(`[music] removing vanished ${path}: ${e instanceof Error ? e.message : String(e)}`))

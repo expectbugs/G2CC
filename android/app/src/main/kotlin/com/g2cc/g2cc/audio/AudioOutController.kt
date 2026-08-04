@@ -166,6 +166,9 @@ class AudioOutController(
                         .build(),
                     /* handleAudioFocus = */ true,   // pauses us when others take focus
                 )
+                // Deep-review #20 (WORK RULE): an earbud disconnect mid-music
+                // must PAUSE, never continue on the phone speaker.
+                .setHandleAudioBecomingNoisy(true)
                 .build()
             p.addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(isPlaying: Boolean) {

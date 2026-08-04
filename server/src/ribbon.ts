@@ -200,7 +200,13 @@ export class RibbonShell {
     // DE_TITLE_W - DE_BATT_W. Reserve the prefix + scene()'s leading space (~6 px)
     // + the two '<'/'>' markers (~30 px) so it stays ZERO-RANGE (fits its region →
     // each scroll fires a per-notch focus event instead of internally scrolling).
-    const budget = (DE_TITLE_W - DE_BATT_W) - fwTextWidth(prefix) - 6 - 30
+    // ×0.85 (§2.2.7 hardening, Adam ON-GLASS 2026-08-04: the strip overflowed
+    // and scroll notches scrolled the text instead of stepping focus — the
+    // fwTextWidth estimate undershoots real firmware glyphs at some label
+    // combos). A conservative fit shows fewer cells ('<'/'>' pick up the
+    // slack) but can never lose the zero-range scroll. If cells look too few
+    // on glass, raise toward 1.0 in small steps.
+    const budget = Math.floor(((DE_TITLE_W - DE_BATT_W) - fwTextWidth(prefix) - 6 - 30) * 0.85)
     let lo = cur, hi = cur
     let width = fwTextWidth(cell(cur))
     let grow = true

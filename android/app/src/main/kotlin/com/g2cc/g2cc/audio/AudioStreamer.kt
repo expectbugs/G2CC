@@ -38,6 +38,9 @@ class AudioStreamer(
      *  proven one-shot path, unchanged. */
     private val handsfree: Boolean = false,
 ) {
+    /** Ears 2026-08-04: the service's dictate-over-handsfree swap keys on this. */
+    val isHandsfree: Boolean get() = handsfree
+
     @get:Synchronized @set:Synchronized
     var isStreaming: Boolean = false
         private set

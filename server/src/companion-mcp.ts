@@ -25,7 +25,7 @@ const TOKEN = process.env.G2CC_TOKEN ?? ''
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
 
-async function call(method: 'GET' | 'POST', path: string, body?: unknown): Promise<ToolResult> {
+async function call(method: 'GET' | 'POST', path: string, body?: unknown, capMs = 120_000): Promise<ToolResult> {
   try {
     const res = await fetch(`${BASE}${path}`, {
       method,
@@ -34,12 +34,13 @@ async function call(method: 'GET' | 'POST', path: string, body?: unknown): Promi
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      // Review 2026-08-04 #9 — the lyrics.ts precedent: a NETWORK RESOURCE
-      // CAP on a loopback HTTP call (the sanctioned no-timeouts exception).
-      // A wedged main server turns into a loud isError tool result instead
-      // of hanging the Companion's turn forever. /internal/speak awaits full
-      // playback (a minutes-long read is normal), so the cap is generous.
-      signal: AbortSignal.timeout(120_000),
+      // The lyrics.ts precedent: a NETWORK RESOURCE CAP on a loopback call
+      // (the sanctioned no-timeouts exception). A wedged main server becomes
+      // a loud isError result instead of hanging the Companion's turn.
+      // Deep-review #11/#30: speak awaits FULL PLAYBACK — a legitimate
+      // minutes-long read must not be reported as a failure, so its cap is
+      // 30 min (see the speak tool's call site), default 120 s elsewhere.
+      signal: AbortSignal.timeout(capMs),
     })
     const text = await res.text()
     if (!res.ok) {
@@ -62,7 +63,7 @@ server.registerTool('speak', {
     text: z.string().describe('What to say. Plain prose — markdown is stripped, code blocks become "code block on glasses".'),
     priority: z.enum(['now', 'next', 'queue']).optional().describe('now = interrupt everything (urgent only); next = ahead of queued speech; queue (default) = after current speech.'),
   },
-}, async ({ text, priority }) => call('POST', '/internal/speak', { text, priority }))
+}, async ({ text, priority }) => call('POST', '/internal/speak', { text, priority }, 1_800_000))
 
 server.registerTool('play_music', {
   description: 'Search Adam\'s music library (1,200 tracks on the PC) and PLAY the results in his earbud (mono). Query matches artist/album/title/path tokens; "random" or "surprise me" plays a random mix. Replaces the current queue.',

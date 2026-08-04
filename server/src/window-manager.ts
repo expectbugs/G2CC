@@ -1610,6 +1610,23 @@ export class WindowManager {
     }
   }
 
+  /** Route an STT error to a SPECIFIC window (deep-review #29 — the
+   *  companion-PTT/voice-confirm capture belongs to the Earbud window
+   *  regardless of focus; its pending-confirm feedback lives there). */
+  async onSttErrorFor(windowId: string, error: string): Promise<void> {
+    const win = this.windows.find((w) => w.id === windowId)
+    if (!win?.onSttError) {
+      this.ctx.log(`[os] onSttErrorFor('${windowId}') — no window/handler; logged only: ${error}`)
+      return
+    }
+    try {
+      await win.onSttError(error)
+      if (this.active.id === windowId) this.requestRender()
+    } catch (e) {
+      this.ctx.log(`[os] onSttErrorFor('${windowId}') handler failed: ${(e as Error).message}`)
+    }
+  }
+
   /** Mic-live feedback (2026-07-22): the first audio frame of the current
    *  capture arrived — route to the active window's optional hook (Terminal
    *  flips "Mic connecting…" → "Mic LIVE"). Never throws. */

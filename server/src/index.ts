@@ -36,7 +36,7 @@ import { initEarbud, getEarbud } from './earbud.js'
 import { warmTts } from './tts.js'
 import { scanLibrary, getTrack, mediaFileFor, trackCount, searchTracks, randomTracks, toEarbudTrack } from './music.js'
 import { appendNote } from './intents.js'
-import { listNotifications, markAllSeen } from './os-notify.js'
+import { listNotifications, markSeen } from './os-notify.js'
 import { createReadStream } from 'node:fs'
 import { paperclips } from './paperclips.js'
 import { armTimersFromDb, createTimer, listPending, fmtRemaining } from './timers.js'
@@ -428,7 +428,10 @@ server.get('/internal/status', async (req, reply) => {
     glasses: { connected: session.g2Connected, battery: session.g2Battery, phoneBattery: session.phoneBattery },
     activeWindow: session.wm.activeWindowId(),
     timers: pending === null ? 'timer store unavailable' : pending.map((t) => ({ id: t.id, label: t.label, remaining: fmtRemaining(t.firesAt) })),
-    library: await trackCount().catch(() => -1),
+    library: await trackCount().catch((e: unknown) => {
+      console.error(`[g2cc-server] /internal/status trackCount failed: ${e instanceof Error ? e.message : String(e)}`)
+      return -1
+    }),
   })
 })
 
@@ -475,11 +478,20 @@ server.post('/internal/note', async (req, reply) => {
 server.get('/internal/notifications', async (req, reply) => {
   if (!internalGuard(req, reply, '/internal/notifications')) return
   try {
-    const { unseen, rows } = await listNotifications(30, 0)
-    const items = rows.filter((n) => !n.seen).map((n) => ({ priority: n.priority, title: n.title, body: n.body }))
+    const { unseen, rows } = await listNotifications(50, 0)
+    const unseenRows = rows.filter((n) => !n.seen)
+    const items = unseenRows.map((n) => ({ priority: n.priority, title: n.title, body: n.body }))
+    // Deep-review #12: mark ONLY the notifications actually LISTED in this
+    // reply — markAllSeen() also wiped the unseen flag of items beyond the
+    // page that the Companion never read out.
     if ((req.query as { markSeen?: string } | undefined)?.markSeen === '1') {
-      const n = await markAllSeen()
-      reply.send({ unseen, items, markedSeen: n })
+      let marked = 0
+      for (const n of unseenRows) {
+        await markSeen(n.id).then(() => { marked++ })
+          .catch((e: unknown) => console.error(`[g2cc-server] /internal/notifications markSeen(${n.id}) failed: ${e instanceof Error ? e.message : String(e)}`))
+      }
+      const more = unseen - unseenRows.length
+      reply.send({ unseen, items, markedSeen: marked, ...(more > 0 ? { unlistedStillUnseen: more } : {}) })
       return
     }
     reply.send({ unseen, items })
@@ -509,8 +521,9 @@ server.get('/scout/live/status', async (req, reply) => {
 // arrive via Tailscale-over-cellular at work or LAN at home. Range-capable —
 // ExoPlayer seeks with byte ranges. Streaming here is safe DESPITE the /apk
 // readFileSync note: the fix is returning reply.send(stream) from the async
-// handler (verified with curl below in the smoke suite); transcodes can be
-// tens of MB and a sync read per seek would thrash.
+// handler (verified LIVE with curl 206/200 checks at deploy, 2026-08-04 —
+// deep-review #31: NOT smoke-covered; a throwaway-server smoke is a queued
+// hardening item); transcodes can be tens of MB and a sync read would thrash.
 server.get('/media/track/:id', async (req, reply) => {
   const token = (req.query as { token?: string } | undefined)?.token
   const bearer = req.headers.authorization

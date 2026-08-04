@@ -1054,8 +1054,16 @@ class SessionLevel {
       return
     }
     this.transcribing = false
+    this.presentTranscript(text)
+  }
+
+  /** Show the CONFIRM card for a transcript this level did NOT capture itself
+   *  (earbud PTT low-confidence path, deep-review #25 — routing such a
+   *  transcript through onStt hit the not-transcribing discard). The card +
+   *  Confirm/Re-record/Cancel mechanics are the standard ones. */
+  presentTranscript(text: string): void {
     // CONFIRM step (g2aria's CONFIRM_STT, Adam 2026-06-11): show the transcript
-    // and wait for Confirm / Retry (re-record) / Cancel — Parakeet mangles
+    // and wait for Confirm / Retry (re-record) / Cancel — the ASR mangles
     // words, and nothing should reach CC unread.
     this.pendingStt = text
     this.pages = this.paginate(blocksToText([

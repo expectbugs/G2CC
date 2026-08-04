@@ -188,28 +188,45 @@ class SpeechPlayer(
                         continue
                     }
                     if (utt.cancelled) continue
+                    // NON-blocking writes with progress supervision (deep-review
+                    // #22): a blocking write on a stalled sink was
+                    // uninterruptible — cancel/shutdown wedged behind it.
                     var off = 0
                     var failed = false
+                    var stalledWrites = 0
                     while (off < cmd.bytes.size && !utt.cancelled && alive) {
-                        val n = t.write(cmd.bytes, off, cmd.bytes.size - off)
+                        val n = t.write(cmd.bytes, off, cmd.bytes.size - off, AudioTrack.WRITE_NON_BLOCKING)
                         if (n < 0) {
                             finish(utt, "failed", "AudioTrack.write error $n", routeName(runCatching { t.routedDevice }.getOrNull()))
                             releaseTrack(); current = null
                             failed = true
                             break
                         }
-                        off += n
+                        if (n == 0) {
+                            if (++stalledWrites > STALL_POLLS) {
+                                finish(utt, "failed", "write stalled (sink dead?)", routeName(runCatching { t.routedDevice }.getOrNull()))
+                                releaseTrack(); current = null
+                                failed = true
+                                break
+                            }
+                            Thread.sleep(40)
+                        } else {
+                            stalledWrites = 0
+                            off += n
+                        }
                     }
                     if (failed) continue
                     utt.chunks++
                     utt.bytesQueued += cmd.bytes.size
-                    if (utt.chunks == 1 && !utt.cancelled) {
-                        // LIVE route re-verification on the first written chunk.
+                    // LIVE route verification — first chunk AND every 8th
+                    // (deep-review #21: a mid-utterance BT drop must not play
+                    // the remainder on the speaker and still ack 'played').
+                    if (!utt.cancelled && (utt.chunks == 1 || utt.chunks % 8 == 0)) {
                         val routed = runCatching { t.routedDevice }.getOrNull()
                         if (!isBt(routed)) {
-                            Log.e(TAG, "ROUTE GUARD: live route ${routeName(routed)} is not BT — killing ${utt.id}")
+                            Log.e(TAG, "ROUTE GUARD: live route ${routeName(routed)} is not BT (chunk ${utt.chunks}) — killing ${utt.id}")
                             utt.cancelled = true
-                            finish(utt, "failed", "routed to ${routeName(routed)} — not the earbud; refusing", routeName(routed))
+                            finish(utt, "failed", "route left the earbud mid-utterance (${routeName(routed)}) — refusing", routeName(routed))
                             releaseTrack(); current = null
                         }
                     }
@@ -237,15 +254,30 @@ class SpeechPlayer(
                     var lastHead = -1L
                     var stuck = 0
                     var stalled = false
+                    var routeLost: String? = null
+                    var drainPolls = 0
                     while (alive && !utt.cancelled) {
                         val head = try { t.playbackHeadPosition.toLong() and 0xFFFFFFFFL } catch (e: Exception) { -1L }
                         if (head < 0 || head >= totalFrames) break
                         if (head == lastHead) {
                             if (++stuck > STALL_POLLS) { stalled = true; break }
                         } else { stuck = 0; lastHead = head }
+                        // Deep-review #21: keep verifying the route through the
+                        // drain — a BT drop mid-tail must fail, not ack 'played'.
+                        if (++drainPolls % 12 == 0) {
+                            val routed = runCatching { t.routedDevice }.getOrNull()
+                            if (!isBt(routed)) { routeLost = routeName(routed); break }
+                        }
                         Thread.sleep(40)
                     }
                     val route = routeName(runCatching { t.routedDevice }.getOrNull())
+                    if (routeLost != null) {
+                        Log.e(TAG, "ROUTE GUARD: route left the earbud during drain ($routeLost) — failing ${utt.id}")
+                        finish(utt, "failed", "route left the earbud during playback ($routeLost)", routeLost)
+                        releaseTrack()
+                        current = null
+                        continue
+                    }
                     when {
                         stalled -> finish(utt, "failed", "playback stalled at $lastHead/$totalFrames frames (BT route died?)", route)
                         utt.cancelled -> finish(utt, if (utt.bytesQueued > 0) "played" else "failed", "cancelled", route)

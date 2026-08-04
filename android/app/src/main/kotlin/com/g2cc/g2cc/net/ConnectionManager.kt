@@ -395,6 +395,7 @@ class ConnectionManager(
         }
 
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            if (isStale()) return   // deep-review #23: a dying socket's frames must not feed the live lane
             // Earbud 2026-08-04: downstream binary = TTS speech frames. Same
             // pre-auth discipline as text: a frame before auth_result is
             // dropped LOUDLY (mirror of the server's collectingAudio guard).
