@@ -1,10 +1,36 @@
 # Earbud Audio — Full Spec (Part C)
 
-**Status: BUILT + DEPLOYED 2026-08-04 (the one-shot; server live, APK v1.20 staged for
-install).** What shipped vs. deferred: CHANGELOG 2026-08-04. Mid-build additions by Adam:
-the wake-word ringless path (§Decision Record) and SPOKEN DIGESTS — long/code replies
-condense through a one-shot model pass before TTS (server/src/speak-digest.ts); the full
-text always renders scrollable on glass; code is never read aloud.
+**Status: BUILT + DEPLOYED + FIELD-TESTED 2026-08-04 — then REJECTED BY ADAM as a design
+the same evening. A ground-up redesign is mandated (fresh session; HANDOFF §1).** This
+document remains the accurate reference for WHAT EXISTS (the code still runs until the
+redesign replaces it) and the post-mortem below is the redesign's required reading.
+
+### Post-mortem — why the design died (2026-08-04 late evening)
+
+The build was mechanically sound (music verified on-glass; TTS, Companion, wake word all
+live). The DESIGN failed on one physical constraint discovered end-to-end: **on classic
+Bluetooth (Buds 2a = SBC/AAC, no confirmed LC3), a continuous SCO mic capture and A2DP
+music playback are mutually exclusive on the same earbud.** The shipped arbitration
+(music wins; wake-word listening auto-suspends during playback) meant voice could not
+control PLAYING music — Adam: "if i have to touch something to pause the music before i
+can tell it to skip or play another song or whatever, then entirely hands-free music
+control is not doable, and a janky half-version is pointless."
+
+Constraints any redesign must honor (facts, not decisions):
+- Voice control DURING music requires a listening path that does NOT own the buds' radio.
+  Candidates seen but NOT designed: the PHONE's own mic for wake-word detection while the
+  buds play A2DP (the phone-mic ban was a DICTATION-quality policy from the DJI era —
+  detection is a different job with different quality needs); LE-Audio-capable hardware;
+  or abandoning voice-during-music for ring/tap-driven transport.
+- Adam's direction: "separate dictation from music, and implement them much differently."
+- The salvageable machinery (working, reviewed, live): the Kokoro TTS daemon pair, the
+  music index/transcode/Range streaming, the Companion session + MCP tool surface, the
+  spoken-digest projection, the route guards + caps-gating discipline, the earcons.
+
+What shipped vs. deferred: CHANGELOG 2026-08-04 (both entries). Mid-build additions by
+Adam: the wake-word ringless path (§Decision Record) and SPOKEN DIGESTS — long/code
+replies condense through a one-shot model pass before TTS (server/src/speak-digest.ts);
+the full text always renders scrollable on glass; code is never read aloud.
 Written after the work-policy change allowing a single earbud during shift. Companion to
 `g2_custom_app_spec.md` Parts A/B; if this conflicts with the Three Absolute Rules or the wire
 discipline there, those win.

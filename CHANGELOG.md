@@ -4,6 +4,43 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## v1.21 (staged) + server 235e7a9 — 2026-08-04 (late evening) — **Field test, the deep-review fix batch, the ears supervisor — and Adam's design verdict: REJECTED, redesign mandated**
+
+The same evening, three arcs:
+
+**Field test.** Music played end-to-end on real hardware (buds → media lane verified
+on-glass). Two field defects: the wake word was dead (the 9b always-on stream had never
+shipped — nothing captured ambient audio) and the ribbon strip overflowed on-glass (the
+fwTextWidth estimate undershoots firmware glyphs; overflow eats the zero-range scroll).
+Fixes: the EARS SUPERVISOR (audioOut.earsOn, default on; handsfree listening auto-runs
+when no dictation is live and music is NOT playing — live-confirmed on the phone at
+deploy) and a ×0.85 strip fit margin.
+
+**The deep review's REAL completion.** The 41-agent workflow finished 26 minutes after an
+interim notification this session had already acted on — lesson: don't act on the first
+notification of a long workflow. 32 confirmed findings, all hand-re-verified and fixed
+(319c951 → 235e7a9): the audible-tail cancel hole (the speaking slot cleared at speak_end
+while playback ran ~10× longer — barge-in/half-duplex/tap-quiet were dead for the tail),
+the capture-gate freeze (a MAX_AUDIO_BYTES discard latched the half-duplex gate forever),
+caps-gating centralized through sendCapped(), ack registration before speak_start, the
+music model surviving WS blips, unreadable library roots excluded from vanished-row
+deletion (an unmounted /mnt/slug would have wiped the index), route re-verification
+through the whole utterance + becoming-noisy pause (the speaker can never inherit audio),
+and the interim's own 120 s MCP cap replaced (it fabricated failures on long spoken reads).
+
+**Adam's verdict (the entry that matters).** The lane works mechanically and is REJECTED
+as a design: on classic BT (Buds 2a, no LC3), continuous SCO listening and A2DP music are
+mutually exclusive, so voice can't control PLAYING music — "if i have to touch something
+to pause the music before i can tell it to skip… entirely hands-free music control is not
+doable, and a janky half-version is pointless." Mandate: separate dictation from music and
+implement them differently, in a fresh session (HANDOFF §1). Nothing was disabled — the
+lane runs until the redesign replaces it; audioOut.earsOn=false silences ambient listening
+if wanted. Lesson recorded for the redesign: hands-free-DURING-music needs a listening
+path that does not own the buds' radio (the phone's own mic for wake-word detection, LE
+Audio hardware, or non-voice music control).
+
+---
+
 ## APK v1.20 (staged) + server — 2026-08-04 — **The earbud lane: DJI retired, the Pixel Buds 2a becomes mic + voice + music (the one-shot build)**
 
 Work now allows a single earbud on shift. Adam's decision set (delivered on his way out
