@@ -39,6 +39,64 @@ registerMigration('music-tracks-1', `
   CREATE INDEX IF NOT EXISTS tracks_album_idx ON tracks (lower(album));
 `)
 
+// MUSIC_SPEC D3.1 — the knowledge-base + player-persistence schema (Phase A).
+// The audio/enrich Python runner ensures the SAME DDL (byte-idempotent, IF NOT
+// EXISTS) so Phase A runs without a server restart; this registration keeps
+// fresh installs + the smoke DB complete. Any change here MUST be mirrored in
+// audio/enrich/db.py.
+registerMigration('music-meta-1', `
+  CREATE TABLE IF NOT EXISTS track_meta (
+    track_id integer PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    genres text[],
+    styles text[],
+    moods text[],
+    energy integer,
+    bpm real,
+    year integer,
+    vocals text,
+    language text,
+    themes text[],
+    description text,
+    dupe_cluster integer,
+    sources jsonb NOT NULL DEFAULT '{}',
+    pass_status jsonb NOT NULL DEFAULT '{}',
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE TABLE IF NOT EXISTS play_history (
+    id bigserial PRIMARY KEY,
+    track_id integer NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    ended_at timestamptz,
+    completed boolean NOT NULL DEFAULT false,
+    skipped boolean NOT NULL DEFAULT false,
+    source text NOT NULL DEFAULT 'unknown'
+  );
+  CREATE INDEX IF NOT EXISTS play_history_track_idx ON play_history (track_id, started_at);
+  CREATE TABLE IF NOT EXISTS playlists (
+    id serial PRIMARY KEY,
+    name text NOT NULL,
+    origin text NOT NULL DEFAULT 'manual',
+    request text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS playlists_name_key ON playlists (lower(name));
+  CREATE TABLE IF NOT EXISTS playlist_tracks (
+    playlist_id integer NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    position integer NOT NULL,
+    track_id integer NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    PRIMARY KEY (playlist_id, position)
+  );
+  CREATE TABLE IF NOT EXISTS player_state (
+    id boolean PRIMARY KEY DEFAULT true CHECK (id),
+    queue jsonb NOT NULL DEFAULT '[]',
+    idx integer NOT NULL DEFAULT 0,
+    pos_ms integer NOT NULL DEFAULT 0,
+    radio boolean NOT NULL DEFAULT false,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+`)
+
 const AUDIO_EXTS = new Set(['.mp3', '.flac', '.m4a', '.ogg', '.opus', '.wav', '.aac', '.wma', '.aiff'])
 
 export interface TrackRow {
