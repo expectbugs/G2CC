@@ -147,10 +147,15 @@ class AudioOutController(
     private var mediaId: String? = null
     private var duckedVolume = false
     private var mediaSession: MediaSession? = null
+    /** Review 2026-08-04 #2: a media_ctl lambda posted BEFORE shutdown() but
+     *  executing AFTER the release must not rebuild a zombie player+session on
+     *  a dead service. Set synchronously in shutdown(); checked on main. */
+    @Volatile private var shuttingDown = false
 
     /** Build the player + session lazily on the main thread. */
     private fun ensurePlayer(then: (ExoPlayer) -> Unit) {
         main.post {
+            if (shuttingDown) { Log.w(TAG, "player command after shutdown — dropped (no zombie rebuild)"); return@post }
             val existing = player
             if (existing != null) { then(existing); return@post }
             val p = ExoPlayer.Builder(context)
@@ -309,6 +314,7 @@ class AudioOutController(
     }
 
     fun shutdown() {
+        shuttingDown = true
         speech.shutdown()
         main.post {
             runCatching { mediaSession?.release() }

@@ -1170,6 +1170,14 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
             // Companion PTT: chime, flag the one-shot voice target, start a
             // dictate capture. The transcript routes to the Earbud window via
             // sttResult's voiceTarget branch (focus unchanged).
+            // Review 2026-08-04 #7: a double-tap DURING a live dictation must
+            // not fire a second audio_request — the app refuses it with an
+            // [audio-error] that unwinds the LIVE dictation, and the stale
+            // voiceTarget would misroute the next transcript. Ignore loudly.
+            if (client.collectingAudio || client.sttInFlightCount > 0) {
+              console.warn(`[ws] companion PTT ignored — a dictation is ${client.collectingAudio ? 'live' : 'transcribing'} (finish or cancel it first)`)
+              break
+            }
             earbud.quiet('companion PTT')
             session.voiceTarget = 'earbud'
             earbud.chime('rec_start')

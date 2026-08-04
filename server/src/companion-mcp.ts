@@ -34,6 +34,12 @@ async function call(method: 'GET' | 'POST', path: string, body?: unknown): Promi
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      // Review 2026-08-04 #9 — the lyrics.ts precedent: a NETWORK RESOURCE
+      // CAP on a loopback HTTP call (the sanctioned no-timeouts exception).
+      // A wedged main server turns into a loud isError tool result instead
+      // of hanging the Companion's turn forever. /internal/speak awaits full
+      // playback (a minutes-long read is normal), so the cap is generous.
+      signal: AbortSignal.timeout(120_000),
     })
     const text = await res.text()
     if (!res.ok) {

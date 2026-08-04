@@ -4,6 +4,74 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## APK v1.20 (staged) + server — 2026-08-04 — **The earbud lane: DJI retired, the Pixel Buds 2a becomes mic + voice + music (the one-shot build)**
+
+Work now allows a single earbud on shift. Adam's decision set (delivered on his way out
+the door, built autonomously): the Buds 2a REPLACES the DJI entirely (fewer BT links) but
+the DJI path stays intact behind `stt.micSource: 'earbud'|'dji'` — the one-flip undo.
+af_heart voice. Server-library music only (Spotify later). Trust-the-transcript at
+heuristic confidence ≥0.95, VOICE confirmation below it ("say send or cancel" — waits
+forever, no auto-anything). "Butterscotch" = the ringless/gloves control path; ring PTT
+bypasses the wake word. Full design + decision record: docs/EARBUD_SPEC.md.
+
+**What shipped (319c951 server, 04bffe6 android):**
+- **TTS**: warm Kokoro daemon pair (audio/pipeline/tts_daemon.py + server/src/tts.ts),
+  ARIA's proven onnx stack + text-prep ports, per-sentence streaming. Measured: 0.24 s
+  warm first-audio, 1.1 s cold at boot, zero VRAM (CPU) next to canary-qwen.
+- **EarbudAudioService** (server/src/earbud.ts): speech queue with per-utterance ack
+  windows (honest played/unverified/failed via phone speak_acks), the glasses-text-vs-TTS
+  output policy (speak only when the Earbud window ISN'T the visible focus), half-duplex
+  (dictation kills speech + pauses music — AEC is deliberately off), duck/pause etiquette,
+  spoken notifications per priority (SMS = chime + sender name only — shop-floor privacy).
+- **Music** (server/src/music.ts): ffprobe index of /mnt/slug/Music (1,193 tracks, 0
+  probe failures), tokenized search, opus-96k-MONO loudnorm transcode cache (the
+  one-earbud rule enforced at the source), Range-capable /media/track endpoint.
+- **The Companion** (~/g2cc-companion + server/src/companion-mcp.ts): the dedicated
+  earbud CC session with 14 MCP tools (speak/play/timers/notes/notifications/external
+  media) over loopback /internal/* — G2CC's first MCP use. EarbudWindow = a SessionLevel
+  shell + Music/Queue levels + the confidence-gated confirm flows.
+- **Spoken digests** (server/src/speak-digest.ts, Adam mid-build): long/code-heavy
+  replies condense through a one-shot haiku before TTS — the glasses hold the full
+  scrollable text, the ear gets 1-2 sentences + "details on your glasses". Deterministic
+  fallback when the one-shot fails. Code is NEVER read aloud.
+- **Android v1.20**: SpeechPlayer (0x11 frames → AudioTrack; BT-only route guard — the
+  phone speaker is NEVER an output; live-route re-verification; progress-supervised
+  drain), media3 ExoPlayer lane, 6 generated earcons (dictation start/stop now CHIME in
+  the ear — glanceless), owned MediaSession → Buds taps become server-routed
+  media_button inputs (single = pause/quiet, double = Companion PTT, triple = next
+  track), micSource role pinning with HONEST source labels (earbud-bt), mediaPlayback
+  FGS type + the latent missing MODIFY_AUDIO_SETTINGS declared.
+- **Compat**: every earbud-family message is caps-gated (v1.20 announces
+  `caps: [audio-out, media-lane, earbud-buttons]` at auth); the live v1.19 phone
+  reattached mid-deploy with caps=[] and correctly receives nothing new.
+
+**Verification**: smoke suite 35/36 (new phase-earbud: config/heuristic/service-vs-fake-
+phone/REAL Kokoro synth/temp-library index+transcode/MCP handshake/digest gate;
+phase10-calendar stays the known OAuth red). Android 389 unit tests / 0 failures, pinned
+cert verified. Live deploy per the §4 procedure; /internal/status + a real 206 Range
+request checked against the running server. A live-caught indexer bug (a scan with
+different libraryDirs deleted rows outside its roots — hit the smoke DB, production
+untouched) was fixed by scoping deletions to scanned roots.
+
+**Adversarial review (5 finder agents × per-finding skeptics, then hand re-verified):**
+33 findings → 22 refuted by the skeptics → of the 11 "confirmed", hand-verification
+refuted 3 MORE (including the top-severity claim, a pump()-stall misread BOTH the finder
+and the verifier made — the lesson: verify the verifiers). 8 real fixes shipped + redeployed:
+the ExoPlayer zombie-rebuild-after-shutdown race, the voice-confirm loop silently opening
+the mic when its TTS prompt couldn't play, the silent half-duplex defer of urgent speech,
+malformed Range headers 416ing instead of RFC-ignored (ExoPlayer-fatal; fix verified live),
+a bud double-tap killing an in-flight dictation (+ stale voiceTarget), musicSearchPending
+surviving window exit (a later transcript eaten as a music query), the MCP fetch missing
+the lyrics.ts-precedent network resource cap, and orphaned transcode .part sweep. Post-fix:
+smokes 35/36, Android 389/0, cert pinned, server redeployed clean.
+
+**Deferred (documented, not built):** ControlActivity bench/transport rows, Tasker MEDIA
+intents, reader read-aloud, lyrics-on-glass for the earbud lane, fetch_audio(url), the
+earbud-mic WER shootout vs the DJI baseline (needs real shift captures via the tee —
+plumbing is live: source-tagged earbud-bt clips).
+
+---
+
 ## (unstamped) — 2026-07-22 (evening) — **The dictation war, part 2: signing roulette ended, tmux fixes, the NC discovery, and canary-qwen takes the engine**
 
 The same marathon continued through the SAME afternoon/evening shift (all of it one

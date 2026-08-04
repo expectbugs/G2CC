@@ -117,6 +117,24 @@ export function scanLibrary(config: G2CCConfig): Promise<ScanSummary> {
 
 async function doScan(config: G2CCConfig): Promise<ScanSummary> {
   const t0 = Date.now()
+  // Review 2026-08-04 #10: a process death mid-ffmpeg orphans a .part in the
+  // transcode cache forever (the rm-on-catch never ran). Sweep stale ones at
+  // scan time — anything not currently in-flight is a leftover.
+  try {
+    if (existsSync(config.music.cacheDir)) {
+      const parts = (await fsp.readdir(config.music.cacheDir)).filter((f) => f.endsWith('.part'))
+      let swept = 0
+      for (const f of parts) {
+        const full = join(config.music.cacheDir, f)
+        if (transcodeInFlight.has(full.slice(0, -'.part'.length))) continue
+        await fsp.rm(full, { force: true })
+        swept++
+      }
+      if (swept > 0) console.warn(`[music] swept ${swept} orphaned transcode .part file(s) from ${config.music.cacheDir}`)
+    }
+  } catch (e) {
+    console.error(`[music] .part sweep failed (continuing): ${e instanceof Error ? e.message : String(e)}`)
+  }
   const known = new Map<string, { id: number; mtime: number }>()
   for (const r of (await query<TrackRow>('SELECT id, path, mtime_ms FROM tracks')).rows) {
     known.set(r.path, { id: r.id, mtime: Number(r.mtime_ms) })

@@ -228,6 +228,11 @@ class SpeechPlayer(
                     if (t == null) { finish(utt, "failed", "no track at end", null); current = null; continue }
                     // Drain: progress-supervised head polling until everything
                     // written has PLAYED, then ack. Cancel flags break it fast.
+                    // NOTE (review 2026-08-04 #6): the drain occupies the writer
+                    // thread, so queued commands wait behind it — safe because
+                    // the server serializes utterances (the next speak_start
+                    // waits for this ack) and cancel() flips the FLAG eagerly
+                    // off-thread; only the Cancel teardown command queues.
                     val totalFrames = utt.bytesQueued / 2
                     var lastHead = -1L
                     var stuck = 0

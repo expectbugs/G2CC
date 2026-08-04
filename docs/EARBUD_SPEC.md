@@ -1,6 +1,10 @@
 # Earbud Audio — Full Spec (Part C)
 
-**Status: APPROVED 2026-08-04 (Adam, before leaving for work) — one-shot build in progress.**
+**Status: BUILT + DEPLOYED 2026-08-04 (the one-shot; server live, APK v1.20 staged for
+install).** What shipped vs. deferred: CHANGELOG 2026-08-04. Mid-build additions by Adam:
+the wake-word ringless path (§Decision Record) and SPOKEN DIGESTS — long/code replies
+condense through a one-shot model pass before TTS (server/src/speak-digest.ts); the full
+text always renders scrollable on glass; code is never read aloud.
 Written after the work-policy change allowing a single earbud during shift. Companion to
 `g2_custom_app_spec.md` Parts A/B; if this conflicts with the Three Absolute Rules or the wire
 discipline there, those win.

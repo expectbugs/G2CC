@@ -288,6 +288,12 @@ export class EarbudWindow implements OsWindow {
   onDeactivate(): void {
     this.visible = false
     this.session.stopDictation('window switch')
+    // Review 2026-08-04 #8: a stale music-search flag would eat a LATER
+    // unrelated transcript (e.g. a companion PTT hours on) as a music query.
+    if (this.musicSearchPending) {
+      this.ctx.log('[earbud-win] leaving window with music search pending — cleared')
+      this.musicSearchPending = false
+    }
   }
 
   statusLine(): string | null {
@@ -361,7 +367,15 @@ export class EarbudWindow implements OsWindow {
       if (pending.rearms < 1) {
         pending.rearms++
         void e.speak('Say send, or cancel.', { priority: 'now', source: 'voice-confirm', music: 'duck' })
-          .then(() => {
+          .then((o) => {
+            // Review 2026-08-04 #3: re-arm the mic ONLY when the prompt was
+            // actually heard — with TTS unavailable (no caps / speakMode never)
+            // an unconditional re-arm opened a SILENT mic with zero user cue.
+            // The pending confirm stays; the glasses card / a PTT tap answers.
+            if (o.status !== 'played') {
+              this.ctx.log(`[earbud-win] voice-confirm prompt not heard (${o.status}: ${o.reason ?? ''}) — NOT re-arming the mic; confirm stays pending`)
+              return
+            }
             this.ctx.setVoiceTarget?.('earbud')
             this.ctx.audio('start', 'dictate')
           })
@@ -388,7 +402,13 @@ export class EarbudWindow implements OsWindow {
     // Audio-only → the spoken confirm loop (waits forever; no auto-confirm).
     this.pendingVoiceConfirm = { text, rearms: 0 }
     void e.speak(`I heard: ${text}. Say send, or cancel.`, { priority: 'now', source: 'voice-confirm', music: 'duck' })
-      .then(() => {
+      .then((o) => {
+        // Review 2026-08-04 #3 (same rule as the re-arm site): no heard
+        // prompt → no silent mic. The confirm waits for a PTT/card answer.
+        if (o.status !== 'played') {
+          this.ctx.log(`[earbud-win] voice-confirm prompt not heard (${o.status}: ${o.reason ?? ''}) — NOT arming the mic; confirm stays pending`)
+          return
+        }
         this.ctx.setVoiceTarget?.('earbud')
         this.ctx.audio('start', 'dictate')
       })

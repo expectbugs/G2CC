@@ -553,18 +553,24 @@ server.get('/media/track/:id', async (req, reply) => {
       if (m[1] !== '') { start = Number(m[1]); end = m[2] !== '' ? Number(m[2]) : size - 1 }
       else if (m[2] !== '') { start = Math.max(0, size - Number(m[2])); end = size - 1 }
     }
-    if (start === null || end === null || start >= size || start > end) {
+    if (!m) {
+      // Review 2026-08-04 #5 (RFC 9110 §14.2): an UNPARSEABLE Range header is
+      // IGNORED (serve 200 full), not 416'd — ExoPlayer treats a 416 here as
+      // a fatal source error. 416 stays for well-formed-but-unsatisfiable.
+      console.warn(`[g2cc-server] /media/track/${id} malformed Range '${range}' — ignored per RFC, serving 200 full`)
+    } else if (start === null || end === null || start >= size || start > end) {
       console.warn(`[g2cc-server] /media/track/${id} unsatisfiable range '${range}' (size ${size})`)
       reply.code(416).header('Content-Range', `bytes */${size}`).send({ error: 'range not satisfiable' })
       return
+    } else {
+      end = Math.min(end, size - 1)
+      reply
+        .code(206)
+        .type(media.mime)
+        .header('Content-Range', `bytes ${start}-${end}/${size}`)
+        .header('Content-Length', String(end - start + 1))
+      return reply.send(createReadStream(media.path, { start, end }))
     }
-    end = Math.min(end, size - 1)
-    reply
-      .code(206)
-      .type(media.mime)
-      .header('Content-Range', `bytes ${start}-${end}/${size}`)
-      .header('Content-Length', String(end - start + 1))
-    return reply.send(createReadStream(media.path, { start, end }))
   }
   reply.type(media.mime).header('Content-Length', String(size))
   return reply.send(createReadStream(media.path))

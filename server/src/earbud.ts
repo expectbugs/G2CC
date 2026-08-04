@@ -211,7 +211,13 @@ export class EarbudAudioService {
     this.pumping = true
     try {
       while (this.queue.length > 0) {
-        if (this.capturing) return          // capture gates speech; capture-end re-pumps
+        if (this.capturing) {
+          // Review 2026-08-04 #4: deferring queued speech (even 'now'
+          // priority — a call alert) behind a live capture is by design
+          // (half-duplex), but it must never be a SILENT defer.
+          console.log(`[earbud] ${this.queue.length} queued utterance(s) DEFERRED behind a live capture (half-duplex) — they play on capture end`)
+          return
+        }
         if (this.speaking) return           // a cancel is still settling; ack path re-pumps
         const job = this.queue.shift()!
         const outcome = await this.speakOne(job)
