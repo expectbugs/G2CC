@@ -35,10 +35,76 @@ export interface G2CCConfig {
     /** DJI-over-Bluetooth path: apply per-utterance ADAPTIVE noise reduction
      *  (local-noise Wiener, 32 ms window) before Parakeet. Validated 2026-06-23
      *  to roughly halve WER at a realistic standing spot; ~neutral point-blank.
-     *  Kill-switch — set false to fall back to raw transcribe(). */
+     *  Kill-switch — set false to fall back to raw transcribe(). ALSO governs
+     *  the earbud-bt path (same 16 k mono BT capture class). */
     djiBtFilter: boolean
     /** Wiener over-subtraction factor for the BT adaptive filter (validated 1.5). */
     djiBtAlpha: number
+    /** Which BT mic the phone captures from (earbud 2026-08-04 — Adam retired
+     *  the DJI to minimize BT connections). 'earbud' = first non-DJI comms
+     *  device (Pixel Buds 2a), announced as source 'earbud-bt'. 'dji' = the
+     *  legacy DJI-name-matched pick — the DISABLED-NOT-DELETED undo: one flip
+     *  restores the collar mic, no code change. Sent to the phone in
+     *  config_snapshot; pre-1.20 APKs ignore it. */
+    micSource: 'earbud' | 'dji'
+  }
+  /** TTS — the earbud speech lane (2026-08-04, docs/EARBUD_SPEC.md §C6.1).
+   *  Engine choice mirrors stt.parakeetModel: a config flip, not a code edit. */
+  tts: {
+    /** Synthesis engine. Only 'kokoro' is implemented (ARIA's proven stack). */
+    engine: 'kokoro'
+    /** Kokoro voice id (Adam 2026-08-04: af_heart — same as ARIA). */
+    voice: string
+    /** Speaking-rate multiplier. */
+    speed: number
+    /** Directory holding kokoro-v1.0.onnx + voices-v1.0.bin. Defaults to
+     *  ARIA's copy — one set of model files on disk. */
+    modelDir: string
+  }
+  /** Earbud output policy (2026-08-04, docs/EARBUD_SPEC.md §C6.2). */
+  audioOut: {
+    /** When Companion replies speak: 'auto' = TTS only when the Earbud window
+     *  is NOT the visible focus (Adam's rule); 'always' = both channels;
+     *  'never' = glasses text only (kill-switch). */
+    speakMode: 'auto' | 'always' | 'never'
+    /** dB drop applied to the music lane while speech plays. */
+    duckDb: number
+    /** Phone-local earcons (dictation start/stop, done, error, timer). */
+    chimes: boolean
+    /** Allow playback with NO Bluetooth output route (phone speaker) — home
+     *  bench ONLY. Default false: at work, no earbud = no sound, ever. */
+    allowSpeaker: boolean
+    /** Per-priority spoken-notification policy (notifyHub priorities).
+     *  'speak' = chime + spoken line; 'chime' = earcon only; 'chime+name' =
+     *  earcon + sender name only (SMS privacy on the floor — body on request);
+     *  'silent' = nothing (readable on ask via "what did I miss"). */
+    notify: Record<'call' | 'timer' | 'sms' | 'email' | 'info', 'speak' | 'chime' | 'chime+name' | 'silent'>
+  }
+  /** Music library + streaming (2026-08-04, docs/EARBUD_SPEC.md §C6.3). */
+  music: {
+    /** Directories scanned into the tracks index (ffprobe metadata). */
+    libraryDirs: string[]
+    /** Wire format for /media/track: 'opus' = ffmpeg → Opus 96k MONO with
+     *  loudnorm, cached (cellular-kind; mono enforced at the source);
+     *  'raw' = range-served original file (LAN listening). */
+    format: 'opus' | 'raw'
+    /** Transcode cache directory. */
+    cacheDir: string
+  }
+  /** The Companion — the dedicated earbud CC session (docs/EARBUD_SPEC.md §C6.4). */
+  companion: {
+    /** Session cwd (a real directory; its CLAUDE.md is the persona). */
+    dir: string
+    /** Model alias for the Companion session. */
+    model: string
+    /** Effort for the Companion session. */
+    effort: CcEffort
+    /** Voice-send confidence gate (Adam 2026-08-04): a dictation whose
+     *  confidence heuristic scores ≥ this auto-sends to the Companion;
+     *  below it, a VOICE confirmation loop runs ("say send or cancel" —
+     *  waits forever, never auto-confirms). 0 = always trust, 1 = always
+     *  confirm. */
+    confirmThreshold: number
   }
   claude: {
     /** Default permission mode. 'bypassPermissions' = --dangerously-skip-permissions. */
@@ -144,6 +210,39 @@ function defaultConfig(): G2CCConfig {
       parakeetModel: 'nvidia/parakeet-tdt-0.6b-v2',
       djiBtFilter: true,
       djiBtAlpha: 1.5,
+      // 2026-08-04: Adam retired the DJI for the Pixel Buds 2a mic ('dji' is
+      // the one-flip undo — every DJI code path stays intact).
+      micSource: 'earbud',
+    },
+    tts: {
+      engine: 'kokoro',
+      voice: 'af_heart',
+      speed: 1.0,
+      modelDir: '/home/user/aria/tts_models/kokoro',
+    },
+    audioOut: {
+      speakMode: 'auto',
+      duckDb: -12,
+      chimes: true,
+      allowSpeaker: false,
+      notify: {
+        call: 'speak',
+        timer: 'speak',
+        sms: 'chime+name',
+        email: 'silent',
+        info: 'silent',
+      },
+    },
+    music: {
+      libraryDirs: ['/mnt/slug/Music'],
+      format: 'opus',
+      cacheDir: join(homedir(), '.g2cc', 'media-cache'),
+    },
+    companion: {
+      dir: '/home/user/g2cc-companion',
+      model: 'opus',
+      effort: 'max',
+      confirmThreshold: 0.95,
     },
     claude: {
       defaultMode: 'bypassPermissions',
@@ -228,6 +327,16 @@ export function loadConfig(): G2CCConfig {
     scout: { ...defaults.scout, ...(saved.scout ?? {}) },
     notifications: { ...defaults.notifications, ...(saved.notifications ?? {}) },
     de: { ...defaults.de, ...(saved.de ?? {}) },
+    // Earbud lane (2026-08-04) — every new section MUST be in this merge list
+    // or a saved config silently loses its user overrides (the known gotcha).
+    tts: { ...defaults.tts, ...(saved.tts ?? {}) },
+    audioOut: {
+      ...defaults.audioOut,
+      ...(saved.audioOut ?? {}),
+      notify: { ...defaults.audioOut.notify, ...(saved.audioOut?.notify ?? {}) },
+    },
+    music: { ...defaults.music, ...(saved.music ?? {}) },
+    companion: { ...defaults.companion, ...(saved.companion ?? {}) },
   }
 
   // authToken stability (review 2026-06-11b): defaultConfig() mints a FRESH
@@ -307,6 +416,88 @@ export function loadConfig(): G2CCConfig {
           || merged.de.readerScrollRows < 1 || merged.de.readerScrollRows > 100)) {
     console.error('[config] de.readerScrollRows must be a number 1–100 (or omitted) — ignoring')
     merged.de.readerScrollRows = undefined
+  }
+  // ---- Earbud lane validators (2026-08-04) — log loudly, fall back, never throw ----
+  if (merged.stt.micSource !== 'earbud' && merged.stt.micSource !== 'dji') {
+    console.error(`[config] stt.micSource '${String(merged.stt.micSource)}' is not 'earbud'|'dji' — using 'earbud'`)
+    merged.stt.micSource = defaults.stt.micSource
+  }
+  if (merged.tts.engine !== 'kokoro') {
+    console.error(`[config] tts.engine '${String(merged.tts.engine)}' is not implemented — using 'kokoro'`)
+    merged.tts.engine = 'kokoro'
+  }
+  if (typeof merged.tts.voice !== 'string' || !merged.tts.voice) {
+    console.error('[config] tts.voice is not a non-empty string — using af_heart')
+    merged.tts.voice = defaults.tts.voice
+  }
+  if (typeof merged.tts.speed !== 'number' || !Number.isFinite(merged.tts.speed)
+      || merged.tts.speed < 0.5 || merged.tts.speed > 2.0) {
+    console.error('[config] tts.speed must be a number 0.5–2.0 — using 1.0')
+    merged.tts.speed = defaults.tts.speed
+  }
+  if (typeof merged.tts.modelDir !== 'string' || !merged.tts.modelDir.startsWith('/')) {
+    console.error('[config] tts.modelDir must be an absolute path — using the default')
+    merged.tts.modelDir = defaults.tts.modelDir
+  }
+  if (!['auto', 'always', 'never'].includes(merged.audioOut.speakMode)) {
+    console.error(`[config] audioOut.speakMode '${String(merged.audioOut.speakMode)}' is not auto|always|never — using 'auto'`)
+    merged.audioOut.speakMode = defaults.audioOut.speakMode
+  }
+  if (typeof merged.audioOut.duckDb !== 'number' || !Number.isFinite(merged.audioOut.duckDb)
+      || merged.audioOut.duckDb > 0 || merged.audioOut.duckDb < -40) {
+    console.error('[config] audioOut.duckDb must be a number in [-40, 0] — using -12')
+    merged.audioOut.duckDb = defaults.audioOut.duckDb
+  }
+  if (typeof merged.audioOut.chimes !== 'boolean') {
+    console.error('[config] audioOut.chimes is not a boolean — using true')
+    merged.audioOut.chimes = defaults.audioOut.chimes
+  }
+  if (typeof merged.audioOut.allowSpeaker !== 'boolean') {
+    console.error('[config] audioOut.allowSpeaker is not a boolean — using false (earbud-or-nothing)')
+    merged.audioOut.allowSpeaker = defaults.audioOut.allowSpeaker
+  }
+  {
+    const validNotify = ['speak', 'chime', 'chime+name', 'silent']
+    for (const pri of ['call', 'timer', 'sms', 'email', 'info'] as const) {
+      if (!validNotify.includes(merged.audioOut.notify[pri])) {
+        console.error(`[config] audioOut.notify.${pri} '${String(merged.audioOut.notify[pri])}' invalid — using '${defaults.audioOut.notify[pri]}'`)
+        merged.audioOut.notify[pri] = defaults.audioOut.notify[pri]
+      }
+    }
+  }
+  if (!Array.isArray(merged.music.libraryDirs)
+      || merged.music.libraryDirs.some((d) => typeof d !== 'string' || !d.startsWith('/'))) {
+    console.error('[config] music.libraryDirs must be an array of absolute paths — using defaults')
+    merged.music.libraryDirs = defaults.music.libraryDirs
+  }
+  if (merged.music.format !== 'opus' && merged.music.format !== 'raw') {
+    console.error(`[config] music.format '${String(merged.music.format)}' is not opus|raw — using 'opus'`)
+    merged.music.format = defaults.music.format
+  }
+  if (typeof merged.music.cacheDir !== 'string' || !merged.music.cacheDir.startsWith('/')) {
+    console.error('[config] music.cacheDir must be an absolute path — using the default')
+    merged.music.cacheDir = defaults.music.cacheDir
+  }
+  // Companion cwd follows the scout.cwd rules: normalized, strictly under /home/user/.
+  if (typeof merged.companion.dir !== 'string'
+      || resolve(merged.companion.dir) !== merged.companion.dir.replace(/\/+$/, '')
+      || !resolve(merged.companion.dir).startsWith('/home/user/')
+      || resolve(merged.companion.dir) === '/home/user') {
+    console.error(`[config] companion.dir '${String(merged.companion.dir)}' must be a normalized absolute path strictly under /home/user/ — using the default ${defaults.companion.dir}`)
+    merged.companion.dir = defaults.companion.dir
+  }
+  if (typeof merged.companion.model !== 'string' || !merged.companion.model) {
+    console.error('[config] companion.model is not a non-empty string — using opus')
+    merged.companion.model = defaults.companion.model
+  }
+  if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(merged.companion.effort)) {
+    console.error(`[config] companion.effort '${String(merged.companion.effort)}' is not a valid effort — using max`)
+    merged.companion.effort = defaults.companion.effort
+  }
+  if (typeof merged.companion.confirmThreshold !== 'number' || !Number.isFinite(merged.companion.confirmThreshold)
+      || merged.companion.confirmThreshold < 0 || merged.companion.confirmThreshold > 1) {
+    console.error('[config] companion.confirmThreshold must be a number 0–1 — using 0.95')
+    merged.companion.confirmThreshold = defaults.companion.confirmThreshold
   }
   return merged
 }

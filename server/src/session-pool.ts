@@ -46,6 +46,8 @@ export interface CreateOptions {
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   model?: string
   systemPrompt?: string
+  /** Earbud 2026-08-04: MCP config path (the Companion's audio tool surface). */
+  mcpConfig?: string
 }
 
 export class SessionPool extends EventEmitter {
@@ -100,6 +102,7 @@ export class SessionPool extends EventEmitter {
         effort: options.effort,
         model: options.model,
         systemPrompt: options.systemPrompt,
+        mcpConfig: options.mcpConfig,
       }),
       scrollback: new ScrollbackBuffer(),
       name: basename(projectPath),
@@ -131,6 +134,7 @@ export class SessionPool extends EventEmitter {
         effort: options.effort,
         model: options.model,
         systemPrompt: options.systemPrompt,
+        mcpConfig: options.mcpConfig,
       }),
       scrollback: new ScrollbackBuffer(),
       name: basename(projectPath),

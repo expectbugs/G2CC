@@ -58,6 +58,16 @@ interface SessionOpts {
   model: string
   effort: Effort
   systemPrompt?: string
+  /** Earbud 2026-08-04 (Companion): MCP config path → cc-session --mcp-config. */
+  mcpConfig?: string
+  /** Earbud 2026-08-04 (Companion): called with each completed NON-error turn's
+   *  text — the EarbudWindow speaks it per the output policy. Errors in the
+   *  callback log loudly and never disturb the turn pipeline. */
+  onAssistantText?: (text: string) => void
+  /** Earbud 2026-08-04: extra rows appended to the IDLE menu (before Reload).
+   *  The owning window intercepts these labels in its onMenuSelect BEFORE
+   *  delegating to onMenu (which doesn't know them). */
+  extraIdleMenu?: string[]
 }
 
 /** Flatten content blocks to FIRMWARE TEXT (decided 2026-06-11: the tile path
@@ -216,6 +226,7 @@ class SessionLevel {
       effort: this.opts.effort,
       model: this.opts.model,
       systemPrompt: this.opts.systemPrompt,
+      mcpConfig: this.opts.mcpConfig,
     })
     if (wired && !this.myEntryIds.has(entry.id)) {
       // A live session for this directory exists but ANOTHER consumer wired it
@@ -317,6 +328,14 @@ class SessionLevel {
             { t: 'heading', text: this.who, meta: info.toolCalls.length ? `${info.toolCalls.length} tools` : 'done' },
             ...parseMarkdown(info.text || '(empty response)'),
           ])
+      // Earbud 2026-08-04 (Companion): hand the completed turn's text to the
+      // owner's speech hook. AFTER setDoc — scrollback is the record; speech
+      // is a projection of it. Callback failures log loudly, never propagate.
+      if (!isErrorTurn && this.opts.onAssistantText && info.text) {
+        try { this.opts.onAssistantText(info.text) } catch (e) {
+          this.ctx.log(`[os] ${this.who}: onAssistantText hook failed: ${(e as Error).message}`)
+        }
+      }
       // Fire the prompt that queued during this turn (mid-stream sends kill CC).
       // retainDoc: the answer that just landed stays on the page above the new
       // prompt — without it the drain erased the response before it ever rendered.
@@ -607,7 +626,7 @@ class SessionLevel {
     // also resets the cursor to 0 on any menu-set change, so cell 0 is the
     // guaranteed default — it must be harmless (Next).
     if (this.busy) return ['Next', 'Prev', 'Interrupt', 'Reload', 'Main']
-    const idle = [this.verb, 'Next', 'Prev', 'Prompts', 'Options', 'Reload', 'Main']
+    const idle = [this.verb, 'Next', 'Prev', 'Prompts', 'Options', ...(this.opts.extraIdleMenu ?? []), 'Reload', 'Main']
     // Suggest leads the idle menu once there's a completed response to predict
     // from (Adam taps it to skip dictating the obvious next prompt).
     return this.completedTurns >= 1 ? ['Suggest', ...idle] : idle

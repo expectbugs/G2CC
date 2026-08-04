@@ -76,6 +76,11 @@ export class OsSession {
   /** The raw PCM (+ format) of the most recent SUCCESSFUL dictation — kept so a
    *  `memo:` intent can save the clip at confirm time. */
   lastDictationAudio: MemoAudio | null = null
+  /** Earbud 2026-08-04: one-shot voice-target override. 'earbud' = the NEXT
+   *  dictate transcript routes to the Earbud/Companion window regardless of
+   *  focus (set by the bud's double-tap PTT); consumed (reset to 'active') on
+   *  the next stt result/error so a later ring dictation behaves normally. */
+  voiceTarget: 'active' | 'earbud' = 'active'
   /** In-flight confirm_on_hud questions (sessionized 2026-07-13): broadcast to
    *  EVERY surface; the FIRST response wins; a socket closing no longer
    *  rejects — asked on the glasses, answerable from the browser, waiting
@@ -390,6 +395,7 @@ export class OsSession {
         }
       },
       phoneLocate: (action) => this.toPhone({ type: 'phone_locate', action }, `phone_locate(${action})`),
+      setVoiceTarget: (target) => { this.voiceTarget = target },
     })
   }
 

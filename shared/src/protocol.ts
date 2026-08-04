@@ -202,6 +202,12 @@ export type InputEventKind =
   | 'hub_gesture'
   | 'focus'
   | 'text'
+  /** Earbud audio 2026-08-04: a media-button action from the phone's OWNED
+   *  MediaSession (Pixel Buds 2a tap gestures — Google's stack translates tap
+   *  counts into transport actions before apps see them). Carried in
+   *  InputMsg.button; the SERVER owns the semantics (play_pause = pause/resume
+   *  all audio; next = Companion PTT; prev = skip track). */
+  | 'media_button'
 
 /** Which kind of display/input surface a client attaches as (multi-surface,
  *  2026-07-13). 'phone' = the Android app (BLE bridge and/or on-phone control
@@ -216,6 +222,14 @@ export type SurfaceKind = 'phone' | 'browser'
 export interface AuthMsg {
   type: 'auth'
   token: string
+  /** Client capability flags (earbud audio, 2026-08-04). The server sends NO
+   *  new-family message (speak_start/speak_end/chime/media_open/media_ctl, nor
+   *  downstream binary speech frames) to a client that didn't announce the
+   *  matching cap — a pre-1.20 APK logs a decode failure per unknown type.
+   *  Known caps: 'audio-out' (speech lane + chimes), 'media-lane' (ExoPlayer
+   *  music), 'earbud-buttons' (owned MediaSession button events). Absent =
+   *  none (pre-1.20 APKs and the /pc browser page). */
+  caps?: string[]
 }
 
 /** Ping from client to server keeping the JS event loop visibly alive.
@@ -282,10 +296,14 @@ export interface AudioStartMsg {
   sampleRate?: number          // default 16000
   channels?: number            // default 1
   encoding?: 'int16' | 'float32'  // default 'int16'
-  // informational only — logged, NOT used for routing. 'dji-bt' is the DJI TX
-  // paired straight to the phone over Bluetooth (HFP/SCO): same 16k/1ch/int16
-  // wire shape as 'phone-mic', so it rides the legacy mono path.
-  source?: 'phone-mic' | 'dji-usb' | 'dji-bt'
+  // informational only — logged + telemetry-tagged, NOT used for routing.
+  // 'dji-bt' is the DJI TX paired straight to the phone over Bluetooth
+  // (HFP/SCO): same 16k/1ch/int16 wire shape as 'phone-mic', so it rides the
+  // legacy mono path. 'earbud-bt' (2026-08-04, the DJI-retirement switch) is
+  // the Pixel Buds 2a mic over SCO/HFP — identical wire shape and pipeline
+  // (adaptive Wiener + config ASR); announced honestly so per-clip telemetry
+  // and future shootouts know the capsule (the model×filter pairing rule).
+  source?: 'phone-mic' | 'dji-usb' | 'dji-bt' | 'earbud-bt'
   /** Dictation mode (Phase 9). 'dictate' (default/omitted) = one-shot push-to-
    *  talk → the transcript routes to the active window's onStt. 'handsfree' =
    *  a continuous-listening utterance → routed to the VOICE-COMMAND grammar
@@ -436,6 +454,9 @@ export interface InputMsg {
    *  paragraph from a surface's keyboard. Arbitrary length — NEVER truncated
    *  (the no-truncation rule); the WM routes it to the active window. */
   text?: string
+  /** event 'media_button' (earbud 2026-08-04): the transport action the
+   *  phone's MediaSession callback received. */
+  button?: 'play' | 'pause' | 'play_pause' | 'next' | 'prev' | 'stop'
 }
 
 /** Result of a Phase-4a inline reply the client attempted (filled a forwarded
@@ -509,6 +530,37 @@ export interface NavUpdateMsg {
  *  nav line (Phase 6). */
 export interface NavClearMsg { type: 'nav_clear' }
 
+/** Earbud speech delivery report (2026-08-04) — the Channel-Router-verified
+ *  outcome of a speak_start. Sent when playback COMPLETES ('played' — the
+ *  route was verified as a BT output device and the final buffer drained), or
+ *  immediately on failure ('failed' — route guard refused: no earbud route /
+ *  AudioTrack error; `reason` says why). The server's ack window is sized per
+ *  utterance (PCM duration + SPEAK_ACK_MARGIN_MS), after which status falls to
+ *  'unverified' — a status window, NOT an I/O timeout; playback continues. */
+export interface SpeakAckMsg {
+  type: 'speak_ack'
+  id: string
+  status: 'played' | 'failed'
+  reason?: string
+  /** The actual routed output device ("<type>:<productName>"), from
+   *  AudioTrack.getRoutedDevice() — the v1.19 SCO-verification discipline,
+   *  output edition. */
+  route?: string
+}
+
+/** Earbud media-lane playback event (2026-08-04) — the ExoPlayer music lane
+ *  reporting state honestly (never fabricated): started, paused/resumed,
+ *  track ended (server advances the queue), or error (`reason`). posMs rides
+ *  along so the server's position extrapolation stays anchored. */
+export interface MediaEventMsg {
+  type: 'media_event'
+  /** The media_open id this event belongs to. */
+  id: string
+  state: 'playing' | 'paused' | 'ended' | 'error'
+  posMs?: number
+  reason?: string
+}
+
 export type ClientMessage =
   | AuthMsg
   | ClientHbMsg
@@ -545,6 +597,8 @@ export type ClientMessage =
   | SmsThreadReplyMsg
   | NavUpdateMsg
   | NavClearMsg
+  | SpeakAckMsg
+  | MediaEventMsg
 
 // ============================================================
 // Server -> Client messages
@@ -566,6 +620,12 @@ export interface HbMsg {
 /** Initial config snapshot sent after successful auth. */
 export interface ConfigSnapshotMsg {
   type: 'config_snapshot'
+  /** Which BT mic the phone should capture from (earbud 2026-08-04 — the
+   *  DJI-retirement switch, config.stt.micSource). 'earbud' = the first
+   *  non-DJI comms device (Pixel Buds 2a), announced as source 'earbud-bt';
+   *  'dji' = the legacy DJI-name-matched pick, announced 'dji-bt'. Absent →
+   *  pre-1.20 APKs keep their built-in behavior (kotlinx ignoreUnknownKeys). */
+  micSource?: 'earbud' | 'dji'
 }
 
 export interface DispatchTargetListMsg {
@@ -839,6 +899,90 @@ export interface SurfaceViewMsg {
   view: SurfaceView | null
 }
 
+// ============================================================
+// Earbud audio lane (2026-08-04 — docs/EARBUD_SPEC.md). ALL messages below
+// (and the downstream binary speech frames) are CAPS-GATED: sent only to
+// clients whose AuthMsg.caps announced the matching capability.
+// ============================================================
+
+/** Names of the phone-local earcon assets (instant, no round-trip). */
+export type ChimeName = 'rec_start' | 'rec_stop' | 'done' | 'error' | 'timer' | 'notify'
+
+/** Server → phone: a TTS utterance is about to stream as binary frames
+ *  (tag SPEECH_FRAME_TAG, header [tag u8][num u32BE][seq u32BE], payload
+ *  PCM16LE @ TTS_SAMPLE_RATE mono). `num` keys the binary frames to this
+ *  utterance; `id` is the Channel-Router messageId echoed back in speak_ack.
+ *  `music` is the duck policy for anything currently playing: 'duck' = drop
+ *  the media lane by duckDb (and request transient AudioFocus so third-party
+ *  audio ducks too); 'pause' = pause the media lane for the utterance. */
+export interface SpeakStartMsg {
+  type: 'speak_start'
+  id: string
+  num: number
+  music: 'duck' | 'pause'
+  duckDb?: number
+  /** Estimated PCM duration in ms if known. Sentences stream as they
+   *  synthesize, so the authoritative total arrives in speak_end.totalMs. */
+  durMs?: number
+}
+
+/** Server → phone: the utterance `num` is fully sent; `chunks` = how many
+ *  binary frames were emitted (hole detection, mirroring the mic path's
+ *  final-frame count) and totalMs the authoritative PCM duration. The phone
+ *  acks with speak_ack after playback drains (or immediately on failure). */
+export interface SpeakEndMsg {
+  type: 'speak_end'
+  id: string
+  num: number
+  chunks: number
+  totalMs: number
+}
+
+/** Server → phone: stop speech playback NOW (barge-in: dictation started, a
+ *  'now'-priority utterance flushed the queue, or the user hit quiet). Flush
+ *  the speech AudioTrack and drop any buffered/late frames for `num` (omitted
+ *  = all utterances). The phone still speak_acks the cancelled utterance with
+ *  status 'played' + reason 'cancelled' if audio had started, or 'failed' +
+ *  reason 'cancelled' if it never did — honest either way. */
+export interface SpeakCancelMsg {
+  type: 'speak_cancel'
+  num?: number
+}
+
+/** Server → phone: play a local earcon (SoundPool asset). Used for dictation
+ *  start/stop feedback, completion/error blips, and timer/notify chimes when
+ *  a full spoken line isn't warranted. */
+export interface ChimeMsg {
+  type: 'chime'
+  name: ChimeName
+}
+
+/** Server → phone: load + play a music-lane track in ExoPlayer. `url` is a
+ *  SERVER-RELATIVE path + query (e.g. "/media/track/42?token=…&fmt=opus") —
+ *  the phone prefixes its configured server host:port, so the same message
+ *  works over LAN and Tailscale (Range-capable; opus-mono default).
+ *  Metadata rides along for the phone's MediaSession/notification. */
+export interface MediaOpenMsg {
+  type: 'media_open'
+  id: string
+  url: string
+  title: string
+  artist?: string
+  album?: string
+  durMs?: number
+  /** Resume offset. */
+  startMs?: number
+}
+
+/** Server → phone: media-lane transport. 'seek' value = ms; 'volume' value =
+ *  0–100 (STREAM_MUSIC absolute); 'duck'/'unduck' value = dB drop for the
+ *  speech-over-music ramp (phone-side 150 ms ramps). */
+export interface MediaCtlMsg {
+  type: 'media_ctl'
+  cmd: 'play' | 'pause' | 'stop' | 'seek' | 'volume' | 'duck' | 'unduck'
+  value?: number
+}
+
 export type ServerMessage =
   | AuthResultMsg
   | HbMsg
@@ -876,3 +1020,9 @@ export type ServerMessage =
   | GlassesResetMsg
   | HardResetMsg
   | SurfaceViewMsg
+  | SpeakStartMsg
+  | SpeakEndMsg
+  | SpeakCancelMsg
+  | ChimeMsg
+  | MediaOpenMsg
+  | MediaCtlMsg

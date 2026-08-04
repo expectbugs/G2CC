@@ -22,6 +22,7 @@ import {
   DEFAULT_BROWSE_MENU, isScrollRead, type WinView, type RibbonChrome,
 } from './os-compose.js'
 import { parseVoiceCommand, type VoiceCommand } from './voice.js'
+import { getEarbud } from './earbud.js'
 import {
   notifyHub, markSeen, unseenCount, latestUnseenFlash,
   OVERLAY_PRIORITIES, PRIORITY_RANK, type NotifyEvent,
@@ -31,7 +32,7 @@ import { overviewText, chartSpecs, readStorage, readTopProcs, storageText, sampl
 import { hostname } from 'node:os'
 // Phase 1 (overhaul.md §1.1): contracts + shared helpers extracted into windows/.
 import {
-  type OsWindow, type WmContext, type WindowCategory, CATEGORY_ORDER, SwitchTo,
+  type OsWindow, type WmContext, type WindowCategory, type SttMeta, CATEGORY_ORDER, SwitchTo,
 } from './windows/types.js'
 import { oneLine, fbActive } from './windows/_util.js'
 // Extracted window modules (Phase 1 §1.2+ — one import per window as it leaves this file):
@@ -503,6 +504,16 @@ export class WindowManager {
    *  cursor to cell 0 so a state flip can't leave it on a dangerous label
    *  (Adam on-glass 2026-07-09). Null = no fb menu rendered yet. */
   private lastFbMenuKey: string | null = null
+
+  /** Earbud output policy accessors (2026-08-04, docs/EARBUD_SPEC.md §C6.2):
+   *  the EarbudAudioService decides glasses-text vs TTS from "is the Earbud
+   *  window the thing the user is actually looking at". READ-ONLY — nothing
+   *  outside the WM may mutate these states. */
+  activeWindowId(): string { return this.active.id }
+  /** True when the screen shows something other than the active window's
+   *  content: blanked (double-tap at root), parked at the ribbon selector, or
+   *  covered by a notification overlay. */
+  isScreenIdle(): boolean { return this.blanked || this.atRibbon || this.activeOverlay !== null }
 
   constructor(private ctx: WmContext) {
     // Each window's requestRender only fires while it IS the active window — a
@@ -1552,9 +1563,9 @@ export class WindowManager {
     }
   }
 
-  async onStt(text: string): Promise<void> {
+  async onStt(text: string, meta?: SttMeta): Promise<void> {
     try {
-      if (this.active.onStt) await this.active.onStt(text)
+      if (this.active.onStt) await this.active.onStt(text, meta)
       else {
         // Dictate → Done → switch windows while Parakeet runs: the transcript
         // routes to the new active window, which takes no dictation. Dropping
@@ -1564,6 +1575,29 @@ export class WindowManager {
     } catch (e) {
       this.ctx.log(`[os] stt handler failed (${this.active.id}): ${(e as Error).message}`)
       this.requestRender()
+    }
+  }
+
+  /** Route a transcript to a SPECIFIC window by id WITHOUT changing focus
+   *  (earbud 2026-08-04 — the Companion PTT: double-tap the bud from anywhere
+   *  and talk to the Companion while the visible window stays put). Loud
+   *  discard when the window is missing or takes no dictation. */
+  async onSttFor(windowId: string, text: string, meta?: SttMeta): Promise<void> {
+    const win = this.windows.find((w) => w.id === windowId)
+    if (!win) {
+      this.ctx.log(`[os] onSttFor('${windowId}') — no such window; transcript DISCARDED (${text.length} chars)`)
+      return
+    }
+    if (!win.onStt) {
+      this.ctx.log(`[os] onSttFor('${windowId}') — window takes no dictation; transcript DISCARDED (${text.length} chars)`)
+      return
+    }
+    try {
+      await win.onStt(text, meta)
+      // If that window IS active, its state changed — repaint.
+      if (this.active.id === windowId) this.requestRender()
+    } catch (e) {
+      this.ctx.log(`[os] onSttFor('${windowId}') handler failed: ${(e as Error).message}`)
     }
   }
 
@@ -1655,7 +1689,7 @@ export class WindowManager {
    *  wake grammar first (prefix-gated, safe anywhere), then Reader bare next/
    *  back. A non-matching utterance is the SANCTIONED quiet path (8 h of
    *  factory audio would be log spam otherwise — the spec's one exception). */
-  async onVoiceCommand(transcript: string): Promise<void> {
+  async onVoiceCommand(transcript: string, meta?: SttMeta): Promise<void> {
     // try/catch + resync mirrors onStt/onSttError (review 2026-07-05): ws-handler
     // void's this call, so a rejection here (e.g. Mail's onOpen failing on a
     // Maildir IO error mid-'read my email') otherwise dies in the global
@@ -1664,7 +1698,7 @@ export class WindowManager {
       const text = (transcript ?? '').trim()
       if (!text) return
       const w = parseVoiceCommand(text, { wake: true })
-      if (w.cmd) { await this.dispatchVoice(w.cmd); return }
+      if (w.cmd) { await this.dispatchVoice(w.cmd, meta); return }
       if (w.prefixed) { this.ctx.log(`[voice] "butterscotch" heard but no grammar match — ignored (LOUD): "${text.slice(0, 80)}"`); return }
       const reader = this.windowById('reader')
       if (this.active.id === 'reader' && reader instanceof ReaderWindow && reader.voiceOn) {
@@ -1678,9 +1712,41 @@ export class WindowManager {
     }
   }
 
-  private async dispatchVoice(cmd: VoiceCommand): Promise<void> {
+  private async dispatchVoice(cmd: VoiceCommand, meta?: SttMeta): Promise<void> {
     this.ctx.log(`[voice] command: ${JSON.stringify(cmd)}`)
     switch (cmd.kind) {
+      // ---- earbud lane (2026-08-04, EARBUD_SPEC §C6.4) ----
+      case 'earbud': {
+        const e = getEarbud()
+        switch (cmd.action) {
+          case 'pause': e.pauseMusic('user'); return
+          case 'resume': e.resumeMusic('voice'); return
+          case 'toggle': e.playPauseToggle('voice'); return
+          case 'skip': e.skip(1, 'voice'); return
+          case 'prev_track': e.skip(-1, 'voice'); return
+          case 'stop_music': e.stopMusic('voice'); return
+          case 'vol_up': e.setVolume((e.volumePct ?? 60) + 10, 'voice'); return
+          case 'vol_down': e.setVolume((e.volumePct ?? 60) - 10, 'voice'); return
+        }
+        return
+      }
+      case 'whats_playing': {
+        const e = getEarbud()
+        const t = e.nowPlaying()
+        const line = t
+          ? `Now playing: ${t.title}${t.artist ? `, by ${t.artist}` : ''}. Track ${e.status().queuePos}.`
+          : 'Nothing is playing.'
+        void e.speak(line, { priority: 'next', source: 'voice:whats-playing', music: 'duck' })
+        return
+      }
+      case 'quiet': getEarbud().quiet('voice command'); return
+      case 'companion': {
+        // The ringless open-ended path: hand the post-wake sentence to the
+        // Companion window (no focus change). Its onStt runs the confidence
+        // gate + voice-confirm flow — same rules as PTT dictation.
+        await this.onSttFor('earbud', cmd.text, meta)
+        return
+      }
       case 'window': this.blanked = false; this.switchTo(cmd.id); return
       case 'blank':
         if (!this.blanked) {

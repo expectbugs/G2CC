@@ -17,7 +17,7 @@
 
 import Fastify from 'fastify'
 import websocket from '@fastify/websocket'
-import { appendFileSync, existsSync, readFileSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
@@ -32,8 +32,14 @@ import { timingSafeEqualStr } from './auth.js'
 import { deliverLiveFrame, scoutLiveStatus } from './scout-live.js'
 import { warmParakeet } from './stt.js'
 import { warmStore } from './store.js'
+import { initEarbud, getEarbud } from './earbud.js'
+import { warmTts } from './tts.js'
+import { scanLibrary, getTrack, mediaFileFor, trackCount, searchTracks, randomTracks, toEarbudTrack } from './music.js'
+import { appendNote } from './intents.js'
+import { listNotifications, markAllSeen } from './os-notify.js'
+import { createReadStream } from 'node:fs'
 import { paperclips } from './paperclips.js'
-import { armTimersFromDb } from './timers.js'
+import { armTimersFromDb, createTimer, listPending, fmtRemaining } from './timers.js'
 import { startCalendarSync } from './calendar.js'
 import { startDeliveriesSync } from './deliveries.js'
 import { startStatsSampler } from './stats.js'
@@ -66,6 +72,49 @@ setWatchdog(watchdogInstance)
 // closeAllClients is injected for hardReset (a direct import from os-session
 // would be a ws-handler module cycle).
 initOsSession(config, watchdogInstance, closeAllClients)
+
+// Earbud audio lane (2026-08-04, docs/EARBUD_SPEC.md): session-lifetime
+// singleton wired to the OS session via closures (earbud.ts imports neither
+// os-session nor ws-handler — no cycles). Playback/speech state survives
+// window switches, blanking, and surface disconnects by construction.
+initEarbud(config, {
+  toPhone: (msg, what) => getOsSession().toPhone(msg, what),
+  toPhoneBinary: (buf, what) => {
+    const phone = getOsSession().phoneSurface()
+    if (!phone || phone.ws.readyState !== 1) {
+      console.error(`[earbud] ${what} needs the phone — no phone surface attached`)
+      return false
+    }
+    phone.ws.send(buf)
+    return true
+  },
+  activeWindowId: () => getOsSession().wm.activeWindowId(),
+  isScreenIdle: () => getOsSession().wm.isScreenIdle(),
+  hasDisplay: () => getOsSession().hasDisplay(),
+})
+
+// Companion MCP config (earbud 2026-08-04): written fresh each boot so the
+// dist path + port + token are always current. The Claude CLI spawns
+// dist/companion-mcp.js itself from this file (cc-session --mcp-config).
+const COMPANION_MCP_PATH = join(homedir(), '.g2cc', 'companion-mcp.json')
+try {
+  const mcpEntry = join(dirname(fileURLToPath(import.meta.url)), 'companion-mcp.js')
+  writeFileSync(COMPANION_MCP_PATH, JSON.stringify({
+    mcpServers: {
+      'g2cc-earbud': {
+        command: process.execPath,
+        args: [mcpEntry],
+        env: {
+          G2CC_INTERNAL_URL: `http://127.0.0.1:${config.port}`,
+          G2CC_TOKEN: config.authToken,
+        },
+      },
+    },
+  }, null, 2))
+  console.log(`[g2cc-server] companion MCP config written (${COMPANION_MCP_PATH} → ${mcpEntry})`)
+} catch (err) {
+  console.error(`[g2cc-server] companion MCP config write FAILED (Companion tools will be unavailable): ${err instanceof Error ? err.message : String(err)}`)
+}
 
 const server = Fastify({ logger: false })
 
@@ -290,9 +339,235 @@ server.post('/scout/live', async (req, reply) => {
   reply.send(result)
 })
 
+// ---- Companion internal API (earbud 2026-08-04, EARBUD_SPEC §C6.4) ----
+// LOOPBACK + Bearer (the /scout/live gate): the companion-mcp.js subprocess
+// runs on this box; these must never be drivable from the network even with a
+// leaked token. Every reply is the honest outcome — errors are 500s with the
+// reason, never fabricated successes.
+function internalGuard(req: Parameters<typeof scoutLiveAllowed>[0], reply: Parameters<typeof scoutLiveAllowed>[1], route: string): boolean {
+  return scoutLiveAllowed(req, reply, route)
+}
+
+server.post('/internal/speak', async (req, reply) => {
+  if (!internalGuard(req, reply, '/internal/speak')) return
+  const b = req.body as { text?: unknown; priority?: unknown }
+  if (typeof b?.text !== 'string' || !b.text.trim()) {
+    reply.code(400).send({ error: 'text (non-empty string) required' })
+    return
+  }
+  const priority = b.priority === 'now' || b.priority === 'next' || b.priority === 'queue' ? b.priority : 'queue'
+  // Explicit speak = the Companion CHOSE to talk — focus policy does not gate
+  // it (respectFocus false); the earbud window shows the text via scrollback
+  // when it's the session's own reply anyway.
+  const outcome = await getEarbud().speak(b.text, { priority, source: 'companion-mcp', music: 'duck' })
+  reply.send(outcome)
+})
+
+server.post('/internal/play', async (req, reply) => {
+  if (!internalGuard(req, reply, '/internal/play')) return
+  const b = req.body as { query?: unknown; shuffle?: unknown; append?: unknown }
+  if (typeof b?.query !== 'string' || !b.query.trim()) {
+    reply.code(400).send({ error: 'query (non-empty string) required' })
+    return
+  }
+  try {
+    const q = b.query.trim()
+    const rows = /^(random|surprise( me)?|anything|shuffle)$/i.test(q)
+      ? await randomTracks(30)
+      : await searchTracks(q, 200)
+    if (rows.length === 0) {
+      reply.send({ queued: 0, message: `no library matches for "${q}"` })
+      return
+    }
+    let tracks = rows.map(toEarbudTrack)
+    if (b.shuffle === true) tracks = tracks.map((t) => [Math.random(), t] as const).sort((a, z) => a[0] - z[0]).map(([, t]) => t)
+    const earbud = getEarbud()
+    if (b.append === true && earbud.musicQueue.length > 0 && earbud.musicState !== 'idle') {
+      earbud.musicQueue.push(...tracks)
+      reply.send({ queued: tracks.length, appended: true, first: tracks[0].title, queueLen: earbud.musicQueue.length })
+      return
+    }
+    const ok = earbud.playQueue(tracks, 0, 'companion-mcp')
+    reply.send({ queued: tracks.length, playing: ok, first: tracks[0].title, artist: tracks[0].artist ?? null, ...(ok ? {} : { error: 'no media-capable phone attached' }) })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[g2cc-server] /internal/play failed: ${msg}`)
+    reply.code(500).send({ error: msg })
+  }
+})
+
+server.post('/internal/media', async (req, reply) => {
+  if (!internalGuard(req, reply, '/internal/media')) return
+  const b = req.body as { cmd?: unknown; value?: unknown }
+  const earbud = getEarbud()
+  switch (b?.cmd) {
+    case 'pause': earbud.pauseMusic('user'); break
+    case 'resume': earbud.resumeMusic('companion-mcp'); break
+    case 'skip': earbud.skip((typeof b.value === 'number' && b.value < 0) ? -1 : 1, 'companion-mcp'); break
+    case 'stop': earbud.stopMusic('companion-mcp'); break
+    case 'volume':
+      if (typeof b.value !== 'number') { reply.code(400).send({ error: 'volume needs numeric value 0-100' }); return }
+      earbud.setVolume(b.value, 'companion-mcp')
+      break
+    default:
+      reply.code(400).send({ error: `unknown cmd '${String(b?.cmd)}' (pause|resume|skip|stop|volume)` })
+      return
+  }
+  reply.send({ ok: true, state: earbud.status() })
+})
+
+server.get('/internal/status', async (req, reply) => {
+  if (!internalGuard(req, reply, '/internal/status')) return
+  const session = getOsSession()
+  const pending = await listPending().catch((e: unknown) => {
+    console.error(`[g2cc-server] /internal/status timers read failed: ${e instanceof Error ? e.message : String(e)}`)
+    return null
+  })
+  reply.send({
+    earbud: getEarbud().status(),
+    glasses: { connected: session.g2Connected, battery: session.g2Battery, phoneBattery: session.phoneBattery },
+    activeWindow: session.wm.activeWindowId(),
+    timers: pending === null ? 'timer store unavailable' : pending.map((t) => ({ id: t.id, label: t.label, remaining: fmtRemaining(t.firesAt) })),
+    library: await trackCount().catch(() => -1),
+  })
+})
+
+server.post('/internal/timer', async (req, reply) => {
+  if (!internalGuard(req, reply, '/internal/timer')) return
+  const b = req.body as { minutes?: unknown; label?: unknown }
+  if (typeof b?.minutes !== 'number' || b.minutes <= 0 || typeof b?.label !== 'string') {
+    reply.code(400).send({ error: 'minutes (positive number) + label (string) required' })
+    return
+  }
+  try {
+    const t = await createTimer(b.minutes, b.label)
+    reply.send({ ok: true, id: t.id, firesAt: t.firesAt, remaining: fmtRemaining(t.firesAt) })
+  } catch (err) {
+    reply.code(500).send({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+server.get('/internal/timers', async (req, reply) => {
+  if (!internalGuard(req, reply, '/internal/timers')) return
+  try {
+    const pending = await listPending()
+    reply.send({ timers: pending.map((t) => ({ id: t.id, label: t.label, remaining: fmtRemaining(t.firesAt) })) })
+  } catch (err) {
+    reply.code(500).send({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+server.post('/internal/note', async (req, reply) => {
+  if (!internalGuard(req, reply, '/internal/note')) return
+  const b = req.body as { text?: unknown }
+  if (typeof b?.text !== 'string' || !b.text.trim()) {
+    reply.code(400).send({ error: 'text (non-empty string) required' })
+    return
+  }
+  try {
+    const path = await appendNote(b.text)
+    reply.send({ ok: true, path })
+  } catch (err) {
+    reply.code(500).send({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+server.get('/internal/notifications', async (req, reply) => {
+  if (!internalGuard(req, reply, '/internal/notifications')) return
+  try {
+    const { unseen, rows } = await listNotifications(30, 0)
+    const items = rows.filter((n) => !n.seen).map((n) => ({ priority: n.priority, title: n.title, body: n.body }))
+    if ((req.query as { markSeen?: string } | undefined)?.markSeen === '1') {
+      const n = await markAllSeen()
+      reply.send({ unseen, items, markedSeen: n })
+      return
+    }
+    reply.send({ unseen, items })
+  } catch (err) {
+    reply.code(500).send({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+server.post('/internal/external-media', async (req, reply) => {
+  if (!internalGuard(req, reply, '/internal/external-media')) return
+  const b = req.body as { cmd?: unknown }
+  if (b?.cmd !== 'play_pause' && b?.cmd !== 'next' && b?.cmd !== 'prev') {
+    reply.code(400).send({ error: `cmd must be play_pause|next|prev, got '${String(b?.cmd)}'` })
+    return
+  }
+  const sent = getOsSession().toPhone({ type: 'media_cmd', cmd: b.cmd }, `media_cmd(${b.cmd}, companion-mcp)`)
+  reply.send({ ok: sent, ...(sent ? {} : { error: 'no phone attached' }) })
+})
+
 server.get('/scout/live/status', async (req, reply) => {
   if (!scoutLiveAllowed(req, reply, '/scout/live/status')) return
   reply.send(scoutLiveStatus())
+})
+
+// Media streaming — the earbud music lane's source (EARBUD_SPEC §C6.3).
+// Token-gated but interface-AGNOSTIC (the /endpoints precedent): the phone may
+// arrive via Tailscale-over-cellular at work or LAN at home. Range-capable —
+// ExoPlayer seeks with byte ranges. Streaming here is safe DESPITE the /apk
+// readFileSync note: the fix is returning reply.send(stream) from the async
+// handler (verified with curl below in the smoke suite); transcodes can be
+// tens of MB and a sync read per seek would thrash.
+server.get('/media/track/:id', async (req, reply) => {
+  const token = (req.query as { token?: string } | undefined)?.token
+  const bearer = req.headers.authorization
+  const tokenOk = typeof token === 'string' && timingSafeEqualStr(token, config.authToken)
+  const bearerOk = typeof bearer === 'string' && timingSafeEqualStr(bearer, `Bearer ${config.authToken}`)
+  if (!tokenOk && !bearerOk) {
+    reply.code(401).send({ error: 'unauthorized' })
+    return
+  }
+  const idRaw = (req.params as { id: string }).id
+  const id = Number.parseInt(idRaw, 10)
+  if (!Number.isInteger(id) || id <= 0) {
+    reply.code(400).send({ error: `bad track id '${idRaw}'` })
+    return
+  }
+  const fmtRaw = (req.query as { fmt?: string } | undefined)?.fmt
+  const fmt: 'opus' | 'raw' = fmtRaw === 'raw' ? 'raw' : 'opus'
+  let media: { path: string; mime: string }
+  try {
+    const track = await getTrack(id)
+    if (!track) {
+      reply.code(404).send({ error: `no track ${id}` })
+      return
+    }
+    media = await mediaFileFor(config, track, fmt)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[g2cc-server] /media/track/${id} failed: ${msg}`)
+    reply.code(500).send({ error: msg })
+    return
+  }
+  const size = statSync(media.path).size
+  reply.header('Accept-Ranges', 'bytes')
+  const range = req.headers.range
+  if (typeof range === 'string') {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim())
+    let start: number | null = null
+    let end: number | null = null
+    if (m) {
+      if (m[1] !== '') { start = Number(m[1]); end = m[2] !== '' ? Number(m[2]) : size - 1 }
+      else if (m[2] !== '') { start = Math.max(0, size - Number(m[2])); end = size - 1 }
+    }
+    if (start === null || end === null || start >= size || start > end) {
+      console.warn(`[g2cc-server] /media/track/${id} unsatisfiable range '${range}' (size ${size})`)
+      reply.code(416).header('Content-Range', `bytes */${size}`).send({ error: 'range not satisfiable' })
+      return
+    }
+    end = Math.min(end, size - 1)
+    reply
+      .code(206)
+      .type(media.mime)
+      .header('Content-Range', `bytes ${start}-${end}/${size}`)
+      .header('Content-Length', String(end - start + 1))
+    return reply.send(createReadStream(media.path, { start, end }))
+  }
+  reply.type(media.mime).header('Content-Length', String(size))
+  return reply.send(createReadStream(media.path))
 })
 
 // WebSocket route.
@@ -324,6 +599,13 @@ try {
   // Pre-warm the Parakeet STT daemon so the first voice command isn't a ~12 s
   // cold model load (fire-and-forget; lazy-loads on first request if it fails).
   void warmParakeet(config)
+  // Pre-warm the Kokoro TTS daemon (earbud lane) — ~1 s cold; fire-and-forget.
+  void warmTts(config)
+  // Music library scan (earbud lane) — incremental; fire-and-forget so a slow
+  // or unmounted library disk can't block boot. Count logged either way.
+  void scanLibrary(config)
+    .then(async () => console.log(`[music] library ready: ${await trackCount()} tracks indexed`))
+    .catch((e: unknown) => console.error(`[music] boot scan failed (window/tools can rescan): ${e instanceof Error ? e.message : String(e)}`))
   // Pre-warm the Postgres store (migrations) — fire-and-forget: a down DB logs
   // loudly and every store feature lazily retries; the server must not care.
   warmStore()

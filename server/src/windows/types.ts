@@ -68,11 +68,26 @@ export interface WmContext {
    *  to its scene-derived text panel). Wired by os-session; absent in smoke
    *  stubs. */
   sendSurfaceView?(view: SurfaceView | null): void
+  /** Earbud 2026-08-04: set the one-shot voice-target override so the NEXT
+   *  dictate transcript routes to the Earbud/Companion window regardless of
+   *  focus (the voice-confirm loop's re-arm needs it — the follow-up capture
+   *  must come back to the Companion even when another window is active).
+   *  Wired by os-session; absent in smoke stubs (loud no-op). */
+  setVoiceTarget?(target: 'active' | 'earbud'): void
 }
 
 /** Main's category-launcher groups (upgrades.md v2 Phase 11, XFCE-style). Each
  *  window self-places by declaring its category; new windows need only set it. */
 export type WindowCategory = 'AI' | 'Comms' | 'Media' | 'Tools' | 'Info' | 'Games'
+
+/** Dictation metadata riding alongside a transcript (earbud 2026-08-04).
+ *  `confidence` is the server's HEURISTIC 0–1 estimate (words-per-second
+ *  plausibility etc., voice.ts estimateSttConfidence — not an ASR logprob).
+ *  The EarbudWindow gates its auto-send on it (companion.confirmThreshold). */
+export interface SttMeta {
+  confidence: number
+  speechMs: number
+}
 export const CATEGORY_ORDER: WindowCategory[] = ['AI', 'Comms', 'Media', 'Tools', 'Info', 'Games']
 
 export interface OsWindow {
@@ -142,7 +157,7 @@ export interface OsWindow {
    *  pendingPermission — the confirm step's "nothing reaches CC unread"
    *  guarantee must never be repainted over. Absent = always interruptible. */
   interruptible?(): boolean
-  onStt?(text: string): Promise<void>
+  onStt?(text: string, meta?: SttMeta): Promise<void>
   onSttError?(error: string): Promise<void>
   /** Mic-live feedback (2026-07-22): the FIRST audio frame of the current
    *  capture reached the server — the phone's mic route (BT-SCO to the DJI)

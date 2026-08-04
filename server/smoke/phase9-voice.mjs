@@ -40,11 +40,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   assert.deepEqual(parseVoiceCommand('butterscotch confirm', { wake: true }).cmd, { kind: 'confirm' })
   assert.deepEqual(parseVoiceCommand('butterscotch cancel', { wake: true }).cmd, { kind: 'cancel' })
   assert.equal(parseVoiceCommand('butterscotch read first email', { wake: true }).cmd.kind, 'read')
-  // wake + nonsense → prefixed true (LOUD no-match), cmd null
+  // Earbud 2026-08-04 (Adam's ringless-control decision): a wake-prefixed
+  // utterance matching NO deterministic rule is now an OPEN-ENDED Companion
+  // prompt (original text preserved) — supersedes the old loud-no-match null.
   const miss = parseVoiceCommand('butterscotch flibbertigibbet', { wake: true })
-  assert.equal(miss.cmd, null); assert.equal(miss.prefixed, true)
+  assert.deepEqual(miss.cmd, { kind: 'companion', text: 'flibbertigibbet' })
+  assert.equal(miss.prefixed, true)
+  // Original casing/punctuation must survive into the Companion prompt.
+  const convo = parseVoiceCommand("Butterscotch, what's my next timer?", { wake: true })
+  assert.equal(convo.cmd.kind, 'companion')
+  assert.equal(convo.cmd.text, "what's my next timer?")
+  // Earbud transport verbs are deterministic (no CC round-trip)…
+  assert.deepEqual(parseVoiceCommand('butterscotch pause', { wake: true }).cmd, { kind: 'earbud', action: 'pause' })
+  assert.deepEqual(parseVoiceCommand('butterscotch next track', { wake: true }).cmd, { kind: 'earbud', action: 'skip' })
+  assert.deepEqual(parseVoiceCommand('butterscotch volume up', { wake: true }).cmd, { kind: 'earbud', action: 'vol_up' })
+  assert.deepEqual(parseVoiceCommand("butterscotch what's playing", { wake: true }).cmd, { kind: 'whats_playing' })
+  assert.deepEqual(parseVoiceCommand('butterscotch quiet', { wake: true }).cmd, { kind: 'quiet' })
+  // …and paging precedence is preserved: bare "next" still pages.
+  assert.deepEqual(parseVoiceCommand('butterscotch next', { wake: true }).cmd, { kind: 'page', dir: 'next' })
   assert.equal(WAKE_WORD, 'butterscotch')
-  console.error('  2. 9b wake-gated grammar (window/verb/read; loud no-match) ✓')
+  console.error('  2. 9b wake-gated grammar (window/verb/read; companion catch-all + earbud verbs) ✓')
 }
 
 // ---------- 3. VAD: math sanity (tone burst segments; silence doesn't) ----------

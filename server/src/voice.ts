@@ -43,6 +43,7 @@ export const WINDOW_ALIASES: Record<string, string> = {
   assistant: 'aria', aria: 'aria',
   code: 'cc', claude: 'cc',
   scout: 'scout',
+  earbud: 'earbud', companion: 'earbud', ear: 'earbud',
 }
 
 export type VoiceCommand =
@@ -54,6 +55,16 @@ export type VoiceCommand =
   | { kind: 'read'; target: string }   // "read first email", "read Becky's last text" — best-effort
   | { kind: 'confirm' }
   | { kind: 'cancel' }
+  // Earbud lane (2026-08-04, EARBUD_SPEC §C6.4) — deterministic transport
+  // verbs (no CC round-trip):
+  | { kind: 'earbud'; action: 'pause' | 'resume' | 'toggle' | 'skip' | 'prev_track' | 'stop_music' | 'vol_up' | 'vol_down' }
+  | { kind: 'whats_playing' }
+  | { kind: 'quiet' }                  // kill speech + hold the queue
+  // The open-ended catch-all (Adam: ringless control): a wake-prefixed
+  // utterance matching NO deterministic rule becomes a Companion prompt.
+  // `text` keeps the ORIGINAL post-wake casing/punctuation (never normed —
+  // the Companion deserves the real sentence).
+  | { kind: 'companion'; text: string }
 
 /** Normalize an utterance: lowercased, trimmed, punctuation stripped to spaces. */
 function norm(s: string): string {
@@ -102,6 +113,19 @@ export function parseVoiceCommand(
   if (/^(?:cancel|no|stop|never\s*mind|nevermind|dismiss)$/.test(rest)) return { cmd: { kind: 'cancel' }, prefixed: true }
   if (/^(?:dictate|ask|listen|new\s+prompt|prompt)$/.test(rest)) return { cmd: { kind: 'dictate' }, prefixed: true }
 
+  // Earbud transport verbs (2026-08-04) — deterministic, no CC round-trip.
+  // Bare "next"/"back" stay PAGING (precedence preserved); track motion needs
+  // the explicit forms below.
+  if (/^(?:pause|pause\s+(?:the\s+)?music|hold\s+(?:the\s+)?music)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'pause' }, prefixed: true }
+  if (/^(?:resume|play|unpause|keep\s+playing|resume\s+(?:the\s+)?music|play\s+music)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'resume' }, prefixed: true }
+  if (/^(?:skip|next\s+(?:track|song)|skip\s+(?:track|song|it|this))$/.test(rest)) return { cmd: { kind: 'earbud', action: 'skip' }, prefixed: true }
+  if (/^(?:previous\s+(?:track|song)|last\s+(?:track|song)|go\s+back\s+a\s+(?:track|song))$/.test(rest)) return { cmd: { kind: 'earbud', action: 'prev_track' }, prefixed: true }
+  if (/^(?:stop\s+(?:the\s+)?music|stop\s+playing)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'stop_music' }, prefixed: true }
+  if (/^(?:volume\s+up|louder|turn\s+it\s+up)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'vol_up' }, prefixed: true }
+  if (/^(?:volume\s+down|quieter|softer|turn\s+it\s+down)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'vol_down' }, prefixed: true }
+  if (/^(?:what'?s\s+playing|now\s+playing|what\s+song\s+is\s+this)$/.test(rest)) return { cmd: { kind: 'whats_playing' }, prefixed: true }
+  if (/^(?:quiet|shut\s+up|shush|silence|stop\s+talking)$/.test(rest)) return { cmd: { kind: 'quiet' }, prefixed: true }
+
   // read <something> — navigation-class (harmless), executes immediately. The
   // target string is handed to the active flow; full resolution (which mail /
   // which contact) is a follow-up tuning item.
@@ -115,7 +139,40 @@ export function parseVoiceCommand(
     const id = WINDOW_ALIASES[name]
     if (id) return { cmd: { kind: 'window', id }, prefixed: true }
   }
-  return { cmd: null, prefixed: true }   // wake-prefixed but no rule — caller logs LOUDLY
+  // Companion catch-all (2026-08-04, Adam's ringless-control decision): a
+  // wake-prefixed utterance with no deterministic match is an OPEN-ENDED
+  // Companion prompt — original casing/punctuation, wake prefix stripped.
+  const original = raw.replace(WAKE_RE, '').trim()
+  if (original) return { cmd: { kind: 'companion', text: original }, prefixed: true }
+  return { cmd: null, prefixed: true }
+}
+
+/** Heuristic transcript-confidence estimate 0–1 (earbud 2026-08-04 — the
+ *  Companion's trust-≥threshold / voice-confirm-below gate, Adam's decision).
+ *  NOT an ASR logprob: canary-qwen doesn't expose a calibrated one through
+ *  the daemon, so this scores PLAUSIBILITY from signals we do have —
+ *  words-per-second sanity against the VAD's speech duration, and degenerate
+ *  shapes (near-empty text, no vowels). Deliberately conservative: normal
+ *  dictation scores ~0.97; anything odd drops below the 0.95 default gate and
+ *  earns a voice confirm. Tune on real shift captures, not synthetic audio. */
+export function estimateSttConfidence(text: string, speechMs: number): number {
+  const t = text.trim()
+  if (!t) return 0
+  const words = t.split(/\s+/).length
+  let conf = 0.97
+  if (speechMs > 0) {
+    const wps = words / (speechMs / 1000)
+    // Human speech runs ~1.5–4 wps; canary hallucinations / gutted audio land
+    // way outside. Soft penalties, not cliffs.
+    if (wps < 0.5 || wps > 6.5) conf -= 0.25
+    else if (wps < 0.9 || wps > 5.0) conf -= 0.08
+  } else {
+    conf -= 0.15   // no VAD speech measured yet text appeared — suspicious
+  }
+  if (words <= 1 && speechMs > 2000) conf -= 0.2   // long speech, one word out
+  if (t.length <= 2) conf -= 0.3
+  if (!/[aeiouy]/i.test(t)) conf -= 0.2            // no vowels — not language
+  return Math.max(0, Math.min(1, conf))
 }
 
 // ============================================================ VAD

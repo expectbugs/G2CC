@@ -79,6 +79,11 @@ export interface CCSessionConfig {
   model?: string
   /** Optional system prompt to append (engineering-oriented for vanilla CC). */
   systemPrompt?: string
+  /** Earbud 2026-08-04: path to an MCP config JSON. When set, the session is
+   *  spawned with `--mcp-config <path> --strict-mcp-config` — the Companion's
+   *  audio tool surface (speak/play/timers/…), the FIRST MCP use in G2CC.
+   *  Flags verified against claude --help 2.1.221 on 2026-08-04. */
+  mcpConfig?: string
 }
 
 export class CCSession extends EventEmitter {
@@ -195,6 +200,9 @@ export class CCSession extends EventEmitter {
     // APPEND (not replace) — keeps CC's built-in tool/environment guidance; matches the
     // config docstring "appended to the default". Verified vs `claude --help` 2026-06-06.
     if (this.config.systemPrompt) args.push('--append-system-prompt', this.config.systemPrompt)
+    // Companion MCP tools (earbud 2026-08-04): strict so ONLY the g2cc audio
+    // server loads — the Companion must not inherit user-level MCP config.
+    if (this.config.mcpConfig) args.push('--mcp-config', this.config.mcpConfig, '--strict-mcp-config')
 
     // [V] Env vars verified from ARIA session_pool.py:122-124 + g2code/cc-session.ts.
     // CLAUDE_CODE_EFFORT_LEVEL=max kept as redundancy with the CLI flag (CLI authoritative).

@@ -219,7 +219,9 @@ export const DEFAULT_MDNS_SERVICE = '_g2cc._tcp'
 // CC session limits
 // ============================================================
 
-export const MAX_CONCURRENT_SESSIONS = 5
+// 5 → 6 (earbud 2026-08-04): the long-lived Companion session must not be
+// able to evict a working session (or vice versa).
+export const MAX_CONCURRENT_SESSIONS = 6
 
 // ============================================================
 // Channel Router ack window (Phase 7) — NOT a timeout on the
@@ -229,3 +231,24 @@ export const MAX_CONCURRENT_SESSIONS = 5
 // ============================================================
 
 export const BLE_ACK_WINDOW_MS = 5_000
+
+// ============================================================
+// Earbud audio lane (2026-08-04 — docs/EARBUD_SPEC.md)
+// ============================================================
+
+/** Downstream WS binary frame tag for TTS speech PCM. Header layout:
+ *  [tag u8=0x11][num u32BE][seq u32BE] then PCM16LE payload. Chosen clear of
+ *  the upstream mic tags (0x01 data / 0x02 end) so a misdirected frame is
+ *  unmistakable in logs. */
+export const SPEECH_FRAME_TAG = 0x11
+export const SPEECH_FRAME_HEADER_BYTES = 9
+/** Max PCM payload per speech frame (~0.68 s @ 24 kHz mono s16). */
+export const SPEECH_CHUNK_MAX_BYTES = 32_768
+/** Kokoro's native output rate; the phone's speech AudioTrack runs at this. */
+export const TTS_SAMPLE_RATE = 24_000
+/** speak_ack window = utterance PCM duration + this margin, after which the
+ *  delivery STATUS falls to 'unverified' (a status window, NOT an I/O timeout
+ *  — playback continues and a late ack still logs). */
+export const SPEAK_ACK_MARGIN_MS = 10_000
+/** Default duck depth (dB) for speech over the music lane. */
+export const SPEECH_DUCK_DB = -12

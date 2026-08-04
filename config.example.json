@@ -4,8 +4,10 @@
   "host": "0.0.0.0",
   "authToken": "<generated-on-first-run>",
   "stt": {
+    "//micSource": "'earbud' (default — Pixel Buds 2a over SCO/HFP, announced earbud-bt) | 'dji' (the retired-but-intact collar-mic path — the one-flip undo; 2026-08-04).",
     "engine": "parakeet",
     "language": "en",
+    "micSource": "earbud",
     "pythonPath": "/home/user/G2CC/audio/venv/bin/python",
     "whisperModel": "large-v3",
     "whisperDevice": "cuda",
@@ -54,5 +56,33 @@
     "fullBleed": false,
     "//readerScrollRows": "row cap for Reader's firmware-scroll pages (sparse content like poetry; the ~660 B byte budget binds first for prose). Default 30.",
     "readerScrollRows": 30
+  },
+  "tts": {
+    "//": "Earbud speech lane (docs/EARBUD_SPEC.md). engine: only 'kokoro' (ARIA's proven ONNX stack, CPU-only — zero VRAM). voice: any id from voices-v1.0.bin (af_heart = Adam's pick, same as ARIA). modelDir points at ARIA's model files by default — one copy on disk.",
+    "engine": "kokoro",
+    "voice": "af_heart",
+    "speed": 1.0,
+    "modelDir": "/home/user/aria/tts_models/kokoro"
+  },
+  "audioOut": {
+    "//": "Earbud output policy. speakMode: 'auto' = TTS only when the Earbud window is NOT the visible focus (text is on glass otherwise); 'always' = both; 'never' = kill-switch. duckDb = music drop under speech. allowSpeaker MUST stay false at work — no BT route means NO sound, ever. notify per priority: speak | chime | chime+name (SMS privacy: sender only) | silent.",
+    "speakMode": "auto",
+    "duckDb": -12,
+    "chimes": true,
+    "allowSpeaker": false,
+    "notify": { "call": "speak", "timer": "speak", "sms": "chime+name", "email": "silent", "info": "silent" }
+  },
+  "music": {
+    "//": "Earbud music lane. format 'opus' = 96k MONO loudnorm transcode, cached (cellular-kind; the one-earbud mono rule enforced at the source); 'raw' = range-served originals.",
+    "libraryDirs": ["/mnt/slug/Music"],
+    "format": "opus",
+    "cacheDir": "~/.g2cc/media-cache"
+  },
+  "companion": {
+    "//": "The dedicated earbud CC session. dir holds its CLAUDE.md persona. confirmThreshold (Adam 2026-08-04): dictations at heuristic confidence ≥ this auto-send (trust-the-transcript); below it, VOICE confirmation ('say send or cancel' — waits forever, never auto-confirms). 0 = always trust, 1 = always confirm.",
+    "dir": "/home/user/g2cc-companion",
+    "model": "opus",
+    "effort": "max",
+    "confirmThreshold": 0.95
   }
 }
