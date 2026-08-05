@@ -4,6 +4,68 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## server 04335fb → HEAD + APK v1.22 staged — 2026-08-05 (overnight) — **The music app, whole: Phases B+C+D+E in one autonomous night**
+
+Adam's overnight mandate ("do the rest of the phases too… full automation"): every
+MUSIC_SPEC phase built, each followed by its own multi-agent verify-then-fix review
+pass and committed only after the confirmed findings were fixed. On-glass verification
++ the v1.22 install + the AcoustID key are the morning items.
+
+**Phase B (04335fb) — removal + player core.** The earbud lane died per D2
+(EarbudAudioService/EarbudWindow deleted; ears, spoken notifications, PTT remap,
+voiceTarget, grammar rows unwired; TTS/Companion dormant on disk). MusicPlayerService
+replaced it: media-lane caps door, NATIVE bud taps (single=toggle w/ idle-tap resume —
+the morning-tap path; double=next; triple=prev w/ Spotify restart-≥3s), the capture
+gate (the one physics coupling), play_history w/ the 80% skip rule, debounced
+player_state persistence + boot resume that never auto-plays, the D6.3 popup channel
+(ribbon strip swap w/ untouched antenna geometry, in-window title intrusion keeping
+flash/nav tails, blanked flash), and the tap-arming ping (the v1.21 app builds its
+MediaSession lazily — an idle staged queue now arms bud-tap routing at attach).
+Review: 14 confirmed fixed / 6 refuted-with-evidence; the keeper was the pausedBy
+latch — a transient audio-focus loss auto-paused+resumed on the phone but latched
+`pausedBy='user'` server-side and silently killed the queue at the next boundary.
+
+**Phase C (599b992) — MusicWindow + resolver lanes 2-3 + playlists + radio +
+karaoke.** The window's fullBleed shape is scrollContent (ring = VOLUME, double-tap =
+the full Actions list) vs classic menus — the Reader branch pattern. Resolver: lane 2
+= the Opus one-shot (speak-digest execFile pattern; the LIVE tag vocabulary incl.
+vocals rides the prompt; strict-JSON plan → SQL; deterministic fallback on any
+failure) + lane 3 = embed_query.py → Qdrant ranked, with the D4 blend + CROSS-set
+dupe-cluster dedupe. Radio: Qdrant recommend over the last-played seeds with
+unembedded-seed filtering (one missing point id 404s a whole recommend — guaranteed
+by fresh grabs), a queue-generation guard against stale fills, and
+queued/history/cluster exclusions. Playlists: transactional mutations (withTransaction
+— pool-level BEGIN was a lie), visual-index gap-safe remove/move. **The lesson of the
+night:** the D14 'sound effects' exclusion matched ZERO real rows — the library's
+term is 'sound effect' (singular), living mostly in STYLES ('spoken word' too, 48/72)
+— and the smoke was green because its fixture planted the code's own string. The
+exclusion now spans the term union; fixtures mirror production reality.
+
+**Phase D — YouTube grabs (D7).** youtube.ts: ytsearch5 → top-5 pick rows → audio-only
+opus w/ --embed-metadata (else the indexer reads filenames) into
+libraryDirs[0]/YouTube/, incremental index, enrichment-on-ingest (speech-first per
+D14, per-track --ids/--track-id), minutes-class network caps (the lyrics.ts sanctioned
+class), explicit-only (no code path from a failed library search). Window flow:
+Browse → YouTube → dictate/type → pick → grab w/ live status → Play now / Append.
+Hermetic phase-youtube.mjs (a PATH-shim yt-dlp; the suite is now 37 files).
+
+**Phase E — v1.22 gapless + AcoustID.** Server: media_open.next + media_ctl
+'preload' + media_event reason 'auto_advanced' (all additive-optional; sent ONLY to a
+cap `media-prestage` phone; the v1.21 floor smoked byte-identical). Android v1.22
+(STAGED to ~/.g2cc, pinned cert 93a0fffd… — NOT installed): rolling 2-item ExoPlayer
+playlist, mediaId-carrying items, minutes-class LoadControl (60s/300s — Tailscale
+hiccup insurance), 205 unit tests (200 baseline + 5 prestage wire tests; the docs'
+old "389" figure doesn't reproduce on any variant — measured reality recorded).
+AcoustID backfill pass written (chromaprint via the SYSTEM libchromaprint ctypes —
+no fpcalc on this box; pyacoustid installed), EVIDENCE-ONLY per the fabrication
+rules, keyless-guarded until Adam mints the free key. Last.fm skipped per D11.
+
+**Meta-lesson:** the per-phase adversarial review passes earned their cost — the two
+worst bugs of the night (the pausedBy queue-killer, the no-op sound-effects
+exclusion) were both invisible to green smokes because the tests asserted the code's
+assumptions rather than the data's reality. Fixture-from-production is now the rule
+for vocabulary-dependent tests.
+
 ## server 3303c92 — 2026-08-04 (late) → 2026-08-05 — **The music redesign: MUSIC_SPEC (Part D) + the Phase A knowledge base + the fabrication hunt**
 
 **Design (Q&A with Adam, all decisions in the spec's D1):** the rejected earbud lane's

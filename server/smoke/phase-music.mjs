@@ -244,11 +244,18 @@ await insertMeta(idDupHi, { genres: ['metal'], styles: ['power metal'], dupe: 90
     svcQ.onMediaEvent({ type: 'media_event', id: sent3.find((m) => m.type === 'media_open').id, state: 'playing', posMs: 0 })
     assert.ok(!sent3.some((m) => m.type === 'media_ctl' && m.cmd === 'preload'), 'no cap → no preload ever')
     svcQ.stop('smoke'); svcP.stop('smoke')
+    // Final-review #S1: three fixture services share the ONE player_state row
+    // (a production impossibility — initMusicPlayer is a throw-on-second
+    // singleton). Flush the 3b fixtures NOW so their debounced writes can't
+    // race Part 4's assertion of svc's state (commit order was a coin flip).
+    await svcP.flushPersist()
+    await svcQ.flushPersist()
     console.error('  3b. v1.22 prestage: open+next, auto-advance w/o re-open, rolling preload, v1.21 floor ✓')
   }
 
   // ---- Part 4: history + player_state persistence (same service instance) ----
-  await sleep(2000)   // let the persist debounce + history fire-and-forgets settle
+  await sleep(1200)          // history fire-and-forget chains settle
+  await svc.flushPersist()   // #S1: svc's write lands LAST, deterministically
   const hist = await query('SELECT track_id, completed, skipped, ended_at FROM play_history WHERE track_id IN ($1,$2) ORDER BY id', [idA1, idA2])
   assert.ok(hist.rows.length >= 2, `history rows written (got ${hist.rows.length})`)
   const completedRow = hist.rows.find((r) => r.completed === true)

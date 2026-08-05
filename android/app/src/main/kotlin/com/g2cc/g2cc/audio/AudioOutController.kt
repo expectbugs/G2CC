@@ -312,7 +312,7 @@ class AudioOutController(
                     .putString(android.media.MediaMetadata.METADATA_KEY_ARTIST, md.artist?.toString() ?: "")
                     .build(),
             )
-        }
+        }.onFailure { Log.w(TAG, "session metadata update failed", it) }   // final-sweep #1: no silent runCatching
     }
 
     /** Replace/append the prestaged NEXT item so the playlist is a rolling

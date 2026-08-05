@@ -438,11 +438,13 @@ export class MusicWindow implements OsWindow {
         this.askStatus = `No match: ${r.detail}\n(YouTube grabs are explicit — Browse → YouTube.)`
         return
       }
-      this.lastAsk = { request: q, lane: r.lane }
       if (!p.playQueue(r.tracks, 0, `ask "${q}"`, r.label)) {
         this.askStatus = `Resolved ${r.tracks.length} tracks but playback refused (no media-capable phone).`
         return
       }
+      // Provenance only AFTER the queue actually changed (final-review #S3: a
+      // refused ask must not stamp the OLD queue's save with this request).
+      this.lastAsk = { request: q, lane: r.lane }
       this.level = 'now'
     } catch (e) {
       this.askStatus = `Resolve failed: ${(e as Error).message}`

@@ -1,8 +1,12 @@
 # Music App — Full Spec (Part D)
 
-**Status: Phase A COMPLETE + gate PASSED 2026-08-05** (knowledge base built, then
-remediated after the fabrication incident — see §D14 amendments; reports + the 362-row
-diff in `audio/enrich/reports/`). **Phase B is the standing mandate** (HANDOFF §1).
+**Status 2026-08-05: Phases B, C, D + E BUILT overnight** (the all-phases
+session; per-phase verify-then-fix review passes — see CHANGELOG). Phase A
+gate PASSED 2026-08-05. **On-glass gates are Adam's morning items:** B (native
+taps, popups), C ("play some hard metal stuff" end-to-end — server-side proven
+live: vocab lane instant, Opus lane 6.2 s; playlist save/reopen; radio), D (a
+named-song grab), E (install v1.22 from /setup — STAGED, not installed — then
+the gapless A/B; AcoustID key unlocks the written backfill pass).
 Designed 2026-08-04 with Adam, Q&A-approved. This replaces the earbud lane's music slice
 with a standalone, Spotify-shaped music app. `docs/EARBUD_SPEC.md` remains the record of
 the rejected lane (its post-mortem is required reading); this document is the build
@@ -162,8 +166,12 @@ Passes, in order:
    then index them. Originals untouched.
 10. **backfill-lastfm / backfill-acoustid** — when Adam supplies the free keys: Last.fm
    crowd tags (mood/style vocabulary gold) merged into moods/styles; AcoustID
-   (chromaprint `fpcalc`) identification for mistagged files + dupe-cluster hardening.
-   Re-run profile+embed for tracks whose inputs materially changed.
+   identification for mistagged files + dupe-cluster hardening. Re-run profile+embed for
+   tracks whose inputs materially changed. *As-built 2026-08-05 (Phase E):* the pass is
+   the `acoustid` subcommand; fingerprints come from the SYSTEM `libchromaprint.so` via
+   pyacoustid's ctypes binding (no `fpcalc` binary on this box); it is EVIDENCE-ONLY per
+   D14 (records `sources.acoustid` + mismatch lines, never rewrites tags); Last.fm is
+   skipped per the D11 assessment.
 
 New venv deps: `psycopg[binary]` (Postgres access), the embedding model, `pyacoustid`+
 `chromaprint` (backfill only). Confirm sizes/compat before install (house rule — the
@@ -323,24 +331,31 @@ one-time note); the rest of `audioOut`/`tts`/`companion` stays dormant-valid (D2
 
 ## D9. Phases + gates
 
-- **Phase A — knowledge base.** D3 schema + enrichment passes 1-9 run to completion.
-  *Gate:* coverage report + random-sample profiles reviewed by Adam.
-- **Phase B — removal + player core.** D2 removal map; MusicPlayerService; native tap
-  mapping; history; resume persistence; popup channel; `phase-earbud.mjs` →
-  `phase-music.mjs` (index/meta/resolver-deterministic/player-vs-fake-phone/transcode/
-  popup-compose/removal asserts). Server-only. *Gate:* smokes green (35/36-equivalent),
-  on-glass: taps drive transport natively, track-change popup at ribbon root + in-window.
-- **Phase C — window + resolver + radio.** Full MusicWindow, resolver lanes 1-3,
-  playlists CRUD, radio, karaoke level. *Gate:* on-glass "play some hard metal stuff"
-  end-to-end; save/reopen a playlist; radio extends a dying queue.
-- **Phase D — YouTube.** D7 flow. *Gate:* on-glass named-song grab → audio-only file in
-  YouTube/ → playing; enrichment ran on it.
-- **Phase E — v1.22 gapless APK + backfills.** D5.1 (cap `media-prestage`, buffer),
-  Last.fm/AcoustID passes when keys arrive, tuning from field use. *Gate:* an audible
-  A/B at a track boundary; a mid-track server restart that the ear never notices.
+- **Phase A — knowledge base.** ✅ COMPLETE, gate PASSED 2026-08-05.
+- **Phase B — removal + player core.** ✅ BUILT 2026-08-05 (commit 04335fb;
+  review pass: 14 confirmed findings fixed, 6 refuted). Smokes green (35/36 at
+  commit time). *On-glass gate PENDING Adam:* taps drive transport natively,
+  track-change popup at ribbon root + in-window.
+- **Phase C — window + resolver + radio.** ✅ BUILT 2026-08-05 (commit 599b992;
+  review pass: 2 HIGH + 8 MED + 9 LOW fixed — incl. the sound-effect-singular
+  exclusion reality fix). Resolver lanes 1-3 proven live server-side.
+  *On-glass gate PENDING Adam:* the end-to-end ask; save/reopen a playlist;
+  radio extending a dying queue.
+- **Phase D — YouTube.** ✅ BUILT 2026-08-05 (module + window flow + hermetic
+  shim smoke; flags verified against yt-dlp 2026.06.09 --help + a live
+  search). *On-glass gate PENDING Adam:* a named-song grab → YouTube/ file →
+  playing → enrichment ran.
+- **Phase E — v1.22 gapless APK + backfills.** ✅ BUILT 2026-08-05: server
+  prestage (media_open.next + media_ctl preload + auto_advanced, cap
+  `media-prestage`; v1.21 floor byte-identical — smoked), Android v1.22
+  (rolling 2-item playlist, minutes-class LoadControl, 205 unit tests) STAGED
+  to ~/.g2cc — NOT installed; AcoustID backfill pass written + keyless-guarded
+  (Last.fm skipped per D11 assessment). *Gates PENDING Adam:* install v1.22,
+  the audible A/B at a boundary, the mid-track-restart test; the AcoustID key.
 
 Deploy discipline unchanged: server ships first; additive-optional wire; caps for new
-behavior; smoke gate + Android baseline (389 until v1.22 touches it); versionCode bump
+behavior; smoke gate + Android baseline (205 as of v1.22 — the older "389" figure never
+reproduced on any variant); versionCode bump
 per install; pinned keystore; no pushes without Adam's word; audio tests never push
 sound to the phone.
 

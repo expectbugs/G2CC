@@ -47,7 +47,8 @@ def _api_key() -> str | None:
             raw = json.load(f)
         k = (raw.get("music") or {}).get("acoustidKey")
         return k.strip() if isinstance(k, str) and k.strip() else None
-    except Exception:
+    except Exception as e:  # noqa: BLE001 — final-sweep #2: name the real cause, don't mask as "no key"
+        print(f"[acoustid] config.json unreadable while looking for the key ({e}) — treating as keyless", flush=True)
         return None
 
 

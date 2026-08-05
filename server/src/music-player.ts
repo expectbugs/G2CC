@@ -76,7 +76,7 @@ export class MusicPlayerService {
    *  auto-transition reports that id with reason 'auto_advanced'; we adopt it
    *  WITHOUT re-opening (the seam becomes a phone-local boundary). null = no
    *  prestage outstanding. */
-  private sentNext: { mediaId: string; idx: number } | null = null
+  private sentNext: { mediaId: string; idx: number; trackId: number } | null = null
   /** The media id whose track-start popup already fired (a 'playing' event
    *  arrives on every resume too — only the FIRST per open pops). */
   private announcedId: string | null = null
@@ -149,7 +149,7 @@ export class MusicPlayerService {
     const next = this.nextPayload(nextIdx)
     if (!next) return
     if (this.sendCapped({ type: 'media_ctl', cmd: 'preload', next }, `media_ctl(preload ${next.title})`)) {
-      this.sentNext = { mediaId: next.id, idx: nextIdx }
+      this.sentNext = { mediaId: next.id, idx: nextIdx, trackId: this.queue[nextIdx].id }
       console.log(`[music] prestaged next → ${next.id} (${nextIdx + 1}/${this.queue.length}: ${next.title})`)
     }
   }
@@ -212,6 +212,9 @@ export class MusicPlayerService {
     this.queue.push(...tracks)
     console.log(`[music] append(${source}): +${tracks.length} → ${this.queue.length} queued`)
     this.schedulePersist()
+    // v1.22 (#S4a): an append while the LAST track plays creates a next where
+    // none existed — stage it so that boundary is gapless too.
+    this.maybePrestageNext()
     return this.queue.length
   }
 
@@ -251,7 +254,7 @@ export class MusicPlayerService {
       ...(next ? { next } : {}),
     }, `media_open(${track.title})`)
     if (ok && next) {
-      this.sentNext = { mediaId: next.id, idx: this.idx + 1 }
+      this.sentNext = { mediaId: next.id, idx: this.idx + 1, trackId: this.queue[this.idx + 1].id }
       console.log(`[music] next shipped with the open → ${next.id} (${next.title})`)
     }
     if (!ok) this.state = 'idle'
@@ -730,9 +733,28 @@ export class MusicPlayerService {
 
   /** The window edited the queue in place (row remove / reorder — review #W3:
    *  those edits never persisted, so a restart resurrected removed rows; and
-   *  #C2-LOW8: a shrink near the tail must re-check the radio fill). */
+   *  #C2-LOW8: a shrink near the tail must re-check the radio fill).
+   *  v1.22 (final-review #S2): an edit SHIFTS indices, and the adoption path
+   *  trusts sentNext.idx blind — a stale mapping made the server adopt the
+   *  WRONG queue slot at the next gapless boundary (phone plays C, server
+   *  announces/histories D, and D then never plays). Heal or re-stage. */
   notifyQueueEdited(source: string): void {
     console.log(`[music] queue edited (${source}) — ${this.queue.length} tracks, idx ${this.idx}`)
+    if (this.sentNext) {
+      if (this.queue[this.idx + 1]?.id === this.sentNext.trackId) {
+        // The staged TRACK still sits at idx+1 — remap (no wedge window).
+        if (this.sentNext.idx !== this.idx + 1) {
+          console.log(`[music] prestage remapped after edit (idx ${this.sentNext.idx} → ${this.idx + 1})`)
+          this.sentNext.idx = this.idx + 1
+        }
+      } else {
+        // The staged track moved/was removed from the next slot — the phone's
+        // item 2 is stale; re-stage the CURRENT next (stageNext replaces).
+        console.log('[music] prestage invalidated by the edit — re-staging the current next')
+        this.sentNext = null
+        this.maybePrestageNext()
+      }
+    }
     void this.flushPersist().catch((e: unknown) =>
       console.error(`[music] queue-edit persist failed: ${e instanceof Error ? e.message : String(e)}`))
     this.maybeRadioFill('queue edited')
