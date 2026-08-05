@@ -35,6 +35,9 @@ import { warmStore } from './store.js'
 import { initMusicPlayer, getMusicPlayer } from './music-player.js'
 import { startIngestWatcher } from './ingest.js'
 import { refreshRulePlaylists } from './playlists.js'
+import { listIdentity, applyIdentity, revertIdentity, rejectProposal } from './identity.js'
+import { fileTrack } from './organize.js'
+import { runEnrichmentPass } from './enrichment.js'
 import { resolveRequest } from './resolver.js'
 import { scanLibrary, getTrack, mediaFileFor, trackCount } from './music.js'
 import { appendNote } from './intents.js'
@@ -285,6 +288,79 @@ server.get('/pc/assets/:name', async (req, reply) => {
     return
   }
   reply.type(mime).send(readFileSync(path, 'utf-8'))
+})
+
+// ---- /identity — the music identity review page (consolidation 2026-08-05).
+// Adam's chosen approval surface for fingerprint identity: applied (revert),
+// pending proposals (apply/reject), unresolved. Tailscale + token, like /pc.
+function identityAuthed(req: { raw: { socket: { localAddress?: string | null } }; ip: string; query?: unknown; headers: Record<string, unknown> }): boolean {
+  if (!setupInterfaceAllowed(req.raw.socket.localAddress ?? undefined, req.ip, '/identity')) return false
+  const token = (req.query as { token?: string } | undefined)?.token
+  const bearer = req.headers['authorization']
+  const tokenOk = typeof token === 'string' && timingSafeEqualStr(token, config.authToken)
+  const bearerOk = typeof bearer === 'string' && timingSafeEqualStr(bearer, `Bearer ${config.authToken}`)
+  return tokenOk || bearerOk
+}
+server.get('/identity', async (req, reply) => {
+  if (!identityAuthed(req)) { reply.code(401).send({ error: 'unauthorized — open /identity with ?token= (see /setup)' }); return }
+  const path = join(STATIC_DIR, 'identity.html')
+  if (!existsSync(path)) {
+    console.error(`[g2cc-server] /identity requested but ${path} is missing — the static page did not ship with this build`)
+    reply.code(404).send({ error: 'identity.html missing from server/static — broken deployment' })
+    return
+  }
+  reply.type('text/html').send(readFileSync(path, 'utf-8'))
+})
+server.get('/api/identity', async (req, reply) => {
+  if (!identityAuthed(req)) { reply.code(401).send({ error: 'unauthorized' }); return }
+  reply.send(await listIdentity())
+})
+/** Post-apply tail: the identity-dependent passes re-derive, playlists
+ *  refresh, and the file moves to its canonical home. Background (the page
+ *  responds immediately); every step logs loudly. */
+function kickIdentityTail(trackId: number, why: string): void {
+  void (async () => {
+    for (const pass of ['musicbrainz', 'lyrics', 'embed']) {
+      try {
+        await runEnrichmentPass(config, [pass, '--track-id', String(trackId)])
+      } catch (e) {
+        console.error(`[identity] ${pass} re-run failed for ${trackId}: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+    await refreshRulePlaylists(why).catch((e: unknown) => console.error(`[identity] refresh failed: ${e instanceof Error ? e.message : String(e)}`))
+    const row = (await getTrack(trackId).catch(() => null))
+    if (row) {
+      await fileTrack(config, row, { tag: '[identity]' }).catch((e: unknown) =>
+        console.error(`[identity] refile failed for ${trackId} (stays put): ${e instanceof Error ? e.message : String(e)}`))
+    }
+  })()
+}
+server.post('/api/identity/apply', async (req, reply) => {
+  if (!identityAuthed(req)) { reply.code(401).send({ error: 'unauthorized' }); return }
+  const b = req.body as { trackId?: number; title?: string; artist?: string; album?: string; method?: string; score?: number; recording_id?: string }
+  if (typeof b?.trackId !== 'number') { reply.code(400).send({ error: 'trackId required' }); return }
+  const method = b.method === 'acoustid' ? 'acoustid' as const : 'manual' as const
+  const row = await applyIdentity(config, b.trackId, { title: b.title, artist: b.artist, album: b.album },
+    { method, score: b.score, recording_id: b.recording_id })
+  if (!row) { reply.code(404).send({ error: `track ${b.trackId} not found` }); return }
+  kickIdentityTail(b.trackId, `identity applied to track ${b.trackId} (review page)`)
+  reply.send({ ok: true, track: row, note: 'applied; re-enrichment + refile running in background' })
+})
+server.post('/api/identity/revert', async (req, reply) => {
+  if (!identityAuthed(req)) { reply.code(401).send({ error: 'unauthorized' }); return }
+  const b = req.body as { trackId?: number }
+  if (typeof b?.trackId !== 'number') { reply.code(400).send({ error: 'trackId required' }); return }
+  const row = await revertIdentity(config, b.trackId)
+  if (!row) { reply.code(404).send({ error: `track ${b.trackId} has no applied identity` }); return }
+  kickIdentityTail(b.trackId, `identity reverted on track ${b.trackId} (review page)`)
+  reply.send({ ok: true, track: row, note: 'reverted; re-enrichment + refile running in background' })
+})
+server.post('/api/identity/reject', async (req, reply) => {
+  if (!identityAuthed(req)) { reply.code(401).send({ error: 'unauthorized' }); return }
+  const b = req.body as { trackId?: number }
+  if (typeof b?.trackId !== 'number') { reply.code(400).send({ error: 'trackId required' }); return }
+  await rejectProposal(b.trackId)
+  reply.send({ ok: true })
 })
 
 // Scout live-display channel (docs/SCOUT.md) — the Scout CC subprocess pushes

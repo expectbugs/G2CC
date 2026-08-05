@@ -141,9 +141,11 @@ export async function ytGrab(config: G2CCConfig, hit: YtHit, enrich = true): Pro
 
 /** Enrichment-on-ingest (D3.2/D14): the shared chain (enrichment.ts — speech
  *  first, per-track passes, adaptive-playlist refresh at the tail),
- *  fire-and-forget here + LOUD — a failed pass never un-grabs the track. */
+ *  fire-and-forget here + LOUD — a failed pass never un-grabs the track.
+ *  fileAfter (consolidation 2026-08-05): once enriched, the grab moves from
+ *  the YouTube/ landing zone to its canonical Library/ home + popup. */
 export function kickEnrichment(config: G2CCConfig, trackId: number, label: string): void {
-  void runEnrichmentChain(config, trackId, label).catch((e: unknown) => {
+  void runEnrichmentChain(config, trackId, label, { fileAfter: true }).catch((e: unknown) => {
     console.error(`[youtube] enrichment chain died for track ${trackId} ("${label}"): ${e instanceof Error ? e.message : String(e)}`)
   })
 }

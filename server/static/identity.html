@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G2CC — Music Identity Review</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.45 system-ui, sans-serif; background: #121417; color: #d7dce1; margin: 0; padding: 1.2rem 1.5rem 4rem; }
+  h1 { font-size: 1.25rem; margin: 0 0 .2rem; }
+  h2 { font-size: 1.02rem; margin: 1.6rem 0 .5rem; color: #9fb6c9; border-bottom: 1px solid #2a2f36; padding-bottom: .25rem; }
+  .sub { color: #8a939d; font-size: .85rem; margin-bottom: 1rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .3rem .55rem; border-bottom: 1px solid #23282e; vertical-align: top; }
+  th { color: #7f8c98; font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+  td.path { color: #6d7680; font-size: .78rem; word-break: break-all; }
+  .ev { color: #9fd49f; }
+  .cur { color: #d4b26a; }
+  .score { color: #7fb2e0; font-variant-numeric: tabular-nums; }
+  button { background: #223041; color: #cfe3f5; border: 1px solid #33475e; border-radius: 4px; padding: .22rem .6rem; cursor: pointer; font-size: .8rem; margin-right: .3rem; }
+  button:hover { background: #2c405a; }
+  button.warn { background: #3a2626; border-color: #573434; color: #eec9c9; }
+  button.warn:hover { background: #4a2e2e; }
+  input[type=text] { background: #1a1e23; color: #d7dce1; border: 1px solid #2c333b; border-radius: 4px; padding: .2rem .4rem; font-size: .8rem; width: 12rem; }
+  .empty { color: #6d7680; font-style: italic; padding: .5rem 0; }
+  #status { position: fixed; bottom: 0; left: 0; right: 0; background: #1a2027; border-top: 1px solid #2a323c; padding: .45rem 1.5rem; font-size: .82rem; color: #9fb6c9; min-height: 1.2rem; }
+  .pill { display: inline-block; padding: 0 .45rem; border-radius: 8px; font-size: .72rem; margin-left: .4rem; background: #263042; color: #8fb3d9; }
+</style>
+</head>
+<body>
+<h1>Music Identity Review</h1>
+<div class="sub">Fingerprint evidence → your call. Applies are recorded with the previous values and reversible. Confident (≥0.90) matches on artist-less tracks auto-apply during ingest; everything touching an already-named track waits here for you.</div>
+
+<h2>Pending proposals <span class="pill" id="n-pending"></span></h2>
+<div class="sub">Artist-less tracks with a match, and tracks whose fingerprint DISAGREES with their current tag.</div>
+<div id="pending"></div>
+
+<h2>Applied <span class="pill" id="n-applied"></span></h2>
+<div id="applied"></div>
+
+<h2>Still unresolved <span class="pill" id="n-unresolved"></span></h2>
+<div class="sub">No artist and no usable fingerprint match — living in Unsorted/ or their Collection until named (manual apply works below each row's title box).</div>
+<div id="unresolved"></div>
+
+<div id="status">loading…</div>
+<script>
+const token = new URLSearchParams(location.search).get('token') ?? '';
+const S = (m) => { document.getElementById('status').textContent = m; };
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, body) {
+  const r = await fetch(path + '?token=' + encodeURIComponent(token), body ? {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+  } : {});
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? ('HTTP ' + r.status));
+  return r.json();
+}
+
+async function act(path, body, doing) {
+  S(doing + '…');
+  try { const r = await api(path, body); S((r.note ?? 'done') + ' — reloading'); await load(); }
+  catch (e) { S('FAILED: ' + e.message); }
+}
+
+function pendingRow(p) {
+  const ev = p.evidence;
+  return '<tr>'
+    + '<td>' + p.id + '</td>'
+    + '<td><span class="cur">' + esc(p.title) + (p.artist ? ' — ' + esc(p.artist) : ' <i>(no artist)</i>') + '</span>'
+    + '<br><span class="ev">↳ ' + esc(ev.title) + ' — ' + esc(ev.artist) + '</span> <span class="score">' + (ev.score ?? '?') + '</span>'
+    + '<br><span class="path">' + esc(p.path) + '</span></td>'
+    + '<td>'
+    + '<button onclick=\'act("/api/identity/apply", {trackId:' + p.id + ', title:' + JSON.stringify(ev.title) + ', artist:' + JSON.stringify(ev.artist) + ', method:"acoustid", score:' + (ev.score ?? 'undefined') + ', recording_id:' + JSON.stringify(ev.recording_id ?? null) + '}, "applying ' + p.id + '")\'>Apply</button>'
+    + '<button class="warn" onclick=\'act("/api/identity/reject", {trackId:' + p.id + '}, "rejecting ' + p.id + '")\'>Reject</button>'
+    + '</td></tr>';
+}
+
+function appliedRow(a) {
+  const r = a.record;
+  return '<tr>'
+    + '<td>' + a.id + '</td>'
+    + '<td><span class="ev">' + esc(a.title) + (a.artist ? ' — ' + esc(a.artist) : '') + (a.album ? ' · ' + esc(a.album) : '') + '</span>'
+    + '<br><span class="path">was: ' + esc(r.prev.title) + (r.prev.artist ? ' — ' + esc(r.prev.artist) : ' (no artist)') + ' · ' + esc(r.method) + (r.score !== undefined ? ' <span class="score">' + r.score + '</span>' : '') + ' · ' + esc(r.applied_at) + '</span>'
+    + '<br><span class="path">' + esc(a.path) + '</span></td>'
+    + '<td><button class="warn" onclick=\'act("/api/identity/revert", {trackId:' + a.id + '}, "reverting ' + a.id + '")\'>Revert</button></td></tr>';
+}
+
+function unresolvedRow(u) {
+  const tid = 't' + u.id, aid = 'a' + u.id, alid = 'al' + u.id;
+  return '<tr>'
+    + '<td>' + u.id + '</td>'
+    + '<td><span class="cur">' + esc(u.title) + '</span><br><span class="path">' + esc(u.path) + '</span>'
+    + '<br>title <input type="text" id="' + tid + '" value="' + esc(u.title) + '"> artist <input type="text" id="' + aid + '"> album <input type="text" id="' + alid + '"></td>'
+    + '<td><button onclick=\'manualApply(' + u.id + ')\'>Apply manual</button></td></tr>';
+}
+
+function manualApply(id) {
+  const v = (x) => document.getElementById(x + id).value.trim() || undefined;
+  act('/api/identity/apply', { trackId: id, title: v('t'), artist: v('a'), album: v('al'), method: 'manual' }, 'applying ' + id);
+}
+
+function table(rows, cols) {
+  if (!rows.length) return '<div class="empty">none</div>';
+  return '<table><tr>' + cols.map((c) => '<th>' + c + '</th>').join('') + '</tr>' + rows.join('') + '</table>';
+}
+
+async function load() {
+  try {
+    const d = await api('/api/identity');
+    document.getElementById('n-pending').textContent = d.pending.length;
+    document.getElementById('n-applied').textContent = d.applied.length;
+    document.getElementById('n-unresolved').textContent = d.unresolved.length;
+    document.getElementById('pending').innerHTML = table(d.pending.map(pendingRow), ['id', 'current → evidence', '']);
+    document.getElementById('applied').innerHTML = table(d.applied.map(appliedRow), ['id', 'identity (and what it was)', '']);
+    document.getElementById('unresolved').innerHTML = table(d.unresolved.map(unresolvedRow), ['id', 'track', '']);
+    S(d.pending.length + ' pending · ' + d.applied.length + ' applied · ' + d.unresolved.length + ' unresolved');
+  } catch (e) { S('load FAILED: ' + e.message); }
+}
+load();
+</script>
+</body>
+</html>

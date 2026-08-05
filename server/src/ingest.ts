@@ -20,23 +20,18 @@
 
 import { watch, type FSWatcher } from 'node:fs'
 import { promises as fsp, existsSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { execFile } from 'node:child_process'
 import { join, extname, basename, dirname } from 'node:path'
 import type { G2CCConfig } from './config.js'
 import { scanLibrary, awaitScanIdle, AUDIO_EXTS, type TrackRow } from './music.js'
 import { runEnrichmentChain } from './enrichment.js'
+import { fileTrack } from './organize.js'
 import { playlistsContaining } from './playlists.js'
 import { tryGetMusicPlayer } from './music-player.js'
 import { query } from './store.js'
 
 const SETTLE_TICK_MS = 2_000        // size-settle pacing (sanctioned; see header)
 const SETTLE_STABLE_TICKS = 2
-
-/** Strip filesystem-hostile characters from a tag used as a directory name. */
-function sanitizeDirName(s: string): string {
-  const cleaned = s.replace(/[/\\:*?"<>|\u0000-\u001f]/g, '\u00b7').replace(/\s+/g, ' ').trim().replace(/\.+$/, '')
-  return cleaned || 'Unsorted'
-}
 
 interface IngestOpts {
   /** Smoke hook (testing-safety: tests never spawn claude/ASR). */
@@ -47,7 +42,16 @@ let processing = false
 const pending: string[] = []
 let watcher: FSWatcher | null = null
 
-/** Walk `dir` for audio files (recursive — a dropped album folder works). */
+/** Archives the drop-box unpacks itself (Bandcamp purchases arrive as .zip
+ *  of tagged audio — Adam 2026-08-05). */
+const ARCHIVE_EXTS = new Set(['.zip'])
+
+function ingestable(name: string): boolean {
+  const ext = extname(name).toLowerCase()
+  return AUDIO_EXTS.has(ext) || ARCHIVE_EXTS.has(ext)
+}
+
+/** Walk `dir` for audio files + archives (recursive — album folders work). */
 async function walkAudio(dir: string): Promise<string[]> {
   const out: string[] = []
   let entries
@@ -60,7 +64,7 @@ async function walkAudio(dir: string): Promise<string[]> {
   for (const ent of entries) {
     const p = join(dir, ent.name)
     if (ent.isDirectory()) out.push(...await walkAudio(p))
-    else if (ent.isFile() && AUDIO_EXTS.has(extname(ent.name).toLowerCase())) out.push(p)
+    else if (ent.isFile() && ingestable(ent.name)) out.push(p)
   }
   return out
 }
@@ -93,17 +97,56 @@ async function settle(path: string): Promise<boolean> {
   }
 }
 
-/** The transcode-cache key mirror of music.ts::mediaFileFor — used to rename
- *  the cached opus alongside a moved file so the pre-transcode stays warm. */
-function cachePathFor(config: G2CCConfig, id: number, mtimeMs: string | number, path: string): string {
-  const h = createHash('sha1').update(path).digest('hex').slice(0, 8)
-  return join(config.music.cacheDir, `${id}-${mtimeMs}-${h}.opus`)
+/** Unpack a dropped archive INTO the drop-box: extracted audio lands in
+ *  new/<archive stem>/ and rides the normal per-file pipeline; non-audio
+ *  payload (cover art — usually also embedded in the tags) is removed with a
+ *  log; the archive itself is deleted only after a clean extraction. */
+async function ingestArchiveNow(config: G2CCConfig, path: string): Promise<null> {
+  if (!await settle(path)) return null
+  const destDir = join(dirname(path), basename(path, extname(path)))
+  await fsp.mkdir(destDir, { recursive: true })
+  try {
+    // bsdtar, not unzip: unzip GLOBS its member arguments ([] in names) and
+    // Bandcamp titles carry brackets often enough to bite.
+    await new Promise<void>((res, rej) => {
+      execFile('bsdtar', ['-x', '-f', path, '-C', destDir], (err, _o, stderr) => {
+        if (err) rej(new Error(`${err.message}${stderr ? ` — ${String(stderr).slice(0, 300)}` : ''}`))
+        else res()
+      })
+    })
+  } catch (e) {
+    console.error(`[ingest] ${basename(path)} EXTRACTION FAILED (archive left in place): ${e instanceof Error ? e.message : String(e)}`)
+    return null
+  }
+  let audio = 0
+  const dropped: string[] = []
+  const sweep = async (d: string): Promise<void> => {
+    for (const ent of await fsp.readdir(d, { withFileTypes: true })) {
+      const p = join(d, ent.name)
+      if (ent.isDirectory()) { await sweep(p); continue }
+      if (AUDIO_EXTS.has(extname(ent.name).toLowerCase())) { audio++; continue }
+      dropped.push(ent.name)
+      await fsp.unlink(p).catch((e: unknown) => console.warn(`[ingest] could not remove non-audio ${p}: ${e instanceof Error ? e.message : String(e)}`))
+    }
+  }
+  await sweep(destDir)
+  if (dropped.length) console.log(`[ingest] ${basename(path)}: dropped ${dropped.length} non-audio entr${dropped.length === 1 ? 'y' : 'ies'} (${dropped.slice(0, 4).join(', ')}${dropped.length > 4 ? ', …' : ''})`)
+  if (audio === 0) {
+    console.error(`[ingest] ${basename(path)} contained NO audio — archive left in place, extraction dir removed`)
+    await fsp.rm(destDir, { recursive: true, force: true }).catch(() => { /* best-effort */ })
+    return null
+  }
+  await fsp.unlink(path).catch((e: unknown) => console.error(`[ingest] could not remove ${basename(path)} after extraction: ${e instanceof Error ? e.message : String(e)}`))
+  console.log(`[ingest] ${basename(path)} unpacked: ${audio} audio file(s) queued from ${basename(destDir)}/`)
+  for (const f of await walkAudio(destDir)) enqueue(config, f)
+  return null
 }
 
 /** Process ONE dropped file end-to-end. Exported for the smoke (enrich:false).
  *  Returns the track's final row, or null when honestly skipped. */
 export async function ingestFileNow(config: G2CCConfig, path: string, opts: IngestOpts = {}): Promise<TrackRow | null> {
   if (!existsSync(path)) { console.warn(`[ingest] ${path} gone before processing — skipped`); return null }
+  if (ARCHIVE_EXTS.has(extname(path).toLowerCase())) return ingestArchiveNow(config, path)
   if (!AUDIO_EXTS.has(extname(path).toLowerCase())) { console.log(`[ingest] ${basename(path)} is not audio — left in place`); return null }
   if (!await settle(path)) return null
 
@@ -165,62 +208,11 @@ export async function ingestFileNow(config: G2CCConfig, path: string, opts: Inge
     void drain(config)
     return null
   }
-  let destDir = fresh.artist
-    ? (fresh.album ? join(root, sanitizeDirName(fresh.artist), sanitizeDirName(fresh.album)) : join(root, sanitizeDirName(fresh.artist)))
-    : join(root, 'Unsorted')
-  // Containment guard (B-review 2026-08-05 #3): an artist tag literally named
-  // like the drop-box dir ('new') resolves INSIDE the recursive watch — the
-  // filed file re-fires the watcher and re-enriches forever. Unsorted instead.
-  const ingestRootAbs = config.music.ingestDir.replace(/\/+$/, '')
-  if (destDir === ingestRootAbs || destDir.startsWith(`${ingestRootAbs}/`)) {
-    console.warn(`[ingest] destination ${destDir} is INSIDE the drop-box (tag collides with the watch dir) — filing under Unsorted instead`)
-    destDir = join(root, 'Unsorted')
-  }
-  await fsp.mkdir(destDir, { recursive: true })
-  const baseExt = extname(path)
-  const baseStem = basename(path, baseExt)
-  let dest = join(destDir, `${baseStem}${baseExt}`)
-  if (existsSync(dest)) {
-    // Loop until FREE (B-review 2026-08-05 #4): fsp.rename overwrites an
-    // existing dest silently on POSIX, so the suffixed candidates need the
-    // same existence check as the base name. (check→rename TOCTOU accepted:
-    // the serial queue is the only writer filing into the library.)
-    let n = 0
-    do {
-      n++
-      dest = join(destDir, `${baseStem} (${row.id}${n > 1 ? `-${n}` : ''})${baseExt}`)
-    } while (existsSync(dest))
-    console.warn(`[ingest] destination existed — filing as ${basename(dest)}`)
-  }
-  // The move pair, hazard-ordered (ingest review 2026-08-05 #9): first wait
-  // out any mid-walk scan (its vanished-row deletion racing a rename CASCADE-
-  // wiped enrichment — the 449-track remediation class), then UPDATE the DB
-  // path BEFORE the rename. awaitScanIdle is pacing, not a lock (B#2): a scan
-  // can still SNAPSHOT between it and the UPDATE — that interleaving is closed
-  // by the scan's conditional delete (id AND snapshot-path, music.ts), which
-  // no-ops once this UPDATE lands. rowCount is checked (#24): a 0-row update
-  // means a scan deleted the row under us — revert nothing, re-index loudly.
-  await awaitScanIdle()
-  const upd = await query('UPDATE tracks SET path = $2 WHERE id = $1', [row.id, dest])
-  if (upd.rowCount === 0) {
-    console.error(`[ingest] track ${row.id} VANISHED before filing (a concurrent scan?) — leaving ${basename(path)} in the drop-box for retry`)
-    return null
-  }
-  try {
-    await fsp.rename(path, dest)   // same filesystem (both under the root) — id-preserving move
-  } catch (e) {
-    // Revert the DB pointer so it never references a file that didn't move.
-    await query('UPDATE tracks SET path = $2 WHERE id = $1', [row.id, path])
-      .catch((re: unknown) => console.error(`[ingest] path revert ALSO failed (row ${row.id} points at ${dest} but the file is at ${path}): ${re instanceof Error ? re.message : String(re)}`))
-    throw e
-  }
-  // Keep the warm transcode (the cache key hashes the path).
-  const oldCache = cachePathFor(config, row.id, fresh.mtime_ms, path)
-  if (existsSync(oldCache)) {
-    await fsp.rename(oldCache, cachePathFor(config, row.id, fresh.mtime_ms, dest))
-      .catch((e: unknown) => console.warn(`[ingest] cache rename failed (will re-transcode): ${e instanceof Error ? e.message : String(e)}`))
-  }
-  console.log(`[ingest] filed track ${row.id} → ${dest}`)
+  // Filing (canonical place + name) is the shared organize.ts authority —
+  // containment guard, collision loop, hazard-ordered move pair, cache
+  // rename, and the empty-source-dir tidy all live there now.
+  const filed = await fileTrack(config, fresh, { tidyUnder: config.music.ingestDir, tag: '[ingest]' })
+  if (!filed) return null
 
   // 4. Announce with the playlists it landed in.
   const lists = await playlistsContaining(row.id).catch((e: unknown) => {
@@ -230,18 +222,7 @@ export async function ingestFileNow(config: G2CCConfig, path: string, opts: Inge
   const line = `✔ ingested: ${fresh.title}${fresh.artist ? ` — ${fresh.artist}` : ''}${lists.length ? ` → ${lists.length} playlist(s)` : ''}`
   console.log(`[ingest] ${line}${lists.length ? ` [${lists.join(' · ')}]` : ''}`)
   tryGetMusicPlayer()?.popup(line)
-
-  // 5. Tidy any now-empty folder the drop created (best-effort, never the
-  //    ingest root itself).
-  let d = dirname(path)
-  const ingestRoot = config.music.ingestDir.replace(/\/+$/, '')
-  while (d !== ingestRoot && d.startsWith(`${ingestRoot}/`)) {
-    try {
-      await fsp.rmdir(d)
-      d = dirname(d)
-    } catch { break }   // not empty / already gone — fine
-  }
-  return (await query<TrackRow>('SELECT * FROM tracks WHERE id = $1', [row.id])).rows[0] ?? null
+  return filed
 }
 
 // Ingest review #3: change events during the settle loop (file still exists,
@@ -313,7 +294,7 @@ export function startIngestWatcher(config: G2CCConfig): void {
       watcher = watch(dir, { recursive: true }, (_event, name) => {
         if (!name) return
         const full = join(dir, name.toString())
-        if (!AUDIO_EXTS.has(extname(full).toLowerCase())) return
+        if (!ingestable(full)) return
         if (!existsSync(full)) return   // deletions/moves-out fire events too
         console.log(`[ingest] detected ${name}`)
         enqueue(config, full)

@@ -20,7 +20,7 @@ import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import { MAX_CONCURRENT_SESSIONS } from '../../shared/dist/index.js'
 import { MusicPlayerService } from '../dist/music-player.js'
 import { estimateSttConfidence, parseVoiceCommand, WINDOW_ALIASES } from '../dist/voice.js'
@@ -593,7 +593,9 @@ await insertMeta(idDupHi, { genres: ['metal'], styles: ['power metal'], dupe: 90
     const ingested = await ingestFileNow(icfg, join(idir, 'drop.flac'), { enrich: false })
     assert.ok(ingested, 'ingest returned the track row')
     assert.equal(ingested.title, 'Dropbox Tone')
-    assert.ok(ingested.path.startsWith(join(iroot, 'Smoke Metal Band', 'Forge') + '/'), `filed into Artist/Album (got ${ingested.path})`)
+    // organize.ts (consolidation 2026-08-05): Library/ zone + canonical name.
+    assert.ok(ingested.path.startsWith(join(iroot, 'Library', 'Smoke Metal Band', 'Forge') + '/'), `filed into Library/Artist/Album (got ${ingested.path})`)
+    assert.equal(basename(ingested.path), 'Dropbox Tone.flac', `canonical file name (got ${basename(ingested.path)})`)
     assert.ok(existsSync(ingested.path), 'file physically moved')
     assert.ok(!existsSync(join(idir, 'drop.flac')), 'source left the drop-box')
     const reRead = await query('SELECT path FROM tracks WHERE id = $1', [ingested.id])

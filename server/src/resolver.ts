@@ -97,10 +97,16 @@ function hasTerm(r: MetaTrackRow, names: readonly string[]): boolean {
 const SFX_TERMS = ['sound effect', 'sound effects', 'sfx'] as const
 const SPOKEN_TERMS = ['spoken word'] as const
 
-/** One member per dupe cluster — the higher-fidelity file wins (D4); equal
- *  fidelity breaks by path so the pick is input-order-independent (planQuery
+/** One member per dupe cluster — the higher-fidelity file wins (D4); ties
+ *  prefer non-Archive (quarantined dupes live under Archive/Dupes — the
+ *  consolidation 2026-08-05 parks them playable but never representative),
+ *  then break by path so the pick is input-order-independent (planQuery
  *  feeds this from ORDER BY random(); an order-dependent tie made every
- *  adaptive-playlist refresh swap cluster representatives, +N −N churn). */
+ *  adaptive-playlist refresh swap cluster representatives, +N −N churn).
+ *  The mover (tools/organize-library.mjs) mirrors this exact comparison. */
+function archived(path: string): boolean {
+  return path.includes('/Archive/')
+}
 function dedupeClusters(rows: MetaTrackRow[]): MetaTrackRow[] {
   const best = new Map<number, MetaTrackRow>()
   const out: MetaTrackRow[] = []
@@ -110,7 +116,10 @@ function dedupeClusters(rows: MetaTrackRow[]): MetaTrackRow[] {
     if (!cur) { best.set(r.dupe_cluster, r); out.push(r); continue }
     const rr = fidelityRank(r.path)
     const cr = fidelityRank(cur.path)
-    if (rr > cr || (rr === cr && r.path < cur.path)) {
+    const better = rr > cr
+      || (rr === cr && !archived(r.path) && archived(cur.path))
+      || (rr === cr && archived(r.path) === archived(cur.path) && r.path < cur.path)
+    if (better) {
       out[out.indexOf(cur)] = r
       best.set(r.dupe_cluster, r)
     }

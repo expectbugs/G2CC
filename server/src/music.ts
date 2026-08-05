@@ -118,6 +118,14 @@ registerMigration('playlists-rule-1', `
   ALTER TABLE playlists ADD COLUMN IF NOT EXISTS rule jsonb;
 `)
 
+// Track/disc numbers (library consolidation 2026-08-05): canonical filenames
+// are "NN - Title.ext" — the probe reads the track/disc tags, the mover
+// backfills existing rows. Python ensure_schema is table-level only; no clash.
+registerMigration('tracks-trackno-1', `
+  ALTER TABLE tracks ADD COLUMN IF NOT EXISTS track_no integer;
+  ALTER TABLE tracks ADD COLUMN IF NOT EXISTS disc_no integer;
+`)
+
 export const AUDIO_EXTS = new Set(['.mp3', '.flac', '.m4a', '.ogg', '.opus', '.wav', '.aac', '.wma', '.aiff'])
 
 export interface TrackRow {
@@ -128,6 +136,8 @@ export interface TrackRow {
   album: string | null
   dur_ms: number | null
   mtime_ms: string | number
+  track_no?: number | null
+  disc_no?: number | null
 }
 
 export function toPlayerTrack(r: TrackRow): PlayerTrack {
@@ -164,7 +174,16 @@ async function* walkAudioFiles(dir: string, onError?: (dir: string) => void): As
 
 // (walk recursion threads onError through subdirectory failures too)
 
-interface ProbeResult { title: string; artist: string | null; album: string | null; durMs: number | null }
+interface ProbeResult { title: string; artist: string | null; album: string | null; durMs: number | null; trackNo: number | null; discNo: number | null }
+
+/** "3", "3/12", "03" → 3; junk → null. Tag values are strings and lie. */
+export function parseTagNumber(v: string | undefined): number | null {
+  if (!v) return null
+  const m = /^\s*(\d{1,4})\s*(?:\/|$)/.exec(v)
+  if (!m) return null
+  const n = parseInt(m[1], 10)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
 
 async function ffprobe(path: string): Promise<ProbeResult> {
   const { stdout } = await execFileAsync('ffprobe', [
@@ -172,7 +191,7 @@ async function ffprobe(path: string): Promise<ProbeResult> {
     // stream_tags too (2026-08-05): Ogg stores vorbiscomments PER-STREAM — a
     // format-only probe indexes tagged .ogg files as artistless (found via the
     // Bastion-trilogy tagging; audio/enrich/passes/videosweep.py mirrors this).
-    '-show_entries', 'format=duration:format_tags=title,artist,album,album_artist:stream_tags=title,artist,album,album_artist',
+    '-show_entries', 'format=duration:format_tags=title,artist,album,album_artist,track,disc,tracknumber,discnumber:stream_tags=title,artist,album,album_artist,track,disc,tracknumber,discnumber',
     '-of', 'json', path,
   ], { maxBuffer: 1024 * 1024 })
   const parsed = JSON.parse(stdout) as {
@@ -192,6 +211,9 @@ async function ffprobe(path: string): Promise<ProbeResult> {
     artist: tags['artist']?.trim() || tags['album_artist']?.trim() || null,
     album: tags['album']?.trim() || null,
     durMs: Number.isFinite(durS) ? Math.round(durS * 1000) : null,
+    // 'track'/'disc' (id3, mp4) vs 'tracknumber'/'discnumber' (vorbis).
+    trackNo: parseTagNumber(tags['track']) ?? parseTagNumber(tags['tracknumber']),
+    discNo: parseTagNumber(tags['disc']) ?? parseTagNumber(tags['discnumber']),
   }
 }
 
@@ -276,15 +298,16 @@ async function doScan(config: G2CCConfig): Promise<ScanSummary> {
           const meta = await ffprobe(path)
           if (existing) {
             await query(
-              'UPDATE tracks SET title=$1, artist=$2, album=$3, dur_ms=$4, mtime_ms=$5, indexed_at=now() WHERE id=$6',
-              [meta.title, meta.artist, meta.album, meta.durMs, mtime, existing.id])
+              'UPDATE tracks SET title=$1, artist=$2, album=$3, dur_ms=$4, mtime_ms=$5, track_no=$7, disc_no=$8, indexed_at=now() WHERE id=$6',
+              [meta.title, meta.artist, meta.album, meta.durMs, mtime, existing.id, meta.trackNo, meta.discNo])
             summary.updated++
           } else {
             await query(
-              `INSERT INTO tracks (path, title, artist, album, dur_ms, mtime_ms) VALUES ($1,$2,$3,$4,$5,$6)
+              `INSERT INTO tracks (path, title, artist, album, dur_ms, mtime_ms, track_no, disc_no) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                ON CONFLICT (path) DO UPDATE SET title=EXCLUDED.title, artist=EXCLUDED.artist,
-                 album=EXCLUDED.album, dur_ms=EXCLUDED.dur_ms, mtime_ms=EXCLUDED.mtime_ms, indexed_at=now()`,
-              [path, meta.title, meta.artist, meta.album, meta.durMs, mtime])
+                 album=EXCLUDED.album, dur_ms=EXCLUDED.dur_ms, mtime_ms=EXCLUDED.mtime_ms,
+                 track_no=EXCLUDED.track_no, disc_no=EXCLUDED.disc_no, indexed_at=now()`,
+              [path, meta.title, meta.artist, meta.album, meta.durMs, mtime, meta.trackNo, meta.discNo])
             summary.added++
           }
         } catch (e) {
