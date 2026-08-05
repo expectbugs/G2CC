@@ -128,8 +128,10 @@ function dedupeClusters(rows: MetaTrackRow[]): MetaTrackRow[] {
 }
 
 /** Fisher-Yates + one mild spread pass so the same artist rarely plays
- *  back-to-back (D4: "mild artist-spread shuffle"). */
-function artistSpreadShuffle(rows: MetaTrackRow[]): MetaTrackRow[] {
+ *  back-to-back (D4: "mild artist-spread shuffle"). Exported 2026-08-05:
+ *  the window's Randomize-queue / playlist Play-at-random reuse the house
+ *  shuffle so every random path has the same feel. */
+export function artistSpreadShuffle<T extends { artist?: string | null }>(rows: T[]): T[] {
   const a = [...rows]
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1))

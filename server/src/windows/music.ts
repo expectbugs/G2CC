@@ -23,7 +23,7 @@ import { browsePageItems } from './_browse.js'
 import { oneLine, fbPagePx } from './_util.js'
 import { paginateText } from '../os-compose.js'
 import { tryGetMusicPlayer, type MusicPlayerService } from '../music-player.js'
-import { resolveRequest, type ResolvedQueue } from '../resolver.js'
+import { resolveRequest, artistSpreadShuffle, type ResolvedQueue } from '../resolver.js'
 import { listArtists, tracksByArtist, searchTracks, toPlayerTrack, type PlayerTrack } from '../music.js'
 import { listAlbums, tracksByAlbum, listVocabTerms, type AlbumRow, type VocabTerm } from '../music-browse.js'
 import {
@@ -65,7 +65,7 @@ type DictMode = 'ask' | 'search' | 'save-name' | 'rename' | 'yt-search' | null
 // must live here or the Phase C gate flow is undrivable on Adam's daily config.
 const ACTIONS_ROWS = [
   '⏯ Pause/Resume', '⏭ Next', 'Ask', 'Browse', 'Queue',
-  '⏮ Previous', 'Seek…', 'Radio toggle',
+  '🔀 Randomize queue', '⏮ Previous', 'Seek…', 'Radio toggle',
   'Save queue as playlist', 'Add current → playlist', 'Lyrics', '■ Stop',
 ] as const
 const SEEK_ROWS = ['−5 min', '−30 s', '+30 s', '+5 min', 'Restart track', 'Cancel'] as const
@@ -126,11 +126,11 @@ export class MusicWindow implements OsWindow {
     this.pacer = setInterval(() => {
       const p = this.player()
       if (p?.status().music !== 'playing') return
-      if (this.level === 'lyrics' && this.lyricsFor && this.lyricsFor !== this.lyricsKey()) {
-        // The queue advanced under an open lyrics level (review #W5:
-        // MediaWindow re-derives on its state push; this window has no push —
-        // the pacer is the substitute). loadLyrics' seq guard handles races.
-        this.ctx.log('[music-win] track changed under the lyrics level — re-deriving')
+      if ((this.level === 'lyrics' || this.level === 'now') && this.lyricsFor && this.lyricsFor !== this.lyricsKey()) {
+        // The queue advanced under an open lyrics level OR the Now Playing
+        // karaoke strip (review #W5 / Adam 2026-08-05: the strip must follow
+        // the track). loadLyrics' seq guard handles races.
+        this.ctx.log(`[music-win] track changed under '${this.level}' — re-deriving lyrics`)
         void this.loadLyrics()
         return
       }
@@ -257,9 +257,13 @@ export class MusicWindow implements OsWindow {
         return { mode: 'browse', menuMode, title, menu: ['Back', 'Reload', 'Main'], items: browsePageItems(rows, this.off('playlists')).items }
       }
       case 'playlist': {
-        const rows = this.plTracks.map((t, i) => `${i + 1}. ${t.title}${t.artist ? ` — ${t.artist}` : ''}`)
+        // '🔀 Play at random' rides ABOVE the first track (Adam 2026-08-05) —
+        // the select handler mirrors the same +1 row offset.
+        const rows = this.plTracks.length
+          ? ['🔀 Play at random', ...this.plTracks.map((t, i) => `${i + 1}. ${t.title}${t.artist ? ` — ${t.artist}` : ''}`)]
+          : ['(empty playlist)']
         const sub = this.plOpen?.request ? ` · "${oneLine(this.plOpen.request, 20)}"` : ''
-        return { mode: 'browse', menuMode, title: `${oneLine(this.plOpen?.name ?? '?', 22)}${sub}`, menu: ['Play', 'Add current', 'Rename', 'Edit', 'Delete', 'Back', 'Main'], items: browsePageItems(rows.length ? rows : ['(empty playlist)'], this.off('playlist')).items }
+        return { mode: 'browse', menuMode, title: `${oneLine(this.plOpen?.name ?? '?', 22)}${sub}`, menu: ['Play', 'Add current', 'Rename', 'Edit', 'Delete', 'Back', 'Main'], items: browsePageItems(rows, this.off('playlist')).items }
       }
       case 'playlist-edit': {
         const rows = this.plTracks.map((t, i) => `${i + 1}. ${t.title}${t.artist ? ` — ${t.artist}` : ''}`)
@@ -326,6 +330,21 @@ export class MusicWindow implements OsWindow {
     }
     lines.push(`queue ${st!.queuePos} · radio ${st!.radio ? 'ON' : 'off'}`)
     if (st!.caps === null) lines.push('⚠ NO PHONE ATTACHED — playback needs the phone')
+    // Karaoke strip (Adam 2026-08-05): the bottom lines follow the synced
+    // lyrics for the CURRENT track, ▶ on the live line (5 s pacer cadence).
+    // Loads lazily: the kick is keyed + seq-guarded inside loadLyrics, so a
+    // render-time call is safe; unsynced/no lyrics = no strip (clean view).
+    if (st!.track) {
+      if (this.lyricsFor !== this.lyricsKey()) void this.loadLyrics()
+      else if (this.lrc && this.lrc.length) {
+        const idx = currentLrcIndex(this.lrc, st!.posMs)
+        const start = Math.max(0, Math.min(idx - 1, this.lrc.length - 4))
+        lines.push('')
+        for (let i = start; i < Math.min(start + 4, this.lrc.length); i++) {
+          lines.push(i === idx ? `▶ ${this.lrc[i].text || '♪'}` : `  ${this.lrc[i].text || '♪'}`)
+        }
+      }
+    }
     return { mode: 'text', title: `Music · ${st!.music}`, menu, text: lines.join('\n') }
   }
 
@@ -633,6 +652,11 @@ export class MusicWindow implements OsWindow {
             case 'Ask': this.level = 'ask'; this.askStatus = null; this.armDictation('ask'); return
             case 'Browse': this.level = 'browse'; this.focus = 'content'; this.requestRender(); return
             case 'Queue': this.offsets.set('queue', 0); this.level = 'queue'; this.focus = 'content'; this.requestRender(); return
+            case '🔀 Randomize queue':
+              this.askStatus = p?.shuffleQueue('window actions') ? '🔀 Queue randomized (current track stays first)' : 'Nothing to randomize.'
+              this.level = 'now'
+              this.requestRender()
+              return
             case '⏮ Previous': p?.skip(-1, 'window'); return
             case 'Seek…': this.level = 'seek'; this.requestRender(); return
             case 'Radio toggle': p?.setRadio(!p.radio, 'window'); this.requestRender(); return
@@ -788,10 +812,17 @@ export class MusicWindow implements OsWindow {
         }
         case 'playlist': {
           if (this.plTracks.length === 0) return
-          const rows = this.plTracks.map((t, i) => `${i + 1}. ${t.title}${t.artist ? ` — ${t.artist}` : ''}`)
+          // Row 0 = '🔀 Play at random' (the view prepends it); tracks are +1.
+          const rows = ['🔀 Play at random', ...this.plTracks.map((t, i) => `${i + 1}. ${t.title}${t.artist ? ` — ${t.artist}` : ''}`)]
           const row = this.pick(rows, 'playlist', index)
           if (row === null) return
-          if (p?.playQueue(this.plTracks, row, `playlist "${this.plOpen?.name}"`, this.plOpen?.name)) { this.lastAsk = null; this.level = 'now' }
+          if (row === 0) {
+            const shuffled = artistSpreadShuffle(this.plTracks)
+            if (p?.playQueue(shuffled, 0, `playlist "${this.plOpen?.name}" (random)`, this.plOpen?.name)) { this.lastAsk = null; this.level = 'now' }
+            this.requestRender()
+            return
+          }
+          if (p?.playQueue(this.plTracks, row - 1, `playlist "${this.plOpen?.name}"`, this.plOpen?.name)) { this.lastAsk = null; this.level = 'now' }
           this.requestRender()
           return
         }

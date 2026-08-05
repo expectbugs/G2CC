@@ -21,7 +21,7 @@
 import type { ServerMessage, MediaEventMsg } from '@g2cc/shared'
 import type { G2CCConfig } from './config.js'
 import type { PlayerTrack } from './music.js'
-import { radioNeighbors } from './resolver.js'
+import { radioNeighbors, artistSpreadShuffle } from './resolver.js'
 import { query } from './store.js'
 
 export interface MusicDeps {
@@ -183,6 +183,24 @@ export class MusicPlayerService {
   }
 
   // ---- transport ----
+
+  /** Randomize the rest of the queue (Adam 2026-08-05): the CURRENT row stays
+   *  first (playback never interrupts — this is a pure reorder), everything
+   *  after gets the house artist-spread shuffle. Returns false when there is
+   *  nothing meaningful to shuffle. */
+  shuffleQueue(source: string): boolean {
+    if (this.queue.length < 3) {
+      console.log(`[music] shuffleQueue(${source}) — ${this.queue.length} track(s), nothing to randomize`)
+      return false
+    }
+    const current = this.queue[this.idx]
+    const rest = this.queue.filter((_, i) => i !== this.idx)
+    this.queue = [current, ...artistSpreadShuffle(rest)]
+    this.idx = 0
+    console.log(`[music] queue randomized (${source}) — ${this.queue.length} tracks, current stays first ("${current?.title ?? '?'}")`)
+    this.notifyQueueEdited(`shuffle (${source})`)
+    return true
+  }
 
   /** Replace the queue and start playing at startIdx. `label` feeds the
    *  queue-start popup ("▶ 25: hard metal"). */
