@@ -19,7 +19,7 @@ from datetime import date
 
 from . import db, report
 from .passes import (audio_feats, consistency, dedupe, lyrics, musicbrainz,
-                     pretranscode, profile, tags, videosweep)
+                     pretranscode, profile, speech, tags, videosweep)
 from .passes import embed as embed_pass
 
 PASSES = {
@@ -29,6 +29,7 @@ PASSES = {
     "musicbrainz": musicbrainz.run,
     "lyrics": lyrics.run,
     "audio": audio_feats.run,
+    "speech": speech.run,
     "profile": profile.run,
     "embed": embed_pass.run,
     "dedupe": dedupe.run,
@@ -47,6 +48,10 @@ def main() -> int:
     ap.add_argument("--track-id", type=int, default=None)
     ap.add_argument("--concurrency", type=int, default=None)
     ap.add_argument("--report-out", default=None)
+    ap.add_argument("--artistless", action="store_true",
+                    help="speech pass only: restrict to tracks with no artist tag")
+    ap.add_argument("--ids", default=None,
+                    help="speech pass only: comma-separated track ids to test")
     args = ap.parse_args()
 
     conn = db.connect()
@@ -63,6 +68,10 @@ def main() -> int:
         kwargs = dict(force=args.force, limit=args.limit, track_id=args.track_id)
         if args.concurrency is not None and name in CONCURRENCY_AWARE:
             kwargs["concurrency"] = args.concurrency
+        if name == "speech":
+            kwargs["artistless"] = args.artistless
+            if args.ids:
+                kwargs["ids"] = [int(x) for x in args.ids.split(",") if x.strip()]
         PASSES[name](conn, **kwargs)
     return 0
 

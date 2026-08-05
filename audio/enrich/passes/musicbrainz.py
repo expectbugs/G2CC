@@ -98,9 +98,19 @@ def run(conn, force: bool = False, limit: int | None = None,
         if not title:
             db.set_pass_status(conn, t["id"], "musicbrainz", True, extra={"skipped": "no title"})
             continue
+        # 2026-08-05 hardening (the '1h'-audiobook fabrication, Adam-confirmed):
+        # a title-only fuzzy search is NOT identification — MB happily scores
+        # bare asset-dump names ('1h', 'flock', '4') at 100 against unrelated
+        # recordings, and that false identity then poisons the profile pass.
+        # No artist tag → no search; an honest miss beats a confident lie.
+        if not t["artist"]:
+            miss += 1
+            payload = {"found": False, "reason": "no artist tag — title-only identification unreliable"}
+            db.merge_sources(conn, t["id"], "musicbrainz", payload)
+            db.set_pass_status(conn, t["id"], "musicbrainz", True, extra={"found": False, "skipped": "artistless"})
+            continue
         q = f'recording:"{_lucene_escape(title)}"'
-        if t["artist"]:
-            q += f' AND artist:"{_lucene_escape(t["artist"])}"'
+        q += f' AND artist:"{_lucene_escape(t["artist"])}"'
         try:
             r = http.get(f"{MB_BASE}/recording/", params={"query": q, "fmt": "json", "limit": 5})
             if r.status_code == 503:

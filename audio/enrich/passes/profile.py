@@ -61,7 +61,21 @@ Rules: profile EVERY id you were given, same order. Use the folder/album context
 folder names (OCRemix tributes, game soundtracks) identify tracks that MusicBrainz misses. If you \
 genuinely don't know a track, say so in the description and profile it honestly from its artist/album/\
 folder/audio-feature context — never invent specifics like chart facts or collaborators. Energy and \
-moods must be consistent with the measured bpm/rms/onset when provided."""
+moods must be consistent with the measured bpm/rms/onset when provided.
+
+EVIDENCE HIERARCHY (hard rules, 2026-08-05 — a fabrication incident made these non-negotiable):
+1. `speechDetected` is a MEASURED FACT from running the audio through ASR. false = the excerpt \
+contains no speech and no sung vocals → `vocals` MUST be "instrumental". true = voice is present \
+(spoken OR sung — you decide which kind from the other evidence). Never contradict it.
+2. Measured audio features outrank any claimed identity. Never assign aggressive/harsh character \
+the spectral+onset numbers contradict outright. But energy = MUSICAL intensity, not mastering \
+loudness: a 1997-mastered battle theme at RMS -23 dB can still be energy 8 — judge as if \
+loudness-normalized.
+3. A `musicbrainz` match for a file with NO artist tag is unreliable (title-only fuzzy matching) — \
+treat it as absent. Never adopt an identity, series, or provenance story from it. Files with bare \
+names like "1h" or "flock" in dump folders are usually game-asset rips: "unknown origin" plus an \
+honest sonic description is the CORRECT answer, and genre "unknown" is allowed when the sound \
+genuinely doesn't place it."""
 
 
 def _lyric_excerpt(conn, t: dict[str, Any]) -> str | None:
@@ -96,6 +110,8 @@ def _dossier(conn, t: dict[str, Any]) -> dict[str, Any]:
         "musicbrainz": src.get("musicbrainz") or {},
         "audio": src.get("audio") or {},
     }
+    speech = src.get("speech")
+    d["speechDetected"] = speech["detected"] if speech else "not measured"
     lyr = _lyric_excerpt(conn, t)
     if lyr:
         d["lyricsExcerpt"] = lyr
