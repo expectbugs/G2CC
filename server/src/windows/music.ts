@@ -20,7 +20,7 @@
 
 import type { OsWindow, WmContext, WinView, SttMeta } from './types.js'
 import { browsePageItems } from './_browse.js'
-import { oneLine, fbPagePx, fbActiveCfg } from './_util.js'
+import { oneLine, fbPagePx } from './_util.js'
 import { paginateText } from '../os-compose.js'
 import { tryGetMusicPlayer, type MusicPlayerService } from '../music-player.js'
 import { resolveRequest, type ResolvedQueue } from '../resolver.js'
@@ -293,21 +293,23 @@ export class MusicWindow implements OsWindow {
   }
 
   private nowView(p: MusicPlayerService | null): WinView {
-    // TWO shapes, the Reader/Scout branch pattern (review #W1):
-    //  - fullBleed: scrollContent + NO menu — TAP opens the Actions list and
-    //    double-tap EXITS to the ribbon (Adam 2026-08-05: double-tap always
-    //    backs out; volume is always max and phone-owned, so no ring-volume).
-    //    A menu here would render as dead-looking top-bar chrome.
-    //  - classic: a plain text view with the menu list (ring drives the native
-    //    list).
-    const fb = fbActiveCfg(this.ctx.config)
+    // ONE shape, the standard G2CC reading-window contract (Adam on-glass
+    // 2026-08-05, second round: "actions in the ribbon menu and scroll wheel
+    // to select"). Now Playing is a PLAIN text view with the normal menu:
+    //  - fullBleed: the top-bar menu antenna captures — RING scrolls the
+    //    3-cell selection, TAP selects the centre item, DOUBLE-TAP exits
+    //    straight to the ribbon (reading-window rule). No scrollContent:
+    //    the earlier menuless scroll-gadget shape routed taps as sys taps
+    //    the WM rightly drops — "tap for actions" could never fire.
+    //  - classic: the same menu as the left list.
+    // Volume stays max + phone-owned (no Vol rows, no ring-volume).
     const st = p?.status()
-    const menu = fb ? [] : [st?.music === 'playing' ? 'Pause' : 'Resume', 'Next', 'Ask', 'Browse', 'Queue', 'More', 'Reload', 'Main']
+    const menu = [st?.music === 'playing' ? 'Pause' : 'Resume', 'Next', 'Ask', 'Browse', 'Queue', 'More', 'Reload', 'Main']
     if (!p) return { mode: 'text', title: 'Music', menu, text: 'Player offline (service not initialized).' }
     if (!st!.track && st!.queued === 0) {
       return {
-        mode: 'text', title: 'Music · idle', menu, scrollContent: fb,
-        text: `Nothing queued.\n\n${fb ? 'Tap → Ask/Browse' : 'Menu → Ask/Browse'} to fill the queue.\nBud taps: single = play/pause · double = next · triple = previous.`,
+        mode: 'text', title: 'Music · idle', menu,
+        text: 'Nothing queued.\n\nAsk or Browse (menu) to fill the queue.\nBud taps: single = play/pause · double = next · triple = previous.',
       }
     }
     const lines: string[] = []
@@ -324,8 +326,7 @@ export class MusicWindow implements OsWindow {
     }
     lines.push(`queue ${st!.queuePos} · radio ${st!.radio ? 'ON' : 'off'}`)
     if (st!.caps === null) lines.push('⚠ NO PHONE ATTACHED — playback needs the phone')
-    if (fb) lines.push('', 'tap = actions · double-tap = exit')
-    return { mode: 'text', title: `Music · ${st!.music}`, menu, scrollContent: fb, text: lines.join('\n') }
+    return { mode: 'text', title: `Music · ${st!.music}`, menu, text: lines.join('\n') }
   }
 
   private posBar(posMs: number, durMs?: number): string {
@@ -623,15 +624,6 @@ export class MusicWindow implements OsWindow {
     const p = this.player()
     try {
       switch (this.level) {
-        case 'now': {
-          // Single tap on the fullBleed Now Playing view = the Actions list
-          // (Adam 2026-08-05: double-tap is reserved for back/exit everywhere).
-          this.offsets.set('actions', 0)
-          this.level = 'actions'
-          this.focus = 'content'
-          this.requestRender()
-          return
-        }
         case 'actions': {
           const row = this.pick([...ACTIONS_ROWS], 'actions', index)
           if (row === null) return
@@ -1019,14 +1011,13 @@ export class MusicWindow implements OsWindow {
     return true
   }
 
-  // Adam on-glass 2026-08-05: double-tap must ALWAYS back out/exit (he was
-  // trapped in a now⇄actions loop — the old onScrollReadBack consumed the
-  // double-tap to open Actions, Scout-style). No onScrollReadBack: the WM's
-  // double-tap path walks onBack hierarchically and EXITS from 'now'.
-  // Actions now opens with a single TAP on the Now Playing view (hub_select
-  // → onBrowseSelect 'now' case). Ring-volume is GONE with it (same session:
-  // volume is always max, Adam controls it on the phone) — no onContentScroll
-  // means ring is a natural no-op on the short Now Playing text.
+  // Adam on-glass 2026-08-05 (two rounds): double-tap must ALWAYS back out /
+  // exit, and Music must use the STANDARD window contract — menu in the bar,
+  // ring scrolls it, tap selects. No onScrollReadBack (the old one consumed
+  // double-tap into a now⇄actions loop) and no onContentScroll (ring-volume
+  // is gone — volume is max + phone-owned). Now Playing is a plain menued
+  // text view, so the WM gives us menu-capture input for free; browse levels
+  // keep their hierarchical onBack below.
 
   private async loadLyrics(): Promise<void> {
     const p = this.player()
