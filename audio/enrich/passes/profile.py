@@ -182,9 +182,68 @@ def _apply(conn, t_by_id: dict[int, dict[str, Any]],
     return ok, failed
 
 
+COPY_FIELDS = ("genres", "styles", "moods", "energy", "year", "vocals",
+               "language", "themes", "description")
+
+
+def _copy_from_cluster(conn, todo: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Dupe-cluster mates share one profile (Adam: skip duplicates — a second
+    rip of the same song must not burn a second Opus call). Copies the
+    descriptive fields from an already-profiled mate; bpm stays per-file
+    (the audio pass owns it). Returns the tracks still needing a real call.
+    Requires dedupe to have run since the last index change."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (dupe_cluster) dupe_cluster, track_id FROM track_meta "
+            "WHERE dupe_cluster IS NOT NULL AND description IS NOT NULL "
+            "ORDER BY dupe_cluster, track_id")
+        donors = {r["dupe_cluster"]: r["track_id"] for r in cur.fetchall()}
+        cur.execute("SELECT track_id, dupe_cluster FROM track_meta WHERE dupe_cluster IS NOT NULL")
+        clusters = {r["track_id"]: r["dupe_cluster"] for r in cur.fetchall()}
+    remaining: list[dict[str, Any]] = []
+    copied = 0
+    for t in todo:
+        donor = donors.get(clusters.get(t["id"]))
+        if donor is None or donor == t["id"]:
+            remaining.append(t)
+            continue
+        with conn.cursor() as cur:
+            cols = ", ".join(f"{c} = src.{c}" for c in COPY_FIELDS)
+            cur.execute(
+                f"UPDATE track_meta dst SET {cols}, updated_at = now() "
+                f"FROM track_meta src WHERE dst.track_id = %s AND src.track_id = %s",
+                (t["id"], donor))
+        db.merge_sources(conn, t["id"], "profile", {"copiedFrom": donor})
+        db.set_pass_status(conn, t["id"], "profile", True, extra={"copiedFrom": donor})
+        copied += 1
+    if copied:
+        print(f"[profile] {copied} dupe-cluster track(s) copied from profiled mates (no LLM call)", flush=True)
+    return remaining
+
+
 def run(conn, force: bool = False, limit: int | None = None,
         track_id: int | None = None, concurrency: int = 2) -> None:
     todo = db.tracks_needing(conn, "profile", force, limit, track_id)
+    todo = _copy_from_cluster(conn, todo)
+    # One REAL call per cluster: extra members of a not-yet-profiled cluster
+    # wait for the post-batch copy sweep instead of burning their own call.
+    with conn.cursor() as cur:
+        cur.execute("SELECT track_id, dupe_cluster FROM track_meta WHERE dupe_cluster IS NOT NULL")
+        cluster_of = {r["track_id"]: r["dupe_cluster"] for r in cur.fetchall()}
+    seen: set[int] = set()
+    callers: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    for t in todo:
+        cl = cluster_of.get(t["id"])
+        if cl is None or cl not in seen:
+            callers.append(t)
+            if cl is not None:
+                seen.add(cl)
+        else:
+            deferred.append(t)
+    if deferred:
+        print(f"[profile] {len(deferred)} cluster-mate(s) deferred to the post-batch copy sweep", flush=True)
+    todo = callers
     print(f"[profile] {len(todo)} track(s) → {(len(todo) + BATCH - 1) // BATCH} Opus-low call(s), "
           f"{concurrency} in flight", flush=True)
     t_by_id = {t["id"]: t for t in todo}
@@ -227,4 +286,10 @@ def run(conn, force: bool = False, limit: int | None = None,
             total_failed += failed
             print(f"[profile] batch {idx} done ({ok} ok, {failed} failed) — "
                   f"{total_ok + total_failed}/{len(todo)} total", flush=True)
-    print(f"[profile] done: {total_ok} ok, {total_failed} failed", flush=True)
+    if deferred:
+        left = _copy_from_cluster(conn, deferred)
+        for t in left:
+            print(f"[profile] deferred #{t['id']} still has no profiled mate "
+                  f"(its cluster's caller failed?) — left pending", flush=True)
+    print(f"[profile] done: {total_ok} ok, {total_failed} failed"
+          + (f", {len(deferred)} copy-swept" if deferred else ""), flush=True)

@@ -74,7 +74,26 @@ def run(conn, force: bool = False, limit: int | None = None,
         artist_tags[key] = tags
         return tags
 
+    # Dupe-cluster copy (Adam: skip duplicates): a mate that already carries
+    # sources.musicbrainz answers for the whole cluster — same query, no HTTP.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (dupe_cluster) dupe_cluster, track_id, sources->'musicbrainz' AS mb "
+            "FROM track_meta WHERE dupe_cluster IS NOT NULL AND sources ? 'musicbrainz' "
+            "ORDER BY dupe_cluster, track_id")
+        donors = {r["dupe_cluster"]: r for r in cur.fetchall()}
+        cur.execute("SELECT track_id, dupe_cluster FROM track_meta WHERE dupe_cluster IS NOT NULL")
+        clusters = {r["track_id"]: r["dupe_cluster"] for r in cur.fetchall()}
+
+    copied = 0
     for t in todo:
+        donor = donors.get(clusters.get(t["id"]))
+        if donor is not None and donor["track_id"] != t["id"]:
+            db.merge_sources(conn, t["id"], "musicbrainz", donor["mb"])
+            db.set_pass_status(conn, t["id"], "musicbrainz", True,
+                               extra={"copiedFrom": donor["track_id"]})
+            copied += 1
+            continue
         title = (t["title"] or "").strip()
         if not title:
             db.set_pass_status(conn, t["id"], "musicbrainz", True, extra={"skipped": "no title"})
@@ -105,9 +124,12 @@ def run(conn, force: bool = False, limit: int | None = None,
                 payload["artistTags"] = artist_lookup(t["artist"])
             db.merge_sources(conn, t["id"], "musicbrainz", payload)
             db.set_pass_status(conn, t["id"], "musicbrainz", True, extra={"found": True})
+            cl = clusters.get(t["id"])
+            if cl is not None and cl not in donors:
+                donors[cl] = {"track_id": t["id"], "mb": payload}   # later mates copy in-run
             ok += 1
         except Exception as e:  # noqa: BLE001 — recorded, batch continues
             failed += 1
             print(f"[mb] FAILED #{t['id']} '{title}': {e}", flush=True)
             db.set_pass_status(conn, t["id"], "musicbrainz", False, str(e))
-    print(f"[mb] done: {ok} found, {miss} honest misses, {failed} failed", flush=True)
+    print(f"[mb] done: {ok} found, {miss} honest misses, {failed} failed, {copied} cluster-copied", flush=True)
