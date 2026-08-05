@@ -4,6 +4,57 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## server — 2026-08-05 (evening) — **The library consolidation: one root, canonical names, identity tooling, on-glass input fix**
+
+Adam's mandate (his decisions inline): consolidate ALL music into /home/user/Music
+(Library/+Collections/ split, canonical rename, dupe quarantine, review-page
+approval UX, 30-day slug cold hold, Wurm/keeper as Collections), fix everything it
+touches, keep new ingests consistent, test with real drops (Westworld folders,
+Yahzick YouTube grabs, Darren Korb Bandcamp zips), commit and push.
+
+**The move (tools/organize-library.mjs):** 2,672/2,672 moved, 0 failed — 799
+same-FS renames + 1,873 cross-FS copies (32.5G, sha1-verified, mtimes preserved),
+cache renamed alongside, manifest + pg_dump first. Boot scan after: `+0 ~0 -0`.
+Zones: Library 701 · Collections 1,121 · Archive/Dupes 837 · Unsorted 13.
+Track/disc numbers: new columns + probe + mover backfill power "NN - Title.ext".
+
+**Identity (D14 evidence discipline, now with tooling):** identity.ts +
+/identity review page (pending/applied/unresolved; apply·reject·revert·manual).
+AcoustID keyed (app key; the first key was a user key — the API rejects those
+for lookups). Chain order: speech → tags → acoustid → confident-auto-apply
+(artistless-only, ≥0.90, atomic) → mb → lyrics → … As-run: 284 collection +
+89 fingerprint identities; artistless 411 → 60. Whole-library audit: 1,402
+confirmed, 912 mismatch evidence rows (exact-string compare — mostly formatting
+variants), 131 benign fails (short game clips + mid-move races).
+
+**Ingest/grab unification:** organize.ts is the one naming/filing authority
+(ingest, ytGrab fileAfter, the mover, identity refiles). Zip drops unpack via
+bsdtar (traversal-refusing, verified), nested archives ride the queue, failed
+extraction quarantines as .failed. ytGrab now lands in Library/ post-chain.
+
+**Review pass:** two agents, 16 verified findings fixed (2 HIGH: the review
+page's onclick attribute XSS/apostrophe breakage — rebuilt as data-attribute
+delegation with zero payload in HTML; the mover's dupe rule missing the
+resolver's non-Archive tie clause — 569 clusters would have oscillated every
+re-run). Plus: partial-zip half-ingest, nested-archive destruction, the
+smoke-guard bypass via runEnrichmentPass, silent ffprobe swallows, NAME_MAX.
+
+**On-glass input fix (Adam, live):** v1.22's Music window trapped him —
+double-tap toggled now⇄actions forever (the Scout pattern misapplied) and ring
+was volume. New contract: TAP = actions, DOUBLE-TAP = back/exit (always),
+volume = max + phone-owned (rows/ring/display removed). One session lesson:
+input path healthy while renders stalled = suspect the app/BLE write path,
+recover via app relaunch or BT toggle.
+
+**Tests:** Westworld folder drop — 63/63 filed into Library/Ramin Djawadi/
+across 3 album dirs (Disc 2 suffix correct), 201 playlist memberships, 63
+popups. Yahzick grabs — 4/4 in Library/Yahzick/ (one metadata repair via the
+identity tooling: the "Mann Shorts" channel is Yahzick's own; one flaky grab
+retried — yt-dlp wants a JS runtime (deno) for reliable format extraction).
+Korb Bandcamp zips — 6/6 unpacked (~166 tracks), overnight grind.
+
+---
+
 ## server — 2026-08-05 (day) — **Adaptive playlists + the /home/user/Music/new ingest drop-box**
 
 Adam's morning ask: ~20-25 rule-driven playlists that new music joins automatically,

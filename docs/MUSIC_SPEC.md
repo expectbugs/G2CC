@@ -413,3 +413,41 @@ Adam caught invented identities on artistless asset-dump files (full story: CHAN
 - **Library as-built:** 2,672 tracks / 4 roots (3 corrupt rips removed on Adam's word,
   tarball at `~/.g2cc/`); resolver must exclude genre `sound effects` from playlists and
   `spoken word` from shuffle (both are REAL content, not junk).
+
+## D15. The consolidation (2026-08-05 — single root, canonical names, identity tooling)
+
+Adam's mandate: one organized library, nothing unknown, everything self-maintaining.
+Decisions (his words): Library/+Collections/ layout YES; canonical rename YES; dupes
+QUARANTINE; approval UX = review page; slug sources 30-day cold hold; Wurm/keeper
+assets = Collections.
+
+**Layout (single root `/home/user/Music`, `organize.ts` is the authority):**
+- `Library/<Artist>/[<Album>[ (Disc N)]/]<NN - Title.ext>` — tag-derived, sanitized
+  (`sanitizeName`: FS-hostile chars → `·`), NAME_MAX-capped loudly.
+- `Collections/<Set>/…` — game-shaped sets (FF ×2 merged, SotN, GTA Radio, Wurm
+  incl. tomcd, Doom/DSoP, Game Audio/misc, OCRemix URL-tagged, VA-detected albums
+  ≥6 tracks/≥5 artists). STICKY: refiles canonicalize in place, never migrate out.
+- `Archive/Dupes/` — non-representative dupe-cluster members (fidelity → non-Archive
+  → path; `dedupeClusters` + the mover share the exact rule). Parked but playable.
+- `Unsorted/<source-group>/` — honest residue; subgrouping sticky for artistless
+  refiles. `YouTube/` + `new/` are landing zones, never destinations.
+- Mover: `tools/organize-library.mjs` (server-down preflight, pg_dump, manifest,
+  cross-FS copy+sha1+mtime-preserve, --plan-only). As-run: 2,672 moved, 0 failed,
+  32.5G copied; boot scan after = `+0 ~0 -0`.
+
+**Identity (D14 rules stand — evidence, never invention):**
+- `identity.ts`: applyIdentity records `sources.identity` w/ prev (reversible),
+  resets mb/lyrics/embed pass_status; acoustid ≥0.90 auto-applies for ARTISTLESS
+  tracks only (atomic artistless guard); collection assignments are Adam-approved
+  classifications (method 'collection').
+- `/identity` review page (Tailscale+token): pending proposals (apply/reject),
+  applied (revert), unresolved (manual apply). Zero payload rides HTML attributes.
+- Chain order: speech → tags → acoustid → confident-auto-apply → mb → lyrics →
+  audio → profile → embed → dedupe → pretranscode; grabs file via `fileAfter`.
+- As-run: 284 collection + 89 fingerprint identities applied; artistless 411 → 60
+  (36 no-match + 24 sub-threshold pendings on the page).
+
+**Ingest (drop-box, unchanged contract + archives):** `.zip` drops unpack via
+bsdtar (`..`-safe, verified) into `new/<stem>/`; nested archives ride the queue;
+non-audio payload removed loudly; failed extraction → partial output removed +
+archive renamed `.failed`. Everything files through the shared `fileTrack`.

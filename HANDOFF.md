@@ -1,5 +1,21 @@
 # G2CC — Fresh-Session Handoff (2026-08-05, post the all-phases music night)
 
+> **CONSOLIDATION ADDENDUM (2026-08-05 evening — supersedes §1/§3 library
+> facts):** the whole library now lives in **`/home/user/Music`** (single
+> `libraryDirs` root): `Library/<Artist>/<Album>/NN - Title.ext` ·
+> `Collections/<Set>/` (sticky) · `Archive/Dupes/` (quarantined, playable,
+> never cluster-representative) · `Unsorted/` · landing zones `YouTube/` +
+> `new/`. 2,672 moved 0 failed (manifest + pg_dump in `~/.g2cc/`); slug +
+> Downloads originals KEPT until ~2026-09-05 then reap deliberately.
+> `organize.ts` is THE naming/filing authority (ingest, ytGrab, identity
+> refiles, the mover). Identity: `identity.ts` + the `/identity` review page
+> (token+Tailscale); acoustid keyed + audited; D14 evidence rules stand.
+> Music window input (Adam on-glass): TAP = actions, DOUBLE-TAP = back/exit
+> ALWAYS, volume = max + phone-owned. Spec: `docs/MUSIC_SPEC.md` §D15.
+> Ingest unpacks `.zip` (bsdtar); folder drops leave sidecars behind (by
+> design). yt-dlp wants a JS runtime (deno) for reliable formats — flaky
+> grabs retry clean. Full story: CHANGELOG 2026-08-05 (evening).
+
 **Read this first, whole.** Then: `~/.claude/CLAUDE.md` (Adam's global rules), `CLAUDE.md`
 (project rules), `docs/MUSIC_SPEC.md` (the Part D contract — **all five phases BUILT**,
 statuses in its header/D9) and `docs/README.md`. History: `CHANGELOG.md` + git; don't

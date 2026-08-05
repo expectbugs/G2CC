@@ -2,9 +2,10 @@
 // Phase C). Takes the Media-category slot the EarbudWindow left (windows/
 // media.ts — the third-party phone-media window — is untouched).
 //
-// Levels: Now Playing (default; in fullBleed it is a scrollContent view so the
-// RING = VOLUME — the Buds 2a have no volume gesture — and double-tap surfaces
-// the Actions list; in classic mode the left menu carries the actions), Ask
+// Levels: Now Playing (default; in fullBleed it is a scrollContent view —
+// TAP opens the Actions list, DOUBLE-TAP exits to the ribbon (Adam
+// 2026-08-05: double-tap always backs out; volume is max + phone-owned);
+// in classic mode the left menu carries the actions), Ask
 // (fuzzy request → resolver → plays immediately, honest which-lane line),
 // Browse (Playlists / Artists / Albums / Moods & Genres / Search / YouTube),
 // Queue (jump/curate/save), Playlists (open/play/rename/delete — delete is
@@ -59,11 +60,12 @@ const YT_GRABBED_ROWS = ['▶ Play now', 'Append to queue', 'Back to results', '
 type DictMode = 'ask' | 'search' | 'save-name' | 'rename' | 'yt-search' | null
 
 // The FULL action set (review 2026-08-06 #W1: in fullBleed this list is the
-// ONLY reachable UI besides ring-volume — Ask/Browse/Queue must live here or
-// the Phase C gate flow is undrivable on Adam's daily config).
+// The tap-from-Now-Playing hub (Adam 2026-08-05: tap = actions, double-tap =
+// exit, volume is phone-owned so the Vol rows are gone) — Ask/Browse/Queue
+// must live here or the Phase C gate flow is undrivable on Adam's daily config.
 const ACTIONS_ROWS = [
   '⏯ Pause/Resume', '⏭ Next', 'Ask', 'Browse', 'Queue',
-  '⏮ Previous', '🔉 Vol −10', '🔊 Vol +10', 'Seek…', 'Radio toggle',
+  '⏮ Previous', 'Seek…', 'Radio toggle',
   'Save queue as playlist', 'Add current → playlist', 'Lyrics', '■ Stop',
 ] as const
 const SEEK_ROWS = ['−5 min', '−30 s', '+30 s', '+5 min', 'Restart track', 'Cancel'] as const
@@ -169,7 +171,7 @@ export class MusicWindow implements OsWindow {
     } else {
       lines.push(`♪ idle · ${st.queued} staged (tap to play)`)
     }
-    lines.push(`radio ${st.radio ? 'ON' : 'off'}${st.volumePct !== null ? ` · vol ${st.volumePct}%` : ''}${st.caps === null ? ' · NO PHONE' : ''}`)
+    lines.push(`radio ${st.radio ? 'ON' : 'off'}${st.caps === null ? ' · NO PHONE' : ''}`)
     return lines.join('\n')
   }
 
@@ -292,12 +294,12 @@ export class MusicWindow implements OsWindow {
 
   private nowView(p: MusicPlayerService | null): WinView {
     // TWO shapes, the Reader/Scout branch pattern (review #W1):
-    //  - fullBleed: scrollContent + NO menu — the content is the capture, so
-    //    RING = VOLUME (D6.1: the Buds have no volume gesture) and double-tap
-    //    surfaces the FULL Actions list (onScrollReadBack, the Scout pattern).
+    //  - fullBleed: scrollContent + NO menu — TAP opens the Actions list and
+    //    double-tap EXITS to the ribbon (Adam 2026-08-05: double-tap always
+    //    backs out; volume is always max and phone-owned, so no ring-volume).
     //    A menu here would render as dead-looking top-bar chrome.
     //  - classic: a plain text view with the menu list (ring drives the native
-    //    list; volume lives in Actions' Vol rows).
+    //    list).
     const fb = fbActiveCfg(this.ctx.config)
     const st = p?.status()
     const menu = fb ? [] : [st?.music === 'playing' ? 'Pause' : 'Resume', 'Next', 'Ask', 'Browse', 'Queue', 'More', 'Reload', 'Main']
@@ -305,7 +307,7 @@ export class MusicWindow implements OsWindow {
     if (!st!.track && st!.queued === 0) {
       return {
         mode: 'text', title: 'Music · idle', menu, scrollContent: fb,
-        text: `Nothing queued.\n\n${fb ? 'Double-tap → Ask/Browse' : 'Menu → Ask/Browse'} to fill the queue.\nBud taps: single = play/pause · double = next · triple = previous.`,
+        text: `Nothing queued.\n\n${fb ? 'Tap → Ask/Browse' : 'Menu → Ask/Browse'} to fill the queue.\nBud taps: single = play/pause · double = next · triple = previous.`,
       }
     }
     const lines: string[] = []
@@ -320,9 +322,9 @@ export class MusicWindow implements OsWindow {
       lines.push('')
       lines.push(`Resume: tap a bud (or Resume) to start at ${fmtClock(st!.posMs)}`)
     }
-    lines.push(`queue ${st!.queuePos} · radio ${st!.radio ? 'ON' : 'off'} · vol ${st!.volumePct !== null ? `${st!.volumePct}%` : '—'}`)
+    lines.push(`queue ${st!.queuePos} · radio ${st!.radio ? 'ON' : 'off'}`)
     if (st!.caps === null) lines.push('⚠ NO PHONE ATTACHED — playback needs the phone')
-    if (fb) lines.push('', 'ring = volume · double-tap = actions')
+    if (fb) lines.push('', 'tap = actions · double-tap = exit')
     return { mode: 'text', title: `Music · ${st!.music}`, menu, scrollContent: fb, text: lines.join('\n') }
   }
 
@@ -621,6 +623,15 @@ export class MusicWindow implements OsWindow {
     const p = this.player()
     try {
       switch (this.level) {
+        case 'now': {
+          // Single tap on the fullBleed Now Playing view = the Actions list
+          // (Adam 2026-08-05: double-tap is reserved for back/exit everywhere).
+          this.offsets.set('actions', 0)
+          this.level = 'actions'
+          this.focus = 'content'
+          this.requestRender()
+          return
+        }
         case 'actions': {
           const row = this.pick([...ACTIONS_ROWS], 'actions', index)
           if (row === null) return
@@ -631,8 +642,6 @@ export class MusicWindow implements OsWindow {
             case 'Browse': this.level = 'browse'; this.focus = 'content'; this.requestRender(); return
             case 'Queue': this.offsets.set('queue', 0); this.level = 'queue'; this.focus = 'content'; this.requestRender(); return
             case '⏮ Previous': p?.skip(-1, 'window'); return
-            case '🔉 Vol −10': p?.setVolume((p.volumePct ?? 60) - 10, 'window'); this.requestRender(); return
-            case '🔊 Vol +10': p?.setVolume((p.volumePct ?? 60) + 10, 'window'); this.requestRender(); return
             case 'Seek…': this.level = 'seek'; this.requestRender(); return
             case 'Radio toggle': p?.setRadio(!p.radio, 'window'); this.requestRender(); return
             case 'Save queue as playlist':
@@ -1010,25 +1019,14 @@ export class MusicWindow implements OsWindow {
     return true
   }
 
-  /** FullBleed double-tap on the scrollContent Now Playing view → the Actions
-   *  list (the Scout onScrollReadBack pattern). */
-  async onScrollReadBack(): Promise<boolean> {
-    if (this.level !== 'now') return false
-    this.offsets.set('actions', 0)
-    this.level = 'actions'
-    this.focus = 'content'
-    this.requestRender()
-    return true
-  }
-
-  /** FullBleed ring-scroll on the Now Playing scrollContent view: VOLUME
-   *  (D6.1 — the Buds 2a have no volume gesture; this is where it lives). */
-  async onContentScroll(dir: 'up' | 'down'): Promise<void> {
-    const p = this.player()
-    if (!p || this.level !== 'now') return
-    p.setVolume((p.volumePct ?? 60) + (dir === 'up' ? 5 : -5), 'ring')
-    this.requestRender()
-  }
+  // Adam on-glass 2026-08-05: double-tap must ALWAYS back out/exit (he was
+  // trapped in a now⇄actions loop — the old onScrollReadBack consumed the
+  // double-tap to open Actions, Scout-style). No onScrollReadBack: the WM's
+  // double-tap path walks onBack hierarchically and EXITS from 'now'.
+  // Actions now opens with a single TAP on the Now Playing view (hub_select
+  // → onBrowseSelect 'now' case). Ring-volume is GONE with it (same session:
+  // volume is always max, Adam controls it on the phone) — no onContentScroll
+  // means ring is a natural no-op on the short Now Playing text.
 
   private async loadLyrics(): Promise<void> {
     const p = this.player()
