@@ -65,9 +65,17 @@ def _extract(video: str) -> str:
 
 def index_file(conn, path: str) -> int:
     """Insert one audio file into tracks mirroring music.ts's probe/insert
-    (title from tags else basename; artist falls back album_artist)."""
-    parsed = ffprobe_json(path, "format=duration:format_tags=title,artist,album,album_artist")
-    tags = {k.lower(): v for k, v in (parsed.get("format", {}).get("tags") or {}).items()}
+    (title from tags else basename; artist falls back album_artist).
+    Reads STREAM tags too (2026-08-05): Ogg stores vorbiscomments per-stream —
+    a format-only probe indexes tagged .ogg files as artistless (bit live on
+    the Bastion trilogy; music.ts got the same fix). Format-level wins."""
+    parsed = ffprobe_json(path, "format=duration:format_tags=title,artist,album,album_artist:stream_tags=title,artist,album,album_artist")
+    tags: dict[str, str] = {}
+    for st in parsed.get("streams", []) or []:
+        for k, v in (st.get("tags") or {}).items():
+            tags[k.lower()] = str(v)
+    for k, v in (parsed.get("format", {}).get("tags") or {}).items():
+        tags[k.lower()] = str(v)
     dur = parsed.get("format", {}).get("duration")
     dur_ms = round(float(dur) * 1000) if dur else None
     base = os.path.splitext(os.path.basename(path))[0].replace(SIBLING_MARK.rstrip("."), "").rstrip(".")

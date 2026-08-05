@@ -148,14 +148,22 @@ interface ProbeResult { title: string; artist: string | null; album: string | nu
 async function ffprobe(path: string): Promise<ProbeResult> {
   const { stdout } = await execFileAsync('ffprobe', [
     '-v', 'error',
-    '-show_entries', 'format=duration:format_tags=title,artist,album,album_artist',
+    // stream_tags too (2026-08-05): Ogg stores vorbiscomments PER-STREAM — a
+    // format-only probe indexes tagged .ogg files as artistless (found via the
+    // Bastion-trilogy tagging; audio/enrich/passes/videosweep.py mirrors this).
+    '-show_entries', 'format=duration:format_tags=title,artist,album,album_artist:stream_tags=title,artist,album,album_artist',
     '-of', 'json', path,
   ], { maxBuffer: 1024 * 1024 })
   const parsed = JSON.parse(stdout) as {
     format?: { duration?: string; tags?: Record<string, string> }
+    streams?: { tags?: Record<string, string> }[]
   }
-  // ffprobe tag keys vary in case — normalize.
+  // ffprobe tag keys vary in case — normalize. Stream tags first so
+  // format-level wins on collision.
   const tags: Record<string, string> = {}
+  for (const st of parsed.streams ?? []) {
+    for (const [k, v] of Object.entries(st.tags ?? {})) tags[k.toLowerCase()] = v
+  }
   for (const [k, v] of Object.entries(parsed.format?.tags ?? {})) tags[k.toLowerCase()] = v
   const durS = parseFloat(parsed.format?.duration ?? '')
   return {
