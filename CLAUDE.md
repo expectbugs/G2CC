@@ -4,6 +4,10 @@
 
 System-wide rules in `~/.claude/CLAUDE.md` apply here too. This file holds G2CC-specific rules. Authoritative build spec: `g2_custom_app_spec.md` (Part A: G2 app, Part B: audio pipeline + STT). If this file conflicts with the spec, the spec wins.
 
+Part D — the **music app** (Spotify-shaped, PC-library streaming, knowledge-base-driven
+fuzzy playlists) — is spec'd in `docs/MUSIC_SPEC.md` and supersedes the rejected earbud
+lane (`docs/EARBUD_SPEC.md`, Part C). The original joined initiatives:
+
 This project covers TWO joined initiatives Adam is implementing together:
 - **Part A — G2 Custom App.** Direct-BLE Android app that replaces the Even Hub companion-app dance. Talks BLE to the Even G2 glasses and WebSocket to the home server. Server bridges to a **Claude Code subprocess** (vanilla CC initially; swarm Code specialist when the swarm exists). See `g2_custom_app_spec.md` Part A and `/home/user/G2 Custom/PLAN.md`.
 - **Part B — Audio + STT Upgrade.** DJI Mic 3 mono TX2 → per-utterance ADAPTIVE Wiener (the 2026-06-23-validated BT path; learned-profile + NLMS retained as fallbacks) → a CONFIG-SELECTED NeMo ASR model (`config.stt.parakeetModel` — **canary-qwen-2.5b since the 2026-07-23 shootout**; parakeet-tdt-0.6b-v2 one flip back). DeepFilterNet was evaluated on real captures and LOST twice — offline tool only (`dfn_polish.py`). See `g2_custom_app_spec.md` Part B (§8 revision notes) and the CHANGELOG 2026-07-22/23 entries.

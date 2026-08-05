@@ -1,7 +1,8 @@
 # Earbud Audio — Full Spec (Part C)
 
 **Status: BUILT + DEPLOYED + FIELD-TESTED 2026-08-04 — then REJECTED BY ADAM as a design
-the same evening. A ground-up redesign is mandated (fresh session; HANDOFF §1).** This
+the same evening. The replacement is `docs/MUSIC_SPEC.md` (Part D — designed, Phase A
+done; its Phase B REMOVES this lane per its D2 map).** This
 document remains the accurate reference for WHAT EXISTS (the code still runs until the
 redesign replaces it) and the post-mortem below is the redesign's required reading.
 

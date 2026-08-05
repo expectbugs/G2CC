@@ -4,6 +4,68 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## server 3303c92 — 2026-08-04 (late) → 2026-08-05 — **The music redesign: MUSIC_SPEC (Part D) + the Phase A knowledge base + the fabrication hunt**
+
+**Design (Q&A with Adam, all decisions in the spec's D1):** the rejected earbud lane's
+replacement is a standalone, Spotify-shaped music app — dictation/TTS/Companion shelved to
+their own future session. `docs/MUSIC_SPEC.md` (Part D) is the build contract: knowledge-base
+enrichment → fuzzy-request playlists ("play some hard metal stuff"), native bud taps,
+transient popups, explicit-only audio-only yt-dlp, five gated phases. Opus-low for every
+LLM call ("Haiku sucks"); no favorites; playlists manual + LLM-built.
+
+**Phase A (Adam's go) — the knowledge base, built and gated:** `music-meta-1` migration
+(track_meta / play_history / playlists / player_state) + the `audio/enrich` runner (10
+resumable per-track passes: full tags, MusicBrainz, LRCLIB lyrics, librosa features, Opus
+profiles, bge-small embeddings → Qdrant `g2cc_music`, duration-cluster dedupe, whole-library
+opus pretranscode, video-audio sweep, consistency). Adam widened the library mid-run from 1
+root to 4 (pandora2/Media/Music, ~/Music, the Downloads FF collection) — the resumable
+design absorbed it as a second wave. Final: **2,672 tracks, 100% profiled + embedded**, 584
+dupe clusters/1,421 tracks (one real Opus call + one MB query per cluster — ~1,500 copies
+free), 7.87 GB instant-play transcode cache. Reports: `audio/enrich/reports/`
+(2026-08-05-phase-a-remediated.md + the 362-row remediation diff).
+
+**The fabrication incident (Adam-caught, the entry that matters):** profiles for artistless
+asset-dump files carried INVENTED identities — "audiobook chapters", "male hip-hop", "harsh
+metal/punk" for what his ears proved were game-music instrumentals. Root cause chain: (1)
+title-only MusicBrainz fuzzy search scored bare names ('1h', 'flock', '4') at 100 against
+unrelated recordings; (2) the Opus profiler TRUSTED the false identity over the measured
+audio; (3) the operator (me) presented profile prose as fact without testing the audio.
+Remediation (his go): artistless files get NO MB search (honest `unidentifiable`); a new
+**speech pass** (60 s excerpt → parakeet-tdt CPU, ~0.2 s/track) writes objective
+vocal-presence facts; the profile prompt gained a hard EVIDENCE HIERARCHY (measurements >
+corroborated identity; "unknown origin" is a correct answer); **449 tracks re-profiled → 345
+genre changes, 69 vocals changes, 225 now honestly 'unknown'**. Mid-remediation bugs caught
+by verification, both fixed: copy DONORS now require profile-status ok (a status-cleared
+track re-donated its stale description — 122 stale copies), and batch dossiers snapshot at
+stage start (corrections must land BEFORE the stage).
+
+**Ground-truth curation:** Adam identified the numbered mystery files as the **Bastion
+ending trilogy** (Build That Wall / Mother, I'm Here / Setting Sail, Coming Home — ASR
+transcripts matched his memory line-for-line); real tags written INTO the six files (his
+go), which exposed and fixed an indexer gap: **Ogg vorbiscomments are stream-level and both
+indexers probed format-only** (music.ts + videosweep; smokes 35/36). 315.ogg =
+Adam-confirmed unknown instrumental. GTA radio rips + IT interludes = correct as profiled.
+
+**Corrupt-rip removal (his word):** 3 genuinely-undecodable files removed (Saucerful, Soul
+Brother ×2; tarball safety at `~/.g2cc/removed-corrupt-2026-08-05.tar.gz`) — and the
+pre-delete decode verification SAVED two falsely-accused tracks (Astronomy Domine, Headlong:
+broken container duration made the audio pass's mid-file seek decode empty; retry-from-0
+fallback added).
+
+**Lessons (each burned live):** verify identity before narrating it — a fuzzy match is not
+an identification; measurements outrank stories; when human ground truth exists, WRITE IT
+DOWN (an LLM re-roll regressed a known-good profile — CLASS.wav is hand-curated now);
+`pgrep -f | head -1` matches your own shell wrapper (killed the wrong PID; the resumable
+pass design absorbed the double-run); Postgres jsonb `a || b - 'key'` parses as
+`a || (b - 'key')` — parenthesize; put the answer Adam asked for at the BOTTOM of the
+message (terminal scroll ate the Black Mages answer).
+
+**State for Phase B:** v1.21 **installed** (not merely staged); the earbud lane still runs
+(removal IS Phase B); the live server predates the migration + 4-root config + stream-tag
+fix — its first Phase-B restart picks up all three. Unit baseline 389; smoke gate 35/36.
+
+---
+
 ## v1.21 (staged) + server 235e7a9 — 2026-08-04 (late evening) — **Field test, the deep-review fix batch, the ears supervisor — and Adam's design verdict: REJECTED, redesign mandated**
 
 The same evening, three arcs:

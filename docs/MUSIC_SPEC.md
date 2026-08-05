@@ -1,11 +1,13 @@
 # Music App — Full Spec (Part D)
 
-**Status: DESIGNED 2026-08-04 (Adam + the redesign session, Q&A-approved). BUILD NOT
-STARTED — awaits Adam's explicit go.** This replaces the earbud lane's music slice with a
-standalone, Spotify-shaped music app. `docs/EARBUD_SPEC.md` remains the record of the
-rejected lane (its post-mortem is required reading); this document is the build contract
-for what replaces it. Companion to `g2_custom_app_spec.md` Parts A/B; if this conflicts
-with the Three Absolute Rules or the wire discipline there, those win.
+**Status: Phase A COMPLETE + gate PASSED 2026-08-05** (knowledge base built, then
+remediated after the fabrication incident — see §D14 amendments; reports + the 362-row
+diff in `audio/enrich/reports/`). **Phase B is the standing mandate** (HANDOFF §1).
+Designed 2026-08-04 with Adam, Q&A-approved. This replaces the earbud lane's music slice
+with a standalone, Spotify-shaped music app. `docs/EARBUD_SPEC.md` remains the record of
+the rejected lane (its post-mortem is required reading); this document is the build
+contract for what replaces it. Companion to `g2_custom_app_spec.md` Parts A/B; if this
+conflicts with the Three Absolute Rules or the wire discipline there, those win.
 
 ## D0. Mission + scope boundary
 
@@ -357,6 +359,42 @@ sound to the phone.
 
 ## D11. Adam's outstanding items
 
-1. **Last.fm API key** (free account) — unblocks backfill-lastfm.
-2. **AcoustID API key** (free) — unblocks backfill-acoustid + fingerprint dedupe.
-3. The **go** to start Phase A.
+1. ~~Last.fm API key~~ — **assessed redundant 2026-08-05** (the Opus profiles cover its
+   tag vocabulary; VGM coverage poor; embedding radio replaces similar-artists). Skip
+   unless Adam overrides.
+2. **AcoustID API key** (free) — unblocks fingerprint identification of the ~200+
+   honest-unknown tracks (would have named the Bastion trilogy instantly) + dedupe
+   hardening.
+3. ~~The go to start Phase A~~ — given 2026-08-04; Phase A complete.
+
+## D14. Phase A as-built amendments (2026-08-05 — the fabrication incident)
+
+Adam caught invented identities on artistless asset-dump files (full story: CHANGELOG
+2026-08-04/05). Standing changes to D3.2, all live in `audio/enrich/`:
+
+- **MB pass:** a file with NO artist tag gets NO search — title-only Lucene matching
+  scored bare names ('1h', 'flock') at 100 against unrelated recordings. Honest
+  `found:false 'unidentifiable'` instead.
+- **New `speech` pass** (not in `all` — scope with `--artistless`/`--ids`/`--track-id`):
+  60 s excerpt → parakeet-tdt-0.6b-v2 on CPU (~0.2 s/track; GPU belongs to the live
+  server) → `sources.speech {detected, chars, sample}`. ≥30 chars of transcript =
+  vocals/speech present. Run it on every future ingest (yt-dlp included).
+- **Profile prompt EVIDENCE HIERARCHY (hard rules):** `speechDetected` is authoritative
+  for `vocals`; measured features outrank claimed identity (energy judged
+  loudness-normalized — quiet masters are not low-energy); uncorroborated identity =
+  absent; "unknown origin" + genre `unknown` are CORRECT answers.
+- **Copy donors require profile-status ok** — a status-cleared track still carrying its
+  old description must never donate it (122 stale copies bit live). Batch dossiers
+  snapshot at stage START — land corrections before the stage runs.
+- **Curated ground truth** (`sources.profile.curated`) is human-verified and must never
+  be LLM-re-rolled (a re-roll regressed CLASS.wav from correct-classical to "hip hop"):
+  the Bastion trilogy (in-file tags written, both copies), CLASS.wav ×2, flock.ogg,
+  315.ogg.
+- **Both indexers read Ogg STREAM tags** (vorbiscomments are per-stream; format-only
+  probing indexed tagged .ogg as artistless).
+- **Audio pass seek fallback:** broken container duration + mid-file `-ss` = empty decode
+  with rc=0; retry-from-0 before declaring failure. Decode-verify before ANY
+  corrupt-file deletion (saved Astronomy Domine + Headlong).
+- **Library as-built:** 2,672 tracks / 4 roots (3 corrupt rips removed on Adam's word,
+  tarball at `~/.g2cc/`); resolver must exclude genre `sound effects` from playlists and
+  `spoken word` from shuffle (both are REAL content, not junk).

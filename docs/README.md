@@ -17,6 +17,7 @@ Read top-down when fresh; the per-file notes say which is which.
 | `SIM_TOOLING.md` | The EvenHub-simulator design loop + measured firmware font metrics (incl. the `─`≈21 px finding). Layout guide only — validate feel on glass. |
 | `SDK_CAPABILITY_MAP.md` | What the official SDK exposes vs what G2CC uses (the display+input-only scope decision). |
 | `DISPATCH.md` | The dispatch-target architecture (vanilla CC now, swarm specialist later). |
+| `MUSIC_SPEC.md` | **The Part D build contract** (music app: knowledge base + player + resolver; Phase A done + amendments in its D14; Phase B = the standing mandate). |
 | `SCOUT.md` | **The Scout window contract** (2026-07-09): the mixed-mode assistant — ```g2img answer pages, the `/scout/live` mid-turn frame channel + `scout_show.py`, `fetch_images.py`, the locked design decisions. |
 | `HAT_BRIDGE_SPEC.md` | The ESP32 hat design + BOM (not built yet; the phone-replacement path). |
 
@@ -40,6 +41,7 @@ Read top-down when fresh; the per-file notes say which is which.
 | `FORBIDDEN_PATTERN_AUDIT.md` | The line-by-line Three-Rules audit of the inherited g2code/g2aria source. |
 | `INHERITANCE_MAP.md` | File-by-file inheritance from g2code/g2aria (both archived 2026-06-29 → `/home/user/g2-old-backup-2026-06-24.tar.gz`). |
 | `VERIFIED_ENVIRONMENT.md` | Point-in-time environment verification snapshot. |
+| `EARBUD_SPEC.md` | The Part C earbud-lane spec — **design REJECTED 2026-08-04** (its post-mortem is MUSIC_SPEC's required reading; the lane's code runs until MUSIC_SPEC Phase B removes it). |
 | `HOLDS.md` | The pre-upgrades deferral catalog — **superseded** by `upgrades.md` (itself now done) and `overhaul.md`. |
 
 ## Where the rest lives (repo root)
