@@ -334,8 +334,11 @@ class AudioOutController(
             sendToServer(ClientMessage.MediaEvent(msg.id, "error", 0, reason = "no Bluetooth output route (earbud not connected)"))
             return
         }
-        mediaId = msg.id
         ensurePlayer { p ->
+            // mediaId assignment on MAIN (review #E12): a boundary transition
+            // firing in the WS→main hop window could otherwise interleave its
+            // own mediaId write; main-thread ordering settles it.
+            mediaId = msg.id
             val item = buildItem(msg.id, msg.url, msg.title, msg.artist, msg.album)
             p.setMediaItem(item, msg.startMs ?: 0L)
             p.volume = 1f

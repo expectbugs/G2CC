@@ -54,9 +54,9 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=None)
     ap.add_argument("--report-out", default=None)
     ap.add_argument("--artistless", action="store_true",
-                    help="speech pass only: restrict to tracks with no artist tag")
+                    help="speech/acoustid passes: restrict to tracks with no artist tag")
     ap.add_argument("--ids", default=None,
-                    help="speech pass only: comma-separated track ids to test")
+                    help="speech/acoustid passes: comma-separated track ids")
     args = ap.parse_args()
 
     conn = db.connect()

@@ -459,14 +459,25 @@ export class MusicPlayerService {
     switch (msg.state) {
       case 'playing': {
         this.state = 'playing'
-        // Review 2026-08-05 #N1: a 'playing' report means NOTHING is holding
-        // the lane — clear any pause latch. Without this, a transient focus
-        // loss (call ring, nav prompt) auto-paused AND auto-resumed on the
-        // phone, but the latched pausedBy='user' silently killed the queue at
-        // the next track boundary (the advance gates on pausedBy===null).
-        if (this.pausedBy !== null) {
-          console.log(`[music] playing report clears pausedBy='${this.pausedBy}' (phone resumed on its own)`)
+        // Review 2026-08-05 #N1: a 'playing' report means the phone is NOT
+        // holding a USER pause — clear that latch (a transient focus loss
+        // auto-paused AND auto-resumed phone-side; the stale latch silently
+        // killed the queue at the next boundary). Review 2026-08-06 #E3: the
+        // CAPTURE latch is different — playing during a LIVE capture means
+        // the pause lost a race (e.g. a gapless auto-advance crossed it), so
+        // RE-ASSERT the pause instead of clearing; capture-end still resumes.
+        if (this.pausedBy === 'user') {
+          console.log(`[music] playing report clears pausedBy='user' (phone resumed on its own)`)
           this.pausedBy = null
+        } else if (this.pausedBy === 'capture') {
+          if (this.capturing) {
+            console.log('[music] playing report during a LIVE capture — re-asserting the capture pause (#E3 race)')
+            this.sendCapped({ type: 'media_ctl', cmd: 'pause' }, 'media_ctl(pause re-assert, capture)')
+            // pausedBy stays 'capture' — onCaptureState(false) resumes.
+          } else {
+            console.log('[music] playing report with a stale capture latch (capture already ended) — cleared')
+            this.pausedBy = null
+          }
         }
         if (this.announcedId !== msg.id) {
           this.announcedId = msg.id
@@ -542,6 +553,7 @@ export class MusicPlayerService {
         this.closeHistory('error')
         this.state = 'idle'
         this.mediaId = null
+        this.sentNext = null   // hygiene (#E7): the phone's playlist state is unknown after an error
         this.deps.popup(`✗ playback error: ${msg.reason ?? 'unknown'}`)
         this.schedulePersist()
         break
