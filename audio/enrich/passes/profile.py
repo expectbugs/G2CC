@@ -209,9 +209,15 @@ def _copy_from_cluster(conn, todo: list[dict[str, Any]]) -> list[dict[str, Any]]
     (the audio pass owns it). Returns the tracks still needing a real call.
     Requires dedupe to have run since the last index change."""
     with conn.cursor() as cur:
+        # Donor gate (2026-08-05 remediation lesson): description alone is NOT
+        # donor eligibility — a status-CLEARED track still carries its old
+        # description, and copying it resurrects exactly the stale profile a
+        # reset meant to kill (bit us live: 122 stale copies). A donor must
+        # also be profile-status ok.
         cur.execute(
             "SELECT DISTINCT ON (dupe_cluster) dupe_cluster, track_id FROM track_meta "
             "WHERE dupe_cluster IS NOT NULL AND description IS NOT NULL "
+            "AND pass_status->'profile'->>'ok' = 'true' "
             "ORDER BY dupe_cluster, track_id")
         donors = {r["dupe_cluster"]: r["track_id"] for r in cur.fetchall()}
         cur.execute("SELECT track_id, dupe_cluster FROM track_meta WHERE dupe_cluster IS NOT NULL")

@@ -1,0 +1,368 @@
+# Remediation before/after — 449 re-profiled tracks (2026-08-05)
+
+Summary: 449 re-profiled · 345 genre changes · 69 vocals changes · 225 now honestly 'unknown'
+
+Format: `id file :: OLD genres/vocals → NEW genres/vocals` (description changes not shown — see DB).
+
+- #482 `Pink Floyd - Discography [EAC - FLAC] (oan)/Pink Floyd - Is There Anybody Out There [Disc 2] 2000 [EAC - FLAC] (oan)/09 - In The Flesh.flac` :: ['classic rock', 'progressive rock']/male → **['classic rock', 'rock']/instrumental**
+- #487 `Pink Floyd - Discography [EAC - FLAC] (oan)/Pink Floyd - Meddle 1971 [EAC - FLAC] (oan)/01 - One of These Days.flac` :: ['classic rock', 'progressive rock']/male → **['classic rock', 'rock']/instrumental**
+- #541 `Pink Floyd - Discography [EAC - FLAC] (oan)/Pink Floyd - The Dark Side Of The Moon 1973 [EAC - FLAC] (oan)/03 - On the Run.flac` :: ['classic rock', 'electronic']/instrumental → **['classic rock', 'rock']/spoken**
+- #675 `Pink Floyd - Discography [EAC - FLAC] (oan)/Pink Floyd - Ummagumma - Live Album 1969 [EAC - FLAC] (oan)/04 - A Saucerful Of Secrets.flac` :: ['classic rock']/instrumental → **['classic rock', 'rock']/instrumental**
+- #753 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - Classic Queen Remixes (1992) [flac]/01 - 7 Seas of Rhye - Freddie in the House - Mix.flac` :: ['classic rock', 'electronic']/male → **['electronic', 'rock']/male**
+- #754 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - Classic Queen Remixes (1992) [flac]/02 - Theme From Flash Gordon - One - Two Mix.flac` :: ['classic rock', 'electronic']/male → **['electronic', 'rock']/mixed**
+- #755 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - Classic Queen Remixes (1992) [flac]/03 - Bycicle Race - Tour D'Hip - Hop Mix.flac` :: ['classic rock', 'electronic', 'hip hop']/male → **['hip hop', 'rock']/male**
+- #756 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - Classic Queen Remixes (1992) [flac]/04 - Dragon Attack - Dragons Return Mix.flac` :: ['classic rock', 'electronic']/male → **['electronic', 'rock']/male**
+- #757 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - Classic Queen Remixes (1992) [flac]/07 - Love Kills - 12'' Mix Re - Edit.flac` :: ['classic rock', 'electronic']/male → **['pop', 'rock']/male**
+- #758 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - Classic Queen Remixes (1992) [flac]/06 - Radio GaGa - Re - Cut '92.flac` :: ['classic rock', 'pop']/male → **['pop', 'rock']/mixed**
+- #759 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - Classic Queen Remixes (1992) [flac]/05 - We Will Rock You - Rock Mix '92.flac` :: ['classic rock']/male → **['rock']/mixed**
+- #760 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - Classic Queen Remixes (1992) [flac]/09 - In My Defense - rare track from time.flac` :: ['classic rock', 'pop']/male → **['pop', 'rock']/male**
+- #761 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - Classic Queen Remixes (1992) [flac]/08 - Queens Reprise '92 - Mega Mix.flac` :: ['classic rock', 'pop']/male → **['electronic', 'rock']/mixed**
+- #764 `QUEEN.LOSSLESS.MEGA.PACK-HDVClub.EXCLUSiVE/Queen - CD Single Box (1991) [FLAC] {Twelve 3-inch Japanese Discs}/D9 of 12 {Under Pressure}/02 - Soul Brother.flac` :: ['classic rock']/male → **['pop', 'rock']/male**
+- #831 `Rob Zombie - Discography (1998-2013) {320} vtwin88cube/2006 - Educated Horses/01.Sawdust In The Blood.mp3` :: ['metal']/instrumental → **['metal', 'rock']/instrumental**
+- #834 `Rob Zombie - Discography (1998-2013) {320} vtwin88cube/2001 - The Sinister Urge/11.House Of 1000 CorpsesUnholy Three.mp3` :: ['metal', 'rock']/male → **['industrial', 'metal']/male**
+- #920 `The Dark Side of Phobos/The Dark Side of Phobos (flac)/Disk One - Phobos/DSoP_00_WelcomeToHell(Intro).flac` :: ['electronic', 'vgm']/instrumental → **['metal', 'vgm']/instrumental**
+- #932 `The Dark Side of Phobos/The Dark Side of Phobos (flac)/Disk One - Phobos/DSoP_11_JadeSpawn(E2M7).flac` :: ['metal', 'vgm']/instrumental → **['vgm']/instrumental**
+- #935 `The Dark Side of Phobos/The Dark Side of Phobos (flac)/Disk Two - Deimos/DSoP_12_Intermission.flac` :: ['vgm']/instrumental → **['electronic', 'vgm']/instrumental**
+- #936 `The Dark Side of Phobos/The Dark Side of Phobos (flac)/Disk Two - Deimos/DSoP_16_TheGlassMoon(E1M8).flac` :: ['metal', 'vgm']/instrumental → **['electronic', 'rock', 'vgm']/instrumental**
+- #937 `The Dark Side of Phobos/The Dark Side of Phobos (flac)/Disk Two - Deimos/DSoP_13_Infiltrator(E2M1).flac` :: ['metal', 'vgm']/instrumental → **['electronic', 'rock', 'vgm']/instrumental**
+- #938 `The Dark Side of Phobos/The Dark Side of Phobos (flac)/Disk Two - Deimos/DSoP_14_InfectedLab(E1M7).flac` :: ['metal', 'vgm']/instrumental → **['electronic', 'rock', 'vgm']/instrumental**
+- #940 `The Dark Side of Phobos/The Dark Side of Phobos (flac)/Disk Two - Deimos/DSoP_19_IronCathedral(E3M8).flac` :: ['electronic', 'vgm']/instrumental → **['rock', 'vgm']/instrumental**
+- #945 `The Dark Side of Phobos/The Dark Side of Phobos (flac)/Disk Two - Deimos/DSoP_21_DarknessDawning(TextMusic).flac` :: ['electronic', 'vgm']/instrumental → **['electronic', 'vgm']/spoken**
+- #1103 `sotn-music/general/0.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1105 `sotn-music/general/1040172572.wav` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1106 `sotn-music/general/10.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1107 `sotn-music/general/1.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1108 `sotn-music/general/12.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1110 `sotn-music/general/14.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1111 `sotn-music/general/13.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1112 `sotn-music/general/15.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1113 `sotn-music/general/152.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1114 `sotn-music/general/151.ogg` :: ['electronic', 'rock']/instrumental → **['unknown']/instrumental**
+- #1115 `sotn-music/general/16.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1116 `sotn-music/general/19.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1117 `sotn-music/general/20.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1118 `sotn-music/general/314.ogg` :: ['electronic', 'hip hop']/instrumental → **['unknown']/spoken**
+- #1119 `sotn-music/general/214.ogg` :: ['unknown']/instrumental → **['unknown']/spoken**
+- #1120 `sotn-music/general/21.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #1122 `sotn-music/general/4.ogg` :: ['hip hop']/male → **['unknown']/instrumental**
+- #1123 `sotn-music/general/5.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1125 `sotn-music/general/57.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #1127 `sotn-music/general/59.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #1128 `sotn-music/general/58.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #1130 `sotn-music/general/60.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #1132 `sotn-music/general/6.ogg` :: ['hip hop']/male → **['unknown']/instrumental**
+- #1134 `sotn-music/general/Anamanaguchi_Mermaid.ogg` :: ['chiptune', 'electronic']/instrumental → **['electronic']/instrumental**
+- #1135 `sotn-music/general/9.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1136 `sotn-music/general/8.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #1137 `sotn-music/general/CHAPEL_OF_EVIL.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1138 `sotn-music/general/DANGER_02.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1139 `sotn-music/general/GREATWOOD.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1141 `sotn-music/general/Magestorm Jam.mp3` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1142 `sotn-music/general/TEMPLE_OF_LIGHT.ogg` :: ['ambient', 'soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1143 `sotn-music/general/Track0.mp3` :: ['electronic', 'vgm']/instrumental → **['unknown']/instrumental**
+- #1145 `sotn-music/general/Track1.mp3` :: ['electronic', 'rock']/instrumental → **['unknown']/instrumental**
+- #1146 `sotn-music/general/ai_baka_music.mp3` :: ['electronic', 'vgm']/instrumental → **['unknown']/instrumental**
+- #1147 `sotn-music/general/gtaradio/CLASS.wav` :: ['radio', 'rock']/mixed → **['classical', 'radio']/mixed**
+- #1148 `sotn-music/general/gtaradio/CHAT.wav` :: ['radio', 'spoken word']/spoken → **['spoken word']/spoken**
+- #1149 `sotn-music/general/gtaradio/END.mp3` :: ['electronic', 'vgm']/instrumental → **['blues', 'rock']/male**
+- #1150 `sotn-music/general/gtaradio/GAME.wav` :: ['hip hop', 'vgm']/male → **['hip hop']/male**
+- #1151 `sotn-music/general/gtaradio/HEAD.wav` :: ['pop', 'vgm']/mixed → **['electronic', 'pop']/mixed**
+- #1152 `sotn-music/general/gtaradio/FLASH.wav` :: ['pop', 'vgm']/mixed → **['electronic', 'pop']/mixed**
+- #1153 `sotn-music/general/gtaradio/KJAH.wav` :: ['reggae', 'vgm']/male → **['reggae']/male**
+- #1154 `sotn-music/general/gtaradio/LIPS.wav` :: ['pop', 'vgm']/female → **['pop']/mixed**
+- #1155 `sotn-music/general/gtaradio/RISE.wav` :: ['electronic', 'vgm']/instrumental → **['electronic']/instrumental**
+- #1156 `sotn-music/general/gtaradio/MSX.wav` :: ['electronic', 'vgm']/instrumental → **['electronic', 'hip hop']/spoken**
+- #1161 `sotn-music/general/talkradio/CHAT.wav` :: ['radio', 'spoken word']/spoken → **['spoken word']/spoken**
+- #1162 `sotn-music/general/track01.ogg` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1165 `sotn-music/general/track07.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1166 `sotn-music/general/track10.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1167 `sotn-music/general/track04.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1168 `sotn-music/general/track02.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1169 `tomcd/sound.5.2.009.0068.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/instrumental**
+- #1170 `tomcd/sound.5.2.009.0069.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #1172 `tomcd/sound.5.2.009.0071.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #1173 `tomcd/sound.5.2.009.0074.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #1174 `tomcd/sound.5.2.009.0076.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #1175 `tomcd/sound.5.2.009.0075.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/instrumental**
+- #1176 `tomcd/sound.5.2.009.0080.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #1177 `tomcd/sound.5.2.010.1.ogg` :: ['ambient', 'new age']/instrumental → **['ambient']/instrumental**
+- #1178 `tomcd/sound.5.2.009.0081.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #1179 `tomcd/sound.5.2.010.10.ogg` :: ['ambient', 'soundtrack']/instrumental → **['soundtrack']/instrumental**
+- #1180 `tomcd/sound.5.2.010.11.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #1181 `tomcd/sound.5.2.010.13.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #1182 `tomcd/sound.5.2.010.14.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #1183 `tomcd/sound.5.2.010.15.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #1184 `tomcd/sound.5.2.010.12.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #1185 `tomcd/sound.5.2.010.16.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #1186 `tomcd/sound.5.2.010.2.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #1187 `tomcd/sound.5.2.010.3.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #1188 `tomcd/sound.5.2.010.4.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #1189 `tomcd/sound.5.2.010.7.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #1190 `tomcd/sound.5.2.010.8.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #1191 `tomcd/sound.5.2.010.5.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #1192 `tomcd/sound.5.2.010.6.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #1193 `tomcd/sound.5.2.010.9.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #1194 `Muse - Knights Of Cydonia  (Video) [360p].g2cc-audio.ogg` :: ['alternative', 'rock']/male → **['alternative', 'rock']/instrumental**
+- #1411 `/home/user/Downloads/[AGM22] Final Fantasy collection v3 - Jan 2020/_Games OST/Final Fantasy/Final Fantasy 7/СOMPILATION of FINAL FANTASY VII Best Selection/2-09 - Pride of Soldier.flac` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1814 `Final Fantasy Music Collection (FLAC)/Final Fantasy VII Original Soundtrack/Disc 3/08 - Steal the Tiny Bronco.flac` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #1994 `DOOM/The Dark Side of Phobos/Disc 1/DSoP_00_WelcomeToHell(Intro).flac` :: ['electronic', 'vgm']/instrumental → **['metal', 'vgm']/instrumental**
+- #2005 `DOOM/The Dark Side of Phobos/Disc 1/DSoP_11_JadeSpawn(E2M7).flac` :: ['metal', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2006 `DOOM/The Dark Side of Phobos/Disc 2/DSoP_12_Intermission.flac` :: ['vgm']/instrumental → **['electronic', 'vgm']/instrumental**
+- #2007 `DOOM/The Dark Side of Phobos/Disc 2/DSoP_13_Infiltrator(E2M1).flac` :: ['metal', 'vgm']/instrumental → **['electronic', 'rock', 'vgm']/instrumental**
+- #2008 `DOOM/The Dark Side of Phobos/Disc 2/DSoP_14_InfectedLab(E1M7).flac` :: ['metal', 'vgm']/instrumental → **['electronic', 'rock', 'vgm']/instrumental**
+- #2010 `DOOM/The Dark Side of Phobos/Disc 2/DSoP_16_TheGlassMoon(E1M8).flac` :: ['metal', 'vgm']/instrumental → **['electronic', 'rock', 'vgm']/instrumental**
+- #2013 `DOOM/The Dark Side of Phobos/Disc 2/DSoP_19_IronCathedral(E3M8).flac` :: ['electronic', 'vgm']/instrumental → **['rock', 'vgm']/instrumental**
+- #2015 `DOOM/The Dark Side of Phobos/Disc 2/DSoP_21_DarknessDawning(TextMusic).flac` :: ['electronic', 'vgm']/instrumental → **['electronic', 'vgm']/spoken**
+- #2127 `GTA-Radio/CHAT.wav` :: ['radio', 'spoken word']/spoken → **['spoken word']/spoken**
+- #2128 `GTA-Radio/CLASS.wav` :: ['radio', 'rock']/mixed → **['classical', 'radio']/mixed**
+- #2129 `GTA-Radio/END.mp3` :: ['electronic', 'vgm']/instrumental → **['blues', 'rock']/male**
+- #2130 `GTA-Radio/FLASH.wav` :: ['pop', 'vgm']/mixed → **['electronic', 'pop']/mixed**
+- #2131 `GTA-Radio/GAME.wav` :: ['hip hop', 'vgm']/male → **['hip hop']/male**
+- #2132 `GTA-Radio/HEAD.wav` :: ['pop', 'vgm']/mixed → **['electronic', 'pop']/mixed**
+- #2133 `GTA-Radio/KJAH.wav` :: ['reggae', 'vgm']/male → **['reggae']/male**
+- #2134 `GTA-Radio/LIPS.wav` :: ['pop', 'vgm']/female → **['pop']/mixed**
+- #2135 `GTA-Radio/MSX.wav` :: ['electronic', 'vgm']/instrumental → **['electronic', 'hip hop']/spoken**
+- #2136 `GTA-Radio/RISE.wav` :: ['electronic', 'vgm']/instrumental → **['electronic']/instrumental**
+- #2336 `Pink Floyd/Pink Floyd - The Dark Side Of The Moon 1973 [EAC - FLAC] (oan)/03 - On the Run.flac` :: ['classic rock', 'electronic']/instrumental → **['classic rock', 'rock']/spoken**
+- #2370 `Queen/Queen - CD Single Box (1991) [FLAC] {Twelve 3-inch Japanese Discs}/D9 of 12 {Under Pressure}/02 - Soul Brother.flac` :: ['classic rock']/male → **['pop', 'rock']/male**
+- #2371 `Queen/Queen - Classic Queen Remixes (1992) [flac]/01 - 7 Seas of Rhye - Freddie in the House - Mix.flac` :: ['classic rock', 'electronic']/male → **['electronic', 'rock']/male**
+- #2372 `Queen/Queen - Classic Queen Remixes (1992) [flac]/02 - Theme From Flash Gordon - One - Two Mix.flac` :: ['classic rock', 'electronic']/male → **['electronic', 'rock']/mixed**
+- #2373 `Queen/Queen - Classic Queen Remixes (1992) [flac]/03 - Bycicle Race - Tour D'Hip - Hop Mix.flac` :: ['classic rock', 'electronic', 'hip hop']/male → **['hip hop', 'rock']/male**
+- #2374 `Queen/Queen - Classic Queen Remixes (1992) [flac]/04 - Dragon Attack - Dragons Return Mix.flac` :: ['classic rock', 'electronic']/male → **['electronic', 'rock']/male**
+- #2375 `Queen/Queen - Classic Queen Remixes (1992) [flac]/05 - We Will Rock You - Rock Mix '92.flac` :: ['classic rock']/male → **['rock']/mixed**
+- #2376 `Queen/Queen - Classic Queen Remixes (1992) [flac]/06 - Radio GaGa - Re - Cut '92.flac` :: ['classic rock', 'pop']/male → **['pop', 'rock']/mixed**
+- #2377 `Queen/Queen - Classic Queen Remixes (1992) [flac]/07 - Love Kills - 12'' Mix Re - Edit.flac` :: ['classic rock', 'electronic']/male → **['pop', 'rock']/male**
+- #2378 `Queen/Queen - Classic Queen Remixes (1992) [flac]/08 - Queens Reprise '92 - Mega Mix.flac` :: ['classic rock', 'pop']/male → **['electronic', 'rock']/mixed**
+- #2379 `Queen/Queen - Classic Queen Remixes (1992) [flac]/09 - In My Defense - rare track from time.flac` :: ['classic rock', 'pop']/male → **['pop', 'rock']/male**
+- #2413 `misc/0.ogg` :: ['electronic', 'experimental']/instrumental → **['unknown']/instrumental**
+- #2414 `misc/0h.ogg` :: ['electronic']/instrumental → **['electronic', 'unknown']/instrumental**
+- #2415 `misc/0o.ogg` :: ['electronic', 'experimental']/instrumental → **['unknown']/instrumental**
+- #2416 `misc/1.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2417 `misc/10.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2418 `misc/1040172572.wav` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2419 `misc/12.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2421 `misc/13.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2422 `misc/14.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2423 `misc/15.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2424 `misc/151.ogg` :: ['electronic', 'rock']/instrumental → **['unknown']/instrumental**
+- #2425 `misc/152.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2426 `misc/16.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2427 `misc/19.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2428 `misc/1h.ogg` :: ['spoken word']/spoken → **['electronic', 'unknown']/instrumental**
+- #2429 `misc/1o.ogg` :: ['spoken word']/spoken → **['unknown']/instrumental**
+- #2430 `misc/2.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2431 `misc/20.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2432 `misc/21.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #2433 `misc/214.ogg` :: ['unknown']/instrumental → **['unknown']/spoken**
+- #2434 `misc/2h.ogg` :: ['spoken word']/spoken → **['unknown']/instrumental**
+- #2435 `misc/2o.ogg` :: ['spoken word']/spoken → **['unknown']/instrumental**
+- #2436 `misc/3.ogg` :: ['electronic', 'experimental']/instrumental → **['unknown']/instrumental**
+- #2437 `misc/314.ogg` :: ['electronic', 'hip hop']/instrumental → **['unknown']/spoken**
+- #2439 `misc/3h.ogg` :: ['spoken word']/spoken → **['unknown']/instrumental**
+- #2440 `misc/3o.ogg` :: ['spoken word']/spoken → **['unknown']/instrumental**
+- #2441 `misc/4.ogg` :: ['electronic', 'experimental']/instrumental → **['unknown']/instrumental**
+- #2443 `misc/4h.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2444 `misc/4o.ogg` :: ['spoken word']/spoken → **['unknown']/instrumental**
+- #2445 `misc/5.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2447 `misc/57.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #2448 `misc/58.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #2449 `misc/59.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #2450 `misc/6.ogg` :: ['hip hop']/male → **['unknown']/instrumental**
+- #2451 `misc/60.ogg` :: ['unknown']/spoken → **['unknown']/instrumental**
+- #2454 `misc/8.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2456 `misc/9.ogg` :: ['electronic']/instrumental → **['unknown']/instrumental**
+- #2457 `misc/Anamanaguchi_Mermaid.ogg` :: ['chiptune', 'electronic']/instrumental → **['electronic']/instrumental**
+- #2458 `misc/Boss.ogg` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2459 `misc/CHAPEL_OF_EVIL.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2460 `misc/DANGER_02.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2461 `misc/GREATWOOD.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2462 `misc/Game1.mp3` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2464 `misc/Lava.ogg` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2465 `misc/Magestorm Jam.mp3` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2467 `misc/TEMPLE_OF_LIGHT.ogg` :: ['ambient', 'soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2468 `misc/TheDeadRocks-EasyJob.ogg` :: ['rock', 'surf']/instrumental → **['unknown']/instrumental**
+- #2469 `misc/TheDeadRocks-GreenSecretFromAmazonia.ogg` :: ['rock', 'surf']/instrumental → **['unknown']/instrumental**
+- #2470 `misc/Track0.mp3` :: ['electronic', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2471 `misc/Track1.mp3` :: ['electronic', 'rock']/instrumental → **['unknown']/instrumental**
+- #2472 `misc/ai_baka_music.mp3` :: ['electronic', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2473 `misc/beyond2000.ogg` :: ['electronic']/instrumental → **['electronic', 'vgm']/instrumental**
+- #2474 `misc/dance_cleopatra.ogg` :: ['blues', 'rock']/instrumental → **['blues']/instrumental**
+- #2475 `misc/demonhill.ogg` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2477 `misc/fanfare.ogg` :: ['classical']/instrumental → **['vgm']/instrumental**
+- #2478 `misc/flock.ogg` :: ['metal', 'punk']/harsh → **['unknown']/instrumental**
+- #2479 `misc/frozen-mainzik-1p.ogg` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2481 `misc/ingame_15.ogg` :: ['metal', 'vgm']/instrumental → **['metal']/instrumental**
+- #2482 `misc/introzik.ogg` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2483 `misc/kart_grand_prix.ogg` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2487 `misc/menutheme.ogg` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2492 `misc/reach_reach.ogg` :: ['electronic', 'pop']/instrumental → **['vgm']/instrumental**
+- #2493 `misc/reachreach.ogg` :: ['electronic', 'pop']/instrumental → **['electronic', 'vgm']/instrumental**
+- #2499 `misc/the-diplomat.ogg` :: ['classical', 'folk']/instrumental → **['electronic']/instrumental**
+- #2502 `misc/together.ogg` :: ['electronic', 'vgm']/instrumental → **['electronic']/instrumental**
+- #2503 `misc/tong.ogg` :: ['folk', 'world']/instrumental → **['electronic']/instrumental**
+- #2504 `misc/track01.ogg` :: ['electronic', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2505 `misc/track02.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2506 `misc/track04.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2507 `misc/track07.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2508 `misc/track10.ogg` :: ['soundtrack', 'vgm']/instrumental → **['vgm']/instrumental**
+- #2510 `wurm/sound.5.2.009.0007.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/spoken**
+- #2511 `wurm/sound.5.2.009.0008.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/spoken**
+- #2512 `wurm/sound.5.2.009.0009.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2513 `wurm/sound.5.2.009.0020.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/spoken**
+- #2514 `wurm/sound.5.2.009.0021.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2515 `wurm/sound.5.2.009.0022.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2516 `wurm/sound.5.2.009.0023.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/spoken**
+- #2517 `wurm/sound.5.2.009.0024.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2518 `wurm/sound.5.2.009.0026.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2519 `wurm/sound.5.2.009.0027.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2520 `wurm/sound.5.2.009.0028.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2521 `wurm/sound.5.2.009.0029.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2522 `wurm/sound.5.2.009.0030.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2523 `wurm/sound.5.2.009.0031.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2524 `wurm/sound.5.2.009.0032.001.ogg` :: ['sound design', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2525 `wurm/sound.5.2.009.0040.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2526 `wurm/sound.5.2.009.0055.001.ogg` :: ['vgm']/instrumental → **['unknown']/spoken**
+- #2527 `wurm/sound.5.2.009.0056.001.ogg` :: ['vgm']/instrumental → **['unknown']/spoken**
+- #2528 `wurm/sound.5.2.009.0057.001.ogg` :: ['vgm']/instrumental → **['unknown']/spoken**
+- #2529 `wurm/sound.5.2.009.0058.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2530 `wurm/sound.5.2.009.0059.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2531 `wurm/sound.5.2.009.0060.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2532 `wurm/sound.5.2.009.0061.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2533 `wurm/sound.5.2.009.0062.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2534 `wurm/sound.5.2.009.0063.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2535 `wurm/sound.5.2.009.0064.001.ogg` :: ['vgm']/instrumental → **['unknown']/spoken**
+- #2536 `wurm/sound.5.2.009.0065.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2537 `wurm/sound.5.2.009.0066.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2538 `wurm/sound.5.2.009.0067.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2539 `wurm/sound.5.2.009.0068.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2540 `wurm/sound.5.2.009.0069.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #2541 `wurm/sound.5.2.009.0071.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #2542 `wurm/sound.5.2.009.0072.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2543 `wurm/sound.5.2.009.0073.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2544 `wurm/sound.5.2.009.0074.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #2545 `wurm/sound.5.2.009.0075.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2546 `wurm/sound.5.2.009.0076.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #2547 `wurm/sound.5.2.009.0077.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2548 `wurm/sound.5.2.009.0078.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2549 `wurm/sound.5.2.009.0079.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2550 `wurm/sound.5.2.009.0080.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #2551 `wurm/sound.5.2.009.0081.001.ogg` :: ['soundtrack', 'vgm']/instrumental → **['unknown']/spoken**
+- #2552 `wurm/sound.5.2.009.0083.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/spoken**
+- #2553 `wurm/sound.5.2.010.1.ogg` :: ['ambient', 'new age']/instrumental → **['ambient']/instrumental**
+- #2554 `wurm/sound.5.2.010.10.ogg` :: ['ambient', 'soundtrack']/instrumental → **['soundtrack']/instrumental**
+- #2555 `wurm/sound.5.2.010.11.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #2556 `wurm/sound.5.2.010.12.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #2557 `wurm/sound.5.2.010.13.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #2558 `wurm/sound.5.2.010.14.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #2559 `wurm/sound.5.2.010.15.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #2560 `wurm/sound.5.2.010.16.ogg` :: ['ambient', 'new age']/instrumental → **['soundtrack']/instrumental**
+- #2561 `wurm/sound.5.2.010.2.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #2562 `wurm/sound.5.2.010.3.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #2563 `wurm/sound.5.2.010.4.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #2564 `wurm/sound.5.2.010.5.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #2565 `wurm/sound.5.2.010.6.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #2566 `wurm/sound.5.2.010.7.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #2567 `wurm/sound.5.2.010.8.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #2568 `wurm/sound.5.2.010.9.ogg` :: ['ambient', 'new age']/instrumental → **['new age']/instrumental**
+- #2569 `wurm/sound.7.1.006.0001.001.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2570 `wurm/sound.7.1.006.0001.002.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2571 `wurm/sound.7.1.006.0001.003.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2572 `wurm/sound.7.1.006.0001.004.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2573 `wurm/sound.7.1.006.0001.005.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2574 `wurm/sound.7.1.006.0001.006.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2575 `wurm/sound.7.1.006.0002.001.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2576 `wurm/sound.7.1.006.0002.002.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2577 `wurm/sound.7.1.006.0002.003.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2578 `wurm/sound.7.1.006.0002.004.ogg` :: ['sound effects']/instrumental → **['unknown']/instrumental**
+- #2579 `wurm/sound.7.1.006.0002.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2580 `wurm/sound.7.1.006.0002.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2581 `wurm/sound.7.1.006.0003.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2582 `wurm/sound.7.1.006.0003.002.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2583 `wurm/sound.7.1.006.0003.003.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2584 `wurm/sound.7.1.006.0003.004.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2585 `wurm/sound.7.1.006.0003.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2586 `wurm/sound.7.1.006.0003.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2587 `wurm/sound.7.1.006.0004.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2588 `wurm/sound.7.1.006.0004.002.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2589 `wurm/sound.7.1.006.0004.003.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2590 `wurm/sound.7.1.006.0004.004.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2591 `wurm/sound.7.1.006.0004.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2592 `wurm/sound.7.1.006.0004.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2593 `wurm/sound.7.1.006.0005.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2594 `wurm/sound.7.1.006.0005.002.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2595 `wurm/sound.7.1.006.0005.003.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2596 `wurm/sound.7.1.006.0005.004.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2597 `wurm/sound.7.1.006.0005.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2598 `wurm/sound.7.1.006.0005.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2599 `wurm/sound.7.1.006.0006.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2600 `wurm/sound.7.1.006.0006.002.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2601 `wurm/sound.7.1.006.0006.003.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2602 `wurm/sound.7.1.006.0006.004.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2603 `wurm/sound.7.1.006.0006.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2604 `wurm/sound.7.1.006.0006.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2605 `wurm/sound.7.1.006.0007.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2606 `wurm/sound.7.1.006.0007.002.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2607 `wurm/sound.7.1.006.0007.003.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2608 `wurm/sound.7.1.006.0007.004.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2609 `wurm/sound.7.1.006.0007.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2610 `wurm/sound.7.1.006.0007.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2611 `wurm/sound.7.1.006.0008.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2612 `wurm/sound.7.1.006.0008.002.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2613 `wurm/sound.7.1.006.0008.003.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2614 `wurm/sound.7.1.006.0008.004.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2615 `wurm/sound.7.1.006.0008.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2616 `wurm/sound.7.1.006.0008.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2617 `wurm/sound.7.1.006.0009.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2618 `wurm/sound.7.1.006.0009.002.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2619 `wurm/sound.7.1.006.0009.003.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2620 `wurm/sound.7.1.006.0009.004.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2621 `wurm/sound.7.1.006.0009.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2622 `wurm/sound.7.1.006.0009.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2623 `wurm/sound.7.1.006.0010.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2624 `wurm/sound.7.1.006.0010.002.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2625 `wurm/sound.7.1.006.0010.003.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2626 `wurm/sound.7.1.006.0010.004.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2627 `wurm/sound.7.1.006.0010.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2628 `wurm/sound.7.1.006.0010.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2629 `wurm/sound.7.1.006.0011.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2630 `wurm/sound.7.1.006.0011.002.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2631 `wurm/sound.7.1.006.0011.003.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2632 `wurm/sound.7.1.006.0011.004.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2633 `wurm/sound.7.1.006.0011.005.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2634 `wurm/sound.7.1.006.0011.006.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2635 `wurm/sound.7.1.006.0018.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2636 `wurm/sound.7.1.006.0019.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2637 `wurm/sound.7.1.006.0020.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2638 `wurm/sound.7.1.006.0021.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2639 `wurm/sound.7.1.006.0022.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2640 `wurm/sound.7.1.006.0023.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2641 `wurm/sound.7.1.006.0023.002.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2642 `wurm/sound.7.1.006.0023.003.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2643 `wurm/sound.7.1.006.0023.004.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2644 `wurm/sound.7.1.006.0023.005.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2645 `wurm/sound.7.1.006.0023.006.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2646 `wurm/sound.7.3.007.0001.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2647 `wurm/sound.7.3.007.0002.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2648 `wurm/sound.7.3.007.0003.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2649 `wurm/sound.7.3.007.0004.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2650 `wurm/sound.7.3.007.0005.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2651 `wurm/sound.7.3.007.0006.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2652 `wurm/sound.7.4.007.0001.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2653 `wurm/sound.7.4.007.0002.001.ogg` :: ['vgm']/instrumental → **['unknown']/instrumental**
+- #2654 `wurm/sound.7.4.007.0003.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2655 `wurm/sound.7.4.007.0004.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2656 `wurm/sound.7.4.007.0005.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2657 `wurm/sound.7.4.007.0006.001.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2658 `wurm/sound.achievement.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2659 `wurm/sound.achievement.update.ogg` :: ['sound effects', 'vgm']/instrumental → **['unknown']/instrumental**
+- #2660 `wurm/sound.bell.dong.1.ogg` :: ['sound effects', 'vgm']/instrumental → **['sound effect']/instrumental**
+- #2661 `wurm/sound.bell.dong.2.ogg` :: ['sound effects', 'vgm']/instrumental → **['sound effect']/instrumental**
+- #2662 `wurm/sound.bell.dong.3.ogg` :: ['sound effects', 'vgm']/instrumental → **['sound effect']/instrumental**
+- #2663 `wurm/sound.bell.dong.4.ogg` :: ['sound effects', 'vgm']/instrumental → **['sound effect']/instrumental**
+- #2664 `wurm/sound.bell.dong.5.ogg` :: ['sound effects', 'vgm']/instrumental → **['sound effect']/instrumental**
+- #2665 `wurm/sound.bell.handbell.long.ogg` :: ['sound effects', 'vgm']/instrumental → **['sound effect']/instrumental**
+- #2666 `wurm/sound.bell.handbell.ogg` :: ['sound effects', 'vgm']/instrumental → **['sound effect']/instrumental**
+- #2667 `wurm/sound.tree.falling.ogg` :: ['sound effects', 'vgm']/instrumental → **['sound effect']/instrumental**
+- #2668 `wurm/sound.work.drumroll.ogg` :: ['sound effects', 'vgm']/instrumental → **['sound effect']/instrumental**
+- #2674 `Muse/Muse - Knights Of Cydonia  (Video) [360p].g2cc-audio.m4a` :: ['alternative', 'rock']/male → **['alternative', 'rock']/instrumental**
+- #2675 `Muse/Muse - Knights Of Cydonia  (Video) [360p].g2cc-audio.ogg` :: ['alternative', 'rock']/male → **['alternative', 'rock']/instrumental**
