@@ -30,6 +30,7 @@ import {
   appendToPlaylist, removePlaylistRow, movePlaylistRow, type PlaylistRow,
 } from '../playlists.js'
 import { getLyrics, parseLrc, currentLrcIndex, type LrcLine } from '../lyrics.js'
+import { ytSearch, ytGrab, ytHitRow, type YtHit, type GrabResult } from '../youtube.js'
 
 function fmtClock(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000))
@@ -41,7 +42,7 @@ type Level =
   | 'artists' | 'albums' | 'vocab' | 'results'
   | 'queue' | 'queue-row' | 'confirm-clear'
   | 'playlists' | 'playlist' | 'playlist-edit' | 'playlist-row' | 'confirm-delete'
-  | 'lyrics'
+  | 'lyrics' | 'yt' | 'yt-grabbed'
 
 /** Levels that render mode 'browse' — the ONLY ones where onBack's first
  *  press flips content→menu focus (review #W6: the flip on a TEXT level —
@@ -49,11 +50,13 @@ type Level =
 const BROWSE_LEVELS: ReadonlySet<Level> = new Set([
   'actions', 'seek', 'browse', 'artists', 'albums', 'vocab', 'results',
   'queue', 'queue-row', 'confirm-clear', 'playlists', 'playlist',
-  'playlist-edit', 'playlist-row', 'confirm-delete',
+  'playlist-edit', 'playlist-row', 'confirm-delete', 'yt', 'yt-grabbed',
 ])
 
+const YT_GRABBED_ROWS = ['▶ Play now', 'Append to queue', 'Back to results', 'Done'] as const
+
 /** What the next dictation transcript means (ONE mode at a time — D6.1 flows). */
-type DictMode = 'ask' | 'search' | 'save-name' | 'rename' | null
+type DictMode = 'ask' | 'search' | 'save-name' | 'rename' | 'yt-search' | null
 
 // The FULL action set (review 2026-08-06 #W1: in fullBleed this list is the
 // ONLY reachable UI besides ring-volume — Ask/Browse/Queue must live here or
@@ -171,6 +174,8 @@ export class MusicWindow implements OsWindow {
   }
 
   statusLine(): string | null {
+    if (this.grabbing) return 'grabbing…'
+    if (this.ytSearching) return 'searching YouTube…'
     if (this.resolving) return 'resolving…'
     if (this.dictMode) return 'listening…'
     // Recent ask/save/rename outcomes surface here for ~8 s (review #W8:
@@ -183,6 +188,10 @@ export class MusicWindow implements OsWindow {
     return st?.track && st.music === 'playing' ? `♪ ${oneLine(st.track.title, 30)}` : null
   }
 
+  // A grab is NOT a sacred dictation/confirm surface (review #D-F7: blocking
+  // overlays for a minutes-class download deferred a CALL alarm up to 10 min
+  // — the B5 rationale doesn't apply; the grab completes fine under an
+  // overlay and announces via popup + level change).
   interruptible(): boolean { return this.dictMode === null && !this.resolving }
 
   // ------------------------------------------------------------ views
@@ -262,6 +271,22 @@ export class MusicWindow implements OsWindow {
         // Cancel FIRST — a stray/double-fire tap must never delete (reader r27).
         return { mode: 'browse', menuMode, title: `Delete "${oneLine(this.plOpen?.name ?? '?', 20)}"?`, menu: ['Back', 'Main'], items: ['Cancel', `Confirm delete (${this.plOpen?.n ?? 0} tracks)`] }
       case 'lyrics': return this.lyricsView()
+      case 'yt': {
+        const rows = this.ytHits.length
+          ? this.ytHits.map(ytHitRow)
+          : [this.dictMode === 'yt-search' ? '🎤 (listening — say what to grab)' : '(no results — Dictate to search)']
+        const lines = browsePageItems(rows, this.off('yt')).items
+        const title = this.grabbing ? 'YouTube · grabbing…' : `YouTube${this.ytQuery ? ` · "${oneLine(this.ytQuery, 16)}"` : ''}`
+        const view: WinView = { mode: 'browse', menuMode, title, menu: ['Dictate', 'Back', 'Main'], items: lines }
+        if (this.askStatus) view.title = `${view.title} · ${oneLine(this.askStatus, 24)}`
+        return view
+      }
+      case 'yt-grabbed':
+        return {
+          mode: 'browse', menuMode,
+          title: `Grabbed: ${oneLine(this.grabbed?.track.title ?? '?', 22)}`,
+          menu: ['Back', 'Main'], items: [...YT_GRABBED_ROWS],
+        }
     }
   }
 
@@ -378,9 +403,10 @@ export class MusicWindow implements OsWindow {
   }
 
   async onTypedText(text: string): Promise<void> {
-    // Typed input is exact + user-authored — trusted for the pending mode,
-    // else it's an Ask (the natural default for a music window).
-    const mode = this.dictMode ?? 'ask'
+    // Typed input is exact + user-authored — trusted for the pending mode;
+    // with none, the LEVEL decides (yt = a grab search, else an Ask — the
+    // natural default for a music window).
+    const mode = this.dictMode ?? (this.level === 'yt' ? 'yt-search' : 'ask')
     this.disarmDictation('typed input supersedes')
     await this.handleInput(mode, text)
   }
@@ -393,6 +419,7 @@ export class MusicWindow implements OsWindow {
       case 'search': await this.runSearch(q); return
       case 'save-name': await this.runSaveQueue(q); return
       case 'rename': await this.runRename(q); return
+      case 'yt-search': await this.runYtSearch(q); return
     }
   }
 
@@ -514,7 +541,7 @@ export class MusicWindow implements OsWindow {
         case 'Resume': p?.toggle('window resume'); this.requestRender(); return
         case 'Next': p?.skip(1, 'window'); return
         case 'Ask': this.level = 'ask'; this.askStatus = null; this.armDictation('ask'); return
-        case 'Dictate': this.armDictation(this.level === 'ask' ? 'ask' : 'search'); return
+        case 'Dictate': this.armDictation(this.level === 'ask' ? 'ask' : this.level === 'yt' ? 'yt-search' : 'search'); return
         case 'Browse': this.level = 'browse'; this.focus = 'content'; this.requestRender(); return
         case 'Queue': this.offsets.set('queue', 0); this.level = 'queue'; this.focus = 'content'; this.requestRender(); return
         case 'More': this.offsets.set('actions', 0); this.level = 'actions'; this.focus = 'content'; this.requestRender(); return
@@ -783,6 +810,40 @@ export class MusicWindow implements OsWindow {
           this.requestRender()
           return
         }
+        case 'yt': {
+          if (this.ytHits.length === 0) return   // the hint row
+          const rows = this.ytHits.map(ytHitRow)
+          const row = this.pick(rows, 'yt', index)
+          if (row === null) return
+          await this.runYtGrab(this.ytHits[row])
+          return
+        }
+        case 'yt-grabbed': {
+          if (index < 0 || index >= YT_GRABBED_ROWS.length) return
+          const g = this.grabbed
+          switch (YT_GRABBED_ROWS[index]) {
+            case '▶ Play now':
+              if (g && p?.playQueue([toPlayerTrack(g.track)], 0, 'youtube grab', g.track.title)) {
+                this.lastAsk = null
+                this.level = 'now'
+              } else {
+                // On-glass honesty (review #D-F12a — the refusal was log-only).
+                this.askStatus = 'Playback refused (no media-capable phone attached).'
+              }
+              break
+            case 'Append to queue':
+              if (g && p) {
+                p.append([toPlayerTrack(g.track)], 'youtube grab')
+                this.askStatus = `Appended: ${oneLine(g.track.title, 28)}`
+                this.level = 'now'
+              }
+              break
+            case 'Back to results': this.level = 'yt'; break
+            case 'Done': this.level = 'now'; break
+          }
+          this.requestRender()
+          return
+        }
         default:
           this.ctx.log(`[music-win] browse select at level '${this.level}' — ignored`)
       }
@@ -826,13 +887,69 @@ export class MusicWindow implements OsWindow {
     this.requestRender()
   }
 
+  // ------------------------------------------------------------ YouTube (D7)
+
+  private ytHits: YtHit[] = []
+  private ytQuery = ''
+  private grabbing = false
+  private grabbed: GrabResult | null = null
+
   private async enterYouTube(): Promise<void> {
-    // Phase D replaces this stub with the search→pick→grab flow.
-    this.results = []
-    this.resultsLabel = 'YouTube'
-    this.askStatus = 'YouTube grabs land with Phase D (tonight).'
-    this.level = 'ask'
+    // Explicit-only (D7): this level is the ONE road to a grab — no search
+    // miss ever falls through to here on its own.
+    this.offsets.set('yt', 0)
+    this.level = 'yt'
+    this.focus = 'content'
+    this.armDictation('yt-search')
+  }
+
+  private ytSearching = false
+  private ytSearchSeq = 0
+
+  private async runYtSearch(q: string): Promise<void> {
+    // Seq guard (review #D-F12b): two rapid searches must not land out of
+    // order and leave stale hits under the newer query's title.
+    const seq = ++this.ytSearchSeq
+    this.ytQuery = q
+    this.askStatus = null
+    this.ytSearching = true
     this.requestRender()
+    try {
+      const hits = await ytSearch(q, 5)
+      if (seq !== this.ytSearchSeq) { this.ctx.log(`[music-win] yt search "${q}" superseded — dropped`); return }
+      this.ytHits = hits
+      this.offsets.set('yt', 0)
+      if (this.ytHits.length === 0) this.askStatus = `No YouTube results for "${q}".`
+      this.level = 'yt'
+    } catch (e) {
+      if (seq !== this.ytSearchSeq) return
+      this.askStatus = `YouTube search failed: ${(e as Error).message}`
+      this.ctx.log(`[music-win] yt search failed: ${(e as Error).message}`)
+    } finally {
+      if (seq === this.ytSearchSeq) this.ytSearching = false
+      this.requestRender()
+    }
+  }
+
+  private async runYtGrab(hit: YtHit): Promise<void> {
+    if (this.grabbing) { this.ctx.log('[music-win] grab already in flight — ignored'); return }
+    const p = this.player()
+    this.grabbing = true
+    this.askStatus = `⬇ grabbing "${oneLine(hit.title, 28)}"…`
+    this.requestRender()
+    try {
+      this.grabbed = await ytGrab(this.ctx.config, hit)
+      this.askStatus = `✔ grabbed: ${oneLine(this.grabbed.track.title, 30)}`
+      p?.popup(`✔ grabbed: ${oneLine(this.grabbed.track.title, 30)}`)   // D7's completion popup
+      this.level = 'yt-grabbed'
+    } catch (e) {
+      // D7: failures render loudly in-window.
+      this.askStatus = `Grab FAILED: ${(e as Error).message}`
+      this.ctx.log(`[music-win] yt grab failed: ${(e as Error).message}`)
+    } finally {
+      this.grabbing = false
+      this.requestRender()
+    }
   }
 
   async onBack(): Promise<boolean> {
@@ -845,6 +962,7 @@ export class MusicWindow implements OsWindow {
       'queue': 'now', 'queue-row': 'queue', 'confirm-clear': 'queue',
       'playlists': 'browse', 'playlist': 'playlists', 'playlist-edit': 'playlist',
       'playlist-row': 'playlist-edit', 'confirm-delete': 'playlist', 'lyrics': 'now',
+      'yt': 'browse', 'yt-grabbed': 'yt',
     }
     if (this.level === 'now') return false
     // The content→menu focus flip only exists on BROWSE levels (review #W6:
