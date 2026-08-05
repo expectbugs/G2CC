@@ -481,6 +481,14 @@ export class MusicWindow implements OsWindow {
     try {
       const trimmed = name.trim()
       const existing = (await listPlaylists()).find((pl) => pl.name.toLowerCase() === trimmed.toLowerCase())
+      if (existing?.adaptive) {
+        // Refuse on the FIRST pass (review 2026-08-05 A#4): the replace-confirm
+        // round-trip promised a replace savePlaylist can never deliver.
+        this.pendingSaveConfirm = null
+        this.askStatus = `"${existing.name}" is an ADAPTIVE playlist (rule-managed) — pick another name.`
+        this.armDictation('save-name')
+        return
+      }
       if (existing && this.pendingSaveConfirm?.toLowerCase() !== trimmed.toLowerCase()) {
         this.pendingSaveConfirm = trimmed
         this.askStatus = `"${existing.name}" exists (${existing.n} tracks) — say the name AGAIN to replace it, or a different name.`
@@ -799,11 +807,18 @@ export class MusicWindow implements OsWindow {
         case 'playlist-row': {
           if (!this.plOpen || index < 0 || index >= PLAYLIST_ROW_ACTIONS.length) return
           const sel = this.rowSel
-          switch (PLAYLIST_ROW_ACTIONS[index]) {
-            case 'Remove': await removePlaylistRow(this.plOpen.id, sel); break
-            case 'Move up': await movePlaylistRow(this.plOpen.id, sel, 'up'); break
-            case 'Move down': await movePlaylistRow(this.plOpen.id, sel, 'down'); break
-            case 'Cancel': break
+          try {
+            switch (PLAYLIST_ROW_ACTIONS[index]) {
+              case 'Remove': await removePlaylistRow(this.plOpen.id, sel); break
+              case 'Move up': await movePlaylistRow(this.plOpen.id, sel, 'up'); break
+              case 'Move down': await movePlaylistRow(this.plOpen.id, sel, 'down'); break
+              case 'Cancel': break
+            }
+          } catch (e) {
+            // A#3: the guards throw now (e.g. a playlist converted to adaptive
+            // while this window sat open on stale plOpen) — surface, don't die.
+            this.askStatus = `Edit failed: ${(e as Error).message}`
+            this.ctx.log(`[music-win] playlist-row edit failed: ${(e as Error).message}`)
           }
           this.plTracks = await playlistTracks(this.plOpen.id)
           this.plOpen = { ...this.plOpen, n: this.plTracks.length }

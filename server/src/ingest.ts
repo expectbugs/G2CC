@@ -144,23 +144,62 @@ export async function ingestFileNow(config: G2CCConfig, path: string, opts: Inge
 
   // 3. File it: <the ingest dir's library root>/<Artist>/[<Album>/]<name>.
   const fresh = (await query<TrackRow>('SELECT * FROM tracks WHERE id = $1', [row.id])).rows[0] ?? row
-  const destDir = fresh.artist
+  // Content-change guard (B-review 2026-08-05 #1a): a same-name re-drop lands
+  // ON the in-flight path (enqueue suppresses its event as in-flight) and
+  // OVERWRITES the bytes mid-enrichment — filing now would put the NEW bytes
+  // under the OLD row's settled identity. mtime is the tell; content changed
+  // means every enrichment pass is stale, so reset pass_status and re-run.
+  const st = await fsp.stat(path).catch(() => null)
+  if (!st) {
+    console.error(`[ingest] ${basename(path)} vanished after enrichment — nothing filed`)
+    return null
+  }
+  if (Math.round(st.mtimeMs) !== Number(fresh.mtime_ms)) {
+    console.error(`[ingest] ${basename(path)} CHANGED during enrichment (mtime ${fresh.mtime_ms} → ${Math.round(st.mtimeMs)}) — a same-name re-drop overwrote it; resetting pass status and re-queuing the new bytes`)
+    await query("UPDATE track_meta SET pass_status = '{}'::jsonb WHERE track_id = $1", [row.id])
+      .catch((e: unknown) => console.error(`[ingest] pass_status reset for track ${row.id} ALSO failed (stale meta until a manual re-enrich): ${e instanceof Error ? e.message : String(e)}`))
+    // Direct push, not enqueue(): we ARE the in-flight path — enqueue's own
+    // guard would eat this. Inside drain, the loop picks it up next iteration;
+    // the void drain covers a direct (non-queue) caller.
+    if (!pending.includes(path)) pending.push(path)
+    void drain(config)
+    return null
+  }
+  let destDir = fresh.artist
     ? (fresh.album ? join(root, sanitizeDirName(fresh.artist), sanitizeDirName(fresh.album)) : join(root, sanitizeDirName(fresh.artist)))
     : join(root, 'Unsorted')
+  // Containment guard (B-review 2026-08-05 #3): an artist tag literally named
+  // like the drop-box dir ('new') resolves INSIDE the recursive watch — the
+  // filed file re-fires the watcher and re-enriches forever. Unsorted instead.
+  const ingestRootAbs = config.music.ingestDir.replace(/\/+$/, '')
+  if (destDir === ingestRootAbs || destDir.startsWith(`${ingestRootAbs}/`)) {
+    console.warn(`[ingest] destination ${destDir} is INSIDE the drop-box (tag collides with the watch dir) — filing under Unsorted instead`)
+    destDir = join(root, 'Unsorted')
+  }
   await fsp.mkdir(destDir, { recursive: true })
-  let dest = join(destDir, basename(path))
+  const baseExt = extname(path)
+  const baseStem = basename(path, baseExt)
+  let dest = join(destDir, `${baseStem}${baseExt}`)
   if (existsSync(dest)) {
-    const ext = extname(dest)
-    dest = join(destDir, `${basename(dest, ext)} (${row.id})${ext}`)
+    // Loop until FREE (B-review 2026-08-05 #4): fsp.rename overwrites an
+    // existing dest silently on POSIX, so the suffixed candidates need the
+    // same existence check as the base name. (check→rename TOCTOU accepted:
+    // the serial queue is the only writer filing into the library.)
+    let n = 0
+    do {
+      n++
+      dest = join(destDir, `${baseStem} (${row.id}${n > 1 ? `-${n}` : ''})${baseExt}`)
+    } while (existsSync(dest))
     console.warn(`[ingest] destination existed — filing as ${basename(dest)}`)
   }
   // The move pair, hazard-ordered (ingest review 2026-08-05 #9): first wait
   // out any mid-walk scan (its vanished-row deletion racing a rename CASCADE-
   // wiped enrichment — the 449-track remediation class), then UPDATE the DB
-  // path BEFORE the rename. A scan starting inside the pair now sees the file
-  // still on disk at new/ (a transient DUPLICATE row the next scan reaps) —
-  // never a deletion. rowCount is checked (#24): a 0-row update means a scan
-  // deleted the row under us — revert nothing, re-index loudly.
+  // path BEFORE the rename. awaitScanIdle is pacing, not a lock (B#2): a scan
+  // can still SNAPSHOT between it and the UPDATE — that interleaving is closed
+  // by the scan's conditional delete (id AND snapshot-path, music.ts), which
+  // no-ops once this UPDATE lands. rowCount is checked (#24): a 0-row update
+  // means a scan deleted the row under us — revert nothing, re-index loudly.
   await awaitScanIdle()
   const upd = await query('UPDATE tracks SET path = $2 WHERE id = $1', [row.id, dest])
   if (upd.rowCount === 0) {
@@ -223,12 +262,22 @@ async function drain(config: G2CCConfig): Promise<void> {
     while (pending.length > 0) {
       const path = pending.shift()!
       inFlightPath = path
+      let filed: unknown = null
       try {
-        await ingestFileNow(config, path)
+        filed = await ingestFileNow(config, path)
       } catch (e) {
         console.error(`[ingest] ${basename(path)} FAILED (left in place): ${e instanceof Error ? e.message : String(e)}`)
       } finally {
         inFlightPath = null
+      }
+      // B-review 2026-08-05 #1b: a same-name drop landing between the rename
+      // and the guard clearing was suppressed as in-flight. After a SUCCESSFUL
+      // filing the original moved out — anything at the path now is new
+      // content. (Failure exits leave the ORIGINAL file in place — those must
+      // NOT requeue, or a permanent-fail file hot-loops the minutes-class chain.)
+      if (filed && existsSync(path)) {
+        console.log(`[ingest] ${basename(path)} re-appeared after filing (same-name drop during processing) — queued`)
+        enqueue(config, path)
       }
     }
   } finally {
@@ -257,11 +306,10 @@ export function startIngestWatcher(config: G2CCConfig): void {
   void (async () => {
     try {
       await fsp.mkdir(dir, { recursive: true })
-      const waiting = await walkAudio(dir)
-      if (waiting.length > 0) {
-        console.log(`[ingest] boot sweep: ${waiting.length} file(s) already waiting in ${dir}`)
-        for (const f of waiting) enqueue(config, f)
-      }
+      // Watch BEFORE sweeping (B-review 2026-08-05 #5): a file landing between
+      // the sweep's enumeration and the watch attach got no event and wasn't
+      // swept — stranded until the next restart. Attached-first, a double-add
+      // (event + sweep) is harmless: enqueue dedups against pending/in-flight.
       watcher = watch(dir, { recursive: true }, (_event, name) => {
         if (!name) return
         const full = join(dir, name.toString())
@@ -271,6 +319,11 @@ export function startIngestWatcher(config: G2CCConfig): void {
         enqueue(config, full)
       })
       watcher.on('error', (e) => console.error(`[ingest] watcher error (drop-box dead until restart): ${e.message}`))
+      const waiting = await walkAudio(dir)
+      if (waiting.length > 0) {
+        console.log(`[ingest] boot sweep: ${waiting.length} file(s) already waiting in ${dir}`)
+        for (const f of waiting) enqueue(config, f)
+      }
       console.log(`[ingest] watching ${dir} (drop audio there → indexed, enriched, filed, playlisted)`)
     } catch (e) {
       console.error(`[ingest] failed to start (drop-box unavailable): ${e instanceof Error ? e.message : String(e)}`)

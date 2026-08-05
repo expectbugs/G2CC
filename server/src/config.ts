@@ -247,7 +247,10 @@ function defaultConfig(): G2CCConfig {
       allowSpeaker: false,
     },
     music: {
-      libraryDirs: ['/mnt/slug/Music'],
+      // /home/user/Music is included so the DEFAULT pair is self-consistent —
+      // ingestDir below must sit inside a root or the drop-box refuses to
+      // start (B-review 2026-08-05 #6: the old default pair could never work).
+      libraryDirs: ['/mnt/slug/Music', '/home/user/Music'],
       format: 'opus',
       cacheDir: join(homedir(), '.g2cc', 'media-cache'),
       youtubeDir: 'YouTube',

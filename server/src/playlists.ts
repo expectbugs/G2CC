@@ -129,10 +129,11 @@ export async function removePlaylistRow(playlistId: number, visualIdx: number): 
   await withTransaction(async (c) => {
     const pl = await c.query<{ rule: unknown }>('SELECT rule FROM playlists WHERE id = $1', [playlistId])
     if (pl.rows[0]?.rule != null) {
-      // Belt to the window's guard (adaptive review #6): direct row surgery on
-      // a rule playlist just gets overwritten by the next refresh.
-      console.warn(`[playlists] remove on ADAPTIVE playlist ${playlistId} refused — its rule manages membership`)
-      return
+      // Belt to the window's guard (adaptive review #6). THROW like
+      // appendToPlaylist does (review 2026-08-05 A#3): a warn+return is a
+      // success-shaped refusal — the window rendered the row still present
+      // with zero on-glass explanation when its cached adaptive flag was stale.
+      throw new Error('adaptive playlist — its rule decides membership (remove refused)')
     }
     const rows = await c.query<{ position: number }>(
       'SELECT position FROM playlist_tracks WHERE playlist_id = $1 ORDER BY position', [playlistId])
@@ -191,12 +192,17 @@ export async function upsertRulePlaylist(name: string, rawRule: PlaylistRule): P
   })
   // The refresh runs OUTSIDE the upsert txn; a failure here must not read as
   // "nothing stored" (adaptive review #7) — the rule persisted and the next
-  // enrichment-chain refresh (or a manual one) materializes it.
+  // enrichment-chain refresh (or a manual one) materializes it. Rides the
+  // refresh chain (A#1) so a create during a full refresh can't collide.
   let n = 0
   try {
-    n = await refreshOneRulePlaylist(id, trimmed, rule)
+    const run = refreshChain.then(() => refreshOneRulePlaylist(id, trimmed, rule))
+    refreshChain = run.then(() => { /* chain */ }, () => { /* logged below */ })
+    n = await run
   } catch (e) {
-    console.error(`[playlists] adaptive "${trimmed}" stored (id ${id}) but the initial materialize FAILED — it stays empty until the next refresh: ${e instanceof Error ? e.message : String(e)}`)
+    // Reworded (review 2026-08-05 A#7): a fresh create stays empty; a CONVERTED
+    // manual playlist keeps its old rows (now ⟳-marked) — both until the next refresh.
+    console.error(`[playlists] adaptive "${trimmed}" stored (id ${id}) but the initial materialize FAILED — membership is stale (fresh create: empty; conversion: the old manual rows) until the next refresh: ${e instanceof Error ? e.message : String(e)}`)
   }
   console.log(`[playlists] adaptive "${trimmed}" upserted (id ${id}, ${n} members)`)
   return { id, n }
@@ -222,25 +228,45 @@ async function refreshOneRulePlaylist(id: number, name: string, rule: PlaylistRu
     const kept = curIds.filter((t) => targetSet.has(t) && !seenKept.has(t) && (seenKept.add(t), true))
     const added = targetIds.filter((t) => !curSet.has(t))
     const removed = curIds.filter((t) => !targetSet.has(t))
-    if (added.length === 0 && removed.length === 0) return curIds.length
+    // Third clause (review 2026-08-05 A#2): a converted manual playlist whose
+    // duplicate rows all match the rule has added=0 ∧ removed=0 but still
+    // needs the rewrite — without it the dupe survives every refresh.
+    if (added.length === 0 && removed.length === 0 && kept.length === curIds.length) return curIds.length
     const next = [...kept, ...added]
+    // Lock the playlists row FIRST (review 2026-08-05 A#6): deletePlaylist
+    // locks playlists → cascades into playlist_tracks; taking the same order
+    // here removes the refresh-vs-delete deadlock window.
+    await c.query('UPDATE playlists SET updated_at = now() WHERE id = $1', [id])
     // Rewrite membership dense 0..n-1 (the two-pass idea is unnecessary here —
     // a full DELETE+INSERT inside the txn is simplest and crash-safe).
     await c.query('DELETE FROM playlist_tracks WHERE playlist_id = $1', [id])
     for (let i = 0; i < next.length; i++) {
       await c.query('INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES ($1, $2, $3)', [id, i, next[i]])
     }
-    await c.query('UPDATE playlists SET updated_at = now() WHERE id = $1', [id])
     console.log(`[playlists] adaptive "${name}" refreshed: ${next.length} members (+${added.length} −${removed.length})`)
     return next.length
   })
 }
 
 /** Refresh EVERY adaptive playlist (called after ingest/grab enrichment and
- *  on demand). `trackIds` narrows the log intent only — membership is always
- *  fully re-derived per playlist (cheap at library scale, and it self-heals
- *  drift from meta re-profiles). Corrupt rules are skipped LOUDLY. */
-export async function refreshRulePlaylists(reason = 'on demand'): Promise<void> {
+ *  on demand). Membership is always fully re-derived per playlist (cheap at
+ *  library scale, and it self-heals drift from meta re-profiles). Corrupt
+ *  rules are skipped LOUDLY.
+ *
+ *  SERIALIZED process-wide (review 2026-08-05 A#1): an ingest chain, a
+ *  fire-and-forget ytGrab chain, and the boot refresh can all fire at once —
+ *  unserialized, two write-phases on the same playlist collided (PK violation
+ *  → spurious loud failure) or the STALER materialize committed last and
+ *  persisted until the next trigger. Chaining makes each run re-derive from
+ *  the meta as of AFTER the previous run — last caller always wins honestly. */
+let refreshChain: Promise<void> = Promise.resolve()
+export function refreshRulePlaylists(reason = 'on demand'): Promise<void> {
+  const run = refreshChain.then(() => doRefreshRulePlaylists(reason))
+  refreshChain = run.catch(() => { /* run's own logging covers it; keep the chain alive */ })
+  return run
+}
+
+async function doRefreshRulePlaylists(reason: string): Promise<void> {
   const r = await query<{ id: number; name: string; rule: unknown }>(
     'SELECT id, name, rule FROM playlists WHERE rule IS NOT NULL ORDER BY id')
   if (r.rows.length === 0) return
@@ -277,8 +303,9 @@ export async function movePlaylistRow(playlistId: number, visualIdx: number, dir
   return withTransaction(async (c) => {
     const pl = await c.query<{ rule: unknown }>('SELECT rule FROM playlists WHERE id = $1', [playlistId])
     if (pl.rows[0]?.rule != null) {
-      console.warn(`[playlists] move on ADAPTIVE playlist ${playlistId} refused — its rule manages membership`)   // review #6
-      return false
+      // Throw, not false (review 2026-08-05 A#3): false means "nothing to swap
+      // with" to the window — an adaptive refusal must surface as an error.
+      throw new Error('adaptive playlist — its rule decides membership (reorder refused)')   // review #6
     }
     const rows = await c.query<{ position: number }>(
       'SELECT position FROM playlist_tracks WHERE playlist_id = $1 ORDER BY position', [playlistId])

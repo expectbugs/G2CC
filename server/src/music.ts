@@ -313,8 +313,18 @@ async function doScan(config: G2CCConfig): Promise<ScanSummary> {
   for (const [path, info] of known) {
     if (seen.has(path)) continue
     if (!deletableRoots.some((r) => path.startsWith(r))) continue
-    await query('DELETE FROM tracks WHERE id=$1', [info.id])
-      .then(() => { summary.removed++ })
+    // CONDITIONAL on the snapshot path (B-review 2026-08-05 #2): `known` is a
+    // snapshot from scan START — an ingest filing that lands mid-walk UPDATEs
+    // the row's path then renames the file, so this walk misses the file at
+    // its OLD path while the row is alive and correct at the NEW one. A bare
+    // id-delete here was the 449-class CASCADE wipe. The rename only happens
+    // AFTER the path UPDATE commits, so "file missing but row moved" always
+    // means path≠snapshot → 0 rows → no wipe, every interleaving safe.
+    await query('DELETE FROM tracks WHERE id=$1 AND path=$2', [info.id, path])
+      .then((r) => {
+        if (r.rowCount === 0) console.warn(`[music] vanished-row delete SKIPPED for ${path} — the row moved mid-scan (ingest filing)`)
+        else summary.removed++
+      })
       .catch((e: unknown) => console.error(`[music] removing vanished ${path}: ${e instanceof Error ? e.message : String(e)}`))
   }
   console.log(`[music] scan done in ${((Date.now() - t0) / 1000).toFixed(1)}s: ${summary.scanned} files, +${summary.added} ~${summary.updated} -${summary.removed}${summary.failed ? ` (${summary.failed} FAILED)` : ''}`)

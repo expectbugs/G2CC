@@ -18,7 +18,7 @@ import { execFile } from 'node:child_process'
 import { promises as fsp, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { G2CCConfig } from './config.js'
-import { scanLibrary, type TrackRow } from './music.js'
+import { scanLibrary, awaitScanIdle, type TrackRow } from './music.js'
 import { runEnrichmentChain } from './enrichment.js'
 import { query } from './store.js'
 
@@ -122,7 +122,16 @@ export async function ytGrab(config: G2CCConfig, hit: YtHit, enrich = true): Pro
   // Incremental index — the scan's vanished-row deletion is scoped to the
   // configured roots and this file is INSIDE root[0]; nothing destructive.
   await scanLibrary(config)
-  const r = await query<TrackRow>('SELECT * FROM tracks WHERE path = $1', [path])
+  let r = await query<TrackRow>('SELECT * FROM tracks WHERE path = $1', [path])
+  if (!r.rows[0]) {
+    // Conflation retry (B-review 2026-08-05 #9, the ingest.ts #10 pattern):
+    // scanLibrary JOINS a scan already in flight — possibly an ingest's
+    // NARROWED scan that never walked root[0], or one that passed YouTube/
+    // before this file landed. One awaited re-run after idle is a fresh walk.
+    await awaitScanIdle()
+    await scanLibrary(config)
+    r = await query<TrackRow>('SELECT * FROM tracks WHERE path = $1', [path])
+  }
   const track = r.rows[0]
   if (!track) throw new Error(`grabbed file did not index (${path}) — see the scan log`)
   if (enrich) kickEnrichment(config, track.id, hit.title)
