@@ -86,6 +86,8 @@ async function cleanupSmokeRows() {
   // every cleanup path and made searchTracks('smoke artist') a coin flip).
   await query('DELETE FROM tracks WHERE path LIKE $1', ['/tmp/g2cc-smoke-music-%'])
   await query('DELETE FROM player_state WHERE id = true')
+  // Part 9's playlists (review #C-LOW8: a crashed run stranded the rows).
+  await query("DELETE FROM playlists WHERE lower(name) IN ('smoke mix', 'other mix')")
 }
 await cleanupSmokeRows()   // stale rows from a crashed prior run
 
@@ -102,9 +104,13 @@ await insertMeta(idA1, { genres: ['metal'], styles: ['power metal'], moods: ['ep
 await insertMeta(idA2, { genres: ['metal'], styles: ['speed metal'], moods: ['driving'] })
 await insertMeta(idB1, { genres: ['metal', 'doom metal'], moods: ['heavy'] })
 // Both carry 'metal' too so the vocab lane MATCHES them and the exclusions
-// are exercised deterministically (not just by random-lane luck).
-await insertMeta(idSfx, { genres: ['metal', 'sound effects'] })
-await insertMeta(idSpoken, { genres: ['metal', 'spoken word'] })
+// are exercised deterministically (not just by random-lane luck). The
+// excluded terms mirror PRODUCTION REALITY (review #C-HIGH1: the library
+// files 'sound effect' SINGULAR and puts both terms mostly in STYLES — the
+// old fixture planted the code's own plural-in-genres string and proved
+// nothing).
+await insertMeta(idSfx, { genres: ['metal'], styles: ['sound effect'] })
+await insertMeta(idSpoken, { genres: ['metal'], styles: ['spoken word'] })
 await insertMeta(idDupHi, { genres: ['metal'], styles: ['power metal'], dupe: 9001 })
 
 // ---- Part 3: MusicPlayerService vs a fake phone ----
@@ -374,6 +380,127 @@ await insertMeta(idDupHi, { genres: ['metal'], styles: ['power metal'], dupe: 90
   try { await import('../dist/earbud.js'); earbudImport = 'resolved' } catch { /* expected */ }
   assert.equal(earbudImport, 'rejected', 'dist/earbud.js gone (clean build)')
   console.error('  8. removal asserts: window/aliases/grammar/module ✓')
+}
+
+// ---- Part 9 (Phase C): playlists CRUD + the resolver playlist lane ----
+{
+  const { listPlaylists, savePlaylist, playlistTracks, renamePlaylist, deletePlaylist, appendToPlaylist, removePlaylistRow, movePlaylistRow } = await import('../dist/playlists.js')
+  const plId = await savePlaylist('Smoke Mix', [{ id: idA1, title: 'Iron Anthem' }, { id: idA2, title: 'Steel Chorus' }], 'manual')
+  const mine = (await listPlaylists()).find((p) => p.id === plId)
+  assert.ok(mine && mine.n === 2, 'playlist saved with 2 rows')
+  await appendToPlaylist(plId, idB1)
+  assert.equal((await playlistTracks(plId))[2].id, idB1, 'append lands at the tail')
+  await movePlaylistRow(plId, 2, 'up')
+  assert.equal((await playlistTracks(plId))[1].id, idB1, 'move-up park-swap works under the (playlist,position) PK')
+  await removePlaylistRow(plId, 1)
+  const after = await playlistTracks(plId)
+  assert.equal(after.length, 2, 'remove closes the position gap')
+  assert.ok(after.every((t) => t.id !== idB1))
+  const plId2 = await savePlaylist('smoke mix', [{ id: idB1, title: 'Slow Dirge' }])
+  assert.equal(plId2, plId, 'save under the same name REPLACES (case-insensitive)')
+  assert.equal((await playlistTracks(plId)).length, 1)
+  const otherId = await savePlaylist('Other Mix', [{ id: idA1, title: 'Iron Anthem' }])
+  let clashErr = null
+  try { await renamePlaylist(otherId, 'SMOKE MIX') } catch (e) { clashErr = e }
+  assert.ok(clashErr, 'rename into an existing name refuses loudly')
+  const plLane = await resolveRequest({ music: { queueSize: 25 } }, 'smoke mix')
+  assert.equal(plLane.lane, 'playlist', 'resolver playlist lane answers by exact name')
+  assert.equal(plLane.tracks.length, 1)
+  await deletePlaylist(plId)
+  await deletePlaylist(otherId)
+  assert.ok(!(await listPlaylists()).some((p) => p.id === plId), 'delete removes the playlist')
+  console.error('  9. playlists CRUD (save/replace/append/move/remove/rename-clash/delete) + playlist lane ✓')
+}
+
+// ---- Part 10 (Phase C): llm plan parse/query + radio plumbing ----
+// The LLM itself is NEVER run in smokes; parseLlmPlan/planQuery are the
+// deterministic halves. radioNeighbors exercises LIVE local Qdrant READ-ONLY
+// (the phase10-calendar read-only precedent) with known-existing point ids;
+// the returned prod track ids then filter against the smoke DB.
+{
+  const { parseLlmPlan, planQuery, radioNeighbors } = await import('../dist/resolver.js')
+  assert.equal(parseLlmPlan('not json'), null)
+  assert.equal(parseLlmPlan('{"order":"shuffle"}'), null, 'a plan with no filter is rejected')
+  const plan = parseLlmPlan('```json\n{"genres":["Metal"],"energy":7,"order":"shuffle","size":10}\n```')
+  assert.ok(plan, 'fenced JSON tolerated')
+  assert.deepEqual(plan.genres, ['metal'], 'terms lowercased')
+  assert.deepEqual(plan.energy, { min: 5, max: 9 }, 'numeric energy becomes a ±2 range')
+  const rows = await planQuery({ genres: ['metal'] }, 25)
+  assert.ok(rows.length >= 2, `planQuery matches the metal fixtures (got ${rows.length})`)
+  const none = await planQuery({ genres: ['metal'], artists: ['nonexistent artist zz'] }, 25)
+  assert.equal(none.length, 0, 'AND across filter lists')
+  // Live local-Qdrant READ-ONLY (the phase10 precedent). Seed ids come from
+  // the collection itself (review #C-LOW7: hard-coded [1,2] would rot if
+  // those tracks are ever purged) and the failure is LABELED as environmental.
+  let radio
+  try {
+    const scroll = await fetch('http://127.0.0.1:6333/collections/g2cc_music/points/scroll', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 2 }), signal: AbortSignal.timeout(8000),
+    }).then((r) => r.json())
+    const seedIds = (scroll.result?.points ?? []).map((p) => p.id)
+    assert.ok(seedIds.length >= 1, 'collection has points to seed from')
+    radio = await radioNeighbors({ music: {} }, seedIds, seedIds, 5)
+  } catch (e) {
+    throw new Error(`live Qdrant read failed (ENV dependency — is qdrant on :6333 up?): ${e.message}`)
+  }
+  assert.ok(Array.isArray(radio), 'radioNeighbors resolves cleanly (foreign ids filter to smoke-DB rows or none)')
+  // Unembedded seeds must degrade cleanly, never 404 the whole call (#C2-HIGH1).
+  const ghost = await radioNeighbors({ music: {} }, [987654321], [], 5)
+  assert.deepEqual(ghost, [], 'an unembedded-only seed set returns [] with a loud log, not a 404 throw')
+  console.error('  10. llm plan parse/query + radio plumbing (incl. unembedded-seed hygiene) ✓')
+}
+
+// ---- Part 12 (Phase C): music-browse facets (review #C-MED5: zero coverage
+//      was exactly how the no-op exclusion shipped green) ----
+{
+  const { listAlbums, tracksByAlbum, listVocabTerms } = await import('../dist/music-browse.js')
+  // Case-variant albums group as ONE row whose count equals what a tap plays
+  // (review #C-LOW6 — prod has real case-duplicate albums).
+  const idCase1 = await insertTrack('Case A', SMOKE_ARTIST_B, 'Smoke Case Album', 100_000)
+  const idCase2 = await insertTrack('Case B', SMOKE_ARTIST_B, 'SMOKE CASE ALBUM', 100_000)
+  const albums = await listAlbums()
+  const caseRows = albums.filter((a) => a.album.toLowerCase() === 'smoke case album')
+  assert.equal(caseRows.length, 1, 'case-variant albums group to one browse row')
+  assert.equal(caseRows[0].n, 2, 'the grouped count is the union')
+  assert.equal((await tracksByAlbum('smoke case album')).length, 2, 'a tap plays the union')
+  // The vocab facet hides the REAL sfx term (singular, styles-resident).
+  const terms = await listVocabTerms(500)
+  assert.ok(!terms.some((t) => t.term.toLowerCase().startsWith('sound effect')), 'sfx terms hidden from the browse facet')
+  assert.ok(terms.some((t) => t.term === 'metal'), 'real vocabulary terms present')
+  await query('DELETE FROM tracks WHERE id IN ($1, $2)', [idCase1, idCase2])
+  // Playlist edge coverage (review #C gaps): boundary moves refuse; append
+  // works on an emptied playlist.
+  const { savePlaylist, movePlaylistRow, removePlaylistRow, appendToPlaylist, playlistTracks, deletePlaylist } = await import('../dist/playlists.js')
+  const pid = await savePlaylist('Smoke Mix', [{ id: idA1, title: 'Iron Anthem' }, { id: idA2, title: 'Steel Chorus' }])
+  assert.equal(await movePlaylistRow(pid, 0, 'up'), false, 'move-up at the head refuses')
+  assert.equal(await movePlaylistRow(pid, 1, 'down'), false, 'move-down at the tail refuses')
+  await removePlaylistRow(pid, 0)
+  await removePlaylistRow(pid, 0)
+  assert.equal((await playlistTracks(pid)).length, 0, 'playlist emptied')
+  await appendToPlaylist(pid, idB1)
+  assert.equal((await playlistTracks(pid))[0].id, idB1, 'append onto an emptied playlist lands at 0')
+  await deletePlaylist(pid)
+  console.error('  12. music-browse facets + playlist edges ✓')
+}
+
+// ---- Part 11 (Phase C): MusicWindow registered + honest offline render ----
+{
+  const wm = new WindowManager({
+    send: () => {}, audio: () => {}, displayReload: () => {}, log: () => {},
+    pool: { count: 0 },
+    config: { claude: { model: 'opus', effort: 'max', defaultMode: 'bypassPermissions' } },
+    registerWatchdog: () => {}, unregisterWatchdog: () => {},
+  })
+  assert.ok(wm.windows.some((w) => w.id === 'music'), 'MusicWindow registered (the Media slot)')
+  assert.ok(wm.windows.some((w) => w.id === 'media'), 'third-party Media window untouched')
+  const music = wm.windows.find((w) => w.id === 'music')
+  const v = await music.view()
+  assert.ok(v.title.includes('Music'))
+  assert.ok((v.text ?? '').toLowerCase().includes('offline'), 'honest player-offline state in harnesses')
+  assert.ok((music.preview() ?? '').toLowerCase().includes('offline'), 'preview honest offline')
+  wm.dispose()
+  console.error('  11. MusicWindow registered + honest offline render ✓')
 }
 
 await cleanupSmokeRows()

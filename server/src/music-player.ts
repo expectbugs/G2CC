@@ -21,6 +21,7 @@
 import type { ServerMessage, MediaEventMsg } from '@g2cc/shared'
 import type { G2CCConfig } from './config.js'
 import type { PlayerTrack } from './music.js'
+import { radioNeighbors } from './resolver.js'
 import { query } from './store.js'
 
 export interface MusicDeps {
@@ -51,9 +52,9 @@ export class MusicPlayerService {
   idx = 0
   state: MusicState = 'idle'
   volumePct: number | null = null
-  /** Radio flag (D5). PERSISTED in Phase B; the nearest-neighbor append engine
-   *  lands with Phase C's resolver — a dying queue with radio on logs the gap
-   *  loudly instead of silently ending. */
+  /** Radio (D5): when on and the unplayed remainder runs low, append
+   *  nearest-neighbors of the last few played tracks (Qdrant recommend via
+   *  resolver.radioNeighbors). Persisted in player_state. */
   radio = false
 
   private mediaSeq = 0
@@ -79,7 +80,13 @@ export class MusicPlayerService {
    *  at after a skip already moved the index. */
   private history: { id: number | null; track: PlayerTrack; pending: Promise<void> } | null = null
   private historySource = 'unknown'
-  private radioGapLogged = false
+  /** One radio fill in flight at a time (the append is async Qdrant+DB). */
+  private radioFillInFlight = false
+  /** Queue GENERATION (review 2026-08-06 #C2-MED2): bumped whenever the queue
+   *  is REPLACED/cleared; an in-flight radio fill captured under an older
+   *  generation discards itself instead of appending stale neighbors (with
+   *  stale exclude sets) to the new queue. */
+  private queueGen = 0
 
   private persistTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -154,6 +161,7 @@ export class MusicPlayerService {
     }
     this.closeHistory('new-queue')
     this.queue = tracks
+    this.queueGen++
     this.idx = Math.min(Math.max(0, startIdx), tracks.length - 1)
     this.pendingAdvance = false
     console.log(`[music] playQueue(${source}): ${tracks.length} track(s), starting at ${this.idx}`)
@@ -284,7 +292,7 @@ export class MusicPlayerService {
     }
     if (this.idx + 1 >= this.queue.length) {
       console.log(`[music] skip(${source}) hit the end of the queue — stopping`)
-      this.maybeLogRadioGap()
+      if (this.radio) console.warn('[music] radio on but the queue ended before a fill landed (skips outran the appender)')
       this.stop('queue-end')
       this.deps.popup('■ queue ended')
       return false
@@ -310,9 +318,46 @@ export class MusicPlayerService {
 
   setRadio(on: boolean, source = 'user'): void {
     this.radio = on
-    this.radioGapLogged = false   // each toggle re-arms the Phase-C gap notice (#H3)
     console.log(`[music] radio ${on ? 'ON' : 'OFF'} (${source})`)
     this.schedulePersist()
+    if (on) this.maybeRadioFill('radio toggled on')
+  }
+
+  /** D5 radio engine: when radio is on and ≤2 unplayed tracks remain, append
+   *  ~radioBatch nearest-neighbors of the last few played tracks. Async +
+   *  in-flight-guarded; every outcome logs loudly; the append itself is
+   *  popup-SILENT by spec (log only). A failure = the queue ends honestly. */
+  private maybeRadioFill(reason: string): void {
+    if (!this.radio || this.radioFillInFlight) return
+    if (this.queue.length === 0) return
+    const remaining = this.queue.length - this.idx - 1
+    if (remaining > 2) return
+    this.radioFillInFlight = true
+    const gen = this.queueGen
+    const seeds = this.queue.slice(Math.max(0, this.idx - 4), this.idx + 1).map((t) => t.id)
+    const excludeIds = [...new Set(this.queue.map((t) => t.id))]
+    const batch = this.config.music.radioBatch ?? 10
+    console.log(`[music] radio fill (${reason}): ${remaining} unplayed left — seeking ${batch} neighbors of [${seeds.join(',')}]`)
+    void radioNeighbors(this.config, seeds, excludeIds, batch)
+      .then((tracks) => {
+        if (gen !== this.queueGen) {
+          // The queue was replaced/cleared while we fetched (#C2-MED2) —
+          // these neighbors belong to the abandoned queue.
+          console.log(`[music] radio fill DISCARDED — queue generation moved (${gen} → ${this.queueGen})`)
+          return
+        }
+        if (tracks.length === 0) {
+          console.warn('[music] radio: no fresh neighbors (all excluded or Qdrant empty) — the queue ends honestly')
+          return
+        }
+        this.queue.push(...tracks)
+        console.log(`[music] radio: +${tracks.length} appended → ${this.queue.length} queued (${tracks.map((t) => t.title).slice(0, 3).join(' · ')}…)`)
+        this.schedulePersist()
+      })
+      .catch((e: unknown) => {
+        console.error(`[music] radio append FAILED (queue ends honestly): ${e instanceof Error ? e.message : String(e)}`)
+      })
+      .finally(() => { this.radioFillInFlight = false })
   }
 
   // ---- capture gate (the ONE dictation coupling — physics, D5) ----
@@ -366,6 +411,8 @@ export class MusicPlayerService {
             this.openHistory(t)
           }
         }
+        // D5 radio: every confirmed track start re-checks the remainder.
+        this.maybeRadioFill('track playing')
         break
       }
       case 'paused': {
@@ -410,7 +457,7 @@ export class MusicPlayerService {
           this.state = 'idle'
           this.mediaId = null
           if (!hadNext) {
-            this.maybeLogRadioGap()
+            if (this.radio) console.warn('[music] radio on but the queue ended before a fill landed (no appendable neighbors?)')
             // Review 2026-08-05 #C2: reset to the top so a future tap replays
             // the queue instead of re-ending the final second of the last track.
             this.idx = 0
@@ -432,13 +479,6 @@ export class MusicPlayerService {
         this.schedulePersist()
         break
       }
-    }
-  }
-
-  private maybeLogRadioGap(): void {
-    if (this.radio && !this.radioGapLogged) {
-      this.radioGapLogged = true
-      console.warn('[music] radio is ON but the nearest-neighbor append engine lands with Phase C — the queue ends honestly until then')
     }
   }
 
@@ -593,6 +633,28 @@ export class MusicPlayerService {
     await this.persistNow()
   }
 
+  /** Clear the queue entirely (the window's Clear action — player-owned so
+   *  the generation bumps and the state persists; review #C2-MED2/#W3). */
+  clearQueue(source: string): void {
+    this.stop(source)
+    this.queue = []
+    this.idx = 0
+    this.queueGen++
+    console.log(`[music] queue cleared (${source})`)
+    void this.flushPersist().catch((e: unknown) =>
+      console.error(`[music] clear-queue persist failed: ${e instanceof Error ? e.message : String(e)}`))
+  }
+
+  /** The window edited the queue in place (row remove / reorder — review #W3:
+   *  those edits never persisted, so a restart resurrected removed rows; and
+   *  #C2-LOW8: a shrink near the tail must re-check the radio fill). */
+  notifyQueueEdited(source: string): void {
+    console.log(`[music] queue edited (${source}) — ${this.queue.length} tracks, idx ${this.idx}`)
+    void this.flushPersist().catch((e: unknown) =>
+      console.error(`[music] queue-edit persist failed: ${e instanceof Error ? e.message : String(e)}`))
+    this.maybeRadioFill('queue edited')
+  }
+
   /** Hard reset (ws-handler drives it): stop the phone's player best-effort
    *  and drop TRANSIENTS. The queue/idx/pos are durable user data (mirrored in
    *  player_state) and SURVIVE — the reader-position rule; a tap resumes. */
@@ -606,7 +668,7 @@ export class MusicPlayerService {
     this.pendingAdvance = false
     this.capturing = false
     this.armed = false
-    this.radioGapLogged = false
+    this.queueGen++   // any in-flight radio fill belongs to the pre-reset world
     console.warn(`[music] hard reset: playback stopped, transients cleared (the ${this.queue.length}-track queue is durable and survives)`)
     this.schedulePersist()
   }

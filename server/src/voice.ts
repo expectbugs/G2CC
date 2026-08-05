@@ -30,7 +30,7 @@ export const WINDOW_ALIASES: Record<string, string> = {
   main: 'main', home: 'main', dashboard: 'main',
   mail: 'mail', email: 'mail', 'e-mail': 'mail', inbox: 'mail',
   sms: 'sms', texts: 'sms', text: 'sms', messages: 'sms',
-  media: 'media', music: 'media', player: 'media',
+  media: 'media', player: 'media',
   notices: 'notices', notifications: 'notices', alerts: 'notices',
   timers: 'timers', timer: 'timers',
   calendar: 'calendar', agenda: 'calendar', schedule: 'calendar',
@@ -43,8 +43,10 @@ export const WINDOW_ALIASES: Record<string, string> = {
   assistant: 'aria', aria: 'aria',
   code: 'cc', claude: 'cc',
   scout: 'scout',
-  // (earbud/companion/ear aliases died with the lane — MUSIC_SPEC D2. Phase C
-  // maps music window names when MusicWindow lands.)
+  // Music app (2026-08-05, MUSIC_SPEC D6.1). 'media'/'player' stay on the
+  // third-party phone-media window above; the app's own window gets the
+  // natural names. (The grammar is feed-dormant until a handsfree revisit.)
+  music: 'music', tunes: 'music', songs: 'music',
 }
 
 export type VoiceCommand =

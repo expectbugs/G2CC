@@ -99,6 +99,29 @@ export async function query<R extends pg.QueryResultRow = pg.QueryResultRow>(
   return getPool().query<R>(text, params)
 }
 
+/** Run `fn` inside ONE transaction on ONE checked-out client (music review
+ *  2026-08-06 #C-MED3: `query('BEGIN')` through the pool is a lie — each
+ *  statement may ride a different connection, so multi-statement mutations
+ *  (the playlist park-swap/dense-shift/replace) could crash into permanently
+ *  half-applied states). COMMIT on success, ROLLBACK + rethrow on any error;
+ *  the client always releases. */
+export async function withTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  await ensureMigrated()
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const out = await fn(client)
+    await client.query('COMMIT')
+    return out
+  } catch (e) {
+    await client.query('ROLLBACK').catch((re: unknown) =>
+      console.error(`[store] ROLLBACK failed (connection dropping?): ${re instanceof Error ? re.message : String(re)}`))
+    throw e
+  } finally {
+    client.release()
+  }
+}
+
 /** Startup pre-warm (index.ts): fire-and-forget so a down DB can't block or
  *  crash startup — features lazily retry through ensureMigrated anyway. */
 export function warmStore(): void {

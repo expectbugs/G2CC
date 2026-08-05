@@ -21,6 +21,7 @@ import { TerminalWindow } from './terminal.js'
 import { DeliveriesWindow } from './deliveries.js'
 import { MediaWindow } from './media.js'
 import { SmsWindow } from './sms.js'
+import { MusicWindow } from './music.js'
 
 /** A window factory: given host services + a reRender callback, build the window. */
 export type WindowFactory = (ctx: WmContext, reRender: () => void) => OsWindow
@@ -30,8 +31,7 @@ export type WindowFactory = (ctx: WmContext, reRender: () => void) => OsWindow
 export const WINDOW_FACTORIES: WindowFactory[] = [
   (c, rr) => new AriaWindow(c, rr),
   (c, rr) => new CcWindow(c, rr),
-  // (EarbudWindow removed 2026-08-05 — MUSIC_SPEC D2; MusicWindow takes the
-  // Media slot in Phase C.)
+  (c, rr) => new MusicWindow(c, rr),   // music app 2026-08-05 (Media — EarbudWindow's slot, MUSIC_SPEC D6.1)
   (c, rr) => new ScoutWindow(c, rr),
   (c, rr) => new MailWindow(c, rr),
   (c, rr) => new FilesWindow(c, rr),
