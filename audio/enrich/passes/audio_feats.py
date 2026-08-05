@@ -42,6 +42,19 @@ def _analyze(path: str, dur_ms: int | None) -> dict[str, Any]:
         if res.returncode != 0:
             raise RuntimeError(f"ffmpeg decode rc={res.returncode}: {res.stderr.strip()[:300]}")
         y, sr = librosa.load(tmp, sr=None)
+        if y.size < sr and seek:
+            # 2026-08-05 (Astronomy Domine/Headlong near-deletion): a broken
+            # container DURATION makes the mid-file -ss land past real EOF —
+            # ffmpeg exits 0 with an empty wav and a healthy file looks
+            # corrupt. Retry from the top before declaring failure.
+            window = "start120s-durmeta-broken"
+            res = subprocess.run(
+                [FFMPEG, "-v", "error", "-y", "-i", path, "-map", "0:a:0",
+                 "-ac", "1", "-ar", str(SR), "-t", "120", "-f", "wav", tmp],
+                capture_output=True, text=True)
+            if res.returncode != 0:
+                raise RuntimeError(f"ffmpeg retry-from-0 rc={res.returncode}: {res.stderr.strip()[:300]}")
+            y, sr = librosa.load(tmp, sr=None)
         if y.size < sr:   # under a second of audio decoded — something is wrong
             raise RuntimeError(f"decoded only {y.size} samples")
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
