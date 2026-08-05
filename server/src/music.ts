@@ -20,7 +20,17 @@ import { promises as fsp, existsSync, mkdirSync } from 'node:fs'
 import { join, extname, basename } from 'node:path'
 import { registerMigration, query } from './store.js'
 import type { G2CCConfig } from './config.js'
-import type { EarbudTrack } from './earbud.js'
+
+/** A queue-shaped track — what the player carries and the phone's MediaSession
+ *  displays (music redesign 2026-08-05: re-homed here from the deleted
+ *  earbud.ts; the shape is unchanged so player_state rows survive). */
+export interface PlayerTrack {
+  id: number
+  title: string
+  artist?: string
+  album?: string
+  durMs?: number
+}
 
 const execFileAsync = promisify(execFile)
 
@@ -109,7 +119,7 @@ export interface TrackRow {
   mtime_ms: string | number
 }
 
-export function toEarbudTrack(r: TrackRow): EarbudTrack {
+export function toPlayerTrack(r: TrackRow): PlayerTrack {
   return {
     id: r.id,
     title: r.title,
@@ -299,6 +309,12 @@ export async function getTrack(id: number): Promise<TrackRow | null> {
   return r.rows[0] ?? null
 }
 
+/** Escape LIKE/ILIKE metacharacters in a user token (music review 2026-08-05
+ *  #D2: a bare '%' or '_' token match-alls; a trailing '\' anchors silently). */
+export function escapeLike(t: string): string {
+  return t.replace(/[%_\\]/g, '\\$&')
+}
+
 /** Tokenized search: every token must match artist, album, title, or path.
  *  Ordered artist → album → path so results group naturally into play order. */
 export async function searchTracks(q: string, limit = 200): Promise<TrackRow[]> {
@@ -307,7 +323,7 @@ export async function searchTracks(q: string, limit = 200): Promise<TrackRow[]> 
   const conds: string[] = []
   const params: unknown[] = []
   tokens.forEach((t, i) => {
-    params.push(`%${t}%`)
+    params.push(`%${escapeLike(t)}%`)
     conds.push(`(lower(coalesce(artist,'')) LIKE $${i + 1} OR lower(coalesce(album,'')) LIKE $${i + 1} OR lower(title) LIKE $${i + 1} OR lower(path) LIKE $${i + 1})`)
   })
   params.push(limit)

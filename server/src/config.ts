@@ -76,19 +76,11 @@ export interface G2CCConfig {
      *  intent, not yet wired across the wire. Flipping it changes nothing
      *  until a future APK consults it. */
     allowSpeaker: boolean
-    /** Ears (2026-08-04 field fix): always-on wake-word listening. The
-     *  supervisor runs handsfree capture whenever a capable phone is attached,
-     *  no dictation is live, and music is NOT playing (continuous SCO capture
-     *  suspends A2DP on the classic-BT Buds 2a — music wins the radio; pause
-     *  the music and "butterscotch" works). Default true. */
-    earsOn: boolean
-    /** Per-priority spoken-notification policy (notifyHub priorities).
-     *  'speak' = chime + spoken line; 'chime' = earcon only; 'chime+name' =
-     *  earcon + sender name only (SMS privacy on the floor — body on request);
-     *  'silent' = nothing (readable on ask via "what did I miss"). */
-    notify: Record<'call' | 'timer' | 'sms' | 'email' | 'info', 'speak' | 'chime' | 'chime+name' | 'silent'>
+    // earsOn + notify RETIRED (music redesign 2026-08-05, MUSIC_SPEC D2/D8):
+    // the ears supervisor and spoken notifications died with the earbud lane.
+    // loadConfig strips them from a saved config with a loud one-time note.
   }
-  /** Music library + streaming (2026-08-04, docs/EARBUD_SPEC.md §C6.3). */
+  /** Music library + streaming + the music app (MUSIC_SPEC D8, 2026-08-05). */
   music: {
     /** Directories scanned into the tracks index (ffprobe metadata). */
     libraryDirs: string[]
@@ -98,6 +90,21 @@ export interface G2CCConfig {
     format: 'opus' | 'raw'
     /** Transcode cache directory. */
     cacheDir: string
+    /** yt-dlp grabs land in this SUBDIRECTORY of libraryDirs[0] (D7). */
+    youtubeDir: string
+    /** Track-change/queue popup duration on glass (D6.3). 0 = popups off. */
+    popupMs: number
+    /** Radio mode: how many nearest-neighbor tracks each append adds (D5). */
+    radioBatch: number
+    /** Default resolver queue size (D4: "default size ~25"). */
+    queueSize: number
+    /** Resolver lane 2 (D4): the Opus one-shot parse. llm=false skips straight
+     *  to the deterministic + embedding lanes (kill-switch). */
+    resolver: { llm: boolean; model: string; effort: CcEffort }
+    /** The pinned local embedding model (D3.1) — MUST match what built the
+     *  Qdrant g2cc_music collection (Phase A pinned BAAI/bge-small-en-v1.5,
+     *  384-dim). Changing it = re-embed the collection. */
+    embedModel: string
   }
   /** The Companion — the dedicated earbud CC session (docs/EARBUD_SPEC.md §C6.4). */
   companion: {
@@ -233,19 +240,17 @@ function defaultConfig(): G2CCConfig {
       duckDb: -12,
       chimes: true,
       allowSpeaker: false,
-      earsOn: true,
-      notify: {
-        call: 'speak',
-        timer: 'speak',
-        sms: 'chime+name',
-        email: 'silent',
-        info: 'silent',
-      },
     },
     music: {
       libraryDirs: ['/mnt/slug/Music'],
       format: 'opus',
       cacheDir: join(homedir(), '.g2cc', 'media-cache'),
+      youtubeDir: 'YouTube',
+      popupMs: 4500,
+      radioBatch: 10,
+      queueSize: 25,
+      resolver: { llm: true, model: 'opus', effort: 'low' },
+      embedModel: 'BAAI/bge-small-en-v1.5',
     },
     companion: {
       dir: '/home/user/g2cc-companion',
@@ -342,9 +347,12 @@ export function loadConfig(): G2CCConfig {
     audioOut: {
       ...defaults.audioOut,
       ...(saved.audioOut ?? {}),
-      notify: { ...defaults.audioOut.notify, ...(saved.audioOut?.notify ?? {}) },
     },
-    music: { ...defaults.music, ...(saved.music ?? {}) },
+    music: {
+      ...defaults.music,
+      ...(saved.music ?? {}),
+      resolver: { ...defaults.music.resolver, ...(saved.music?.resolver ?? {}) },
+    },
     companion: { ...defaults.companion, ...(saved.companion ?? {}) },
   }
 
@@ -465,16 +473,24 @@ export function loadConfig(): G2CCConfig {
     console.error('[config] audioOut.allowSpeaker is not a boolean — using false (earbud-or-nothing)')
     merged.audioOut.allowSpeaker = defaults.audioOut.allowSpeaker
   }
-  if (typeof merged.audioOut.earsOn !== 'boolean') {
-    console.error('[config] audioOut.earsOn is not a boolean — using true')
-    merged.audioOut.earsOn = defaults.audioOut.earsOn
-  }
+  // Retired keys (music redesign 2026-08-05, MUSIC_SPEC D2/D8): the ears
+  // supervisor + spoken notifications died with the earbud lane. The interface
+  // change alone doesn't strip a SAVED config's runtime keys — the spread
+  // carries them — so drop them explicitly, say so ONCE, and persist the strip.
   {
-    const validNotify = ['speak', 'chime', 'chime+name', 'silent']
-    for (const pri of ['call', 'timer', 'sms', 'email', 'info'] as const) {
-      if (!validNotify.includes(merged.audioOut.notify[pri])) {
-        console.error(`[config] audioOut.notify.${pri} '${String(merged.audioOut.notify[pri])}' invalid — using '${defaults.audioOut.notify[pri]}'`)
-        merged.audioOut.notify[pri] = defaults.audioOut.notify[pri]
+    const legacy = merged.audioOut as Record<string, unknown>
+    if ('earsOn' in legacy || 'notify' in legacy) {
+      console.error('[config] audioOut.earsOn / audioOut.notify are RETIRED (music redesign D2) — removed from config.json; TTS/notification audio returns in its own future session')
+      delete legacy['earsOn']
+      delete legacy['notify']
+      // Persist the strip from PRODUCTION boots only (review 2026-08-05 #H2):
+      // the smoke suite also calls loadConfig() and must never write Adam's
+      // real ~/.g2cc/config.json ("never pollute production data"). The smoke
+      // env is marked by G2CC_PG_DATABASE (_env.mjs; production never sets it).
+      if (!process.env.G2CC_PG_DATABASE) {
+        try { saveConfig(merged) } catch (e) {
+          console.error(`[config] persisting the retired-key strip failed (live config is clean anyway): ${(e as Error).message}`)
+        }
       }
     }
   }
@@ -490,6 +506,43 @@ export function loadConfig(): G2CCConfig {
   if (typeof merged.music.cacheDir !== 'string' || !merged.music.cacheDir.startsWith('/')) {
     console.error('[config] music.cacheDir must be an absolute path — using the default')
     merged.music.cacheDir = defaults.music.cacheDir
+  }
+  // ---- Music-app validators (MUSIC_SPEC D8, 2026-08-05) — loud fallback, never throw ----
+  if (typeof merged.music.youtubeDir !== 'string' || !merged.music.youtubeDir
+      || merged.music.youtubeDir.startsWith('/') || merged.music.youtubeDir.includes('..')) {
+    console.error(`[config] music.youtubeDir '${String(merged.music.youtubeDir)}' must be a plain subdirectory NAME (it lands under libraryDirs[0]) — using 'YouTube'`)
+    merged.music.youtubeDir = defaults.music.youtubeDir
+  }
+  if (typeof merged.music.popupMs !== 'number' || !Number.isFinite(merged.music.popupMs)
+      || merged.music.popupMs < 0 || merged.music.popupMs > 60_000) {
+    console.error('[config] music.popupMs must be a number 0–60000 (0 = popups off) — using 4500')
+    merged.music.popupMs = defaults.music.popupMs
+  }
+  if (typeof merged.music.radioBatch !== 'number' || !Number.isInteger(merged.music.radioBatch)
+      || merged.music.radioBatch < 1 || merged.music.radioBatch > 100) {
+    console.error('[config] music.radioBatch must be an integer 1–100 — using 10')
+    merged.music.radioBatch = defaults.music.radioBatch
+  }
+  if (typeof merged.music.queueSize !== 'number' || !Number.isInteger(merged.music.queueSize)
+      || merged.music.queueSize < 1 || merged.music.queueSize > 500) {
+    console.error('[config] music.queueSize must be an integer 1–500 — using 25')
+    merged.music.queueSize = defaults.music.queueSize
+  }
+  if (typeof merged.music.resolver.llm !== 'boolean') {
+    console.error('[config] music.resolver.llm is not a boolean — using true')
+    merged.music.resolver.llm = defaults.music.resolver.llm
+  }
+  if (typeof merged.music.resolver.model !== 'string' || !merged.music.resolver.model) {
+    console.error('[config] music.resolver.model is not a non-empty string — using opus')
+    merged.music.resolver.model = defaults.music.resolver.model
+  }
+  if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(merged.music.resolver.effort)) {
+    console.error(`[config] music.resolver.effort '${String(merged.music.resolver.effort)}' is not a valid effort — using low`)
+    merged.music.resolver.effort = defaults.music.resolver.effort
+  }
+  if (typeof merged.music.embedModel !== 'string' || !merged.music.embedModel) {
+    console.error('[config] music.embedModel is not a non-empty string — using BAAI/bge-small-en-v1.5')
+    merged.music.embedModel = defaults.music.embedModel
   }
   // Companion cwd follows the scout.cwd rules: normalized, strictly under /home/user/.
   if (typeof merged.companion.dir !== 'string'

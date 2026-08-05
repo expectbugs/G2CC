@@ -242,10 +242,24 @@ export class RibbonShell {
    *  or a preview() projection — the WM decides) fills the full content area (the
    *  bottom status bar is gone). `battery` is the glasses-battery text. The strip
    *  is at the TOP and is the SOLE event-capture (scroll=true text); the client
-   *  overlays the clock cutout. Estimator-guarded against the multi-packet wall. */
-  scene(previewText: string, battery: string): WireScene {
+   *  overlays the clock cutout. Estimator-guarded against the multi-packet wall.
+   *
+   *  `stripOverride` (MUSIC_SPEC D6.3): a transient music-popup line that swaps
+   *  the STRIP TEXT for its window — same region id, geometry, and scroll
+   *  capture (the antenna keeps firing per-notch focus events), px-clamped to
+   *  the strip budget with the same ×0.85 margin so the strip can never
+   *  overflow into internal scrolling (a navigational-chrome clamp — the
+   *  sanctioned class; the full track data lives in the player state). */
+  scene(previewText: string, battery: string, stripOverride?: string | null): WireScene {
     const STRIP_W = DE_TITLE_W - DE_BATT_W
     const barH = DE_BAR_H - RULE_H   // borderless bar, shortened so the underline fits below it
+    // Override clamp keeps the SAME reserves as stripText()'s proven budget
+    // (leading space ~6 px + the '<'/'>' marker allowance 30 px, ×0.85) —
+    // review 2026-08-05 #H6: a looser clamp could overflow real firmware
+    // glyphs and cost the strip its zero-range scroll for the popup window.
+    const stripText = stripOverride != null && stripOverride !== ''
+      ? this.clampOne(stripOverride, Math.floor((STRIP_W - 6 - 30) * 0.85))
+      : this.stripText()
     const build = (preview: string): SceneRegion[] => [
       {
         // The strip — the antenna (scroll=true) and the sole capture — at the TOP
@@ -253,7 +267,7 @@ export class RibbonShell {
         // RIBBON_STRIP_ID is a DEDICATED scroll-antenna id, not a passive-bar id
         // (the client caches the scroll flag per id — see the const above).
         id: RIBBON_STRIP_ID, name: 'strip', x: 0, y: 0, w: STRIP_W, h: barH,
-        kind: 'text', content: { kind: 'text', text: ' ' + this.stripText(), scroll: true },
+        kind: 'text', content: { kind: 'text', text: ' ' + stripText, scroll: true },
       },
       {
         // Glasses battery, between the strip and the client clock cutout (§2.2.5).

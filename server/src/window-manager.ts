@@ -22,7 +22,6 @@ import {
   DEFAULT_BROWSE_MENU, isScrollRead, type WinView, type RibbonChrome,
 } from './os-compose.js'
 import { parseVoiceCommand, type VoiceCommand } from './voice.js'
-import { getEarbud } from './earbud.js'
 import {
   notifyHub, markSeen, unseenCount, latestUnseenFlash,
   OVERLAY_PRIORITIES, PRIORITY_RANK, type NotifyEvent,
@@ -461,6 +460,16 @@ export class WindowManager {
   /** Adam's blanked-flash auto-clear timer (display pacing, blanked case only).
    *  Cleared on EVERY exit path: tap, double-tap, replacement, dispose. */
   private blankPopupTimer: ReturnType<typeof setTimeout> | null = null
+  /** Music popup (MUSIC_SPEC D6.3, 2026-08-05): the transient one-line track/
+   *  queue announcement. Non-null = live; rendered per surface state (ribbon
+   *  strip swap / in-window title intrusion / blanked one-line flash), auto-
+   *  reverting after config.music.popupMs — sanctioned display pacing (the
+   *  BLANK_POPUP_MS precedent). Pure visual: no focus change, no capture-
+   *  region change; conflated with the render pumps (a mid-popup content
+   *  render re-applies the line rather than fighting it). Notification
+   *  flashes/overlays always take precedence. */
+  private musicPopupLine: string | null = null
+  private musicPopupTimer: ReturnType<typeof setTimeout> | null = null
   private readonly onHubNotification = (evt: NotifyEvent): void => this.onNotification(evt)
   private readonly onHubSeen = (): void => this.refreshNotifyChrome()
   /** A notification was read on glass (or MkAll'd) — tell the phone to cancel
@@ -615,6 +624,57 @@ export class WindowManager {
     }, 30_000)
   }
 
+  /** MUSIC_SPEC D6.3: show a transient one-line music popup on the current
+   *  surface, auto-reverting after config.music.popupMs (0 = off). Newest
+   *  wins (the timer re-arms). Never throws — the player's popup dep must be
+   *  fire-and-forget safe. */
+  musicPopup(line: string): void {
+    try {
+      if (this.retired) { this.ctx.log('[music-popup] on a RETIRED WM — discarded'); return }
+      const ms = this.ctx.config?.music?.popupMs ?? 4500
+      if (ms <= 0) { this.ctx.log(`[music-popup] popups off (music.popupMs=0) — "${line}"`); return }
+      this.ctx.log(`[music-popup] ${line}`)
+      this.musicPopupLine = line
+      if (this.musicPopupTimer) clearTimeout(this.musicPopupTimer)
+      this.musicPopupTimer = setTimeout(() => {
+        this.musicPopupTimer = null
+        this.musicPopupLine = null
+        if (this.retired) return
+        // Restore whatever surface is current. The blank branch re-derives
+        // (nav line / notification flash / plain dark); ribbon + window paths
+        // recompose without the intrusion.
+        if (this.blanked && !this.activeOverlay) {
+          if (this.blankFlash) return   // a notification flash owns the dark screen — its own timer re-blanks
+          try {
+            this.sendBlank(this.navLine ? blankFlashScene(this.navLine) : blankScene())
+          } catch (e) {
+            this.ctx.log(`[music-popup] re-blank compose failed (${(e as Error).message}) — plain blank`)
+            this.sendBlank(blankScene())
+          }
+          return
+        }
+        if (this.rootNav === 'ribbon' && this.atRibbon && !this.activeOverlay) { this.renderRibbon(); return }
+        this.requestRender()
+      }, ms)
+      // Render it now, by surface state. A live notification overlay/flash
+      // outranks the popup — the line stays armed and appears on the next
+      // conflated render if the overlay clears within the popup window.
+      if (this.blanked && !this.activeOverlay) {
+        if (this.blankFlash) { this.ctx.log('[music-popup] notification flash on the blanked screen — popup deferred'); return }
+        try {
+          this.sendBlank(blankFlashScene(line))
+        } catch (e) {
+          this.ctx.log(`[music-popup] blank flash compose failed (${(e as Error).message}) — skipped`)
+        }
+        return
+      }
+      if (this.rootNav === 'ribbon' && this.atRibbon && !this.activeOverlay) { this.renderRibbon(); return }
+      this.requestRender()
+    } catch (e) {
+      this.ctx.log(`[music-popup] failed (popups are best-effort): ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   /** Multi-surface (2026-07-13): a surface just attached (os_attach — first
    *  attach OR the app's re-attach after a BLE cold-launch). Force a full
    *  repaint of the current state to every surface. Clearing lastBlankSurface
@@ -661,6 +721,8 @@ export class WindowManager {
     notifyHub.off('seen', this.onHubSeen)
     notifyHub.off('dismissPhone', this.onHubDismissPhone)
     this.clearPopupTimer()
+    if (this.musicPopupTimer) { clearTimeout(this.musicPopupTimer); this.musicPopupTimer = null }
+    this.musicPopupLine = null
     if (this.dashboardPacer) { clearInterval(this.dashboardPacer); this.dashboardPacer = null }
     // Release any window-held resource (e.g. the Terminal capture poll).
     for (const w of this.windows) {
@@ -672,6 +734,16 @@ export class WindowManager {
 
   private clearPopupTimer(): void {
     if (this.blankPopupTimer) { clearTimeout(this.blankPopupTimer); this.blankPopupTimer = null }
+  }
+
+  /** An explicit user BLANK kills a live music popup (review 2026-08-05 #N7:
+   *  a background render inside the popup window otherwise re-lit the
+   *  deliberately-darkened screen with it via the blank-branch re-assert). */
+  private clearMusicPopup(reason: string): void {
+    if (this.musicPopupLine === null) return
+    this.ctx.log(`[music-popup] cleared (${reason})`)
+    this.musicPopupLine = null
+    if (this.musicPopupTimer) { clearTimeout(this.musicPopupTimer); this.musicPopupTimer = null }
   }
 
   private markEvtSeen(evt: NotifyEvent): void {
@@ -849,6 +921,12 @@ export class WindowManager {
       // in place via onNavUpdate and only clears on nav_clear); a 5 s flash
       // still takes precedence for its window, then nav resumes.
       if (this.blankFlash) return
+      // D6.3: a live music popup owns the dark screen for its window (a
+      // background render must not re-blank over it; sendBlank dedupes the
+      // re-assert). Notification flashes above outrank it.
+      // A pinned nav line rides along on the dark screen (review #N6 — the
+      // popup must not hide a live Maps instruction for its whole window).
+      if (this.musicPopupLine) { this.sendBlank(blankFlashScene(this.navLine ? `${this.musicPopupLine} · ▲ ${this.navLine}` : this.musicPopupLine)); return }
       this.sendBlank(this.navLine ? blankFlashScene(this.navLine) : blankScene())
       return
     }
@@ -890,6 +968,19 @@ export class WindowManager {
             // bar that carried it is gone in ribbon mode). The flash already shows
             // the latest one, so only add the count when there is no flash.
             if (this.rootNav === 'ribbon' && this.unseen > 0 && !this.titleFlash) view = { ...view, title: `${view.title} · !${this.unseen}` }
+            // D6.3: the music popup is a one-line TOP INTRUSION — it takes the
+            // title bar for its ~4.5 s window (classic + fullBleed both
+            // compose view.title as the top line), then a normal re-render
+            // restores it. Pure visual; menus/capture untouched. It rides any
+            // mid-popup content render (conflation) instead of fighting it.
+            // The notification-flash and nav tails STAY appended (review #N6:
+            // replacing the whole title hid `! <sender>` / `▲ <nav>` for the
+            // popup window; compose's px middle-clamp keeps head + tail).
+            if (this.musicPopupLine) {
+              const tail = [this.titleFlash ? `! ${this.titleFlash.title}` : null, this.navLine ? `▲ ${this.navLine}` : null]
+                .filter(Boolean).join(' · ')
+              view = { ...view, title: tail ? `${this.musicPopupLine} · ${tail}` : this.musicPopupLine }
+            }
           }
           // Tab strip RETIRED (Phase 5, 2026-06-11): the Main dashboard carries
           // the window states now; the status slot takes the full bottom bar.
@@ -1044,7 +1135,10 @@ export class WindowManager {
           let scene: WireScene
           const battery = this.g2BatteryText()
           try {
-            scene = this.ribbon!.scene(preview, battery)
+            // D6.3: a live music popup swaps the STRIP TEXT only — antenna id,
+            // geometry, and the scroll capture stay untouched (scroll keeps
+            // working); the revert render restores the normal strip.
+            scene = this.ribbon!.scene(preview, battery, this.musicPopupLine)
           } catch (e) {
             this.ctx.log(`[ribbon] scene compose failed: ${(e as Error).message}`)
             try {
@@ -1423,6 +1517,7 @@ export class WindowManager {
         if (act.kind === 'recompose') { this.renderRibbon(); return }
         if (act.kind === 'blank') {
           this.blanked = true
+          this.clearMusicPopup('user blank at ribbon root')
           this.ctx.log('[os] screen BLANK (double-tap at ribbon root) — double-tap again to wake')
           // Keep a live Maps nav line on the dark screen (review 2026-07-05 —
           // 'nav owns the blanked surface'; every other blank site already does
@@ -1469,6 +1564,7 @@ export class WindowManager {
       if (consumed) return
       if (this.active.id === 'main') {
         this.blanked = true
+        this.clearMusicPopup('user blank at Main root')
         this.ctx.log('[os] screen BLANK (double-tap at Main root) — double-tap again to wake')
         this.sendBlank(blankScene())
         return
@@ -1578,28 +1674,8 @@ export class WindowManager {
     }
   }
 
-  /** Route a transcript to a SPECIFIC window by id WITHOUT changing focus
-   *  (earbud 2026-08-04 — the Companion PTT: double-tap the bud from anywhere
-   *  and talk to the Companion while the visible window stays put). Loud
-   *  discard when the window is missing or takes no dictation. */
-  async onSttFor(windowId: string, text: string, meta?: SttMeta): Promise<void> {
-    const win = this.windows.find((w) => w.id === windowId)
-    if (!win) {
-      this.ctx.log(`[os] onSttFor('${windowId}') — no such window; transcript DISCARDED (${text.length} chars)`)
-      return
-    }
-    if (!win.onStt) {
-      this.ctx.log(`[os] onSttFor('${windowId}') — window takes no dictation; transcript DISCARDED (${text.length} chars)`)
-      return
-    }
-    try {
-      await win.onStt(text, meta)
-      // If that window IS active, its state changed — repaint.
-      if (this.active.id === windowId) this.requestRender()
-    } catch (e) {
-      this.ctx.log(`[os] onSttFor('${windowId}') handler failed: ${(e as Error).message}`)
-    }
-  }
+  // (onSttFor/onSttErrorFor — the earbud PTT's focus-independent routing —
+  // died with the lane, MUSIC_SPEC D2. Transcripts route to the active window.)
 
   async onSttError(error: string): Promise<void> {
     try {
@@ -1607,23 +1683,6 @@ export class WindowManager {
       else this.ctx.log(`[os] STT error arrived for '${this.active.id}' which takes no dictation — logged only: ${error}`)
     } catch (e) {
       this.ctx.log(`[os] stt-error handler failed (${this.active.id}): ${(e as Error).message}`)
-    }
-  }
-
-  /** Route an STT error to a SPECIFIC window (deep-review #29 — the
-   *  companion-PTT/voice-confirm capture belongs to the Earbud window
-   *  regardless of focus; its pending-confirm feedback lives there). */
-  async onSttErrorFor(windowId: string, error: string): Promise<void> {
-    const win = this.windows.find((w) => w.id === windowId)
-    if (!win?.onSttError) {
-      this.ctx.log(`[os] onSttErrorFor('${windowId}') — no window/handler; logged only: ${error}`)
-      return
-    }
-    try {
-      await win.onSttError(error)
-      if (this.active.id === windowId) this.requestRender()
-    } catch (e) {
-      this.ctx.log(`[os] onSttErrorFor('${windowId}') handler failed: ${(e as Error).message}`)
     }
   }
 
@@ -1729,41 +1788,12 @@ export class WindowManager {
     }
   }
 
-  private async dispatchVoice(cmd: VoiceCommand, meta?: SttMeta): Promise<void> {
+  private async dispatchVoice(cmd: VoiceCommand, _meta?: SttMeta): Promise<void> {
     this.ctx.log(`[voice] command: ${JSON.stringify(cmd)}`)
     switch (cmd.kind) {
-      // ---- earbud lane (2026-08-04, EARBUD_SPEC §C6.4) ----
-      case 'earbud': {
-        const e = getEarbud()
-        switch (cmd.action) {
-          case 'pause': e.pauseMusic('user'); return
-          case 'resume': e.resumeMusic('voice'); return
-          case 'toggle': e.playPauseToggle('voice'); return
-          case 'skip': e.skip(1, 'voice'); return
-          case 'prev_track': e.skip(-1, 'voice'); return
-          case 'stop_music': e.stopMusic('voice'); return
-          case 'vol_up': e.setVolume((e.volumePct ?? 60) + 10, 'voice'); return
-          case 'vol_down': e.setVolume((e.volumePct ?? 60) - 10, 'voice'); return
-        }
-        return
-      }
-      case 'whats_playing': {
-        const e = getEarbud()
-        const t = e.nowPlaying()
-        const line = t
-          ? `Now playing: ${t.title}${t.artist ? `, by ${t.artist}` : ''}. Track ${e.status().queuePos}.`
-          : 'Nothing is playing.'
-        void e.speak(line, { priority: 'next', source: 'voice:whats-playing', music: 'duck' })
-        return
-      }
-      case 'quiet': getEarbud().quiet('voice command'); return
-      case 'companion': {
-        // The ringless open-ended path: hand the post-wake sentence to the
-        // Companion window (no focus change). Its onStt runs the confidence
-        // gate + voice-confirm flow — same rules as PTT dictation.
-        await this.onSttFor('earbud', cmd.text, meta)
-        return
-      }
+      // (The earbud transport verbs / whats_playing / quiet / companion
+      // catch-all died with the lane — MUSIC_SPEC D2. The grammar core stays
+      // for the future handsfree revisit; it simply has no always-on feed.)
       case 'window': this.blanked = false; this.switchTo(cmd.id); return
       case 'blank':
         if (!this.blanked) {
@@ -1783,6 +1813,7 @@ export class WindowManager {
             this.overlayRendered = false
           }
           this.blanked = true
+          this.clearMusicPopup('voice blank')
           this.sendBlank(this.navLine ? blankFlashScene(this.navLine) : blankScene())
         }
         return

@@ -17,7 +17,7 @@
 
 import Fastify from 'fastify'
 import websocket from '@fastify/websocket'
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
@@ -32,9 +32,9 @@ import { timingSafeEqualStr } from './auth.js'
 import { deliverLiveFrame, scoutLiveStatus } from './scout-live.js'
 import { warmParakeet } from './stt.js'
 import { warmStore } from './store.js'
-import { initEarbud, getEarbud } from './earbud.js'
-import { warmTts } from './tts.js'
-import { scanLibrary, getTrack, mediaFileFor, trackCount, searchTracks, randomTracks, toEarbudTrack } from './music.js'
+import { initMusicPlayer, getMusicPlayer } from './music-player.js'
+import { resolveRequest } from './resolver.js'
+import { scanLibrary, getTrack, mediaFileFor, trackCount } from './music.js'
 import { appendNote } from './intents.js'
 import { listNotifications, markSeen } from './os-notify.js'
 import { createReadStream } from 'node:fs'
@@ -73,48 +73,22 @@ setWatchdog(watchdogInstance)
 // would be a ws-handler module cycle).
 initOsSession(config, watchdogInstance, closeAllClients)
 
-// Earbud audio lane (2026-08-04, docs/EARBUD_SPEC.md): session-lifetime
-// singleton wired to the OS session via closures (earbud.ts imports neither
-// os-session nor ws-handler — no cycles). Playback/speech state survives
-// window switches, blanking, and surface disconnects by construction.
-initEarbud(config, {
+// Music player core (MUSIC_SPEC D5, 2026-08-05): session-lifetime singleton
+// wired to the OS session via closures (music-player.ts imports neither
+// os-session nor ws-handler — no cycles). Playback state survives window
+// switches, blanking, and surface disconnects by construction. The earbud
+// lane's speech/TTS/ears/Companion wiring is GONE (spec D2 — dormant on disk
+// for its own future session); popups ride the WM's transient channel.
+initMusicPlayer(config, {
   toPhone: (msg, what) => getOsSession().toPhone(msg, what),
-  toPhoneBinary: (buf, what) => {
-    const phone = getOsSession().phoneSurface()
-    if (!phone || phone.ws.readyState !== 1) {
-      console.error(`[earbud] ${what} needs the phone — no phone surface attached`)
-      return false
+  popup: (line) => {
+    try {
+      getOsSession().wm.musicPopup(line)
+    } catch (e) {
+      console.error(`[music] popup dispatch failed (best-effort): ${e instanceof Error ? e.message : String(e)}`)
     }
-    phone.ws.send(buf)
-    return true
   },
-  activeWindowId: () => getOsSession().wm.activeWindowId(),
-  isScreenIdle: () => getOsSession().wm.isScreenIdle(),
-  hasDisplay: () => getOsSession().hasDisplay(),
 })
-
-// Companion MCP config (earbud 2026-08-04): written fresh each boot so the
-// dist path + port + token are always current. The Claude CLI spawns
-// dist/companion-mcp.js itself from this file (cc-session --mcp-config).
-const COMPANION_MCP_PATH = join(homedir(), '.g2cc', 'companion-mcp.json')
-try {
-  const mcpEntry = join(dirname(fileURLToPath(import.meta.url)), 'companion-mcp.js')
-  writeFileSync(COMPANION_MCP_PATH, JSON.stringify({
-    mcpServers: {
-      'g2cc-earbud': {
-        command: process.execPath,
-        args: [mcpEntry],
-        env: {
-          G2CC_INTERNAL_URL: `http://127.0.0.1:${config.port}`,
-          G2CC_TOKEN: config.authToken,
-        },
-      },
-    },
-  }, null, 2))
-  console.log(`[g2cc-server] companion MCP config written (${COMPANION_MCP_PATH} → ${mcpEntry})`)
-} catch (err) {
-  console.error(`[g2cc-server] companion MCP config write FAILED (Companion tools will be unavailable): ${err instanceof Error ? err.message : String(err)}`)
-}
 
 const server = Fastify({ logger: false })
 
@@ -339,56 +313,43 @@ server.post('/scout/live', async (req, reply) => {
   reply.send(result)
 })
 
-// ---- Companion internal API (earbud 2026-08-04, EARBUD_SPEC §C6.4) ----
-// LOOPBACK + Bearer (the /scout/live gate): the companion-mcp.js subprocess
-// runs on this box; these must never be drivable from the network even with a
-// leaked token. Every reply is the honest outcome — errors are 500s with the
-// reason, never fabricated successes.
+// ---- Internal control API (music redesign 2026-08-05; the /scout/live gate) ----
+// LOOPBACK + Bearer: local tooling (and the dormant Companion, if it ever
+// returns) drives the box; these must never be drivable from the network even
+// with a leaked token. Every reply is the honest outcome — errors are 500s
+// with the reason, never fabricated successes. /internal/speak died with the
+// speech lane (MUSIC_SPEC D2 — TTS is shelved to its own future session).
 function internalGuard(req: Parameters<typeof scoutLiveAllowed>[0], reply: Parameters<typeof scoutLiveAllowed>[1], route: string): boolean {
   return scoutLiveAllowed(req, reply, route)
 }
 
-server.post('/internal/speak', async (req, reply) => {
-  if (!internalGuard(req, reply, '/internal/speak')) return
-  const b = req.body as { text?: unknown; priority?: unknown }
-  if (typeof b?.text !== 'string' || !b.text.trim()) {
-    reply.code(400).send({ error: 'text (non-empty string) required' })
-    return
-  }
-  const priority = b.priority === 'now' || b.priority === 'next' || b.priority === 'queue' ? b.priority : 'queue'
-  // Explicit speak = the Companion CHOSE to talk — focus policy does not gate
-  // it (respectFocus false); the earbud window shows the text via scrollback
-  // when it's the session's own reply anyway.
-  const outcome = await getEarbud().speak(b.text, { priority, source: 'companion-mcp', music: 'duck' })
-  reply.send(outcome)
-})
-
 server.post('/internal/play', async (req, reply) => {
   if (!internalGuard(req, reply, '/internal/play')) return
-  const b = req.body as { query?: unknown; shuffle?: unknown; append?: unknown }
+  const b = req.body as { query?: unknown; append?: unknown }
   if (typeof b?.query !== 'string' || !b.query.trim()) {
     reply.code(400).send({ error: 'query (non-empty string) required' })
     return
   }
   try {
-    const q = b.query.trim()
-    const rows = /^(random|surprise( me)?|anything|shuffle)$/i.test(q)
-      ? await randomTracks(30)
-      : await searchTracks(q, 200)
-    if (rows.length === 0) {
-      reply.send({ queued: 0, message: `no library matches for "${q}"` })
+    const resolved = await resolveRequest(config, b.query.trim())
+    console.log(`[g2cc-server] /internal/play: ${resolved.detail}`)
+    if (resolved.tracks.length === 0) {
+      reply.send({ queued: 0, lane: resolved.lane, message: resolved.detail })
       return
     }
-    let tracks = rows.map(toEarbudTrack)
-    if (b.shuffle === true) tracks = tracks.map((t) => [Math.random(), t] as const).sort((a, z) => a[0] - z[0]).map(([, t]) => t)
-    const earbud = getEarbud()
-    if (b.append === true && earbud.musicQueue.length > 0 && earbud.musicState !== 'idle') {
-      earbud.musicQueue.push(...tracks)
-      reply.send({ queued: tracks.length, appended: true, first: tracks[0].title, queueLen: earbud.musicQueue.length })
+    const player = getMusicPlayer()
+    if (b.append === true && player.queue.length > 0) {
+      const len = player.append(resolved.tracks, 'internal-play')
+      reply.send({ queued: resolved.tracks.length, appended: true, lane: resolved.lane, first: resolved.tracks[0].title, queueLen: len })
       return
     }
-    const ok = earbud.playQueue(tracks, 0, 'companion-mcp')
-    reply.send({ queued: tracks.length, playing: ok, first: tracks[0].title, artist: tracks[0].artist ?? null, ...(ok ? {} : { error: 'no media-capable phone attached' }) })
+    const ok = player.playQueue(resolved.tracks, 0, 'internal-play', resolved.label)
+    reply.send({
+      queued: resolved.tracks.length, playing: ok, lane: resolved.lane,
+      first: resolved.tracks[0].title, artist: resolved.tracks[0].artist ?? null,
+      detail: resolved.detail,
+      ...(ok ? {} : { error: 'no media-lane-capable phone attached' }),
+    })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error(`[g2cc-server] /internal/play failed: ${msg}`)
@@ -399,21 +360,26 @@ server.post('/internal/play', async (req, reply) => {
 server.post('/internal/media', async (req, reply) => {
   if (!internalGuard(req, reply, '/internal/media')) return
   const b = req.body as { cmd?: unknown; value?: unknown }
-  const earbud = getEarbud()
+  const player = getMusicPlayer()
   switch (b?.cmd) {
-    case 'pause': earbud.pauseMusic('user'); break
-    case 'resume': earbud.resumeMusic('companion-mcp'); break
-    case 'skip': earbud.skip((typeof b.value === 'number' && b.value < 0) ? -1 : 1, 'companion-mcp'); break
-    case 'stop': earbud.stopMusic('companion-mcp'); break
+    case 'pause': player.pause('user'); break
+    case 'resume': player.resume('internal'); break
+    case 'toggle': player.toggle('internal'); break
+    case 'skip': player.skip((typeof b.value === 'number' && b.value < 0) ? -1 : 1, 'internal'); break
+    case 'stop': player.stop('internal'); break
+    case 'seek':
+      if (typeof b.value !== 'number') { reply.code(400).send({ error: 'seek needs numeric value (ms)' }); return }
+      player.seek(b.value, 'internal')
+      break
     case 'volume':
       if (typeof b.value !== 'number') { reply.code(400).send({ error: 'volume needs numeric value 0-100' }); return }
-      earbud.setVolume(b.value, 'companion-mcp')
+      player.setVolume(b.value, 'internal')
       break
     default:
-      reply.code(400).send({ error: `unknown cmd '${String(b?.cmd)}' (pause|resume|skip|stop|volume)` })
+      reply.code(400).send({ error: `unknown cmd '${String(b?.cmd)}' (pause|resume|toggle|skip|stop|seek|volume)` })
       return
   }
-  reply.send({ ok: true, state: earbud.status() })
+  reply.send({ ok: true, state: player.status() })
 })
 
 server.get('/internal/status', async (req, reply) => {
@@ -424,7 +390,7 @@ server.get('/internal/status', async (req, reply) => {
     return null
   })
   reply.send({
-    earbud: getEarbud().status(),
+    music: getMusicPlayer().status(),
     glasses: { connected: session.g2Connected, battery: session.g2Battery, phoneBattery: session.phoneBattery },
     activeWindow: session.wm.activeWindowId(),
     timers: pending === null ? 'timer store unavailable' : pending.map((t) => ({ id: t.id, label: t.label, remaining: fmtRemaining(t.firesAt) })),
@@ -617,14 +583,19 @@ try {
   startDiscovery(config.port)
   // Pre-warm the Parakeet STT daemon so the first voice command isn't a ~12 s
   // cold model load (fire-and-forget; lazy-loads on first request if it fails).
+  // (The Kokoro TTS warm died with the speech lane — MUSIC_SPEC D2; tts.ts
+  // stays dormant on disk for its own future session.)
   void warmParakeet(config)
-  // Pre-warm the Kokoro TTS daemon (earbud lane) — ~1 s cold; fire-and-forget.
-  void warmTts(config)
-  // Music library scan (earbud lane) — incremental; fire-and-forget so a slow
-  // or unmounted library disk can't block boot. Count logged either way.
+  // Music library scan — incremental; fire-and-forget so a slow or unmounted
+  // library disk can't block boot. Count logged either way.
   void scanLibrary(config)
     .then(async () => console.log(`[music] library ready: ${await trackCount()} tracks indexed`))
     .catch((e: unknown) => console.error(`[music] boot scan failed (window/tools can rescan): ${e instanceof Error ? e.message : String(e)}`))
+  // Restore the persisted player queue into the IDLE model (D5 Resume — NEVER
+  // auto-plays; a bud tap / the Music window starts it). Fire-and-forget: a
+  // down DB logs loudly and the player simply starts empty.
+  void getMusicPlayer().loadPersisted()
+    .catch((e: unknown) => console.error(`[music] persisted-state load failed (starting empty): ${e instanceof Error ? e.message : String(e)}`))
   // Pre-warm the Postgres store (migrations) — fire-and-forget: a down DB logs
   // loudly and every store feature lazily retries; the server must not care.
   warmStore()
@@ -697,6 +668,9 @@ function shutdown(): void {
     // wait — compatible with the no-timeouts rule; otherwise up to ~30 s of idle
     // progress is silently lost on every restart — review 2026-06-27, C-F2/D-F1).
     .then(() => paperclips.flush())
+    // Same class (music review 2026-08-05 #H5): a pause/seek inside the last
+    // ~1.5 s before SIGTERM would lose its debounced player_state write.
+    .then(() => getMusicPlayer().flushPersist())
     .then(() => process.exit(0))
     .catch((err) => {
       console.error('[g2cc-server] shutdown (server.close/paperclips.flush) rejected:', err)

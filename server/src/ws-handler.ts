@@ -51,7 +51,7 @@ import { menuScene, ensureMenuRendered, menuItemLabel, MENU_ITEM_COUNT } from '.
 import { getOsSession, type OsSurface } from './os-session.js'
 import { type MemoAudio } from './memo.js'
 import { segmentUtterances, estimateSttConfidence } from './voice.js'
-import { getEarbud } from './earbud.js'
+import { getMusicPlayer } from './music-player.js'
 import { type SttMeta } from './windows/types.js'
 
 // Hard ceiling on a single in-flight audio buffer (a resource guard, NOT an I/O timeout — allowed):
@@ -129,9 +129,9 @@ export interface WSClient {
    *  `wm: WindowManager` and phone-fed state (batteries, lastDictationAudio)
    *  moved to the OsSession. */
   surface: OsSurface | null
-  /** Earbud 2026-08-04: capability flags from AuthMsg.caps. null = none
-   *  announced (pre-1.20 APK / browser). Pushed to the EarbudAudioService on
-   *  phone os_attach — the server sends NO earbud-family message otherwise. */
+  /** Capability flags from AuthMsg.caps. null = none announced (pre-1.20 APK
+   *  / browser). Pushed to the MusicPlayerService on phone os_attach — the
+   *  server sends NO media-family message otherwise. */
   caps: string[] | null
 }
 
@@ -278,9 +278,9 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
           // peer must not OOM the single-threaded server. Loud-fail + discard.
           console.warn(`[ws] audio buffer hit ${client.audioBytes}B without audio_end — discarding`)
           client.collectingAudio = false
-          // Deep-review #1: without this release the earbud half-duplex gate
-          // latched forever — speech queue frozen, music stuck paused.
-          if (client.audioFormat?.mode !== 'handsfree') getEarbud().onCaptureState(false)
+          // Deep-review #1 (kept for the music lane): without this release the
+          // capture gate latched forever — music stuck paused.
+          if (client.audioFormat?.mode !== 'handsfree') getMusicPlayer().onCaptureState(false)
           client.audioChunks = []
           client.audioBytes = 0
           client.audioFormat = null
@@ -345,7 +345,7 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
       client.audioChunks = []
       client.audioBytes = 0
       client.audioFormat = null
-      getEarbud().onCaptureState(false)   // half-duplex gate must not stay latched
+      getMusicPlayer().onCaptureState(false)   // capture gate must not stay latched
     }
     if (client.authTimer) clearTimeout(client.authTimer)
     if (client.streamTimer) clearTimeout(client.streamTimer)
@@ -370,9 +370,9 @@ export function handleConnection(ws: WebSocket, config: G2CCConfig): WSClient {
       const wasPhone = client.surface.kind === 'phone'
       getOsSession().detach(client.surface.id)
       client.surface = null
-      // Earbud 2026-08-04: caps die with the last phone surface (a reconnect
-      // re-announces them on its own os_attach).
-      if (wasPhone && getOsSession().phoneSurface() === null) getEarbud().notePhoneCaps(null)
+      // Caps die with the last phone surface (a reconnect re-announces them
+      // on its own os_attach).
+      if (wasPhone && getOsSession().phoneSurface() === null) getMusicPlayer().notePhoneCaps(null)
     }
     // Kill the LEGACY per-connection pool's CC subprocesses (dispatch-menu
     // path only — the DE pool is session-owned and survives). Once the socket
@@ -403,10 +403,10 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       if (!valid) {
         client.ws.close(4003, 'Invalid token')
       } else {
-        // Earbud 2026-08-04: capability flags (v1.20+ APKs). Stored per-client;
-        // pushed to the EarbudAudioService when this connection attaches as the
-        // phone surface. micSource rides the snapshot so the phone knows which
-        // BT mic to capture from (earbud vs the disabled-not-deleted DJI).
+        // Capability flags (v1.20+ APKs). Stored per-client; pushed to the
+        // MusicPlayerService when this connection attaches as the phone
+        // surface. micSource rides the snapshot so the phone knows which BT
+        // mic to capture from (earbud vs the disabled-not-deleted DJI).
         client.caps = Array.isArray(msg.caps) ? msg.caps.filter((c) => typeof c === 'string') : null
         if (client.caps) console.log(`[ws] client caps: ${client.caps.join(',') || '(empty)'}`)
         sendMsg(client, { type: 'config_snapshot', micSource: config.stt.micSource })
@@ -725,13 +725,11 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         mode: msg.mode === 'handsfree' ? 'handsfree' : undefined,   // Phase 9
       }
       console.log(`[ws] audio_start sr=${client.audioFormat.sampleRate} ch=${client.audioFormat.channels} enc=${client.audioFormat.encoding} src=${client.audioFormat.source ?? '?'}${client.audioFormat.mode === 'handsfree' ? ' mode=handsfree' : ''}`)
-      if (handsfree) getEarbud().noteHandsfreeStarted()   // ears truth anchor (2026-08-04 field fix)
-      // Earbud half-duplex (2026-08-04): a live DICTATE capture kills speech
-      // (echo — AEC is deliberately off) and pauses the music lane. Handsfree
-      // is EXEMPT: its 3 s window re-cuts would flap the music pause; ambient
-      // listening coexists with playback by design (wake-word-gated, and the
-      // confidence gate + voice confirm catch music-bleed mishears).
-      if (!handsfree) getEarbud().onCaptureState(true)
+      // Capture gate (MUSIC_SPEC D5 — the ONE dictation/audio coupling, and
+      // it's physics): a live DICTATE capture pauses the music lane (SCO
+      // suspends A2DP). Handsfree stays EXEMPT (dormant plumbing — nothing
+      // requests handsfree since the ears supervisor died, spec D2).
+      if (!handsfree) getMusicPlayer().onCaptureState(true)
       break
     }
 
@@ -750,18 +748,18 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         // sttResult/sttError; the stray stays loud in the log only.
         if (client.sttInFlightCount > 0) {
           console.warn(`[ws] duplicate audio_end while ${client.sttInFlightCount} transcription(s) in flight — logged only (the live pipeline owns the WM state)`)
-          getEarbud().onCaptureState(false)   // idempotent belt-and-braces gate release (deep-review #1)
+          getMusicPlayer().onCaptureState(false)   // idempotent belt-and-braces gate release (deep-review #1)
           break
         }
         console.warn(`[ws] audio_end without prior audio_start — ignoring`)
-        getEarbud().onCaptureState(false)     // idempotent gate release (deep-review #1)
+        getMusicPlayer().onCaptureState(false)     // idempotent gate release (deep-review #1)
         sttError(client, 'audio_end without prior audio_start')
         break
       }
       client.collectingAudio = false
-      // Half-duplex gate released (earbud 2026-08-04) — dictate captures only
-      // (handsfree never latched it; see audio_start).
-      if (client.audioFormat?.mode !== 'handsfree') getEarbud().onCaptureState(false)
+      // Capture gate released — dictate captures only (handsfree never
+      // latched it; see audio_start).
+      if (client.audioFormat?.mode !== 'handsfree') getMusicPlayer().onCaptureState(false)
       const pcmBuffer = Buffer.concat(client.audioChunks)
       const format = client.audioFormat ?? { sampleRate: 16_000, channels: 1, encoding: 'int16' as const }
       client.audioChunks = []
@@ -1066,14 +1064,17 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
     }
 
     case 'speak_ack': {
-      // Earbud 2026-08-04: the phone's honest speech-delivery report.
-      getEarbud().onSpeakAck(msg)
+      // The speech lane is RETIRED (music redesign 2026-08-05, MUSIC_SPEC D2)
+      // — the server never sends speak_start any more, so an ack arriving is
+      // protocol drift or a stale phone-side queue. Loud ignore, never a crash.
+      console.warn(`[ws] speak_ack ${msg.id} (${msg.status}) ignored — the speech lane is retired (music redesign D2)`)
       break
     }
 
     case 'media_event': {
-      // Earbud 2026-08-04: the phone's ExoPlayer state (queue advance etc.).
-      getEarbud().onMediaEvent(msg)
+      // The phone's ExoPlayer state — the music player's truth anchor
+      // (queue advance, honest pause/error reporting).
+      getMusicPlayer().onMediaEvent(msg)
       break
     }
 
@@ -1099,18 +1100,11 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
       // audio_start ever arrives, so no stt_result/stt_error can fire.
       if (client.osMode && client.osScreen === 'de' && msg.text.includes('[audio-error]')) {
         const reason = msg.text.slice(msg.text.indexOf('[audio-error]') + '[audio-error]'.length).trim()
-        const session = getOsSession()
-        // Deep-review #1/#3: a capture that never starts still releases the
-        // half-duplex gate and the companion-PTT voice-target latch — and the
-        // error feedback goes to the window that OWNS the failed capture.
-        getEarbud().onCaptureState(false)
-        if (session.voiceTarget === 'earbud') {
-          session.voiceTarget = 'active'
-          console.warn('[ws] companion PTT mic failure — voice-target override reset; error routed to the Earbud window')
-          void session.wm.onSttErrorFor('earbud', reason || 'mic capture failed (see client diag)')
-        } else {
-          void session.wm.onSttError(reason || 'mic capture failed (see client diag)')
-        }
+        // Deep-review #1 (kept): a capture that never starts still releases
+        // the music capture gate; the error feedback goes to the active
+        // window (the earbud voice-target override died with the lane — D2).
+        getMusicPlayer().onCaptureState(false)
+        void getOsSession().wm.onSttError(reason || 'mic capture failed (see client diag)')
       }
       break
     }
@@ -1135,9 +1129,10 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
           const session = getOsSession()
           client.surface = session.attach(client.ws, msg.surface ?? 'phone')
           session.wm.onSurfaceAttached()
-          // Earbud caps follow the phone surface (2026-08-04): the audio lane
-          // sends nothing to a phone that didn't announce the capability.
-          if (client.surface.kind === 'phone') getEarbud().notePhoneCaps(client.caps ?? [])
+          // Media caps follow the phone surface: the music lane sends nothing
+          // to a phone that didn't announce the capability. This also fires
+          // the tap-arming ping when an idle queue is staged (D6.2).
+          if (client.surface.kind === 'phone') getMusicPlayer().notePhoneCaps(client.caps ?? [])
           console.log(`[ws] os_attach — surface ${client.surface.id} (${client.surface.kind}); DE session resumed`)
         } else if (client.osScreen === 'menu') {
           await ensureMenuRendered() // rasterize + cache all menu tiles once (~1s first time)
@@ -1170,43 +1165,25 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         const session = getOsSession()
         const wm = session.wm
         if (msg.event === 'media_button') {
-          // Earbud buttons (2026-08-04, EARBUD_SPEC §C7): the SERVER owns the
-          // semantics. Pixel Buds 2a taps arrive as transport actions:
-          //   single (play/pause) → quiet speech if talking, else music toggle
-          //   double (next)       → Companion push-to-talk from ANYWHERE
-          //   triple (prev)       → next track (remapped; 'previous' via voice)
+          // Bud taps — NATIVE transport semantics (MUSIC_SPEC D6.2,
+          // Spotify-identical; the Companion-PTT / quiet-speech / triple=next
+          // remap died with the earbud lane, D2):
+          //   single (play_pause) → toggle (idle + staged queue = start it)
+          //   double (next)       → next track
+          //   triple (prev)       → previous track (≥3 s in = restart current)
           // NOT enqueueInput-serialized: these are audio-lane reflexes, not
           // display navigation, and must work while a slow window handler runs.
           const btn = msg.button ?? 'play_pause'
-          const earbud = getEarbud()
-          console.log(`[ws] earbud media_button: ${btn}`)
+          const player = getMusicPlayer()
+          console.log(`[ws] bud media_button: ${btn}`)
           if (btn === 'play_pause' || btn === 'play' || btn === 'pause') {
-            if (earbud.status().speaking || earbud.status().queued > 0) earbud.quiet('earbud tap')
-            else earbud.playPauseToggle('earbud tap')
+            player.toggle('bud tap')
           } else if (btn === 'next') {
-            // Companion PTT: chime, flag the one-shot voice target, start a
-            // dictate capture. The transcript routes to the Earbud window via
-            // sttResult's voiceTarget branch (focus unchanged).
-            // Review 2026-08-04 #7: a double-tap DURING a live dictation must
-            // not fire a second audio_request — the app refuses it with an
-            // [audio-error] that unwinds the LIVE dictation, and the stale
-            // voiceTarget would misroute the next transcript. Ignore loudly.
-            if (client.collectingAudio || client.sttInFlightCount > 0) {
-              console.warn(`[ws] companion PTT ignored — a dictation is ${client.collectingAudio ? 'live' : 'transcribing'} (finish or cancel it first)`)
-              break
-            }
-            earbud.quiet('companion PTT')
-            session.voiceTarget = 'earbud'
-            earbud.chime('rec_start')
-            if (!session.toPhone({ type: 'audio_request', action: 'start', mode: 'dictate' }, 'audio_request(companion PTT)')) {
-              session.voiceTarget = 'active'
-              console.error('[ws] companion PTT failed — no phone for audio_request (flag reset)')
-            }
+            player.skip(1, 'bud tap')
           } else if (btn === 'prev') {
-            earbud.skip(1, 'earbud triple-tap')
+            player.skip(-1, 'bud tap')
           } else if (btn === 'stop') {
-            earbud.quiet('earbud stop')
-            earbud.stopMusic('earbud stop')
+            player.stop('bud tap')
           }
         } else if (msg.event === 'hub_select') {
           // The firmware reports the tapped row: widgetType = our container NAME
@@ -1346,7 +1323,7 @@ async function handleMessage(client: WSClient, msg: ClientMessage, config: G2CCC
         // must never be the default branch of an unvalidated wire field — a
         // garbled/missing kind used to fall through to hardReset().
         console.warn(`[ws] HARD RESET requested by surface ${client.surface?.id ?? '(unattached)'}`)
-        getEarbud().reset()   // earbud 2026-08-04: speech queue + music state die with the world
+        getMusicPlayer().reset()   // playback stops; the queue is durable and survives (D5)
         await getOsSession().hardReset()
       } else {
         console.error(`[ws] reset with unknown kind '${String((msg as { kind?: unknown }).kind)}' — REFUSED (nothing reset)`)
@@ -1713,17 +1690,10 @@ function sttResult(client: WSClient, text: string, audio?: MemoAudio, meta?: Stt
   if (audio) getOsSession().lastDictationAudio = audio
   sendMsg(client, { type: 'stt_result', text })
   if (client.osMode && client.osScreen === 'de') {
-    const session = getOsSession()
-    // Earbud 2026-08-04: the bud's double-tap PTT set a one-shot voice-target
-    // override — this transcript goes to the Companion regardless of focus.
-    if (session.voiceTarget === 'earbud') {
-      session.voiceTarget = 'active'
-      console.log(`[ws] DE stt → Companion (PTT override): "${text}"${meta ? ` conf=${meta.confidence.toFixed(2)}` : ''}`)
-      void session.wm.onSttFor('earbud', text, meta)
-      return
-    }
+    // (The earbud voice-target override died with the lane — D2. Transcripts
+    // always route to the active window now.)
     console.log(`[ws] DE stt → active window: "${text}"${meta ? ` conf=${meta.confidence.toFixed(2)}` : ''}`)
-    void session.wm.onStt(text, meta)
+    void getOsSession().wm.onStt(text, meta)
   }
 }
 
@@ -1734,18 +1704,7 @@ function sttError(client: WSClient, error: string): void {
   console.error(`[stt] REJECTED dictation: ${error}`)
   sendMsg(client, { type: 'stt_error', error })
   if (client.osMode && client.osScreen === 'de') {
-    const session = getOsSession()
-    // A failed companion-PTT dictation must not leave the override latched
-    // (earbud 2026-08-04) — and its error belongs to the EARBUD window (the
-    // voice-confirm loop waits there), not whatever window happens to be
-    // active (deep-review #29).
-    if (session.voiceTarget === 'earbud') {
-      session.voiceTarget = 'active'
-      console.warn('[ws] companion PTT dictation failed — voice-target override reset; error → Earbud window')
-      void session.wm.onSttErrorFor('earbud', error)
-      return
-    }
-    void session.wm.onSttError(error)
+    void getOsSession().wm.onSttError(error)
   }
 }
 

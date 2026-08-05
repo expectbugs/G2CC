@@ -43,7 +43,8 @@ export const WINDOW_ALIASES: Record<string, string> = {
   assistant: 'aria', aria: 'aria',
   code: 'cc', claude: 'cc',
   scout: 'scout',
-  earbud: 'earbud', companion: 'earbud', ear: 'earbud',
+  // (earbud/companion/ear aliases died with the lane — MUSIC_SPEC D2. Phase C
+  // maps music window names when MusicWindow lands.)
 }
 
 export type VoiceCommand =
@@ -55,16 +56,10 @@ export type VoiceCommand =
   | { kind: 'read'; target: string }   // "read first email", "read Becky's last text" — best-effort
   | { kind: 'confirm' }
   | { kind: 'cancel' }
-  // Earbud lane (2026-08-04, EARBUD_SPEC §C6.4) — deterministic transport
-  // verbs (no CC round-trip):
-  | { kind: 'earbud'; action: 'pause' | 'resume' | 'toggle' | 'skip' | 'prev_track' | 'stop_music' | 'vol_up' | 'vol_down' }
-  | { kind: 'whats_playing' }
-  | { kind: 'quiet' }                  // kill speech + hold the queue
-  // The open-ended catch-all (Adam: ringless control): a wake-prefixed
-  // utterance matching NO deterministic rule becomes a Companion prompt.
-  // `text` keeps the ORIGINAL post-wake casing/punctuation (never normed —
-  // the Companion deserves the real sentence).
-  | { kind: 'companion'; text: string }
+  // (The earbud transport verbs, whats_playing, quiet, and the Companion
+  // catch-all died with the lane — MUSIC_SPEC D2, 2026-08-05. The grammar
+  // core stays for the future handsfree revisit; a wake-prefixed utterance
+  // matching no rule is a LOUD no-match again, the pre-earbud behavior.)
 
 /** Normalize an utterance: lowercased, trimmed, punctuation stripped to spaces. */
 function norm(s: string): string {
@@ -113,19 +108,6 @@ export function parseVoiceCommand(
   if (/^(?:cancel|no|stop|never\s*mind|nevermind|dismiss)$/.test(rest)) return { cmd: { kind: 'cancel' }, prefixed: true }
   if (/^(?:dictate|ask|listen|new\s+prompt|prompt)$/.test(rest)) return { cmd: { kind: 'dictate' }, prefixed: true }
 
-  // Earbud transport verbs (2026-08-04) — deterministic, no CC round-trip.
-  // Bare "next"/"back" stay PAGING (precedence preserved); track motion needs
-  // the explicit forms below.
-  if (/^(?:pause|pause\s+(?:the\s+)?music|hold\s+(?:the\s+)?music)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'pause' }, prefixed: true }
-  if (/^(?:resume|play|unpause|keep\s+playing|resume\s+(?:the\s+)?music|play\s+music)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'resume' }, prefixed: true }
-  if (/^(?:skip|next\s+(?:track|song)|skip\s+(?:track|song|it|this))$/.test(rest)) return { cmd: { kind: 'earbud', action: 'skip' }, prefixed: true }
-  if (/^(?:previous\s+(?:track|song)|last\s+(?:track|song)|go\s+back\s+a\s+(?:track|song))$/.test(rest)) return { cmd: { kind: 'earbud', action: 'prev_track' }, prefixed: true }
-  if (/^(?:stop\s+(?:the\s+)?music|stop\s+playing)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'stop_music' }, prefixed: true }
-  if (/^(?:volume\s+up|louder|turn\s+it\s+up)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'vol_up' }, prefixed: true }
-  if (/^(?:volume\s+down|quieter|softer|turn\s+it\s+down)$/.test(rest)) return { cmd: { kind: 'earbud', action: 'vol_down' }, prefixed: true }
-  if (/^(?:what'?s\s+playing|now\s+playing|what\s+song\s+is\s+this)$/.test(rest)) return { cmd: { kind: 'whats_playing' }, prefixed: true }
-  if (/^(?:quiet|shut\s+up|shush|silence|stop\s+talking)$/.test(rest)) return { cmd: { kind: 'quiet' }, prefixed: true }
-
   // read <something> — navigation-class (harmless), executes immediately. The
   // target string is handed to the active flow; full resolution (which mail /
   // which contact) is a follow-up tuning item.
@@ -139,11 +121,8 @@ export function parseVoiceCommand(
     const id = WINDOW_ALIASES[name]
     if (id) return { cmd: { kind: 'window', id }, prefixed: true }
   }
-  // Companion catch-all (2026-08-04, Adam's ringless-control decision): a
-  // wake-prefixed utterance with no deterministic match is an OPEN-ENDED
-  // Companion prompt — original casing/punctuation, wake prefix stripped.
-  const original = raw.replace(WAKE_RE, '').trim()
-  if (original) return { cmd: { kind: 'companion', text: original }, prefixed: true }
+  // No deterministic match. (The Companion catch-all died with the earbud
+  // lane — D2.) The caller logs prefixed no-matches LOUDLY — a real miss.
   return { cmd: null, prefixed: true }
 }
 

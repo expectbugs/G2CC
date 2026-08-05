@@ -68,12 +68,6 @@ export interface WmContext {
    *  to its scene-derived text panel). Wired by os-session; absent in smoke
    *  stubs. */
   sendSurfaceView?(view: SurfaceView | null): void
-  /** Earbud 2026-08-04: set the one-shot voice-target override so the NEXT
-   *  dictate transcript routes to the Earbud/Companion window regardless of
-   *  focus (the voice-confirm loop's re-arm needs it — the follow-up capture
-   *  must come back to the Companion even when another window is active).
-   *  Wired by os-session; absent in smoke stubs (loud no-op). */
-  setVoiceTarget?(target: 'active' | 'earbud'): void
 }
 
 /** Main's category-launcher groups (upgrades.md v2 Phase 11, XFCE-style). Each
@@ -83,7 +77,8 @@ export type WindowCategory = 'AI' | 'Comms' | 'Media' | 'Tools' | 'Info' | 'Game
 /** Dictation metadata riding alongside a transcript (earbud 2026-08-04).
  *  `confidence` is the server's HEURISTIC 0–1 estimate (words-per-second
  *  plausibility etc., voice.ts estimateSttConfidence — not an ASR logprob).
- *  The EarbudWindow gates its auto-send on it (companion.confirmThreshold). */
+ *  (Its confirm-gate consumer died with the earbud lane — MUSIC_SPEC D2; the
+ *  meta still rides so future consumers can gate on it.) */
 export interface SttMeta {
   confidence: number
   speechMs: number
