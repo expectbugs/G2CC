@@ -343,6 +343,11 @@ async function doScan(config: G2CCConfig): Promise<ScanSummary> {
     // id-delete here was the 449-class CASCADE wipe. The rename only happens
     // AFTER the path UPDATE commits, so "file missing but row moved" always
     // means path≠snapshot → 0 rows → no wipe, every interleaving safe.
+    // KNOWN RESIDUAL (review A'#11, accepted): a process CRASH in the ~ms
+    // between a filer's UPDATE and its rename leaves DB=dest/file=old — the
+    // next scan re-adds the old path as a fresh row and this delete removes
+    // the moved row (meta lost for that one track). Crash-window only, never
+    // concurrent operation; the mover takes a pg_dump first for exactly this.
     await query('DELETE FROM tracks WHERE id=$1 AND path=$2', [info.id, path])
       .then((r) => {
         if (r.rowCount === 0) console.warn(`[music] vanished-row delete SKIPPED for ${path} — the row moved mid-scan (ingest filing)`)

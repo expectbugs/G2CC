@@ -29,10 +29,20 @@ export function sanitizeName(s: string): string {
 }
 
 /** Canonical file name: "NN - Title.ext" when the track number is known,
- *  "Title.ext" otherwise. Extension follows the current file (lowercased). */
+ *  "Title.ext" otherwise. Extension follows the current file (lowercased).
+ *  Titles longer than the filesystem allows are capped LOUDLY (review A'#5:
+ *  ENAMETOOLONG would strand the file in a re-fail loop; the full title
+ *  stays intact in the DB — only the file name is shortened). */
+const NAME_BYTES_MAX = 200   // NAME_MAX 255 minus "NN - ", " (id-n)", ext headroom
 export function canonicalFileName(row: TrackRow): string {
   const ext = extname(row.path).toLowerCase()
-  const title = sanitizeName(row.title)
+  let title = sanitizeName(row.title)
+  if (Buffer.byteLength(title, 'utf-8') > NAME_BYTES_MAX) {
+    let cut = title
+    while (Buffer.byteLength(cut, 'utf-8') > NAME_BYTES_MAX) cut = cut.slice(0, -1)
+    console.warn(`[organize] title too long for a file name — capped "${title}" → "${cut}" (track ${row.id}; the DB title stays complete)`)
+    title = cut.trim()
+  }
   const nn = row.track_no != null && row.track_no > 0 ? `${String(row.track_no).padStart(2, '0')} - ` : ''
   return `${nn}${title}${ext}`
 }
@@ -49,7 +59,13 @@ export function planDestDir(config: G2CCConfig, row: TrackRow): { dir: string; z
   if (rel?.startsWith('Collections/') || rel?.startsWith('Archive/')) {
     return { dir: dirname(row.path), zone: rel.startsWith('Archive/') ? 'archive' : 'collections' }
   }
-  if (!row.artist) return { dir: join(root, 'Unsorted'), zone: 'unsorted' }
+  if (!row.artist) {
+    // Unsorted keeps its subgrouping (review A'#7): the mover grouped residue
+    // by source dir — an artistless re-file must not flatten that away. (A
+    // NAMED track still escapes: this branch only runs with no artist.)
+    if (rel?.startsWith('Unsorted/')) return { dir: dirname(row.path), zone: 'unsorted' }
+    return { dir: join(root, 'Unsorted'), zone: 'unsorted' }
+  }
   const artistDir = join(root, 'Library', sanitizeName(row.artist))
   if (!row.album) return { dir: artistDir, zone: 'library' }
   const disc = row.disc_no != null && row.disc_no >= 2 ? ` (Disc ${row.disc_no})` : ''

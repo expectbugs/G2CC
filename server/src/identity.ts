@@ -43,13 +43,17 @@ async function readMeta(trackId: number): Promise<Record<string, unknown>> {
  *  prev snapshot recorded. Optionally re-runs the identity-dependent passes
  *  (musicbrainz/lyrics/embed re-derive from the new name) + the adaptive
  *  refresh — that path is minutes-class, so batch callers pass reEmbed:false
- *  and run the passes bare afterwards (pass_status is reset here either way). */
+ *  and run the passes bare afterwards (pass_status is reset here either way).
+ *  Deliberate asymmetry (review B'#3): empty/blank values mean "leave
+ *  unchanged" — this API can never CLEAR a field to empty; use revert.
+ *  opts.onlyIfArtistless makes the write atomic against a concurrent tagger
+ *  (review B'#4): the UPDATE itself re-checks artistlessness. */
 export async function applyIdentity(
   config: G2CCConfig,
   trackId: number,
   next: { title?: string; artist?: string; album?: string },
   how: { method: IdentityRecord['method']; score?: number; recording_id?: string },
-  opts: { reEmbed?: boolean } = {},
+  opts: { reEmbed?: boolean; onlyIfArtistless?: boolean } = {},
 ): Promise<TrackRow | null> {
   const row = (await query<TrackRow>('SELECT * FROM tracks WHERE id = $1', [trackId])).rows[0]
   if (!row) {
@@ -78,7 +82,12 @@ export async function applyIdentity(
     ...(how.recording_id ? { recording_id: how.recording_id } : {}),
     prev: { title: row.title, artist: row.artist, album: row.album },
   }
-  await query(`UPDATE tracks SET ${fields.join(', ')} WHERE id = $1`, params)
+  const guard = opts.onlyIfArtistless ? " AND (artist IS NULL OR artist = '')" : ''
+  const upd = await query(`UPDATE tracks SET ${fields.join(', ')} WHERE id = $1${guard}`, params)
+  if (upd.rowCount === 0) {
+    console.warn(`[identity] track ${trackId}: apply SKIPPED — a concurrent writer named it first (artistless guard)`)
+    return row
+  }
   await query(
     `UPDATE track_meta SET sources = jsonb_set(coalesce(sources, '{}'::jsonb), '{identity}', $2::jsonb),
        pass_status = pass_status - 'musicbrainz' - 'lyrics' - 'embed'
@@ -121,7 +130,7 @@ export async function applyConfidentAcoustid(
   await applyIdentity(config, trackId,
     { title: ev.title, artist: ev.artist },
     { method: 'acoustid', score: ev.score, recording_id: ev.recording_id },
-    { reEmbed: opts.reEmbed ?? false })
+    { reEmbed: opts.reEmbed ?? false, onlyIfArtistless: opts.onlyArtistless ?? true })
   return true
 }
 
@@ -164,10 +173,12 @@ export interface IdentityListing {
   unresolved: Array<{ id: number; title: string; path: string }>
 }
 
-/** Everything the /identity review page shows. */
+/** Everything the /identity review page shows. LEFT JOIN (review B'#5): a
+ *  track indexed but never enriched has no track_meta row yet — exactly the
+ *  artistless newcomer the unresolved list exists to surface. */
 export async function listIdentity(): Promise<IdentityListing> {
   const rows = await query<TrackRow & { sources: Record<string, unknown> | null }>(
-    `SELECT t.*, m.sources FROM tracks t JOIN track_meta m ON m.track_id = t.id
+    `SELECT t.*, m.sources FROM tracks t LEFT JOIN track_meta m ON m.track_id = t.id
      WHERE m.sources ? 'acoustid' OR m.sources ? 'identity' OR t.artist IS NULL OR t.artist = ''
      ORDER BY t.id`)
   const out: IdentityListing = { applied: [], pending: [], unresolved: [] }

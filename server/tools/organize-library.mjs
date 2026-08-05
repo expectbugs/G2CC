@@ -94,12 +94,20 @@ function sha1File(path) {
   })
 }
 
+let probeFailures = 0
 async function ffprobeNumbers(path) {
   return new Promise((res) => {
     execFile('ffprobe', ['-v', 'error',
       '-show_entries', 'format_tags=track,disc,tracknumber,discnumber:stream_tags=track,disc,tracknumber,discnumber',
       '-of', 'json', path], { maxBuffer: 1024 * 1024 }, (err, stdout) => {
-      if (err) { res({ trackNo: null, discNo: null }); return }
+      // Loud on failure (review A'#4 — house rule: no silent failures): a
+      // probe error files the track WITHOUT its "NN - " prefix this run.
+      if (err) {
+        probeFailures++
+        console.error(`[organize] ffprobe FAILED for ${path} (filed without a track number this run): ${err.message}`)
+        res({ trackNo: null, discNo: null })
+        return
+      }
       try {
         const p = JSON.parse(stdout)
         const tags = {}
@@ -109,7 +117,11 @@ async function ffprobeNumbers(path) {
           trackNo: parseTagNumber(tags['track']) ?? parseTagNumber(tags['tracknumber']),
           discNo: parseTagNumber(tags['disc']) ?? parseTagNumber(tags['discnumber']),
         })
-      } catch { res({ trackNo: null, discNo: null }) }
+      } catch (e) {
+        probeFailures++
+        console.error(`[organize] ffprobe output unparseable for ${path}: ${e instanceof Error ? e.message : String(e)}`)
+        res({ trackNo: null, discNo: null })
+      }
     })
   })
 }
@@ -118,6 +130,15 @@ const normArtist = (a) => (a ?? '').toLowerCase().replace(/\s*\(.*?\)\s*/g, ' ')
 
 async function main() {
   // ---- preflight ----
+  // Smoke-context refusal (review A'#10): with G2CC_PG_DATABASE leaked the
+  // plan would read the SMOKE DB while pg_dump backs up prod — a mismatch no
+  // file-moving tool should tolerate. Production never sets the var.
+  if (process.env.G2CC_PG_DATABASE) {
+    console.error(`PREFLIGHT FAIL: G2CC_PG_DATABASE=${process.env.G2CC_PG_DATABASE} (smoke/test context) — the mover only runs against production.`)
+    process.exit(1)
+  }
+  // :7300 matches the live config; loadConfig() needs the DB layer that this
+  // check gates, so the port stays literal here.
   const port = execFileSync('bash', ['-c', "ss -ltn 'sport = :7300' | tail -n +2 | wc -l"]).toString().trim()
   if (port !== '0') {
     if (PLAN_ONLY) {
@@ -163,14 +184,21 @@ async function main() {
     }))
   }
 
-  // ---- dupe representatives (dedupeClusters' exact rule) ----
+  // ---- dupe representatives (dedupeClusters' exact rule, incl. the
+  // non-Archive tie preference — review A'#1: without it, Archive/ is the
+  // alphabetical minimum, so every equal-fidelity tie on a RE-RUN would flip
+  // to the quarantined copy and oscillate representatives run-to-run) ----
+  const archived = (p) => p.includes('/Archive/')
   const clusters = new Map()
   for (const r of rows) {
     if (r.dupe_cluster == null) continue
     const cur = clusters.get(r.dupe_cluster)
     if (!cur) { clusters.set(r.dupe_cluster, r); continue }
     const rr = fidelityRank(r.path), cr = fidelityRank(cur.path)
-    if (rr > cr || (rr === cr && r.path < cur.path)) clusters.set(r.dupe_cluster, r)
+    const better = rr > cr
+      || (rr === cr && !archived(r.path) && archived(cur.path))
+      || (rr === cr && archived(r.path) === archived(cur.path) && r.path < cur.path)
+    if (better) clusters.set(r.dupe_cluster, r)
   }
   const isLoser = (r) => r.dupe_cluster != null && clusters.get(r.dupe_cluster)?.id !== r.id
 
@@ -226,6 +254,11 @@ async function main() {
       if (!r.artist && collection.identity && (collection.identity.artist || collection.identity.album)) {
         idApplies.push({ id: r.id, identity: collection.identity })
       }
+    } else if (r.album && /^https?:\/\//i.test(r.album)) {
+      // URL-as-album junk tags (OCRemix loose singles tagged with the site) —
+      // a literal "http·--ocremix.org" dir helps no one.
+      zone = 'collections'
+      destDir = join(TARGET_ROOT, 'Collections', 'OCRemix')
     } else if (r.album && vaAlbums.has(r.album.toLowerCase())) {
       zone = 'collections'
       destDir = join(TARGET_ROOT, 'Collections', sanitizeName(r.album))
@@ -263,7 +296,10 @@ async function main() {
         try {
           await fsp.rename(row.path, dest)
         } catch (e) {
+          // Guarded revert (review A'#6): a pg hiccup here must not mask the
+          // rename error nor hide the DB/disk divergence.
           await query('UPDATE tracks SET path=$2 WHERE id=$1', [row.id, row.path])
+            .catch((re) => console.error(`[organize] path revert ALSO failed (row ${row.id} points at ${dest} but the file is at ${row.path}): ${re instanceof Error ? re.message : String(re)}`))
           throw e
         }
         renamed++
@@ -320,7 +356,7 @@ async function main() {
 
   // ---- leftovers report: indexed rows still outside the target root ----
   const outside = (await query(`SELECT count(*) AS n FROM tracks WHERE path NOT LIKE $1`, [`${TARGET_ROOT}/%`])).rows[0].n
-  log(`[organize] DONE: ${done} moved (${renamed} renamed, ${copied} copied ${(bytes / 1e9).toFixed(1)}G), ${failed} FAILED, ${applied} collection identities applied`)
+  log(`[organize] DONE: ${done} moved (${renamed} renamed, ${copied} copied ${(bytes / 1e9).toFixed(1)}G), ${failed} FAILED, ${applied} collection identities applied${probeFailures ? `, ${probeFailures} PROBE FAILURES (filed without track numbers)` : ''}`)
   log(`[organize] rows still outside ${TARGET_ROOT}: ${outside} (should be 0)`)
   log(`[organize] manifest → ${MANIFEST}`)
   log(`[organize] sources on /mnt/slug + Downloads were KEPT (30-day cold hold) — reap later, deliberately.`)

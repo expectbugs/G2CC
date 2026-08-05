@@ -25,8 +25,15 @@ export interface ChainOpts {
   fileAfter?: boolean
 }
 
-/** Run one enrichment pass via the Python runner; throws on nonzero exit. */
+/** Run one enrichment pass via the Python runner; throws on nonzero exit.
+ *  The cross-DB guard lives HERE (review B'#2): every spawn path — the chain,
+ *  kickIdentityTail, applyIdentity(reEmbed) — funnels through this function,
+ *  and the Python hardcodes dbname=g2cc while a smoke-boot server runs on
+ *  g2cc_smoke. Throwing (not returning) keeps callers' logging honest. */
 export async function runEnrichmentPass(config: G2CCConfig, args: string[]): Promise<void> {
+  if (process.env.G2CC_PG_DATABASE) {
+    throw new Error(`smoke/test context (G2CC_PG_DATABASE=${process.env.G2CC_PG_DATABASE}) must never spawn the prod-writing Python passes`)
+  }
   const py = config.stt.pythonPath
   const audioDir = resolvePath(dirname(py), '..', '..')
   await new Promise<void>((resolveP, rejectP) => {

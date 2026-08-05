@@ -62,42 +62,65 @@ async function act(path, body, doing) {
   catch (e) { S('FAILED: ' + e.message); }
 }
 
+// Review 2026-08-05 B'#1: NO payload ever rides an HTML attribute — a
+// fingerprint title with an apostrophe broke the single-quoted onclick, and
+// MusicBrainz text is third-party data (attribute breakout = XSS in this
+// authenticated page). Buttons carry only data-action/data-id; the evidence
+// lives in this map and actions resolve through one delegated listener.
+let pendingById = new Map();
+
 function pendingRow(p) {
   const ev = p.evidence;
   return '<tr>'
-    + '<td>' + p.id + '</td>'
+    + '<td>' + Number(p.id) + '</td>'
     + '<td><span class="cur">' + esc(p.title) + (p.artist ? ' — ' + esc(p.artist) : ' <i>(no artist)</i>') + '</span>'
-    + '<br><span class="ev">↳ ' + esc(ev.title) + ' — ' + esc(ev.artist) + '</span> <span class="score">' + (ev.score ?? '?') + '</span>'
+    + '<br><span class="ev">↳ ' + esc(ev.title) + ' — ' + esc(ev.artist) + '</span> <span class="score">' + esc(ev.score ?? '?') + '</span>'
     + '<br><span class="path">' + esc(p.path) + '</span></td>'
     + '<td>'
-    + '<button onclick=\'act("/api/identity/apply", {trackId:' + p.id + ', title:' + JSON.stringify(ev.title) + ', artist:' + JSON.stringify(ev.artist) + ', method:"acoustid", score:' + (ev.score ?? 'undefined') + ', recording_id:' + JSON.stringify(ev.recording_id ?? null) + '}, "applying ' + p.id + '")\'>Apply</button>'
-    + '<button class="warn" onclick=\'act("/api/identity/reject", {trackId:' + p.id + '}, "rejecting ' + p.id + '")\'>Reject</button>'
+    + '<button data-action="apply-pending" data-id="' + Number(p.id) + '">Apply</button>'
+    + '<button class="warn" data-action="reject" data-id="' + Number(p.id) + '">Reject</button>'
     + '</td></tr>';
 }
 
 function appliedRow(a) {
   const r = a.record;
   return '<tr>'
-    + '<td>' + a.id + '</td>'
+    + '<td>' + Number(a.id) + '</td>'
     + '<td><span class="ev">' + esc(a.title) + (a.artist ? ' — ' + esc(a.artist) : '') + (a.album ? ' · ' + esc(a.album) : '') + '</span>'
-    + '<br><span class="path">was: ' + esc(r.prev.title) + (r.prev.artist ? ' — ' + esc(r.prev.artist) : ' (no artist)') + ' · ' + esc(r.method) + (r.score !== undefined ? ' <span class="score">' + r.score + '</span>' : '') + ' · ' + esc(r.applied_at) + '</span>'
+    + '<br><span class="path">was: ' + esc(r.prev.title) + (r.prev.artist ? ' — ' + esc(r.prev.artist) : ' (no artist)') + ' · ' + esc(r.method) + (r.score !== undefined ? ' <span class="score">' + esc(r.score) + '</span>' : '') + ' · ' + esc(r.applied_at) + '</span>'
     + '<br><span class="path">' + esc(a.path) + '</span></td>'
-    + '<td><button class="warn" onclick=\'act("/api/identity/revert", {trackId:' + a.id + '}, "reverting ' + a.id + '")\'>Revert</button></td></tr>';
+    + '<td><button class="warn" data-action="revert" data-id="' + Number(a.id) + '">Revert</button></td></tr>';
 }
 
 function unresolvedRow(u) {
-  const tid = 't' + u.id, aid = 'a' + u.id, alid = 'al' + u.id;
+  const id = Number(u.id);
   return '<tr>'
-    + '<td>' + u.id + '</td>'
+    + '<td>' + id + '</td>'
     + '<td><span class="cur">' + esc(u.title) + '</span><br><span class="path">' + esc(u.path) + '</span>'
-    + '<br>title <input type="text" id="' + tid + '" value="' + esc(u.title) + '"> artist <input type="text" id="' + aid + '"> album <input type="text" id="' + alid + '"></td>'
-    + '<td><button onclick=\'manualApply(' + u.id + ')\'>Apply manual</button></td></tr>';
+    + '<br>title <input type="text" id="t' + id + '" value="' + esc(u.title) + '"> artist <input type="text" id="a' + id + '"> album <input type="text" id="al' + id + '"></td>'
+    + '<td><button data-action="apply-manual" data-id="' + id + '">Apply manual</button></td></tr>';
 }
 
-function manualApply(id) {
-  const v = (x) => document.getElementById(x + id).value.trim() || undefined;
-  act('/api/identity/apply', { trackId: id, title: v('t'), artist: v('a'), album: v('al'), method: 'manual' }, 'applying ' + id);
-}
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  const id = Number(btn.dataset.id);
+  if (!Number.isFinite(id)) return;
+  const action = btn.dataset.action;
+  if (action === 'apply-pending') {
+    const p = pendingById.get(id);
+    if (!p) { S('stale row — reload'); return; }
+    const ev = p.evidence;
+    act('/api/identity/apply', { trackId: id, title: ev.title, artist: ev.artist, method: 'acoustid', score: ev.score, recording_id: ev.recording_id ?? null }, 'applying ' + id);
+  } else if (action === 'reject') {
+    act('/api/identity/reject', { trackId: id }, 'rejecting ' + id);
+  } else if (action === 'revert') {
+    act('/api/identity/revert', { trackId: id }, 'reverting ' + id);
+  } else if (action === 'apply-manual') {
+    const v = (x) => document.getElementById(x + id).value.trim() || undefined;
+    act('/api/identity/apply', { trackId: id, title: v('t'), artist: v('a'), album: v('al'), method: 'manual' }, 'applying ' + id);
+  }
+});
 
 function table(rows, cols) {
   if (!rows.length) return '<div class="empty">none</div>';

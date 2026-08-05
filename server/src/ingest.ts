@@ -107,7 +107,8 @@ async function ingestArchiveNow(config: G2CCConfig, path: string): Promise<null>
   await fsp.mkdir(destDir, { recursive: true })
   try {
     // bsdtar, not unzip: unzip GLOBS its member arguments ([] in names) and
-    // Bandcamp titles carry brackets often enough to bite.
+    // Bandcamp titles carry brackets often enough to bite. (bsdtar refuses
+    // ../ members, absolute paths, and through-symlink writes — verified.)
     await new Promise<void>((res, rej) => {
       execFile('bsdtar', ['-x', '-f', path, '-C', destDir], (err, _o, stderr) => {
         if (err) rej(new Error(`${err.message}${stderr ? ` — ${String(stderr).slice(0, 300)}` : ''}`))
@@ -115,29 +116,47 @@ async function ingestArchiveNow(config: G2CCConfig, path: string): Promise<null>
       })
     })
   } catch (e) {
-    console.error(`[ingest] ${basename(path)} EXTRACTION FAILED (archive left in place): ${e instanceof Error ? e.message : String(e)}`)
+    // Review A'#2: bsdtar extracts good members BEFORE failing, and the
+    // recursive watcher already enqueued them — remove the partial extraction
+    // so those queue entries resolve as loud "gone before processing" skips
+    // (a partial album must never half-ingest). The archive is renamed
+    // .failed (loudly) so the boot sweep doesn't re-extract it forever.
+    await fsp.rm(destDir, { recursive: true, force: true }).catch((re: unknown) =>
+      console.error(`[ingest] could not remove partial extraction ${destDir}: ${re instanceof Error ? re.message : String(re)}`))
+    await fsp.rename(path, `${path}.failed`).catch((re: unknown) =>
+      console.error(`[ingest] could not rename the failed archive (it will retry every boot): ${re instanceof Error ? re.message : String(re)}`))
+    console.error(`[ingest] ${basename(path)} EXTRACTION FAILED — partial output removed, archive kept as ${basename(path)}.failed: ${e instanceof Error ? e.message : String(e)}`)
     return null
   }
   let audio = 0
+  let nested = 0
   const dropped: string[] = []
   const sweep = async (d: string): Promise<void> => {
     for (const ent of await fsp.readdir(d, { withFileTypes: true })) {
       const p = join(d, ent.name)
-      if (ent.isDirectory()) { await sweep(p); continue }
-      if (AUDIO_EXTS.has(extname(ent.name).toLowerCase())) { audio++; continue }
+      if (ent.isDirectory()) {
+        await sweep(p)
+        await fsp.rmdir(p).catch(() => { /* not empty — audio/archives remain */ })   // A'#9: no residue dirs
+        continue
+      }
+      const ext = extname(ent.name).toLowerCase()
+      if (AUDIO_EXTS.has(ext)) { audio++; continue }
+      // Review A'#3: a NESTED archive may carry audio — keep it; it rides the
+      // queue like any dropped .zip (one level per queue item, loud each hop).
+      if (ARCHIVE_EXTS.has(ext)) { nested++; continue }
       dropped.push(ent.name)
       await fsp.unlink(p).catch((e: unknown) => console.warn(`[ingest] could not remove non-audio ${p}: ${e instanceof Error ? e.message : String(e)}`))
     }
   }
   await sweep(destDir)
   if (dropped.length) console.log(`[ingest] ${basename(path)}: dropped ${dropped.length} non-audio entr${dropped.length === 1 ? 'y' : 'ies'} (${dropped.slice(0, 4).join(', ')}${dropped.length > 4 ? ', …' : ''})`)
-  if (audio === 0) {
+  if (audio === 0 && nested === 0) {
     console.error(`[ingest] ${basename(path)} contained NO audio — archive left in place, extraction dir removed`)
     await fsp.rm(destDir, { recursive: true, force: true }).catch(() => { /* best-effort */ })
     return null
   }
   await fsp.unlink(path).catch((e: unknown) => console.error(`[ingest] could not remove ${basename(path)} after extraction: ${e instanceof Error ? e.message : String(e)}`))
-  console.log(`[ingest] ${basename(path)} unpacked: ${audio} audio file(s) queued from ${basename(destDir)}/`)
+  console.log(`[ingest] ${basename(path)} unpacked: ${audio} audio file(s)${nested ? ` + ${nested} nested archive(s)` : ''} queued from ${basename(destDir)}/`)
   for (const f of await walkAudio(destDir)) enqueue(config, f)
   return null
 }
