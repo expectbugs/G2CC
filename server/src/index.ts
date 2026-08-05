@@ -33,6 +33,8 @@ import { deliverLiveFrame, scoutLiveStatus } from './scout-live.js'
 import { warmParakeet } from './stt.js'
 import { warmStore } from './store.js'
 import { initMusicPlayer, getMusicPlayer } from './music-player.js'
+import { startIngestWatcher } from './ingest.js'
+import { refreshRulePlaylists } from './playlists.js'
 import { resolveRequest } from './resolver.js'
 import { scanLibrary, getTrack, mediaFileFor, trackCount } from './music.js'
 import { appendNote } from './intents.js'
@@ -596,6 +598,15 @@ try {
   // down DB logs loudly and the player simply starts empty.
   void getMusicPlayer().loadPersisted()
     .catch((e: unknown) => console.error(`[music] persisted-state load failed (starting empty): ${e instanceof Error ? e.message : String(e)}`))
+  // The ingest drop-box (2026-08-05): watch music.ingestDir — dropped audio
+  // is indexed, enriched, filed into <root>/<Artist>/, and lands in every
+  // matching adaptive playlist. Self-guards + loud-disables on bad config.
+  startIngestWatcher(config)
+  // Boot-time adaptive refresh (adaptive review #7: enrichment chains were
+  // the ONLY trigger — manual re-profiles / offline meta changes drifted
+  // until the next ingest). Fire-and-forget; a down DB logs loudly.
+  void refreshRulePlaylists('boot').catch((e: unknown) =>
+    console.error(`[playlists] boot refresh failed: ${e instanceof Error ? e.message : String(e)}`))
   // Pre-warm the Postgres store (migrations) — fire-and-forget: a down DB logs
   // loudly and every store feature lazily retries; the server must not care.
   warmStore()

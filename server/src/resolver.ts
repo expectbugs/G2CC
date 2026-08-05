@@ -97,7 +97,10 @@ function hasTerm(r: MetaTrackRow, names: readonly string[]): boolean {
 const SFX_TERMS = ['sound effect', 'sound effects', 'sfx'] as const
 const SPOKEN_TERMS = ['spoken word'] as const
 
-/** One member per dupe cluster — the higher-fidelity file wins (D4). */
+/** One member per dupe cluster — the higher-fidelity file wins (D4); equal
+ *  fidelity breaks by path so the pick is input-order-independent (planQuery
+ *  feeds this from ORDER BY random(); an order-dependent tie made every
+ *  adaptive-playlist refresh swap cluster representatives, +N −N churn). */
 function dedupeClusters(rows: MetaTrackRow[]): MetaTrackRow[] {
   const best = new Map<number, MetaTrackRow>()
   const out: MetaTrackRow[] = []
@@ -105,7 +108,9 @@ function dedupeClusters(rows: MetaTrackRow[]): MetaTrackRow[] {
     if (r.dupe_cluster === null) { out.push(r); continue }
     const cur = best.get(r.dupe_cluster)
     if (!cur) { best.set(r.dupe_cluster, r); out.push(r); continue }
-    if (fidelityRank(r.path) > fidelityRank(cur.path)) {
+    const rr = fidelityRank(r.path)
+    const cr = fidelityRank(cur.path)
+    if (rr > cr || (rr === cr && r.path < cur.path)) {
       out[out.indexOf(cur)] = r
       best.set(r.dupe_cluster, r)
     }
@@ -590,6 +595,41 @@ async function embeddingCandidates(config: G2CCConfig, text: string, want: numbe
   const ranked = ids.map((id) => byId.get(id)).filter((row): row is MetaTrackRow => row !== undefined)
   // Ranked order is the point — shuffle off; discovery lane → spoken excluded.
   return postProcess(ranked, { shuffle: false, excludeSpoken: true, cap: want, requestLc: text.toLowerCase() })
+}
+
+// ============================================================ adaptive playlists
+
+/** An adaptive playlist's stored rule — exactly the LlmPlan filter shape
+ *  (genres/styles/moods match the UNION of the three tag columns; lists AND
+ *  together; energy/bpm ranges; vocals/artists exact). order/size ignored. */
+export type PlaylistRule = LlmPlan
+
+/** Materialize a rule into its FULL matching membership (Adam 2026-08-05:
+ *  adaptive playlists). Uncapped (a genre playlist is ALL of that genre),
+ *  stable-sorted artist→album→path, sound-effect variants excluded always
+ *  (D14), ONE member per dupe cluster (highest fidelity — the resolver
+ *  fact "one member per playlist"). Spoken word is INCLUDED — playlists are
+ *  genre collections, not shuffle discovery, and gutting the IT interludes
+ *  out of a Revolution Rap playlist would misrepresent the albums. */
+export async function materializeRule(rule: PlaylistRule): Promise<PlayerTrack[]> {
+  const rows = await planQuery({ ...rule, order: undefined, size: undefined }, 100_000)
+  // Dedupe BEFORE sorting (adaptive review #2): dedupeClusters parks a
+  // higher-fidelity winner at the first-seen slot, so dedupe-then-sort is
+  // what actually keeps the artist→album→path order claim true.
+  const deduped = dedupeClusters(rows.filter((r) => !hasTerm(r, SFX_TERMS)))
+  deduped.sort((a, b) =>
+    (a.artist ?? '￿').localeCompare(b.artist ?? '￿')
+    || (a.album ?? '￿').localeCompare(b.album ?? '￿')
+    || a.path.localeCompare(b.path))
+  return deduped.map(toPlayerTrack)
+}
+
+/** Shape-check a stored rule (jsonb from the DB / operator input). Returns
+ *  the validated rule or null — a corrupt rule must refuse loudly at the
+ *  caller, never materialize garbage. */
+export function parseRule(raw: unknown): PlaylistRule | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  return parseLlmPlan(JSON.stringify(raw))
 }
 
 /** Radio (D5): ~batch nearest-neighbors of the last few PLAYED tracks,

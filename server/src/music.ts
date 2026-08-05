@@ -107,7 +107,18 @@ registerMigration('music-meta-1', `
   );
 `)
 
-const AUDIO_EXTS = new Set(['.mp3', '.flac', '.m4a', '.ogg', '.opus', '.wav', '.aac', '.wma', '.aiff'])
+// Adaptive playlists (Adam 2026-08-05 morning): a playlist may carry a RULE —
+// a stored LlmPlan-shaped filter. rule IS NOT NULL = adaptive: membership is
+// MATERIALIZED into playlist_tracks (so every existing consumer — the window,
+// the resolver's playlist lane, play-from-here — works unchanged) and
+// re-derived by refreshRulePlaylists() whenever new music lands (ingest / a
+// YouTube grab) or meta changes. Python's ensure_schema uses table-level IF
+// NOT EXISTS only, so this column addition never conflicts with it.
+registerMigration('playlists-rule-1', `
+  ALTER TABLE playlists ADD COLUMN IF NOT EXISTS rule jsonb;
+`)
+
+export const AUDIO_EXTS = new Set(['.mp3', '.flac', '.m4a', '.ogg', '.opus', '.wav', '.aac', '.wma', '.aiff'])
 
 export interface TrackRow {
   id: number
@@ -192,6 +203,18 @@ export function scanLibrary(config: G2CCConfig): Promise<ScanSummary> {
   if (scanInFlight) return scanInFlight
   scanInFlight = doScan(config).finally(() => { scanInFlight = null })
   return scanInFlight
+}
+
+/** Resolve when no scan is mid-walk (ingest review 2026-08-05 #9: the file-
+ *  move + path-UPDATE pair must not interleave a scan's vanished-row deletion
+ *  — a rename landing mid-walk read as "vanished" and the CASCADE wiped the
+ *  track's enrichment). A scan STARTING after this resolves is handled by the
+ *  caller's UPDATE-first ordering (worst case = a transient duplicate row
+ *  that the next scan reaps — no meta loss). */
+export async function awaitScanIdle(): Promise<void> {
+  while (scanInFlight) {
+    await scanInFlight.catch(() => { /* the scan's own logging covers it */ })
+  }
 }
 
 async function doScan(config: G2CCConfig): Promise<ScanSummary> {

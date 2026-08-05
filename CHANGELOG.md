@@ -4,6 +4,43 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## server — 2026-08-05 (day) — **Adaptive playlists + the /home/user/Music/new ingest drop-box**
+
+Adam's morning ask: ~20-25 rule-driven playlists that new music joins automatically,
+plus a drop-box where anything he throws in gets indexed, enriched, filed into a
+proper `Artist/Album/` subtree, and landed in whatever playlists fit.
+
+**Adaptive playlists.** `playlists.rule jsonb` (the LlmPlan shape — lists AND
+together, terms match the UNION of genres/styles/moods). Membership MATERIALIZES
+into playlist_tracks so every existing consumer (window, resolver lane, play-from-
+here) works untouched; `refreshRulePlaylists()` re-derives with stable positions
+(kept rows keep order, new append, gone drop) and short-circuits silent when
+unchanged. Refresh triggers: enrichment-chain tail + boot. Adaptive playlists refuse
+manual edits loudly (save/append/remove/move + the window's Edit case, ⟳ marker).
+25 playlists created from the PRODUCTION vocabulary (fixture-from-production rule —
+'gangsta rap' not 'gangster', 'political hip hop', vocals='instrumental', energy
+ranges for High Voltage/Wind Down).
+
+**Ingest drop-box.** `music.ingestDir` (default `/home/user/Music/new`, must sit
+inside a libraryDirs root) — fs.watch(recursive) + boot sweep, size-settle pacing
+loop (forever-wait w/ loud 30s logs), serial queue. Index-in-place → the awaited
+enrichment chain (`enrichment.ts`, extracted from youtube.ts) → file into
+`root/Artist/Album/` → popup with the playlists it joined. The hazard that shaped
+it: a concurrent scan seeing the old path vanish DELETEs the row and CASCADE-wipes
+meta (the 449-track remediation class) — hence awaitScanIdle() + UPDATE-path-BEFORE-
+rename + rowCount-0 loud abort + DB revert on rename failure.
+
+**Lessons.** (1) `G2CC_PG_DATABASE` guard: smoke-boot servers run on g2cc_smoke but
+the Python passes hardcode dbname=g2cc — an unguarded watcher/chain would write PROD
+meta for SMOKE track ids. Both entry points refuse loudly in smoke context. (2) The
++N −N churn: planQuery feeds dedupeClusters from ORDER BY random(), and equal-
+fidelity cluster ties broke by arrival order — every refresh swapped representatives.
+Deterministic tiebreak (fidelity, then path) killed it; boot refresh is now silent
+when nothing really changed. (3) Write-tool regex emitted raw control bytes (NUL)
+into a character class — od -c to diagnose, escaped backslash-u form to fix.
+
+---
+
 ## server 04335fb → HEAD + APK v1.22 staged — 2026-08-05 (overnight) — **The music app, whole: Phases B+C+D+E in one autonomous night**
 
 Adam's overnight mandate ("do the rest of the phases too… full automation"): every

@@ -85,9 +85,12 @@ async function cleanupSmokeRows() {
   // leftovers from a CRASHED prior run (review #D11: those rows were outside
   // every cleanup path and made searchTracks('smoke artist') a coin flip).
   await query('DELETE FROM tracks WHERE path LIKE $1', ['/tmp/g2cc-smoke-music-%'])
+  // Part 13's ingest drop-box roots (ingest review #20: a crash between
+  // ingestFileNow and rmSync stranded rows the music-% prefix missed).
+  await query('DELETE FROM tracks WHERE path LIKE $1', ['/tmp/g2cc-smoke-ingestlib-%'])
   await query('DELETE FROM player_state WHERE id = true')
-  // Part 9's playlists (review #C-LOW8: a crashed run stranded the rows).
-  await query("DELETE FROM playlists WHERE lower(name) IN ('smoke mix', 'other mix')")
+  // Part 9/13's playlists (review #C-LOW8: a crashed run stranded the rows).
+  await query("DELETE FROM playlists WHERE lower(name) IN ('smoke mix', 'other mix', 'smoke rule metal')")
 }
 await cleanupSmokeRows()   // stale rows from a crashed prior run
 
@@ -540,6 +543,64 @@ await insertMeta(idDupHi, { genres: ['metal'], styles: ['power metal'], dupe: 90
   assert.ok((music.preview() ?? '').toLowerCase().includes('offline'), 'preview honest offline')
   wm.dispose()
   console.error('  11. MusicWindow registered + honest offline render ✓')
+}
+
+// ---- Part 13 (2026-08-05): adaptive playlists + the ingest drop-box ----
+{
+  const { upsertRulePlaylist, refreshRulePlaylists, listPlaylists, savePlaylist, appendToPlaylist, playlistTracks, deletePlaylist, playlistsContaining } = await import('../dist/playlists.js')
+  const { ingestFileNow } = await import('../dist/ingest.js')
+
+  // Rule playlist over the fixtures: metal, sfx excluded, cluster-deduped.
+  const { id: rpId, n } = await upsertRulePlaylist('Smoke Rule Metal', { genres: ['metal'] })
+  assert.ok(n >= 3, `rule materialized (${n} members)`)
+  const members = await playlistTracks(rpId)
+  assert.ok(members.every((t) => t.id !== idSfx), 'sfx excluded from rule membership')
+  assert.equal(members.filter((t) => t.id === idA1 || t.id === idDupHi).length, 1, 'one member per dupe cluster')
+  const listed = (await listPlaylists()).find((p) => p.id === rpId)
+  assert.equal(listed?.adaptive, true, 'adaptive flag surfaces')
+  // Guards: frozen-snapshot replace + manual append both refuse.
+  let saveErr = null
+  try { await savePlaylist('smoke rule metal', [{ id: idA1, title: 'Iron Anthem' }]) } catch (e) { saveErr = e }
+  assert.ok(saveErr && /adaptive/i.test(saveErr.message), 'save-over-rule-name refuses')
+  let appErr = null
+  try { await appendToPlaylist(rpId, idB1) } catch (e) { appErr = e }
+  assert.ok(appErr && /adaptive/i.test(appErr.message), 'manual append to adaptive refuses')
+
+  // Adaptivity: a NEW matching track lands on refresh; positions stay dense.
+  const idNew = await insertTrack('Fresh Steel', SMOKE_ARTIST_A, 'Forge', 180_000)
+  await insertMeta(idNew, { genres: ['metal'] })
+  await refreshRulePlaylists('smoke new track')
+  const after = await playlistTracks(rpId)
+  assert.ok(after.some((t) => t.id === idNew), 'new matching track auto-lands')
+  assert.ok((await playlistsContaining(idNew)).includes('Smoke Rule Metal'), 'playlistsContaining sees it')
+
+  // The ingest drop-box: temp root + new/ inside it; enrichment skipped
+  // (testing-safety); the file indexes, gets FILED into <root>/<Artist>/<Album>/,
+  // the row's id/path update in place, and the rule playlist picks it up
+  // (via an explicit refresh here — the real chain does it in-line).
+  const iroot = mkdtempSync(join(tmpdir(), 'g2cc-smoke-ingestlib-'))
+  const idir = join(iroot, 'new')
+  const { mkdirSync } = await import('node:fs')
+  mkdirSync(idir, { recursive: true })
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=550:duration=2',
+    '-metadata', 'title=Dropbox Tone', '-metadata', 'artist=Smoke Metal Band', '-metadata', 'album=Forge', join(idir, 'drop.flac')])
+  const icfg = { music: { libraryDirs: [iroot], ingestDir: idir, format: 'opus', cacheDir: join(iroot, 'cache'), queueSize: 25 } }
+  const ingested = await ingestFileNow(icfg, join(idir, 'drop.flac'), { enrich: false })
+  assert.ok(ingested, 'ingest returned the track row')
+  assert.equal(ingested.title, 'Dropbox Tone')
+  assert.ok(ingested.path.startsWith(join(iroot, 'Smoke Metal Band', 'Forge') + '/'), `filed into Artist/Album (got ${ingested.path})`)
+  assert.ok(existsSync(ingested.path), 'file physically moved')
+  assert.ok(!existsSync(join(idir, 'drop.flac')), 'source left the drop-box')
+  const reRead = await query('SELECT path FROM tracks WHERE id = $1', [ingested.id])
+  assert.equal(reRead.rows[0].path, ingested.path, 'DB path updated in place (same id)')
+  await insertMeta(ingested.id, { genres: ['metal'] })
+  await refreshRulePlaylists('smoke ingest')
+  assert.ok((await playlistsContaining(ingested.id)).includes('Smoke Rule Metal'), 'ingested track lands in the matching rule playlist')
+
+  await deletePlaylist(rpId)
+  await query('DELETE FROM tracks WHERE path LIKE $1', [`${iroot}%`])
+  rmSync(iroot, { recursive: true, force: true })
+  console.error('  13. adaptive rule playlists (materialize/guards/refresh) + ingest drop-box (index→file→playlist) ✓')
 }
 
 await cleanupSmokeRows()

@@ -105,6 +105,11 @@ export interface G2CCConfig {
      *  Qdrant g2cc_music collection (Phase A pinned BAAI/bge-small-en-v1.5,
      *  384-dim). Changing it = re-embed the collection. */
     embedModel: string
+    /** Ingest watch directory (Adam 2026-08-05): audio dropped here is
+     *  indexed, enriched, FILED into <its library root>/<Artist>/[<Album>/]
+     *  and added to every matching adaptive playlist. MUST live inside one of
+     *  libraryDirs (the index-in-place flow depends on it). '' = disabled. */
+    ingestDir: string
   }
   /** The Companion — the dedicated earbud CC session (docs/EARBUD_SPEC.md §C6.4). */
   companion: {
@@ -251,6 +256,7 @@ function defaultConfig(): G2CCConfig {
       queueSize: 25,
       resolver: { llm: true, model: 'opus', effort: 'low' },
       embedModel: 'BAAI/bge-small-en-v1.5',
+      ingestDir: '/home/user/Music/new',
     },
     companion: {
       dir: '/home/user/g2cc-companion',
@@ -543,6 +549,11 @@ export function loadConfig(): G2CCConfig {
   if (typeof merged.music.embedModel !== 'string' || !merged.music.embedModel) {
     console.error('[config] music.embedModel is not a non-empty string — using BAAI/bge-small-en-v1.5')
     merged.music.embedModel = defaults.music.embedModel
+  }
+  if (typeof merged.music.ingestDir !== 'string'
+      || (merged.music.ingestDir !== '' && !merged.music.ingestDir.startsWith('/'))) {
+    console.error(`[config] music.ingestDir '${String(merged.music.ingestDir)}' must be an absolute path or '' (disabled) — using the default`)
+    merged.music.ingestDir = defaults.music.ingestDir
   }
   // Companion cwd follows the scout.cwd rules: normalized, strictly under /home/user/.
   if (typeof merged.companion.dir !== 'string'

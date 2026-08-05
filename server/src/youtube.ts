@@ -16,9 +16,10 @@
 
 import { execFile } from 'node:child_process'
 import { promises as fsp, existsSync } from 'node:fs'
-import { join, dirname, resolve as resolvePath } from 'node:path'
+import { join } from 'node:path'
 import type { G2CCConfig } from './config.js'
 import { scanLibrary, type TrackRow } from './music.js'
+import { runEnrichmentChain } from './enrichment.js'
 import { query } from './store.js'
 
 const YTDLP = process.env.G2CC_YTDLP ?? `${process.env.HOME ?? '/home/user'}/.local/bin/yt-dlp`
@@ -129,42 +130,11 @@ export async function ytGrab(config: G2CCConfig, hit: YtHit, enrich = true): Pro
   return { path, track }
 }
 
-/** Enrichment-on-ingest (D3.2/D14): the same passes every library track got,
- *  scoped to the new id. Fire-and-forget + LOUD — a failed pass leaves an
- *  honest pass_status and never un-grabs the track. speech runs FIRST (D14:
- *  authoritative for `vocals`; profile reads it). */
+/** Enrichment-on-ingest (D3.2/D14): the shared chain (enrichment.ts — speech
+ *  first, per-track passes, adaptive-playlist refresh at the tail),
+ *  fire-and-forget here + LOUD — a failed pass never un-grabs the track. */
 export function kickEnrichment(config: G2CCConfig, trackId: number, label: string): void {
-  const py = config.stt.pythonPath
-  const audioDir = resolvePath(dirname(py), '..', '..')
-  const passes: string[][] = [
-    ['speech', '--ids', String(trackId)],
-    ['tags', '--track-id', String(trackId)],
-    ['musicbrainz', '--track-id', String(trackId)],
-    ['lyrics', '--track-id', String(trackId)],
-    ['audio', '--track-id', String(trackId)],
-    ['profile', '--track-id', String(trackId)],
-    ['embed', '--track-id', String(trackId)],
-    ['pretranscode', '--track-id', String(trackId)],
-  ]
-  void (async () => {
-    for (const args of passes) {
-      const pass = args[0]
-      try {
-        await new Promise<void>((resolveP, rejectP) => {
-          execFile(py, ['-m', 'enrich.run_enrichment', ...args], { cwd: audioDir, maxBuffer: 4 * 1024 * 1024 },
-            (err, _stdout, stderr) => {
-              if (err) {
-                rejectP(new Error(`${err.message}${stderr ? ` — ${String(stderr).slice(0, 300)}` : ''}`))
-                return
-              }
-              resolveP()
-            })
-        })
-        console.log(`[youtube] enrich ${pass} ok for track ${trackId} ("${label}")`)
-      } catch (e) {
-        console.error(`[youtube] enrich ${pass} FAILED for track ${trackId} ("${label}") — pass_status carries it; later passes continue: ${e instanceof Error ? e.message : String(e)}`)
-      }
-    }
-    console.log(`[youtube] enrichment-on-ingest done for track ${trackId} ("${label}")`)
-  })()
+  void runEnrichmentChain(config, trackId, label).catch((e: unknown) => {
+    console.error(`[youtube] enrichment chain died for track ${trackId} ("${label}"): ${e instanceof Error ? e.message : String(e)}`)
+  })
 }

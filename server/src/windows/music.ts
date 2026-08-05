@@ -246,7 +246,7 @@ export class MusicWindow implements OsWindow {
       }
       case 'playlists': {
         const rows = this.playlists.length
-          ? this.playlists.map((pl) => `${pl.name} (${pl.n})${pl.origin === 'llm' ? ' ✦' : ''}`)
+          ? this.playlists.map((pl) => `${pl.name} (${pl.n})${pl.adaptive ? ' ⟳' : pl.origin === 'llm' ? ' ✦' : ''}`)
           : ['(no playlists yet — Save queue as playlist creates one)']
         // Add-current mode retitles so the tap's meaning is unmistakable (#W2).
         const title = this.addTarget
@@ -576,7 +576,17 @@ export class MusicWindow implements OsWindow {
           if (this.level === 'playlist' && this.plOpen) { this.renameTarget = this.plOpen; this.armDictation('rename') }
           return
         case 'Edit':
-          if (this.level === 'playlist') { this.offsets.set('playlist-edit', 0); this.level = 'playlist-edit'; this.focus = 'content'; this.requestRender() }
+          if (this.level === 'playlist') {
+            // Adaptive playlists are rule-managed — row surgery would be
+            // overwritten by the next refresh; refuse honestly (2026-08-05).
+            if (this.plOpen?.adaptive) {
+              this.askStatus = 'Adaptive playlist — its rule manages the rows (edits refused).'
+              this.ctx.log(`[music-win] Edit refused on adaptive "${this.plOpen.name}"`)
+              this.requestRender()
+              return
+            }
+            this.offsets.set('playlist-edit', 0); this.level = 'playlist-edit'; this.focus = 'content'; this.requestRender()
+          }
           return
         case 'Delete':
           if (this.level === 'playlist') { this.level = 'confirm-delete'; this.focus = 'content'; this.requestRender() }
@@ -753,7 +763,7 @@ export class MusicWindow implements OsWindow {
         }
         case 'playlists': {
           if (this.playlists.length === 0) return
-          const rows = this.playlists.map((pl) => `${pl.name} (${pl.n})${pl.origin === 'llm' ? ' ✦' : ''}`)
+          const rows = this.playlists.map((pl) => `${pl.name} (${pl.n})${pl.adaptive ? ' ⟳' : pl.origin === 'llm' ? ' ✦' : ''}`)
           const row = this.pick(rows, 'playlists', index)
           if (row === null) return
           // Add-current mode (review #W2: this route previously dead-ended —
@@ -883,7 +893,15 @@ export class MusicWindow implements OsWindow {
     const cur = this.addTarget ?? p?.nowPlaying() ?? (p ? p.queue[p.idx] : undefined)
     this.addTarget = null
     if (!cur) { this.ctx.log('[music-win] add-current: nothing to add — ignored'); return }
-    await appendToPlaylist(pl.id, cur.id)
+    try {
+      await appendToPlaylist(pl.id, cur.id)
+    } catch (e) {
+      // On-glass honesty (e.g. an adaptive playlist refusing appends).
+      this.askStatus = `Add failed: ${(e as Error).message}`
+      this.ctx.log(`[music-win] add-current refused: ${(e as Error).message}`)
+      this.requestRender()
+      return
+    }
     this.ctx.log(`[music-win] "${cur.title}" → playlist "${pl.name}"`)
     if (this.plOpen?.id === pl.id) { this.plTracks = await playlistTracks(pl.id); this.plOpen = { ...this.plOpen, n: this.plTracks.length } }
     this.requestRender()
