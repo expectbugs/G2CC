@@ -71,6 +71,12 @@ export class MusicPlayerService {
   /** The tap-arming ping was sent for the current phone attach (see
    *  armTapRouting). Reset when the phone detaches or a real open runs. */
   private armed = false
+  /** v1.22 gapless (D5.1, cap media-prestage): the NEXT track we prestaged on
+   *  the phone — its minted media id + the queue idx it maps to. The phone's
+   *  auto-transition reports that id with reason 'auto_advanced'; we adopt it
+   *  WITHOUT re-opening (the seam becomes a phone-local boundary). null = no
+   *  prestage outstanding. */
+  private sentNext: { mediaId: string; idx: number } | null = null
   /** The media id whose track-start popup already fired (a 'playing' event
    *  arrives on every resume too — only the FIRST per open pops). */
   private announcedId: string | null = null
@@ -114,8 +120,38 @@ export class MusicPlayerService {
     this.armTapRouting('phone attached')
   }
 
-  private capable(cap: 'media-lane' | 'earbud-buttons'): boolean {
+  private capable(cap: 'media-lane' | 'earbud-buttons' | 'media-prestage'): boolean {
     return this.phoneCaps !== null && this.phoneCaps.has(cap)
+  }
+
+  /** Build the wire payload for prestaging queue[idx] (D5.1). */
+  private nextPayload(idx: number): { id: string; url: string; title: string; artist?: string; album?: string; durMs?: number } | null {
+    const t = this.queue[idx]
+    if (!t) return null
+    return {
+      id: `med-${++this.mediaSeq}`,
+      url: `/media/track/${t.id}?token=${encodeURIComponent(this.config.authToken)}&fmt=${this.config.music.format}`,
+      title: t.title,
+      artist: t.artist,
+      album: t.album,
+      durMs: t.durMs,
+    }
+  }
+
+  /** Ensure the FOLLOWING track is prestaged on a media-prestage phone —
+   *  called after every anchored 'playing'. Covers opens that predated the
+   *  capability and radio appends that extend the tail late. */
+  private maybePrestageNext(): void {
+    if (!this.capable('media-prestage')) return
+    const nextIdx = this.idx + 1
+    if (nextIdx >= this.queue.length) return
+    if (this.sentNext?.idx === nextIdx) return   // already staged
+    const next = this.nextPayload(nextIdx)
+    if (!next) return
+    if (this.sendCapped({ type: 'media_ctl', cmd: 'preload', next }, `media_ctl(preload ${next.title})`)) {
+      this.sentNext = { mediaId: next.id, idx: nextIdx }
+      console.log(`[music] prestaged next → ${next.id} (${nextIdx + 1}/${this.queue.length}: ${next.title})`)
+    }
   }
 
   /** THE single door for every media-lane send (earbud deep-review #2/#8):
@@ -198,7 +234,11 @@ export class MusicPlayerService {
     this.posMs = startMs
     this.posAt = Date.now()
     this.pausedBy = null
+    this.sentNext = null   // a real open replaces the phone playlist (v1.22)
     if (source) this.historySource = source
+    // v1.22 gapless: ship the following track with the open (cap-gated; the
+    // phone stages it as item 2 — D5.1). maybePrestageNext covers late cases.
+    const next = this.capable('media-prestage') ? this.nextPayload(this.idx + 1) : null
     const ok = this.sendCapped({
       type: 'media_open',
       id,
@@ -208,7 +248,12 @@ export class MusicPlayerService {
       album: track.album,
       durMs: track.durMs,
       ...(startMs > 0 ? { startMs } : {}),
+      ...(next ? { next } : {}),
     }, `media_open(${track.title})`)
+    if (ok && next) {
+      this.sentNext = { mediaId: next.id, idx: this.idx + 1 }
+      console.log(`[music] next shipped with the open → ${next.id} (${next.title})`)
+    }
     if (!ok) this.state = 'idle'
     else this.armed = true              // a real open arms the session anyway
     this.schedulePersist()
@@ -250,6 +295,7 @@ export class MusicPlayerService {
     this.mediaId = null
     this.pausedBy = null
     this.pendingAdvance = false
+    this.sentNext = null   // the phone's stop clears its playlist (v1.22)
     // Review 2026-08-05 #C2: a stale position here made the next idle-tap
     // resume the stopped track at its OLD offset (worst case: its final
     // second, instantly re-ending). Stop = restart-from-top semantics.
@@ -353,6 +399,9 @@ export class MusicPlayerService {
         this.queue.push(...tracks)
         console.log(`[music] radio: +${tracks.length} appended → ${this.queue.length} queued (${tracks.map((t) => t.title).slice(0, 3).join(' · ')}…)`)
         this.schedulePersist()
+        // v1.22: an append at the TAIL creates a next where none existed —
+        // prestage it now so even the post-append boundary is gapless.
+        this.maybePrestageNext()
       })
       .catch((e: unknown) => {
         console.error(`[music] radio append FAILED (queue ends honestly): ${e instanceof Error ? e.message : String(e)}`)
@@ -387,8 +436,24 @@ export class MusicPlayerService {
 
   onMediaEvent(msg: MediaEventMsg): void {
     if (msg.id !== this.mediaId) {
-      console.log(`[music] media_event for stale id ${msg.id} (current ${this.mediaId ?? 'none'}) — ignored`)
-      return
+      // v1.22 gapless: the phone rolled to the PRESTAGED item on its own
+      // (reason 'auto_advanced', D5.1). Adopt it — the previous track ended
+      // naturally (history closes completed), the index advances WITHOUT a
+      // re-open, and the FOLLOWING track prestages below.
+      if (this.sentNext && msg.id === this.sentNext.mediaId) {
+        console.log(`[music] gapless auto-advance → ${msg.id} (${this.sentNext.idx + 1}/${this.queue.length})${msg.reason === 'auto_advanced' ? '' : ` (reason '${msg.reason ?? 'none'}' — expected auto_advanced)`}`)
+        this.closeHistory('ended')
+        this.mediaId = msg.id
+        this.idx = this.sentNext.idx
+        this.sentNext = null
+        this.posMs = 0
+        this.posAt = Date.now()
+        this.schedulePersist()
+        // fall through — the normal 'playing' handling announces + prestages
+      } else {
+        console.log(`[music] media_event for stale id ${msg.id} (current ${this.mediaId ?? 'none'}) — ignored`)
+        return
+      }
     }
     if (typeof msg.posMs === 'number') { this.posMs = msg.posMs; this.posAt = Date.now() }
     switch (msg.state) {
@@ -413,6 +478,8 @@ export class MusicPlayerService {
         }
         // D5 radio: every confirmed track start re-checks the remainder.
         this.maybeRadioFill('track playing')
+        // v1.22: keep the phone one track ahead (no-op without the cap).
+        this.maybePrestageNext()
         break
       }
       case 'paused': {
@@ -645,6 +712,10 @@ export class MusicPlayerService {
       console.error(`[music] clear-queue persist failed: ${e instanceof Error ? e.message : String(e)}`))
   }
 
+  /** Public popup passthrough (Phase D: the YouTube grab's '✔ grabbed' line —
+   *  windows can't reach the WM's musicPopup without an import cycle). */
+  popup(line: string): void { this.deps.popup(line) }
+
   /** The window edited the queue in place (row remove / reorder — review #W3:
    *  those edits never persisted, so a restart resurrected removed rows; and
    *  #C2-LOW8: a shrink near the tail must re-check the radio fill). */
@@ -666,6 +737,7 @@ export class MusicPlayerService {
     this.announcedId = null
     this.pausedBy = null
     this.pendingAdvance = false
+    this.sentNext = null
     this.capturing = false
     this.armed = false
     this.queueGen++   // any in-flight radio fill belongs to the pre-reset world

@@ -957,11 +957,27 @@ export interface ChimeMsg {
   name: ChimeName
 }
 
+/** The prestaged NEXT track (v1.22 gapless, MUSIC_SPEC D5.1 — sent ONLY to a
+ *  phone announcing cap `media-prestage`; additive-optional, pre-1.22 APKs
+ *  never see it). Same shape as a MediaOpen minus start. */
+export interface MediaNextInfo {
+  id: string
+  url: string
+  title: string
+  artist?: string
+  album?: string
+  durMs?: number
+}
+
 /** Server → phone: load + play a music-lane track in ExoPlayer. `url` is a
  *  SERVER-RELATIVE path + query (e.g. "/media/track/42?token=…&fmt=opus") —
  *  the phone prefixes its configured server host:port, so the same message
  *  works over LAN and Tailscale (Range-capable; opus-mono default).
- *  Metadata rides along for the phone's MediaSession/notification. */
+ *  Metadata rides along for the phone's MediaSession/notification.
+ *  `next` (v1.22, cap media-prestage): prestage the following track as
+ *  ExoPlayer item 2 (the rolling 2-item playlist) — the track boundary
+ *  becomes a phone-local auto-transition (media_event reason
+ *  'auto_advanced') instead of a WS round-trip. */
 export interface MediaOpenMsg {
   type: 'media_open'
   id: string
@@ -972,15 +988,19 @@ export interface MediaOpenMsg {
   durMs?: number
   /** Resume offset. */
   startMs?: number
+  next?: MediaNextInfo
 }
 
 /** Server → phone: media-lane transport. 'seek' value = ms; 'volume' value =
  *  0–100 (STREAM_MUSIC absolute); 'duck'/'unduck' value = dB drop for the
- *  speech-over-music ramp (phone-side 150 ms ramps). */
+ *  speech-over-music ramp (phone-side 150 ms ramps). 'preload' (v1.22, cap
+ *  media-prestage): `next` carries the track to stage behind the playing one
+ *  — sent after each auto-advance; unknown cmds are loud no-ops on old code. */
 export interface MediaCtlMsg {
   type: 'media_ctl'
-  cmd: 'play' | 'pause' | 'stop' | 'seek' | 'volume' | 'duck' | 'unduck'
+  cmd: 'play' | 'pause' | 'stop' | 'seek' | 'volume' | 'duck' | 'unduck' | 'preload'
   value?: number
+  next?: MediaNextInfo
 }
 
 export type ServerMessage =

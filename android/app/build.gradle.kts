@@ -38,8 +38,8 @@ android {
         // now REFUSES to install over a newer build (a loud downgrade error
         // beats silently running old code). OsLayout.OS_VERSION reads
         // BuildConfig.VERSION_NAME — one bump updates the splash/antenna too.
-        versionCode = 121
-        versionName = "1.21"
+        versionCode = 122
+        versionName = "1.22"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

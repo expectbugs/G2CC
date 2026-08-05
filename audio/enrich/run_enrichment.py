@@ -2,8 +2,9 @@
 #
 #   cd /home/user/G2CC && audio/venv/bin/python -m audio.enrich.run_enrichment <pass> [flags]
 #
-# Passes: consistency videosweep tags musicbrainz lyrics audio profile embed
-#         dedupe pretranscode report all
+# Passes: consistency videosweep tags musicbrainz lyrics audio speech profile
+#         embed dedupe pretranscode acoustid report all
+#         (speech + acoustid are NOT in `all` — scope with --ids/--track-id)
 # Flags:  --force (redo done tracks) --limit N --track-id N --concurrency N
 #
 # Every pass is resumable (per-track pass_status in track_meta) and safe to
@@ -18,8 +19,9 @@ import sys
 from datetime import date
 
 from . import db, report
-from .passes import (audio_feats, consistency, dedupe, lyrics, musicbrainz,
-                     pretranscode, profile, speech, tags, videosweep)
+from .passes import (audio_feats, backfill_acoustid, consistency, dedupe,
+                     lyrics, musicbrainz, pretranscode, profile, speech, tags,
+                     videosweep)
 from .passes import embed as embed_pass
 
 PASSES = {
@@ -34,6 +36,9 @@ PASSES = {
     "embed": embed_pass.run,
     "dedupe": dedupe.run,
     "pretranscode": pretranscode.run,
+    # Phase E backfill (D3.2 #10) — NOT in `all` (like speech): evidence-only
+    # fingerprint identification; keyless-guarded (Adam's D11#2 key unlocks it).
+    "acoustid": backfill_acoustid.run,
 }
 ALL_ORDER = ["consistency", "videosweep", "tags", "musicbrainz", "lyrics",
              "audio", "pretranscode", "dedupe", "profile", "embed"]
@@ -68,7 +73,7 @@ def main() -> int:
         kwargs = dict(force=args.force, limit=args.limit, track_id=args.track_id)
         if args.concurrency is not None and name in CONCURRENCY_AWARE:
             kwargs["concurrency"] = args.concurrency
-        if name == "speech":
+        if name in ("speech", "acoustid"):
             kwargs["artistless"] = args.artistless
             if args.ids:
                 kwargs["ids"] = [int(x) for x in args.ids.split(",") if x.strip()]

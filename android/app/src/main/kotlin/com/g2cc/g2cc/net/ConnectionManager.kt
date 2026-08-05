@@ -321,8 +321,10 @@ class ConnectionManager(
             }
             lastMessageReceivedAt = System.currentTimeMillis()
             // Send auth FIRST.
-            // caps (earbud 2026-08-04): this build carries the full audio lane.
-            send(ClientMessage.Auth(authToken, caps = listOf("audio-out", "media-lane", "earbud-buttons")))
+            // caps: audio lane (2026-08-04) + v1.22 gapless prestage (MUSIC_SPEC
+            // D5.1 — the server sends media_open.next / media_ctl preload ONLY
+            // to a phone announcing media-prestage).
+            send(ClientMessage.Auth(authToken, caps = listOf("audio-out", "media-lane", "earbud-buttons", "media-prestage")))
             ensureLivenessWatchdog()
             ensureClientHbTimer()
         }

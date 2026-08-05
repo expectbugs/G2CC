@@ -610,8 +610,24 @@ sealed interface ServerMessage {
     @Serializable @SerialName("chime")
     data class Chime(val name: String) : ServerMessage   // rec_start|rec_stop|done|error|timer|notify
 
+    /** The prestaged NEXT track (v1.22 gapless, MUSIC_SPEC D5.1 — cap
+     *  `media-prestage`). Same shape as a MediaOpen minus start. */
+    @Serializable
+    data class MediaNext(
+        val id: String,
+        val url: String,
+        val title: String,
+        val artist: String? = null,
+        val album: String? = null,
+        val durMs: Long? = null,
+    )
+
     /** Load + play a music-lane track in ExoPlayer. url is SERVER-RELATIVE
-     *  (path + query, token included) — prefix the configured host:port. */
+     *  (path + query, token included) — prefix the configured host:port.
+     *  `next` (v1.22, cap media-prestage): prestage the following track as
+     *  ExoPlayer item 2 — the rolling 2-item playlist; the boundary becomes a
+     *  local auto-transition instead of a WS round-trip. Additive-optional:
+     *  pre-1.22 APKs never see it (server gates on the cap). */
     @Serializable @SerialName("media_open")
     data class MediaOpen(
         val id: String,
@@ -621,10 +637,18 @@ sealed interface ServerMessage {
         val album: String? = null,
         val durMs: Long? = null,
         val startMs: Long? = null,
+        val next: MediaNext? = null,
     ) : ServerMessage
 
     /** Music-lane transport. seek value = ms; volume value = 0-100
-     *  (STREAM_MUSIC absolute); duck/unduck value = dB for the speech ramp. */
+     *  (STREAM_MUSIC absolute); duck/unduck value = dB for the speech ramp.
+     *  cmd 'preload' (v1.22, cap media-prestage): `next` carries the track to
+     *  prestage behind the currently-playing one (sent after each
+     *  auto-advance). Unknown cmds stay loud no-ops on older code. */
     @Serializable @SerialName("media_ctl")
-    data class MediaCtl(val cmd: String, val value: Double? = null) : ServerMessage
+    data class MediaCtl(
+        val cmd: String,
+        val value: Double? = null,
+        val next: MediaNext? = null,
+    ) : ServerMessage
 }

@@ -215,6 +215,38 @@ await insertMeta(idDupHi, { genres: ['metal'], styles: ['power metal'], dupe: 90
 
   console.error('  3. MusicPlayerService: caps/transport/capture/advance/blip/idle-tap/arming/popups ✓')
 
+  // ---- Part 3b (Phase E): v1.22 gapless prestage (cap media-prestage) ----
+  {
+    const sent2 = []
+    const svcP = new MusicPlayerService(cfg, { toPhone: (m) => { sent2.push(m); return true }, popup: () => {} })
+    svcP.notePhoneCaps(['media-lane', 'media-prestage'])
+    assert.equal(svcP.playQueue([t1, t2, { id: idB1, title: 'Slow Dirge', durMs: 240_000 }], 0, 'smoke', 'prestage test'), true)
+    const openP = sent2.find((m) => m.type === 'media_open')
+    assert.ok(openP.next, 'the open ships the NEXT track (cap-gated)')
+    assert.match(openP.next.url, new RegExp(`track/${idA2}\\?`), 'next points at queue[1]')
+    svcP.onMediaEvent({ type: 'media_event', id: openP.id, state: 'playing', posMs: 0 })
+    // The phone rolls to the prestaged item on its own: NO re-open; the
+    // FOLLOWING track preloads; history completed for the finished one.
+    const opensBefore2 = sent2.filter((m) => m.type === 'media_open').length
+    svcP.onMediaEvent({ type: 'media_event', id: openP.next.id, state: 'playing', posMs: 0, reason: 'auto_advanced' })
+    assert.equal(sent2.filter((m) => m.type === 'media_open').length, opensBefore2, 'auto-advance does NOT re-open')
+    assert.equal(svcP.idx, 1, 'idx adopted the prestaged track')
+    assert.equal(svcP.status().music, 'playing')
+    const preload = sent2.find((m) => m.type === 'media_ctl' && m.cmd === 'preload')
+    assert.ok(preload?.next, 'the following track preloads after the advance')
+    assert.match(preload.next.url, new RegExp(`track/${idB1}\\?`), 'preload points at queue[2]')
+    // A v1.21-class phone (no cap) gets NEITHER field nor preload cmds.
+    const sent3 = []
+    const svcQ = new MusicPlayerService(cfg, { toPhone: (m) => { sent3.push(m); return true }, popup: () => {} })
+    svcQ.notePhoneCaps(['media-lane'])
+    svcQ.playQueue([t1, t2], 0, 'smoke')
+    assert.equal(sent3.find((m) => m.type === 'media_open').next, undefined, 'no cap → no next field (v1.21 floor)')
+    svcQ.onMediaEvent({ type: 'media_event', id: sent3.find((m) => m.type === 'media_open').id, state: 'playing', posMs: 0 })
+    assert.ok(!sent3.some((m) => m.type === 'media_ctl' && m.cmd === 'preload'), 'no cap → no preload ever')
+    svcQ.stop('smoke'); svcP.stop('smoke')
+    console.error('  3b. v1.22 prestage: open+next, auto-advance w/o re-open, rolling preload, v1.21 floor ✓')
+  }
+
   // ---- Part 4: history + player_state persistence (same service instance) ----
   await sleep(2000)   // let the persist debounce + history fire-and-forgets settle
   const hist = await query('SELECT track_id, completed, skipped, ended_at FROM play_history WHERE track_id IN ($1,$2) ORDER BY id', [idA1, idA2])

@@ -15,6 +15,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import com.g2cc.g2cc.net.ClientMessage
 import com.g2cc.g2cc.net.ServerMessage
@@ -169,6 +170,19 @@ class AudioOutController(
                 // Deep-review #20 (WORK RULE): an earbud disconnect mid-music
                 // must PAUSE, never continue on the phone speaker.
                 .setHandleAudioBecomingNoisy(true)
+                // v1.22 (MUSIC_SPEC D5.1): minutes-class buffer — Tailscale-at-
+                // work hiccup insurance. A blip mid-track plays on from RAM
+                // instead of stalling; the defaults buffered only ~50 s.
+                .setLoadControl(
+                    DefaultLoadControl.Builder()
+                        .setBufferDurationsMs(
+                            /* minBufferMs = */ 60_000,
+                            /* maxBufferMs = */ 300_000,
+                            /* bufferForPlaybackMs = */ 1_500,
+                            /* bufferForPlaybackAfterRebufferMs = */ 5_000,
+                        )
+                        .build(),
+                )
                 .build()
             p.addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -181,6 +195,28 @@ class AudioOutController(
                     if (state == Player.STATE_ENDED) {
                         sendToServer(ClientMessage.MediaEvent(id, "ended", p.currentPosition))
                     }
+                }
+                override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+                    // v1.22 gapless (D5.1): the rolling 2-item playlist rolled
+                    // to the prestaged track on its own. Anchor OUR id to the
+                    // new item and tell the server honestly — it advances its
+                    // queue WITHOUT re-opening and preloads the following one.
+                    if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) return
+                    val newId = item?.mediaId
+                    if (newId.isNullOrEmpty()) {
+                        Log.e(TAG, "auto-transition to an item with NO mediaId — cannot report (server will see a stale id)")
+                        return
+                    }
+                    mediaId = newId
+                    // Prune the finished item so the playlist stays a rolling
+                    // 2-item window (index 0 = now playing after removal).
+                    if (p.currentMediaItemIndex > 0) {
+                        runCatching { p.removeMediaItem(0) }
+                            .onFailure { Log.w(TAG, "rolling-window prune failed", it) }
+                    }
+                    updateSessionMetadata(item)
+                    Log.i(TAG, "gapless auto-advance → $newId")
+                    sendToServer(ClientMessage.MediaEvent(newId, "playing", p.currentPosition, reason = "auto_advanced"))
                 }
                 override fun onPlayerError(error: PlaybackException) {
                     val id = mediaId ?: return
@@ -250,39 +286,67 @@ class AudioOutController(
 
     fun onSpeakCancel(msg: ServerMessage.SpeakCancel) = speech.cancel(msg.num)
 
+    /** Build a playlist item carrying the SERVER's media id as the ExoPlayer
+     *  mediaId — the auto-transition handler reports it back verbatim. */
+    private fun buildItem(id: String, url: String, title: String, artist: String?, album: String?): MediaItem {
+        val full = if (url.startsWith("http")) url else serverBase + url
+        return MediaItem.Builder()
+            .setMediaId(id)
+            .setUri(full)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist(artist)
+                    .setAlbumTitle(album)
+                    .build(),
+            )
+            .build()
+    }
+
+    private fun updateSessionMetadata(item: MediaItem?) {
+        val md = item?.mediaMetadata ?: return
+        runCatching {
+            mediaSession?.setMetadata(
+                android.media.MediaMetadata.Builder()
+                    .putString(android.media.MediaMetadata.METADATA_KEY_TITLE, md.title?.toString() ?: "")
+                    .putString(android.media.MediaMetadata.METADATA_KEY_ARTIST, md.artist?.toString() ?: "")
+                    .build(),
+            )
+        }
+    }
+
+    /** Replace/append the prestaged NEXT item so the playlist is a rolling
+     *  2-item window (v1.22 D5.1). Called on main via ensurePlayer. */
+    private fun stageNext(p: ExoPlayer, next: ServerMessage.MediaNext) {
+        val item = buildItem(next.id, next.url, next.title, next.artist, next.album)
+        val cur = p.currentMediaItemIndex
+        while (p.mediaItemCount > cur + 1) {
+            runCatching { p.removeMediaItem(p.mediaItemCount - 1) }
+                .onFailure { Log.w(TAG, "stale next removal failed", it); return }
+        }
+        p.addMediaItem(item)
+        Log.i(TAG, "prestaged next → ${next.id} ('${next.title}') — ${p.mediaItemCount} item(s) loaded")
+    }
+
     fun onMediaOpen(msg: ServerMessage.MediaOpen) {
         if (btOut() == null) {
             Log.e(TAG, "ROUTE GUARD: media_open '${msg.title}' with no BT output — refusing (the speaker is never an option)")
             sendToServer(ClientMessage.MediaEvent(msg.id, "error", 0, reason = "no Bluetooth output route (earbud not connected)"))
             return
         }
-        val url = if (msg.url.startsWith("http")) msg.url else serverBase + msg.url
         mediaId = msg.id
         ensurePlayer { p ->
-            val item = MediaItem.Builder()
-                .setUri(url)
-                .setMediaMetadata(
-                    MediaMetadata.Builder()
-                        .setTitle(msg.title)
-                        .setArtist(msg.artist)
-                        .setAlbumTitle(msg.album)
-                        .build(),
-                )
-                .build()
+            val item = buildItem(msg.id, msg.url, msg.title, msg.artist, msg.album)
             p.setMediaItem(item, msg.startMs ?: 0L)
             p.volume = 1f
             duckedVolume = false
             p.prepare()
             p.play()
-            runCatching {
-                mediaSession?.setMetadata(
-                    android.media.MediaMetadata.Builder()
-                        .putString(android.media.MediaMetadata.METADATA_KEY_TITLE, msg.title)
-                        .putString(android.media.MediaMetadata.METADATA_KEY_ARTIST, msg.artist ?: "")
-                        .build(),
-                )
-            }
-            Log.i(TAG, "media_open ${msg.id}: '${msg.title}' ← $url")
+            // v1.22 (cap media-prestage): the server may ship the next track
+            // with the open — stage it as item 2 for a gapless boundary.
+            msg.next?.let { stageNext(p, it) }
+            updateSessionMetadata(item)
+            Log.i(TAG, "media_open ${msg.id}: '${msg.title}'${msg.next?.let { " (+next ${it.id})" } ?: ""}")
         }
     }
 
@@ -311,6 +375,13 @@ class AudioOutController(
                     duckedVolume = true
                 }
                 "unduck" -> { p.volume = 1f; duckedVolume = false }
+                // v1.22 gapless (D5.1): stage the following track behind the
+                // one now playing (sent by the server after each auto-advance).
+                "preload" -> {
+                    val next = msg.next
+                    if (next == null) Log.e(TAG, "media_ctl preload with no `next` payload — ignored LOUDLY")
+                    else stageNext(p, next)
+                }
                 else -> Log.w(TAG, "unknown media_ctl cmd '${msg.cmd}' — ignored LOUDLY")
             }
         }
