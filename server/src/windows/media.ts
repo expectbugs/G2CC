@@ -110,12 +110,13 @@ export class MediaWindow implements OsWindow {
     return { mode: 'text', title: `Media · ${s.playing ? 'playing' : 'paused'}`, menu, text: lines.join('\n') }
   }
 
-  /** ▕████░░░░░░░░░░░░▏ 2:31/4:05 — fixed 16-cell bar, server-extrapolated. */
+  /** ||||........ 2:31/4:05 — 50 text cells (2% each), server-extrapolated.
+   *  Block glyphs rendered as an IMAGE on the G2 (Adam 2026-08-06 sweep). */
   private posBar(): string {
     const s = this.state!
-    const pos = this.posMs(), dur = s.durationMs ?? 0, cells = 16
+    const pos = this.posMs(), dur = s.durationMs ?? 0, cells = 50
     const filled = dur > 0 ? Math.max(0, Math.min(cells, Math.round((pos / dur) * cells))) : 0
-    return `▕${'█'.repeat(filled)}${'░'.repeat(cells - filled)}▏ ${fmtClock(pos)}${dur ? `/${fmtClock(dur)}` : ''}`
+    return `${'|'.repeat(filled)}${'.'.repeat(cells - filled)} ${fmtClock(pos)}${dur ? `/${fmtClock(dur)}` : ''}`
   }
 
   private lyricsView(): WinView {

@@ -356,12 +356,12 @@ export class MusicWindow implements OsWindow {
   }
 
   private posBar(posMs: number, durMs?: number): string {
-    // Plain text only (Adam on-glass 2026-08-06): the block glyphs (█░▕▏)
-    // rendered as an IMAGE on the G2 — seconds-slow per update. '=' and '·'
-    // are proven text-path characters (the · separator is all over the UI).
-    const cells = 16
+    // Plain text only (Adam on-glass 2026-08-06): block glyphs (█░▕▏)
+    // rendered as an IMAGE on the G2 — seconds-slow per update. 50 cells of
+    // '|'/'.' (close widths, both narrow) = exactly 2% per cell.
+    const cells = 50
     const filled = durMs ? Math.max(0, Math.min(cells, Math.round((posMs / durMs) * cells))) : 0
-    return `[${'='.repeat(filled)}${'·'.repeat(cells - filled)}] ${fmtClock(posMs)}${durMs ? `/${fmtClock(durMs)}` : ''}`
+    return `${'|'.repeat(filled)}${'.'.repeat(cells - filled)} ${fmtClock(posMs)}${durMs ? `/${fmtClock(durMs)}` : ''}`
   }
 
   private lyricsView(): WinView {

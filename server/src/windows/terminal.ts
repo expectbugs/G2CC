@@ -364,7 +364,7 @@ export class TerminalWindow implements OsWindow {
     if (this.level === 'kbd') {
       const { items } = browsePageItems(this.kbdModel().items, this.kbdOffset)
       const buf = this.kbdBuf || ' '
-      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Tmux · ⌨ ${buf}▏`, menu: ['Back', 'Reload', 'Main'], items }
+      return { mode: 'browse', menuMode: this.focus === 'menu' ? 'capture' : 'passive', title: `Tmux · ⌨ ${buf}|`, menu: ['Back', 'Reload', 'Main'], items }
     }
     if (this.level === 'slash') {
       const { items } = browsePageItems([...TERM_SLASH_COMMANDS, '‹ Done'], this.kbdOffset)
