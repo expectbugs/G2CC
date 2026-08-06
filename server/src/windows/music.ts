@@ -118,6 +118,7 @@ export class MusicWindow implements OsWindow {
   private lyricsSeq = 0
 
   private pacer: ReturnType<typeof setInterval> | null = null
+  private tickN = 0
 
   constructor(private ctx: WmContext, private requestRender: () => void) {
     // Position tick (sanctioned pacing, the MediaWindow precedent): re-render
@@ -126,6 +127,7 @@ export class MusicWindow implements OsWindow {
     this.pacer = setInterval(() => {
       const p = this.player()
       if (p?.status().music !== 'playing') return
+      this.tickN++
       if ((this.level === 'lyrics' || this.level === 'now') && this.lyricsFor && this.lyricsFor !== this.lyricsKey()) {
         // The queue advanced under an open lyrics level OR the Now Playing
         // karaoke strip (review #W5 / Adam 2026-08-05: the strip must follow
@@ -134,8 +136,13 @@ export class MusicWindow implements OsWindow {
         void this.loadLyrics()
         return
       }
-      if (this.level === 'now' || (this.level === 'lyrics' && this.lrc)) this.requestRender()
-    }, 5_000)
+      // Adam 2026-08-06 "keep up with the music better": live karaoke gets
+      // every 1.5 s tick (posMs extrapolates, so the ▶ line lands on time);
+      // without synced lyrics the position bar keeps the old ~4.5 s cadence.
+      const karaoke = (this.level === 'now' || this.level === 'lyrics') && !!this.lrc?.length && this.lyricsFor === this.lyricsKey()
+      if (karaoke) { this.requestRender(); return }
+      if (this.tickN % 3 === 0 && this.level === 'now') this.requestRender()
+    }, 1_500)
   }
 
   /** The current track's lyrics identity (artist|title — matches loadLyrics). */
@@ -320,7 +327,6 @@ export class MusicWindow implements OsWindow {
     if (st!.track) {
       lines.push(st!.track.title)
       lines.push(`${st!.track.artist ?? '(unknown artist)'}${st!.track.album ? ` — ${st!.track.album}` : ''}`)
-      lines.push('')
       lines.push(this.posBar(st!.posMs, st!.track.durMs))
     } else {
       const next = p.queue[p.idx]
@@ -330,17 +336,18 @@ export class MusicWindow implements OsWindow {
     }
     lines.push(`queue ${st!.queuePos} · radio ${st!.radio ? 'ON' : 'off'}`)
     if (st!.caps === null) lines.push('⚠ NO PHONE ATTACHED — playback needs the phone')
-    // Karaoke strip (Adam 2026-08-05): the bottom lines follow the synced
-    // lyrics for the CURRENT track, ▶ on the live line (5 s pacer cadence).
-    // Loads lazily: the kick is keyed + seq-guarded inside loadLyrics, so a
-    // render-time call is safe; unsynced/no lyrics = no strip (clean view).
+    // Karaoke strip (Adam 2026-08-06 shape): blank, then THREE lyric lines —
+    // ▶ the CURRENT line on top, the next two upcoming below (no history).
+    // 1.5 s pacer tick while lyrics show; posMs extrapolates between the
+    // phone's pushes so the live line lands on time. The whole view stays
+    // ≤8 lines (the old 9-line layout clipped the strip to two on glass).
     if (st!.track) {
       if (this.lyricsFor !== this.lyricsKey()) void this.loadLyrics()
       else if (this.lrc && this.lrc.length) {
         const idx = currentLrcIndex(this.lrc, st!.posMs)
-        const start = Math.max(0, Math.min(idx - 1, this.lrc.length - 4))
+        const start = Math.max(0, idx)
         lines.push('')
-        for (let i = start; i < Math.min(start + 4, this.lrc.length); i++) {
+        for (let i = start; i < Math.min(start + 3, this.lrc.length); i++) {
           lines.push(i === idx ? `▶ ${this.lrc[i].text || '♪'}` : `  ${this.lrc[i].text || '♪'}`)
         }
       }
@@ -349,9 +356,12 @@ export class MusicWindow implements OsWindow {
   }
 
   private posBar(posMs: number, durMs?: number): string {
+    // Plain text only (Adam on-glass 2026-08-06): the block glyphs (█░▕▏)
+    // rendered as an IMAGE on the G2 — seconds-slow per update. '=' and '·'
+    // are proven text-path characters (the · separator is all over the UI).
     const cells = 16
     const filled = durMs ? Math.max(0, Math.min(cells, Math.round((posMs / durMs) * cells))) : 0
-    return `▕${'█'.repeat(filled)}${'░'.repeat(cells - filled)}▏ ${fmtClock(posMs)}${durMs ? `/${fmtClock(durMs)}` : ''}`
+    return `[${'='.repeat(filled)}${'·'.repeat(cells - filled)}] ${fmtClock(posMs)}${durMs ? `/${fmtClock(durMs)}` : ''}`
   }
 
   private lyricsView(): WinView {
