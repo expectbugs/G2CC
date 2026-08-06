@@ -130,6 +130,9 @@ function table(rows, cols) {
 async function load() {
   try {
     const d = await api('/api/identity');
+    // The delegated Apply reads evidence from here — rebuild it EVERY load
+    // (an unpopulated map made every Apply a silent 'stale row' no-op).
+    pendingById = new Map(d.pending.map((p) => [Number(p.id), p]));
     document.getElementById('n-pending').textContent = d.pending.length;
     document.getElementById('n-applied').textContent = d.applied.length;
     document.getElementById('n-unresolved').textContent = d.unresolved.length;

@@ -309,7 +309,8 @@ server.get('/identity', async (req, reply) => {
     reply.code(404).send({ error: 'identity.html missing from server/static — broken deployment' })
     return
   }
-  reply.type('text/html').send(readFileSync(path, 'utf-8'))
+  // no-store: a cached copy of an earlier page build left dead buttons.
+  reply.header('cache-control', 'no-store').type('text/html').send(readFileSync(path, 'utf-8'))
 })
 server.get('/api/identity', async (req, reply) => {
   if (!identityAuthed(req)) { reply.code(401).send({ error: 'unauthorized' }); return }
