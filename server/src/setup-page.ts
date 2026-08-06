@@ -170,6 +170,12 @@ export async function renderSetupPage(port: number, token: string, apkInfo = '')
     <p class="subtitle">Live browser surface for the SAME OS session: the glasses screen mirrored on canvas, keyboard/mouse input (wheel/arrows scroll, Enter/click select, Esc back), a text bar that types straight into the active window, and Soft/Hard Reset buttons. Glasses on the charger? Keep going here.</p>
   </div>
 
+  <div class="box">
+    <strong>Music Identity Review</strong><br>
+    <a href="/identity?token=${encodeURIComponent(token)}">🎵 Open the identity review page (/identity)</a>
+    <p class="subtitle">The library's naming queue: pending fingerprint proposals (apply/reject), applied identities (revertible — the previous values are always recorded), and still-unresolved tracks with manual title/artist/album boxes. Applying re-derives MusicBrainz/lyrics/embedding and refiles the track to its canonical home automatically.</p>
+  </div>
+
   <h3>Endpoints (refetched at runtime)</h3>
   <p class="subtitle">The Android client fetches <code>/endpoints</code> on each successful auth and tries them in priority order: Tailscale/WireGuard first, then Ethernet/WiFi, then other.</p>
 </body>
