@@ -52,7 +52,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   wm.onMediaState({ playing: true, title: 'Test Song', artist: 'The Testers', album: 'Smoke', durationMs: 240000, positionMs: 60000 })
   await waitFor(() => textOf(scenes[scenes.length - 1]).includes('Test Song'), 'track shows')
   assert.ok(textOf(scenes[scenes.length - 1]).includes('The Testers'), 'artist shows')
-  assert.ok(/▕[█░]+▏/.test(textOf(scenes[scenes.length - 1])), 'position bar present')
+  // 50-cell text bar (2026-08-06 sweep: block glyphs image-rendered on the G2).
+  assert.ok(/[|.]{50} \d+:\d\d/.test(textOf(scenes[scenes.length - 1])), 'position bar present')
 
   // tap Play/Pause (menu index 0) → media_cmd play_pause
   await wm.onSelect('menu', 0)
