@@ -1,0 +1,483 @@
+   #Data Crystal (en) Data Crystal Atom feed
+
+   If you are still using the old URL (datacrystal.romhacking.net), please
+   update your bookmarks! The old URL may stop working at any time.
+   The current URL is datacrystal.tcrf.net.
+
+Final Fantasy/RAM map
+
+   From Data Crystal
+   < Final Fantasy
+   Jump to navigation Jump to search
+
+     Chip tiny.png The following article is a RAM map for Final Fantasy.
+
+            RAM                            Purpose
+      0x0020 to 0x----              Button being pressed
+      0x0062 to 0x----           Position of finger on menu
+      0x00B0 to 0x00BF             Music Driver, Square 1
+      0x00C0 to 0x00CF             Music Driver, Square 2
+      0x00D0 to 0x00DF             Music Driver, Triangle
+      0x00F5 to 0x----        Step counter for "random" enemies
+      0x0200 to 0x02FF         Sprite data page (to be DMA'd)
+      0x0300 to 0x---- Top-left character selection in naming sequence
+      0x0500 to 0x057F    TSA for current tileset (upper-left tile)
+      0x0580 to 0x05FF   TSA for current tileset (upper-right tile)
+      0x0600 to 0x067F    TSA for current tileset (lower-left tile)
+      0x0680 to 0x06FF   TSA for current tileset (lower-right tile)
+      0x0700 to 0x077F    Attribute assignment for current tileset
+
+0x000D     : toggles between displaying a room contents or outside? (0=outside,
+0xD1 is inside)<br />
+0x000E/F   : the VRAM address of the door tile (?)
+0x0010     : 16 bytes of tmp data.
+0x0020     : Buttons being pressed, bits added together for multiple buttons.
+0x0022     : Select pressed
+0x0023     : Start pressed
+0x0024     : A pressed
+0x0025     : B pressed
+
+0x0027     : World Map Horizontal Position in tiles
+0x0028     : World Map Vertical Position in tiles
+0x0029     : Non-world map, horizontal position in tiles (maps do not terminate
+at 0)
+0x002A     : Non-world map, vertical position in tiles (maps do not terminate at
+ 0)
+
+0x002D     : 1-bit set in map, 1-bit unset on overworld. 2-bit set if you're wal
+king horizontally, 2-bit unset if you're walking vertically
+
+0x0030     : vertical tile (but does not change when switching up/down direction
+ for one tile)
+0x0034     : 1 when scrolling, 0 otherwise
+0x0035     : timer when scrolling, from 0 to 0xF, when moving to a different cel
+l
+0x0040     : low byte will count 0-F when moving horizontally (except not for on
+e tile when changing direction), the upper byte will be 1 when scolling vertical
+ly, 0 otherwise.
+0x0043     : worldmap only: 0x10 when you're not (completely drawn, like in a fo
+rest as well), 0x00 otherwise. always sets 0x00 from 0x10 after the colorsflashi
+ng of a battle... always seems to be 0x10 while battling (not very strange, i gu
+ess)
+0x0062     : Position of finger on menu, position of characters when giving name
+s at start
+0x0064     : Position x of finger when giving names at start
+0x0065     : Position x of finger when giving names at start
+0x0068     : x position indoors
+0x0069     : y position indoors
+0x0080/4   : gets set to a table value (sprite?), at least when fighting (from s
+ource)
+0x0081     : 0x68 when fighting, 0x63 while on a map after a fight (world, indoo
+rs, town), 0 on boot and until first fight...
+0x0088/A   : Graphics used when battle? All 0 on powerup up to the first battle.
+ during battle, 8A jumps while menu's are scrolling, 88 jumps between 69 and 6A.
+ when not fighting, 89 is 6A and 8A is C0. while not in a fight (after the first
+ fight after poweron), 8A will be reset to 0, 88 to 4. it seems 88 does never tu
+rn to 4 during a battle.
+0x0090/F   : Graphics. 0x96 seems to be 6 when not in a fight. 0x94 counts down
+during a frame, but i'm not sure if that's between frames as well.
+0x00B0/BF  : Music Driver, Square 1
+0x00C0/CF  : Music Driver, Square 2
+0x00D0/DF  : Music Driver, Triangle
+0x00FA     : respond rate (set at title screen, 1-8), delay of text stuff.
+0x00F5     : encounter counter (decreases by 1 when walking except for a few til
+e types). when reaching certain periodic value, it fires an encounter
+0x00F6     : decreases by 0x60 (wrap around) whenever 0x00F5 reaches a boundry (
+bottom or top). Every other time 0x00F5 will switch the way it counts, wrapping
+around the other time. "affects whether $f5 is incremented or decremented, to gi
+ve something vaguely resembling a longer period."
+0x00F7     : indicates which enemy (type?) we'll battle next. "is the index numb
+er of the next battle. This is the one that leads to Kyzokus."
+(0x688A)   : "is the index of the next random number for the other PRNG. This va
+lue is saved in SRAM, oddly enough."
+0x00F9     : Cold Boot/Warm Boot flag (value 0x4D indicates warm boot, skips to
+New/Continue screen)
+
+0x0200/FF  : Sprite data page (to be DMA'd)
+0x230 + 34 : mapping from tileset number to music: "Also, that data table I move
+d from 0x3cfd3 to 0x2d4e8 in one of my patches is the mapping from map tileset n
+umber to background music. The other music selections seem to be hard-coded into
+ the appropriate setup routines. The possible values are:"
+0x41: Prelude (the music at the beginning)
+0x42: Prologue (Bridge and Ship Game)
+0x43: Ending
+0x44: World map
+0x45: Ship music (without the wave sounds, though)
+0x46: Airship music (without the propeller sounds)
+0x47: Towns
+0x48: Castles
+0x49: Earth Cave, Volcano, Titan's Tunnel
+0x4a: Ice Cave, Cardia caves, Waterfall, Dwarf Cave, Matoya's Cave, Sarda's Cave
+0x4b: Marsh Cave and Mirage Tower
+0x4c: ToF and Sea Shrine
+0x4d: Sky Castle
+0x4e: ToFR
+0x4f: Shops
+0x50: Battle
+0x51: Menus
+0x52: Slain
+0x53: Victory
+0x54: Win the ship game, get a plot item. This uses command FF to end, and I sup
+pose the game watches for that and restarts the standard background music.
+0x55: Prelude, again. It really does just point to the same song data.
+0x56: Saving. Another one that ends itself.
+0x57: This is the very short piece of music that plays when you use a potion.
+0x58: This is the very short piece of music that plays when you open a non-plot-
+item chest.
+
+
+0x0300     : Top-left character selection in naming sequence
+
+0x0500/7F  : TSA for current tileset (upper-left tile)
+0x0580/FF  : TSA for current tileset (upper-right tile)
+0x0600/7F  : TSA for current tileset (lower-left tile)
+0x0680/FF  : TSA for current tileset (lower-right tile)
+0x0700-0x077F  Attribute assignment for current tileset
+
+0x0700-0x077F  Attribute assignment for current tileset
+
+0x6021/31  : ("which key item a handler involves, as the flags for whether you h
+ave each key item are stored in the SRAM at those addresses; the byte sequences
+will be "ad xx 60" (which is involved in checking whether you have the item), "c
+e xx 60" (which will take the item away), and "ee xx 60" (which will give the it
+em). "?)
+0x6100/3F  : Character 1
+0x6140/7F  : Character 2
+0x6180/BF  : Character 3
+0x61C0/FF  : Character 4
++0x00 = character id (00-03). when the order of your party changes, so does this
+ number (and everything else that belongs to it)
++0x01 = player status (sort of uses flags (some can be combined, others can not)
+: 0=standing, 1=dead, 2=petrified, 3=kneeling (low hp), 4=poison, 8=dark, 0x10=s
+tun, 0x14=stun+poison, 0x18=stun+poison, 0x20=sleep, 0x40=mute)
++0x02 = name 1
++0x03 = name 2
++0x04 = name 3
++0x05 = name 4
++0x06 =
++0x07 = current xp lowbyte
++0x08 = current xp highbyte
++0x0A = hp low byte
++0x0B = hp high byte
++0x0C = max hp low byte
++0x0D = max hp high byte (i guess?)
++0x10 = str
++0x11 = agility
++0x12 = int
++0x13 = vitality
++0x14 = luck
++0x16 = required xp lowbyte
++0x17 = required xp highbyte
++0x18 = first weapon
++0x19 = second weapon
++0x1A = third weapon
++0x1B = fourth weapon
++0x1C = first armor
++0x1D = second armor
++0x1E = third armor
++0x1F = fourth armor
++0x20 = (max?) dmg
++0x21 = hit%
++0x22 = absorb level
++0x23 = evade
++0x25 = hit %
++0x26 = level (actually, level - 1, it offsets at 0)
+0x6300/FF  : Magic info for all characters, 0x2F for each
++0x00 - Lv.1 magic 1
++0x01 - Lv.1 magic 2
++0x02 - Lv.1 magic 3
++0x04 - Lv.2 magic 1
++0x05 - Lv.2 magic 2
++0x06 - Lv.2 magic 3
++0x08 - Lv.3 magic 1
++0x09 - Lv.3 magic 2
++0x0A - Lv.3 magic 3
++0x0C - Lv.4 magic 1
++0x0D - Lv.4 magic 2
++0x0E - Lv.4 magic 3
++0x10 - Lv.5 magic 1
++0x11 - Lv.5 magic 2
++0x12 - Lv.5 magic 3
++0x14 - Lv.6 magic 1
++0x15 - Lv.6 magic 2
++0x16 - Lv.6 magic 3
++0x18 - Lv.7 magic 1
++0x19 - Lv.7 magic 2
++0x1A - Lv.7 magic 3
++0x1C - Lv.8 magic 1
++0x1D - Lv.8 magic 2
++0x1E - Lv.8 magic 3
++0x20 - Lv.1 max MP
++0x21 - Lv.2 max MP
++0x22 - Lv.3 max MP
++0x23 - Lv.4 max MP
++0x24 - Lv.5 max MP
++0x25 - Lv.6 max MP
++0x26 - Lv.7 max MP
++0x27 - Lv.8 max MP
++0x28 - Lv.1 current MP
++0x29 - Lv.2 current MP
++0x2A - Lv.3 current MP
++0x2B - Lv.4 current MP
++0x2C - Lv.5 current MP
++0x2D - Lv.6 current MP
++0x2E - Lv.7 current MP
++0x2F - Lv.8 current MP
+
+0x6830     : 0x55 when its our turn?
+0x6848/54  : battle order. determined about 12 frames AFTER selecting the last t
+arget. Dead/empty enemy slots are included and skipped. 0-8 = enemy slots (see b
+elow), 80-83 = player characters. order is left to right
+0x6856     : pre-emptive/ambush, et al. Dunno, but when freezing this (to at lea
+st 0x1C), the step counter increases but no battles occur..
+0x6858/9   : (" it's putting 300 into $6858,9 for the comparison to HP. When the
+ pointers are doubled, it ends up comparing to $685A,B to the HP which in this c
+ase is $0000. The HP can't be less than that, so it doesn't work.")
+0x685A/B   : (INT of (attacking) enemy?), hi-lo or lo-hi
+0x685E     : at start of battle, resets to 0 then counts up to 4 while filling t
+he character status windows. At four, the ambush/pre-emptive is computed! Later
+it holds the damage dealt by a character (not monster) and counts to four betwee
+n attacks
+0x6860     : something with dmg (freeze to 255 to do 255dmg)
+0x686B     : critical hit when 1
+0x686A     : number of hits for one attack
+0x6870     : (Spell hit rate?)
+0x6876     : (Target damage?)
+0x687C     : ? something to do with fighting...
+0x687F     : (Target absorb?)
+0x6882     : something with dmg
+0x6884     : (Target hit %?)
+0x6885     : (Target evade ?)
+0x6887     : switches who attacks who?
+0x688A     : randomizer seed..? (at least) used for battle order (freeze to 0 to
+ have a numeric ordered battle order) and to display the hit-enemy-animation. Al
+so influences hit/miss (FF=always miss for everyone). Determines amount of dmg.
+0x688E     : counter that indicates who's turn it is in the battleorder (so, I t
+hink, this serves as the battle-order-index). Also: "LDA $688E      ; Load the c
+haracter's <class> byte and skip the [Magic" // http://www.romhacking.net/forum/
+index.php/topic,6025.0.html
+
+
+0x688F/9E  : 4x4 bytes, something with picking targets. clears to 0 before a tur
+n. Does not immediately reset when you undo your move, but does change when you
+change your targets. does not clear after a battle.
++0x00 = action (0x20=run away, 04=attack, 01=dead(/not attacking?))
++0x01 = (?): 0x10 when attacking normally but also when running away
++0x02 = target (enemy index, 0x80+ when targeting your own group) third byte see
+ms to indicate who you attack (0x80 indicates yourself, like when running away)
++0x03 = zero? (perhaps spell/item index)
+0x689F/A2  : Cleared during battle. Rearranged battle order after battle (before
+ black screen!). "The background: after a battle, the game re-sorts your warrior
+s based on their status ailments. It does this by "tagging" each warrior with a
+number made up of the warrior's current slot (0-3) plus a number based on the st
+atus (dead=0x40, stone=0x20, poison=0x10, normal=0). Then it performs a simple b
+ubble sort. It's supposed to end up with the afflicted warriors moved to the end
+, but otherwise maintain the original order. But in 106 of the 256 possible comb
+inations of statuses, it gets the order screwed up."
+0x68AF     : (gets the x coord of hand on screen as set in 0x68B0 during start o
+f battle (et.al.?))
+0x68B0/1   : coords of hand and characters. note that this register gets set and
+ reset during one frame. freeze it and all players and hte hand will have the sa
+me x or y coord!
+0x68B3     : toggles between 0 and 1 every other frame, in sync with rng. seems
+to have something to do with drawing and input. when freezing to one, half of th
+e palette will be drawn and the A button will be pressed (and more?), when freez
+ing to 0 the other half of the palette gets drawn and you cant give any input...
+0x68BD/E   : 0x0B 0x0A when picking targets, 0x0A 0x04 when busy fighting, not c
+leared after battle (?)
+0x6920/A5F : fight menu text and layout
+0x69C2     : enemy size (0=small, 1= half height, 2=big (kary))
+
+
+0x6AA3     : 2 while fighting sequence, one frame 3 after being done... (actuall
+y counts the number of windows open..)
+0x6AA5     : this value becomes set when the notification windows are closing af
+ter an attack (and after selecting targets)
+0x6AA7     : ? counts 0-3 really fast, goes to 5 when selecting action or enemy,
+ frozen to last value while attacking
+0x6AA8     : when fighting; character moving back/forward, after battle this cou
+nts down from 0x40 to zero (1 per 2 frames) (victory animation), after which the
+ "monsters perished" message is displayed
+0x6AA9     : character that's supposed to make a move now
+0x6AAA     : when fighting; target enemy (numbered up down, left right), or coun
+ts as you move up and down in player-menu. note that this does not wrap at 4 for
+ the player (but denotes the proper enemy!)....
+0x6AAB     : like 0x6AAA, for player, counts as the player goes left/right in th
+e menu. note that this does not wrap at 2....
+0x6A9F     : seems to be 0x0C when displaying attack result...
+0x6AD0     : counter, counts down the time an attack result remains on screen (s
+et to 1 if speed is fastest)
+0x6AD6     : (at the start of a fight, it seems to get set to 0x18 when you're d
+ead/incapable and 0 otherwise? looking at the source, dunno)
+0x6AE3     : screen x coords of hand in menu
+0x6AE4     : screen y coords of hand in menu
+0x6B2B     : damage dealt (result?) 0x40/0x64=fail?
+0x6B2A     : 0x11 when hit, 0x0F on miss
+0x6B3B     : 0x2C on critical hit, 0xF3 on killing blow, 0x21 on normal hit/miss
+0x6B5E     : runs from 4 to 7 between attacks, remains 7 otherwise? (see bank 18
+)
+0x6BB7     : enemie types? (FF=empty)
+0x6BC9     : seems to be equal to (main?) enemy type...
+0x6BD3/C86 : Enemy data (0x14 bytes for each, in sync with enemy type), 9x
++0x02 = hp low
++0x03 = hp high
++0x06 = dead (1=yes,0=no)
+0x6B7A     : which player is picking action while fighting (uses iterative 0-3,
+not the internal index order)
+0x6B7B     : which enemy is targeted in menu
+0x6BCF     : scratch register, often used to temp store the Accumulator when pus
+hing A X Y registers. (damage dealth? 0 when missed, something (random?!) before
+ actual dmg. hm, 90 when shadow.. (but set at the time preemptive/ambush is dete
+rmined, see also 0x6D90))
+
+enemy index (top-down left-right):
+1: 1
+2: 0
+3: 2
+4: 4
+5: 3
+6: 5
+7: 7
+8: 6
+9: 9
+
+0x6C87     : target player index (either way): 0=1, 2=2, 4=3, 6=4
+0x6C88     : always 0?
+0x6C89/A   : attacker/defender. the value > 128 denotes the player (128/129/130/
+131), the other value is the attacker
+0x6C93     : number of enemies (total)
+0x6D18     : counts down when enemy gets hit (freeze this for endless animation)
+. damage seems to be determined right after this hits 0
+0x6D14     : counts down while screen is shaking (when enemy attacks you)
+0x6D50/7F  : menu text
+0x6D55     : tile, related to dmg, does not influence it internally. same as 0x6
+b2b. gets 0x63 when (enemy?) dies (right after it gets set to dmg). this registe
+r also gets reset between battles, set to (?) and then set to dmg. 0x61 when fig
+ht over?
+0x6D90     : surprise value of current enemy. 90 for shadow, 75 for warmech, 4 f
+or most other enemies. used to determine ambush/preemptive strikes.
+0x6D9B     : counts back when you / enemy get hit (blocking when frozen for enem
+ies), while flashing (0xD to 0)
+0x6DA0     : before hit: counts down while hitting, 303 to 300, jump to 206, dow
+n to 200, jump to 101, end. non blocking but does affect tiles
+
+
+
+
+Weapons
+00 - nothing            10 - silver knife          20 - defense
+01 - wooden nunchuck    11 - silver sword          21 - wizard staff
+02 - small knife        12 - silver hammer         22 - vorpal
+03 - wooden staff       13 - silver axe            23 - catclaw
+04 - rapier             14 - flame sword           24 - thor hammer
+05 - iron hammer        15 - ice sword             25 - bane sword
+06 - short sword        16 - dragon sword          26 - katana
+07 - hand axe           17 - giant sword           27 - xcalber
+08 - scimtar            18 - sun sword             28 - masamune
+09 - iron nunchuck      19 - corel sword           29 - cloth
+0A - large knife        1A - were sword            2A - wooden armor
+0B - iron staff         1B - rune sword            2B - chain armor
+0C - sabre              1C - power staff           2C - iron armor
+0D - long sword         1D - light axe             2D - steel armor
+0E - great axe          1E - heal staff            2E - silver amror
+0F - falchon            1F - mage staff            2F - flame armor
+
+30 - ice armor          40 - buckler               50 - proring
+31 - opal armor         41 - procape
+32 - dragon armor       42 - cape
+33 - copper bracelet    43 - wooden helmet
+34 - silver bracelet    44 - iron helmet
+35 - gold bracelet      45 - silver helmet
+36 - opal bracelet      46 - opal helmet
+37 - white shirt        47 - heal helmet
+38 - black shirt        48 - ribbon
+39 - wooden shield      49 - gloves
+3A - iron shield        4A - copper gauntlet
+3B - silver shield      4B - iron gauntlet
+3C - flame shield       4C - silver gauntlet
+3D - ice shield         4D - zeus gauntlet
+3E - opal shield        4E - power gauntlet
+3F - aegis              4F - opal gauntlet
+
+note: if you want the item to be equipped just add 80 to the hex number
+
+                Internal Data for Final Fantasy
+   ROM map • RAM map • Text table • Notes • Tutorials
+   Retrieved from
+   "https://datacrystal.tcrf.net/w/index.php?title=Final_Fantasy/RAM_map&o
+   ldid=50723"
+   Category:
+     * RAM maps
+
+Navigation menu
+
+Personal tools
+
+     * Create account
+     * Log in
+
+Namespaces
+
+     * Page
+     * Discussion
+
+   [ ] English
+
+Views
+
+     * Read
+     * View source
+     * View history
+
+   [ ] More
+
+Search
+
+   ____________________ Search Go
+
+Navigation
+
+     * Main Page
+     * Recent changes
+     * Random page
+     * Help
+
+Community
+
+     * ROMhack.ing
+     * TCRF
+     * Discord (RHDI)
+     * Discord (TCRF)
+     * Fan Translation Community History
+
+Games
+
+     * By platform
+     * By series
+     * By content
+     * By hardware
+     * By release date
+     * By developer
+     * By publisher
+     * RHDI Games List
+     * Translation Request List
+
+Tools
+
+     * What links here
+     * Related changes
+     * Special pages
+     * Printable version
+     * Permanent link
+     * Page information
+
+     * This page was last edited on 24 January 2024, at 02:41.
+     * Content is available under GNU Free Documentation License 1.2
+       unless otherwise noted.
+
+     * Privacy policy
+     * About Data Crystal
+     * Disclaimers
+
+     * GNU Free Documentation License 1.2
+     * Powered by MediaWiki

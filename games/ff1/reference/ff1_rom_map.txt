@@ -1,0 +1,710 @@
+   #Data Crystal (en) Data Crystal Atom feed
+
+   If you are still using the old URL (datacrystal.romhacking.net), please
+   update your bookmarks! The old URL may stop working at any time.
+   The current URL is datacrystal.tcrf.net.
+
+Final Fantasy/ROM map
+
+   From Data Crystal
+   < Final Fantasy
+   Jump to navigation Jump to search
+
+     Chip tiny.png The following article is a ROM map for Final Fantasy.
+
+   [ ]
+
+Contents
+
+     * 1 Disassembly
+          + 1.1 Disch
+               o 1.1.1 Errata
+          + 1.2 Anomiex
+               o 1.2.1 Errata
+     * 2 Intro Values
+     * 3 Game Selecting Values
+     * 4 Starting Items
+     * 5 Starting Stats
+     * 6 Main Menu Hand Cursor Data
+     * 7 Default Character Screen Data
+     * 8 Random Window Stuff
+     * 9 Battle Values
+     * 10 World map data
+     * 11 Town and dungeon map data
+     * 12 Free bytes in the original FF1 ROM
+          + 12.1 BANK 01
+          + 12.2 BANK 06
+          + 12.3 BANK 09
+          + 12.4 BANK 0B
+          + 12.5 BANK 0C
+          + 12.6 BANK 0D
+          + 12.7 BANK 0E
+          + 12.8 BANK 0F
+     * 13 Unused routines in the original US FF1 ROM
+          + 13.1 Bank C
+          + 13.2 Bank E
+          + 13.3 Bank F
+
+Disassembly
+
+Disch
+
+   Heavily-commented and fully ready to assembly (on Windows).
+   It's available in the RHDN documents section:
+   FF1 Disassembly (Disch) v1.0
+
+   The files are a mix of assembly source (.asm and .inc) and binary data
+   (.bin).
+   Disch included the assembly tools cc65 and ld65 along with a build.bat
+   file to assemble the files into a working .nes file.
+
+Errata
+
+   The price list is mislabeled as unknown text.
+
+   In bank_0D.asm, the price list binary data file is .incbin'd on line
+   3002, but no one went back to update the filename and comment.
+   So in v1.0, lines 3001 describes it as unknown text, and the filename
+   reinforces this; in fact, it's the price list, containing the price
+   data for every item in the game.
+; $BB8E -- unknown/unused?  very, very strange.  More space for credit text?
+ .INCBIN "bin/0D_BB8E_unknown.bin"
+
+Anomiex
+
+   For a detailed byte-for-byte treatment of the ROM, consult Anomie's
+   disassembly.
+   It's available in the RHDN documents section:
+   FF1 Disassembly with Bugfix & Enhancement Patches v1.0 (Anomie)
+
+   The disassembly has a separate text file for each of the game's 16
+   banks.
+
+   Each file purports to describe all bytes in the file;
+   each line starts with a bank address label followed by the raw bytes,
+   then the assembly language instruction represented by those bytes (and
+   sometimes a comment).
+; Plot (Rescue princess): Vanish sprite 0x03, show sprite 0x12, teleport to 0x3f
+, d[$11]
+92be: a0 03        LDY #$03
+92c0: 20 96 90     JSR $9096   ; Vanish sprite Y (also sprite X in current map)
+92c3: a0 12        LDY #$12
+92c5: 20 a4 90     JSR $90a4   ; Show sprite Y (erases $10)
+
+   Disch renders large blocks of the game as binary files (.dat and .bin)
+   that can't easily be read.
+   While Anomie's disassembly can't be directly assembled as is, it does
+   allow inspection of all instructions in the game and works well as a
+   reference companion when working with Disch's binary files.
+
+Errata
+
+   There are 3 bytes that appear to be incorrect (when compared with Disch
+   which is known to work).
+
+   Notes:
+   1 Unspecified byte in b11.txt at bank address $a4e3
+   -Disch bank_0B.asm line 2885 has @lut_AttributeOffset (line 2882) is a
+   9-byte table
+   -Anomie b11.txt line 2684 only lists 8 bytes at label a4db: instead of
+   9, leaving the 9th unassigned (assumed to be $00 instead of $1A)
+   -result: ROM offset 0x2E4F3 has byte $00 instead of $1A
+
+   2 Unspecified byte in b12.txt at bank address $b13c
+   -Disch bank_0C.asm line 6562's @AltMessageLut: is a 22-entry table
+   ending on line 6584 with BTLMSG_NOTHINGHAPPENS
+   -Anomie b12.txt line 4261 only lists 1 byte at label b13b: instead of
+   2, leaving the last (22nd) byte unassigned (assumed to be $00 instead
+   of $4E)
+   -result: ROM offset 0x3314c has byte $00 instead of $4E
+
+   3 Wrong byte set in b14.txt at bank address $9273
+   -Disch bank_0E.asm line 962 HideMapObject routine's first instruction
+   starts with STY tmp, which is $84 $10;
+   -Anomie b14.txt line 1073 instead has 9273: 85 10 STA $10, the wrong
+   opcode ($85 instead of $84).
+   -result: ROM offset 0x39283 has byte $85 instead of $84
+
+Intro Values
+
+     * 0x37F30 to 0x38000 (00D0) = Intro text, #$00 ends text
+     * 0x3A12C to 0x----- (0001) = Intro text background color, original
+       value = #$01
+     * 0x3A2E3 to 0x----- (0001) = Text 'default' color after flicker,
+       returns to this color
+     * 0x3A2B8 to 0x----- (0001) = Text color that the above flicker math
+       routine is applied to
+     * 0x3A2C8 to 0x----- (0001) = Intro fade-in speed. Lower = fast &
+       higher = slower, original value = #$0F
+     * 0x3EB40 to 0x----- (0001) = Text color after flicker effect has
+       been applied on text line
+     * 0x3EB48 to 0x----- (0001) = Text 'color number 02' after flicker
+       effect
+
+Game Selecting Values
+
+     * 0x3A263 - 0x3A281 (001F) = New Game/Continue/Respond Rate text
+     * 0x384B8 - 0x384C7 (0010) = Copyright (for Square and Nintendo) text
+     * 0x36843 - 0x36843 (0010) = Copyright (for Square and Nintendo) text
+
+Starting Items
+
+   For Tents/Cabins/Houses and the Potions, the number given is the amount
+   of them with which you start (eg., to start with 10 heal potions, set
+   the byte at $3049 to $0A). For the rest, supply any non-zero value to
+   start with that item.
+     * 0x3026 to 0x----- (0001) = Sets off bridge scene prematurarly when
+       game starts
+     * 0x3031 to 0x----- (0001) = Lute
+     * 0x3032 to 0x----- (0001) = Crown
+     * 0x3033 to 0x----- (0001) = Crystal
+     * 0x3034 to 0x----- (0001) = Herb
+     * 0x3035 to 0x----- (0001) = Mystic Key
+     * 0x3036 to 0x----- (0001) = TNT
+     * 0x3037 to 0x----- (0001) = Adamant
+     * 0x3038 to 0x----- (0001) = Slab
+     * 0x3039 to 0x----- (0001) = Ruby
+     * 0x303A to 0x----- (0001) = Rod
+     * 0x303B to 0x----- (0001) = Floater
+     * 0x303C to 0x----- (0001) = Chime
+     * 0x303D to 0x----- (0001) = Tail
+     * 0x303E to 0x----- (0001) = Cube
+     * 0x303F to 0x----- (0001) = Bottle
+     * 0x3040 to 0x----- (0001) = Oxyale
+     * 0x3041 to 0x----- (0001) = Canoe appears on items screen (not
+       working Canoe)
+     * 0x3042 to 0x----- (0001) = Orb 1
+     * 0x3043 to 0x----- (0001) = Orb 2
+     * 0x3044 to 0x----- (0001) = Orb 3
+     * 0x3045 to 0x----- (0001) = Orb 4
+     * 0x3046 to 0x----- (0001) = Tents
+     * 0x3047 to 0x----- (0001) = Cabins
+     * 0x3048 to 0x----- (0001) = Houses
+     * 0x3049 to 0x----- (0001) = Heal Potions
+     * 0x304A to 0x----- (0001) = Pure Potions
+     * 0x304B to 0x----- (0001) = Soft Potions
+
+Starting Stats
+
+   There are 11 bytes for each character. 5 bytes with the value of "00"
+   are used to seperate each character. Bytes are ordered as follows:
+   Fighter, Thief, Black Belt, Red Mage, White Mage, Black Mage.
+     * 0x3050 to 0x----- (0001) = Fighter's Listing Byte (normally 00)
+     * 0x3051 to 0x----- (0001) = Fighter's Starting HP (normally 23)
+     * 0x3052 to 0x----- (0001) = Fighter's Starting Strength (normally
+       14)
+     * 0x3053 to 0x----- (0001) = Fighter's Starting Agility (normally 05)
+     * 0x3054 to 0x----- (0001) = Fighter's Starting Intellect (normally
+       01)
+     * 0x3055 to 0x----- (0001) = Fighter's Starting Vitality (normally
+       0A)
+     * 0x3056 to 0x----- (0001) = Fighter's Starting Luck (normally 05)
+     * 0x3057 to 0x----- (0001) = Fighter's Starting Damage (normally 0A)
+     * 0x3058 to 0x----- (0001) = Fighter's Starting Hit% (normally 0A)
+     * 0x3059 to 0x----- (0001) = Fighter's Starting Evade% (normally 35)
+     * 0x305A to 0x----- (0001) = Fighter's Starting MagDef% (normally 15)
+     * 0x3060 to 0x----- (0001) = Thief's Listing Byte (normally 01)
+     * 0x3061 to 0x----- (0001) = Thief's Starting HP (normally 1E)
+
+Main Menu Hand Cursor Data
+
+     * 0x3B636 to 0x----- (0001) = X position of Character4 Sprite
+     * 0x3B64A to 0x----- (0001) = Y position of Character4 Sprite
+     * 0x3B8AC to 0x----- (0001) = X position of ORB 1
+     * 0x3B8AE to 0x----- (0001) = Y position of ORB 1
+     * 0x3B7E9 to 0x----- (0001) = X position of Character1 Hand Cursor
+     * 0x3B7EA to 0x----- (0001) = Y position of Character1 Hand Cursor
+     * 0x3B7EB to 0x----- (0001) = X position of Character2 Hand Cursor
+     * 0x3B7EC to 0x----- (0001) = Y position of Character2 Hand Cursor
+     * 0x3B7ED to 0x----- (0001) = X position of Character3 Hand Cursor
+     * 0x3B7EE to 0x----- (0001) = Y position of Character3 Hand Cursor
+     * 0x3B7EF to 0x----- (0001) = X position of Character4 Hand Cursor
+     * 0x3B7F0 to 0x----- (0001) = Y position of Character4 Hand Cursor
+     * 0x3B7F1 to 0x----- (0001) = Y position of ITEM Hand Cursor
+     * 0x3B7F2 to 0x----- (0001) = Y position of MAGIC Hand Cursor
+     * 0x3B7F3 to 0x----- (0001) = Y position of WEAPON Hand Cursor
+     * 0x3B7F4 to 0x----- (0001) = Y position of STATUS Hand Cursor
+
+Default Character Screen Data
+
+     * 0x3A0C4 to 0x----- (0001) = X position of 4 letter name
+     * 0x3A0C5 to 0x----- (0001) = Y position of 4 letter name
+     * 0x3A0C6 to 0x----- (0001) = X position of Class Title
+     * 0x3A0C7 to 0x----- (0001) = Y position of Class Title
+     * 0x3A0C8 to 0x----- (0001) = X position of Character Sprite
+     * 0x3A0C9 to 0x----- (0001) = Y position of Character Sprite
+     * 0x3A0CA to 0x----- (0001) = X position of Background Window
+     * 0x3A0CB to 0x----- (0001) = Y position of Background Window
+     * 0x3A0CC to 0x----- (0001) = X position of Hand Cursor
+     * 0x3A0CD to 0x----- (0001) = Y position of Hand Cursor
+
+Random Window Stuff
+
+     * 0x3D630 = window open speed
+     * 0x3D6A9 = window close speed
+     * 0x3E0AA to 0x----- (0001) = horizontal spacing between text and
+       left boundary of window
+     * 0x3E0B1 to 0x----- (0001) = vertical spacing between text and top
+       boundary of window
+     * 0x3E082 to 0x----- (0001) = horizontal window border subtraction
+     * 0x3E089 to 0x----- (0001) = vertical window border subtraction
+
+Battle Values
+
+     * 0x31751 to 0x----- (0001) = all characters default sprite staring X
+       coordinates
+     * 0x3175F to 0x----- (0001) = character 1 default sprite Y coordinate
+     * 0x31764 to 0x----- (0001) = character 2 default sprite Y coordinate
+     * 0x31769 to 0x----- (0001) = character 3 default sprite Y coordinate
+     * 0x3176E to 0x----- (0001) = character 4 default sprite Y coordinate
+     * 0x3E0C8 to 0x----- (0001) = where (on name table) to load left
+       window tile, original vaue $FA
+     * 0x3E0CD to 0x----- (0001) = where (on name table) to load
+       background tile, original vaue $FF
+     * 0x3E0D5 to 0x----- (0001) = where (on name table) to load right
+       tile, original vaue $FB
+     * 0x3E11F to 0x----- (0001) = where (on name table) to load
+       upper-left tile, original vaue $F7
+     * 0x3E124 to 0x----- (0001) = where (on name table) to load top tile,
+       original vaue $F8
+     * 0x3E12C to 0x----- (0001) = where (on name table) to load
+       upper-right tile, original vaue $F9
+     * 0x3F2F5 to 0x----- (0001) = main battle border X & Y position
+     * 0x3F2FA to 0x----- (0001) = main battle border Width (should not be
+       below 3)
+     * 0x3F2FC to 0x----- (0001) = main battle border Height (should not
+       be below 3)
+     * 0x3F301 to 0x----- (0001) = character battle border X position
+     * 0x3F306 to 0x----- (0001) = character battle border Y position
+     * 0x3F308 to 0x----- (0001) = character battle border Width
+     * 0x3F30A to 0x----- (0001) = character battle border Height
+     * 0x3f3a3 to 0x------(0001) = background width
+     * 0x3f384 to 0x3f386 (0001) = menu fill
+     * 0x3F3E0 to 0x----- (0001) = stat battle width for all 4 stat
+       windows
+     * 0x3F30F to 0x----- (0001) = stat battle x position for all 4 stat
+       windows
+     * 0x3F311 to 0x----- (0001) = stat battle window 4 y position
+     * 0x3F316 to 0x----- (0001) = stat battle window 3 y position
+     * 0x3F31B to 0x----- (0001) = stat battle window 2 y position
+     * 0x3F320 to 0x----- (0001) = stat battle window 1 y position
+     * 0x3F355 to 0x----- (0001) = row 1 BG × position and type
+     * 0x3F39D to 0x----- (0001) = how many tiles the first section of the
+       BG should draw
+     * 0x3F3AA to 0x----- (0001) = how many tiles the second section of
+       the BG should draw
+     * 0x3F35D to 0x----- (0001) = row 1 BG environment tile set
+       (00,04,08,0C)
+     * 0x3F364 to 0x----- (0001) = row 2 BG environment tile set
+       (00,04,08,0C)
+     * 0x3F36B to 0x----- (0001) = row 3 BG environment tile set
+       (00,04,08,0C)
+     * 0x3F372 to 0x----- (0001) = row 4 BG environment tile set
+       (00,04,08,0C)
+     * 0x3f64c to 0x3f653 (0001) = bottom of enemy border
+     * 0x3F410 to 0x3F44F (0040) = Battle Screen Attribute Data
+     * 0x3F9F5 to 0x----- (0001) = Enemy window X coordinate
+     * 0x3F9F6 to 0x----- (0001) = Enemy window Y coordinate
+     * 0x3F9F7 to 0x----- (0001) = Enemy window Width
+     * 0x3F9F8 to 0x----- (0001) = Enemy window Height
+     * 0x3F9FA to 0x----- (0001) = current Attacker window X coordinate
+     * 0x3F9FB to 0x----- (0001) = current Attacker window Y coordinate
+     * 0x3F9FC to 0x----- (0001) = current Attacker window Width
+     * 0x3F9FD to 0x----- (0001) = current Attacker window Height
+     * 0x3F9FF to 0x----- (0001) = current Attacker text X coordinate
+     * 0x3FA00 to 0x----- (0001) = current Attacker text Y coordinate
+     * 0x3FA02 to 0x----- (0001) = hit number window X coordinate
+     * 0x3FA03 to 0x----- (0001) = hit number window Y coordinate
+     * 0x3FA04 to 0x----- (0001) = hit number window Width
+     * 0x3FA05 to 0x----- (0001) = hit number window Height
+     * 0x3FA07 to 0x----- (0001) = hit number text X coordinate
+     * 0x3FA08 to 0x----- (0001) = hit number text Y coordinate
+     * 0x3FA0A to 0x----- (0001) = current Attackee window X coordinate
+     * 0x3FA0B to 0x----- (0001) = current Attackee window Y coordinate
+     * 0x3FA0C to 0x----- (0001) = current Attackee window Width
+     * 0x3FA0D to 0x----- (0001) = current Attackee window Height
+     * 0x3FA0F to 0x----- (0001) = current Attackee text X coordinate
+     * 0x3FA10 to 0x----- (0001) = current Attackee text Y coordinate
+     * 0x3FA12 to 0x----- (0001) = Attack Status window X coordinate
+     * 0x3FA13 to 0x----- (0001) = Attack Status window Y coordinate
+     * 0x3FA14 to 0x----- (0001) = Attack Status window Width
+     * 0x3FA15 to 0x----- (0001) = Attack Status window Height
+     * 0x3FA17 to 0x----- (0001) = Attack Status text X coordinate
+     * 0x3FA18 to 0x----- (0001) = Attack Status text Y coordinate
+     * 0x3FA1A to 0x----- (0001) = Battle Info window X coordinate
+     * 0x3FA1B to 0x----- (0001) = Battle Info window Y coordinate
+     * 0x3FA1C to 0x----- (0001) = Battle Info window Width
+     * 0x3FA1D to 0x----- (0001) = Battle Info window Height
+     * 0x3FA1F to 0x----- (0001) = Battle Info text X coordinate
+     * 0x3FA20 to 0x----- (0001) = Battle Info text Y coordinate
+     * 0x3FA22 to 0x----- (0001) = Magic window X coordinate
+     * 0x3FA23 to 0x----- (0001) = Magic window Y coordinate
+     * 0x3FA24 to 0x----- (0001) = Magic window Width
+     * 0x3FA25 to 0x----- (0001) = Magic window Height
+     * 0x3FA27 to 0x----- (0001) = Drink window X coordinate
+     * 0x3FA28 to 0x----- (0001) = Drink window Y coordinate
+     * 0x3FA29 to 0x----- (0001) = Drink window Width
+     * 0x3FA2A to 0x----- (0001) = Drink window Height
+     * 0x3FA2C to 0x----- (0001) = Battle options window X coordinate
+     * 0x3FA2D to 0x----- (0001) = Battle options window Y coordinate
+     * 0x3FA2E to 0x----- (0001) = Battle options window Width
+     * 0x3FA2F to 0x----- (0001) = Battle options window Height
+     * 0x3FA31 to 0x----- (0001) = "FIGHT" battle X coordinate
+     * 0x3FA32 to 0x----- (0001) = "FIGHT" battle Y coordinate
+     * 0x3FA33 to 0x----- (0001) = Text pointer byte (Low)
+     * 0x3FA34 to 0x----- (0001) = Text pointer byte (High)
+     * 0x3FA36 to 0x----- (0001) = "MAGIC" battle X coordinate
+     * 0x3FA37 to 0x----- (0001) = "MAGIC" battle Y coordinate
+     * 0x3FA38 to 0x----- (0001) = Text pointer byte (Low)
+     * 0x3FA39 to 0x----- (0001) = Text pointer byte (High)
+     * 0x3FA3B to 0x----- (0001) = "DRINK" battle X coordinate
+     * 0x3FA3C to 0x----- (0001) = "DRINK" battle Y coordinate
+     * 0x3FA3D to 0x----- (0001) = Text pointer byte (Low)
+     * 0x3FA3E to 0x----- (0001) = Text pointer byte (High)
+     * 0x3FA40 to 0x----- (0001) = "ITEM" battle X coordinate
+     * 0x3FA41 to 0x----- (0001) = "ITEM" battle Y coordinate
+     * 0x3FA42 to 0x----- (0001) = Text pointer byte (Low)
+     * 0x3FA43 to 0x----- (0001) = Text pointer byte (High)
+     * 0x3FA45 to 0x----- (0001) = "RUN" battle X coordinate
+     * 0x3FA46 to 0x----- (0001) = "RUN" battle Y coordinate
+     * 0x3FA47 to 0x----- (0001) = Text pointer byte (Low)
+     * 0x3FA48 to 0x----- (0001) = Text pointer byte (High)
+     * 0x3FA49 to 0x----- (0001) = Pattern table location for "FIGHT"
+       tiles (through 3FA4C)
+     * 0x3FA4E to 0x----- (0001) = Pattern table location for "MAGIC"
+       tiles (through 3FA51)
+     * 0x3FA53 to 0x----- (0001) = Pattern table location for "DRINK"
+       tiles (through 3FA56)
+     * 0x3FA58 to 0x----- (0001) = Pattern table location for "ITEM" tiles
+       (through 3FA5B)
+     * 0x3FA5D to 0x----- (0001) = Pattern table location for "RUN" tiles
+       (through 3FA5F)
+     * 0x3FA61 to 0x----- (0001) = value for which string to display in
+       Enemy name slot 1
+     * 0x3FA63 to 0x----- (0001) = value for which string to display in
+       Enemy name slot 2
+     * 0x3FA65 to 0x----- (0001) = value for which string to display in
+       Enemy name slot 3
+     * 0x3FA67 to 0x----- (0001) = value for which string to display in
+       Enemy name slot 4
+
+World map data
+
+   World map data is stored in ROM Bank 0x01, which is accessed by the CPU
+   at address 0x8000, and located at 0x4000 in the ROM image. (0x4010 for
+   iNES files).
+
+   The data begins with a 256 entry table of 2-byte memory addresses (CPU
+   addresses), pointing to the first (left-most) tile of each row of the
+   world map. Since the map tile data is compressed, this index table
+   allows quick access to the map data.
+
+   The actual world map tile data starts at CPU address 0x8200. Each entry
+   in this data area is either 1 byte or 2 bytes long. The most
+   significant bit of the first byte is set if there is a second byte for
+   this entry. The first byte (excluding the MSB flag) specifies the tile
+   number (0-127). The second byte, if present, specifies the number of
+   tiles that should be displayed. If the second byte is 2, then two tiles
+   should be rendered. If the second byte is 0, then the tile should be
+   rendered 256 times. A single byte entry with the value of 0xFF
+   represents the end of the row.
+     * See Final Fantasy:World map data.
+
+Town and dungeon map data
+
+   Town and dungeon map data is similar to the world map data. It is
+   compressed with the same 1/2 byte method, but it does not contain a
+   single byte 0xFF value at the end of each row. Instead, each row is 64
+   tiles wide, and any 2-byte tiles that extend beyond the last tile will
+   wrap around and continue on the next row. There is a single byte 0xFF
+   value at the end of the map.
+
+   There is a table of 2-byte CPU address pointers located at the
+   beginning of Bank 4 which contains the start of each map. The 2 most
+   significant bits of each entry specifies the bank number (starting from
+   Bank 4), and the remaining 14 bits specifies the CPU address of the
+   map, starting at 0x8000.
+
+   Each map also has 16 entries in a table located on bank 0 at CPU
+   address 0xB400 which define any objects located on that map. This
+   includes Bosses, NPCs, bats, magic brooms, etc. Each entry is 3 bytes
+   long. Byte 1 is the object type. Byte 2 is the X position, and byte 3
+   is the Y position. Byte 2 also contains behavior flags. If bit 7 (0x80)
+   is set, this object is inside of a room. If bit 6 is set (0x40), this
+   object does not move.
+
+   After the map tiles have been "decompressed" into RAM in a 64x64 grid,
+   the map effectively wraps in both the horizontal and vertical
+   directions. Walking to the left of the map will seamlessly continue on
+   the right of the map, and standing near the left side of the map will
+   draw tiles from the right side of the map.
+
+Free bytes in the original FF1 ROM
+
+   This is a list of known free bytes available in the original FF1 ROM.
+   These bytes were gleaned from examining the ROM, Disch's 1.0
+   Disassembly, and Anomie's Disassembly.
+   Each Bank section below denotes the following:
+     * Offset Adjustment as a +/- hex value e.g. -28010 (37 total bytes)
+     * Total free bytes in the whole bank as a decimal value in parens
+       e.g. -28010 (37 total bytes)
+     * a list of entries having the form in the form 851C : 0x3052C (4
+       bytes)
+          + The N bytes next to each offset in parens is the count (in
+            decimal) of free bytes starting at that offset.
+          + For each entry listed, the ROM offset = the Bank offset + the
+            Offset Adjustment value (which can be negative or positive).
+
+BANK 01
+
+   +3FF0 (30 total bytes)
+     * BFE2 : 0x07FF2 (30 bytes)
+
+BANK 06
+
+   - 10010 (? total bytes)
+     * ACAA : 0x (4,950 bytes with a HUGE caveat)
+
+   Be very careful if putting any routines or data in this area.
+
+   Explanation:
+   There are 61 standard maps in the original game, the last being Titan's
+   Tunnel.
+   Standard maps use variable length storage with a Run-Length Encoding
+   (RLE) style compression scheme, so instead of a fixed size, they end
+   with a byte having the value FF (the end of map marker value).
+
+   Standard map data is stored in an area of ROM stretching from Bank 04
+   to the end of Bank 06.
+   All of the bytes in bank 06 after that last map's FF byte are zeroed
+   out.
+   Coincidentally (or not?) the last 3 pointers in the standard map
+   pointer table (maps 62-64) are also zeroed out.
+
+   The issue is that when the standard maps are saved, they're rewritten
+   in RLE-compressed form, which means the data can grow or shrink.
+   As a result, all data after the last map's FF byte can slide forward or
+   backward as a result.
+
+   So pay attention if using this area in your ROM hack; assembly labels
+   will automatically handle relocated routines, but hackers using hex
+   editors will have to update variable references, branches, and jumps
+   whenever map edits cause the code to move.
+   Note for template.png
+   Note(s):
+   Some FF1 editing tools might truncate any bytes that slide forward past
+   the end of bank 06 (i.e. no bytes are allowed to move past 0x1C00F).
+   Consult your tool's documentation or experiment on a test ROM to
+   determine how the tool handles this scenario and plan accordingly.
+
+BANK 09
+
+   -1c010 (472 total bytes)
+     * B980 : 0x27990 (384 bytes)
+
+   Note for template.png
+   Note(s):
+   These 384 bytes apparently define an unused graphic and a series of
+   alternating black and white tiles that don't appear in the game.
+
+     * BBDA : 0x27BEA (38 bytes)
+     * BEEB : 0x27EFB (21 bytes)
+     * BF30 : 0x27F40 (4 bytes)
+     * BF67 : 0x27F77 (25 bytes)
+
+BANK 0B
+
+   -24010 (5 total bytes)
+   Note for template.png
+   Note(s):
+   In the disassembly, 0x2C010 : $8000 is identified as 1024 bytes of
+   unknown space, but this is actually the overworld battle domain data.
+   It's stored in the bin/0B_8000_unknown.bin file and incbin'd into the
+   assembly source file for Bank 0B.
+   Note for template.png
+   Note(s):
+   In the disassembly, 0x2CFFC : $8FEC is identified as 20 bytes of unused
+   space, but this is actually the battle message "Nothing happens". It is
+   the only battle message stored after the battle message pointer table.
+   In the bank_0B.asm source file, this is stored as a series of inline
+   bytes (not an incbin'd file).
+     * 9093 : 0x2DA03 (1 bytes)
+     * A7FC : 0x2E80C (4 bytes)
+
+BANK 0C
+
+   -28010 (37 total bytes)
+     * 851C : 0x3052C (4 bytes) (padding)
+     * 92F4 : 0x31304 (12 bytes)
+     * BC95 : 0x33CA5 (16 bytes) (maybe)
+     * BFFB : 0x3400B (5 bytes)
+
+BANK 0D
+
+   -2C010 (70 total bytes)
+     * 9DF9 : 0x35E09 (7 bytes)
+     * A779 : 0x36789 (7 bytes)
+     * A7E5 : 0x367F5 (27 bytes) (almost looks like it might be
+       attributes)
+     * AE02 : 0x36E12 (14 bytes) ?unused -- fragmented code?
+     * AFFE : 0x3700E (2 bytes) (that $60 might be an unused RTS -- but
+       who cares)
+     * BA9F : 0x37AAF (1 bytes)
+     * BAF9 : 0x37B09 (7 bytes) (unknown / unused)
+     * BEFB : 0x37F0B (5 bytes)
+
+BANK 0E
+
+   -30010 (114 total bytes)
+     * 84E2 : 0x384F2 (30 bytes)
+     * 9088 : 0x39098 (9 bytes) (ClearGameEventFlag unused by the original
+       game)
+     * 94EF : 0x394FF (1 bytes) (truly unused -- no entry in the jump
+       table)
+     * 9586 : 0x39596 (14 bytes) Talk_CubeBotBad
+     * 9B3E : 0x39B4E (22 bytes) UnusedRoutine_9B3E, Faux/Unused routine
+     * BF3A : 0x3BF4A (22 bytes) Unused Phantom Code
+     * BFF0 : 0x3C000 (16 bytes)
+
+BANK 0F
+
+   -30010 (126 total bytes)
+     * C464 : 0x3C474 (5 bytes)
+     * D7BF : 0x3D7CF (3 bytes) (unused/unreachable call)
+     * DB09 : 0x3DB19 (2 bytes) (unused NOPs)
+     * E4BF : 0x3E4CF (8 bytes)
+     * ECB9 : 0x3ECC9 (1 bytes)
+     * FCBB : 0x3FCCB (7 bytes) (UNUSED_DrawBattle_IncSrcPtr)
+     * FDF1 : 0x3FE01 (15 bytes) (Unused space)
+     * FEEB : 0x3FEFB (23 bytes)
+     * FF3C : 0x3FF4C (4 bytes)
+     * FF81 : 0x3FF91 (15 bytes)
+     * FFA4 : 0x3FFB4 (4 bytes)
+     * FFB9 : 0x3FFC9 (7 bytes)
+     * FFCD : 0x3FFDD (22 bytes) space before "FINAL FANTASY"
+     * FFF0 : 0x40000 (10 bytes) space after "FINAL FANTASY"
+
+Unused routines in the original US FF1 ROM
+
+   The following routines are either completely or partially unused in the
+   original US FF1 ROM and can be recycled as free space.
+
+Bank C
+
+     * [$B674 :: 0x33684] lut_IBCharStatsPtrTable_alt (8 bytes)
+     * [$B67C :: 0x3368C] lut_CharStatsPtrTable_alt (8 bytes)
+
+ These are duplicates of the lut_IBCharStatsPtrTable and
+ lut_CharStatsPtrTable tables. References to the duplicates
+ can be updated to point to the originals, and the 16 contiguous
+ bytes here can be used for other LUTs or a short routine.
+
+     * [$B684 :: 0x33694] PreparePlayerMagAttack (41 bytes)
+
+ 41 of the last 42 bytes in this routine perform tasks that have no effect.
+ Those bytes can be moved out of the routine and used for other tasks.
+
+     * [$B730 :: 0x33740] PrepareEnemyMagAttack (39 bytes)
+
+ The entire routine loads stats that simply aren't used by the routine
+ or its caller.
+
+Bank E
+
+     * [$BEF7 :: 0x3BF07] UpdateEquipMenuModeAttrib (55 bytes)
+
+ Likely a holdover from the Japanese version, it has no visible effect
+ in the US version (since the palettes involved are identical) and
+ would need to be refactored to work as intended anyway.
+
+Bank F
+
+     * [$FAA6 :: 0x3FAB6] DrawBattleString_ExpandChar (55 bytes)
+
+ Another holdover from the Japanese version, part of this function
+ attempts to assign the top half of characters when drawing a string.
+ The default is a blank (space) character.
+ Since this is always a space character in the US ROM, the code
+ to choose that top tile could be removed, since a space will always
+ be used.
+
+                Internal Data for Final Fantasy
+   ROM map • RAM map • Text table • Notes • Tutorials
+   Retrieved from
+   "https://datacrystal.tcrf.net/w/index.php?title=Final_Fantasy/ROM_map&o
+   ldid=71018"
+   Category:
+     * ROM maps
+
+Navigation menu
+
+Personal tools
+
+     * Create account
+     * Log in
+
+Namespaces
+
+     * Page
+     * Discussion
+
+   [ ] English
+
+Views
+
+     * Read
+     * View source
+     * View history
+
+   [ ] More
+
+Search
+
+   ____________________ Search Go
+
+Navigation
+
+     * Main Page
+     * Recent changes
+     * Random page
+     * Help
+
+Community
+
+     * ROMhack.ing
+     * TCRF
+     * Discord (RHDI)
+     * Discord (TCRF)
+     * Fan Translation Community History
+
+Games
+
+     * By platform
+     * By series
+     * By content
+     * By hardware
+     * By release date
+     * By developer
+     * By publisher
+     * RHDI Games List
+     * Translation Request List
+
+Tools
+
+     * What links here
+     * Related changes
+     * Special pages
+     * Printable version
+     * Permanent link
+     * Page information
+
+     * This page was last edited on 2 August 2026, at 10:44.
+     * Content is available under GNU Free Documentation License 1.2
+       unless otherwise noted.
+
+     * Privacy policy
+     * About Data Crystal
+     * Disclaimers
+
+     * GNU Free Documentation License 1.2
+     * Powered by MediaWiki

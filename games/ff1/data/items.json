@@ -1,0 +1,1423 @@
+{
+ "_meta": {
+  "generated_by": "bridge/gen_data.py",
+  "date": "2026-08-12",
+  "source": "ROM (CRC32 AB12ECE6): names lut_ItemNamePtrTbl 0A:$B700, prices lut_ItemPrices 0D:$BC00, weapon stats lut_Weapons 0C:$8000, armor lut_Armor 0C:$8140 (Constants.inc labels)",
+  "idSpace": "TCITYPE_* unified ids: item $00-$1B, weapon $1C-$43 (catId 1-40), armor $44-$6B (catId 1-40); ch_weapons/ch_armor store catId (+$80 = equipped)",
+  "anchors": "weapon 2 \"Short Sword\" 550 G; item $19 HEAL 60 G"
+ },
+ "items": [
+  {
+   "id": 0,
+   "name": "",
+   "fullName": "",
+   "icon": null,
+   "category": "none",
+   "catId": 0,
+   "price": 0
+  },
+  {
+   "id": 1,
+   "name": "LUTE",
+   "fullName": "LUTE",
+   "icon": null,
+   "category": "item",
+   "catId": 1,
+   "price": 0
+  },
+  {
+   "id": 2,
+   "name": "CROWN",
+   "fullName": "CROWN",
+   "icon": null,
+   "category": "item",
+   "catId": 2,
+   "price": 0
+  },
+  {
+   "id": 3,
+   "name": "CRYSTAL",
+   "fullName": "CRYSTAL",
+   "icon": null,
+   "category": "item",
+   "catId": 3,
+   "price": 0
+  },
+  {
+   "id": 4,
+   "name": "HERB",
+   "fullName": "HERB",
+   "icon": null,
+   "category": "item",
+   "catId": 4,
+   "price": 0
+  },
+  {
+   "id": 5,
+   "name": "KEY",
+   "fullName": "KEY",
+   "icon": null,
+   "category": "item",
+   "catId": 5,
+   "price": 0
+  },
+  {
+   "id": 6,
+   "name": "TNT",
+   "fullName": "TNT",
+   "icon": null,
+   "category": "item",
+   "catId": 6,
+   "price": 0
+  },
+  {
+   "id": 7,
+   "name": "ADAMANT",
+   "fullName": "ADAMANT",
+   "icon": null,
+   "category": "item",
+   "catId": 7,
+   "price": 0
+  },
+  {
+   "id": 8,
+   "name": "SLAB",
+   "fullName": "SLAB",
+   "icon": null,
+   "category": "item",
+   "catId": 8,
+   "price": 0
+  },
+  {
+   "id": 9,
+   "name": "RUBY",
+   "fullName": "RUBY",
+   "icon": null,
+   "category": "item",
+   "catId": 9,
+   "price": 0
+  },
+  {
+   "id": 10,
+   "name": "ROD",
+   "fullName": "ROD",
+   "icon": null,
+   "category": "item",
+   "catId": 10,
+   "price": 0
+  },
+  {
+   "id": 11,
+   "name": "FLOATER",
+   "fullName": "FLOATER",
+   "icon": null,
+   "category": "item",
+   "catId": 11,
+   "price": 0
+  },
+  {
+   "id": 12,
+   "name": "CHIME",
+   "fullName": "CHIME",
+   "icon": null,
+   "category": "item",
+   "catId": 12,
+   "price": 0
+  },
+  {
+   "id": 13,
+   "name": "TAIL",
+   "fullName": "TAIL",
+   "icon": null,
+   "category": "item",
+   "catId": 13,
+   "price": 0
+  },
+  {
+   "id": 14,
+   "name": "CUBE",
+   "fullName": "CUBE",
+   "icon": null,
+   "category": "item",
+   "catId": 14,
+   "price": 0
+  },
+  {
+   "id": 15,
+   "name": "BOTTLE",
+   "fullName": "BOTTLE",
+   "icon": null,
+   "category": "item",
+   "catId": 15,
+   "price": 50000
+  },
+  {
+   "id": 16,
+   "name": "OXYALE",
+   "fullName": "OXYALE",
+   "icon": null,
+   "category": "item",
+   "catId": 16,
+   "price": 0
+  },
+  {
+   "id": 17,
+   "name": "CANOE",
+   "fullName": "CANOE",
+   "icon": null,
+   "category": "item",
+   "catId": 17,
+   "price": 0
+  },
+  {
+   "id": 18,
+   "name": "",
+   "fullName": "",
+   "icon": null,
+   "category": "item",
+   "catId": 18,
+   "price": 0
+  },
+  {
+   "id": 19,
+   "name": "",
+   "fullName": "",
+   "icon": null,
+   "category": "item",
+   "catId": 19,
+   "price": 0
+  },
+  {
+   "id": 20,
+   "name": "",
+   "fullName": "",
+   "icon": null,
+   "category": "item",
+   "catId": 20,
+   "price": 0
+  },
+  {
+   "id": 21,
+   "name": "",
+   "fullName": "",
+   "icon": null,
+   "category": "item",
+   "catId": 21,
+   "price": 0
+  },
+  {
+   "id": 22,
+   "name": "TENT",
+   "fullName": "TENT",
+   "icon": null,
+   "category": "item",
+   "catId": 22,
+   "price": 75
+  },
+  {
+   "id": 23,
+   "name": "CABIN",
+   "fullName": "CABIN",
+   "icon": null,
+   "category": "item",
+   "catId": 23,
+   "price": 250
+  },
+  {
+   "id": 24,
+   "name": "HOUSE",
+   "fullName": "HOUSE",
+   "icon": null,
+   "category": "item",
+   "catId": 24,
+   "price": 3000
+  },
+  {
+   "id": 25,
+   "name": "HEAL@P",
+   "fullName": "HEAL Potion",
+   "icon": "P",
+   "category": "item",
+   "catId": 25,
+   "price": 60
+  },
+  {
+   "id": 26,
+   "name": "PURE@P",
+   "fullName": "PURE Potion",
+   "icon": "P",
+   "category": "item",
+   "catId": 26,
+   "price": 75
+  },
+  {
+   "id": 27,
+   "name": "SOFT@P",
+   "fullName": "SOFT Potion",
+   "icon": "P",
+   "category": "item",
+   "catId": 27,
+   "price": 800
+  },
+  {
+   "id": 28,
+   "name": "Wooden@N",
+   "fullName": "Wooden Nunchuck",
+   "icon": "N",
+   "category": "weapon",
+   "catId": 1,
+   "price": 10,
+   "stats": {
+    "hitrate": 0,
+    "damage": 12,
+    "crit": 10
+   }
+  },
+  {
+   "id": 29,
+   "name": "Small @K",
+   "fullName": "Small Knife",
+   "icon": "K",
+   "category": "weapon",
+   "catId": 2,
+   "price": 5,
+   "stats": {
+    "hitrate": 10,
+    "damage": 5,
+    "crit": 5
+   }
+  },
+  {
+   "id": 30,
+   "name": "Wooden@F",
+   "fullName": "Wooden Staff",
+   "icon": "F",
+   "category": "weapon",
+   "catId": 3,
+   "price": 5,
+   "stats": {
+    "hitrate": 0,
+    "damage": 6,
+    "crit": 1
+   }
+  },
+  {
+   "id": 31,
+   "name": "Rapier",
+   "fullName": "Rapier",
+   "icon": null,
+   "category": "weapon",
+   "catId": 4,
+   "price": 10,
+   "stats": {
+    "hitrate": 5,
+    "damage": 9,
+    "crit": 10
+   }
+  },
+  {
+   "id": 32,
+   "name": "Iron  @H",
+   "fullName": "Iron Hammer",
+   "icon": "H",
+   "category": "weapon",
+   "catId": 5,
+   "price": 10,
+   "stats": {
+    "hitrate": 0,
+    "damage": 9,
+    "crit": 1
+   }
+  },
+  {
+   "id": 33,
+   "name": "Short @S",
+   "fullName": "Short Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 6,
+   "price": 550,
+   "stats": {
+    "hitrate": 10,
+    "damage": 15,
+    "crit": 5
+   }
+  },
+  {
+   "id": 34,
+   "name": "Hand  @X",
+   "fullName": "Hand Axe",
+   "icon": "X",
+   "category": "weapon",
+   "catId": 7,
+   "price": 550,
+   "stats": {
+    "hitrate": 5,
+    "damage": 16,
+    "crit": 3
+   }
+  },
+  {
+   "id": 35,
+   "name": "Scimtar",
+   "fullName": "Scimtar",
+   "icon": null,
+   "category": "weapon",
+   "catId": 8,
+   "price": 200,
+   "stats": {
+    "hitrate": 10,
+    "damage": 10,
+    "crit": 5
+   }
+  },
+  {
+   "id": 36,
+   "name": "Iron  @N",
+   "fullName": "Iron Nunchuck",
+   "icon": "N",
+   "category": "weapon",
+   "catId": 9,
+   "price": 200,
+   "stats": {
+    "hitrate": 0,
+    "damage": 16,
+    "crit": 10
+   }
+  },
+  {
+   "id": 37,
+   "name": "Large @K",
+   "fullName": "Large Knife",
+   "icon": "K",
+   "category": "weapon",
+   "catId": 10,
+   "price": 175,
+   "stats": {
+    "hitrate": 10,
+    "damage": 7,
+    "crit": 5
+   }
+  },
+  {
+   "id": 38,
+   "name": "Iron  @F",
+   "fullName": "Iron Staff",
+   "icon": "F",
+   "category": "weapon",
+   "catId": 11,
+   "price": 200,
+   "stats": {
+    "hitrate": 0,
+    "damage": 14,
+    "crit": 1
+   }
+  },
+  {
+   "id": 39,
+   "name": "Sabre",
+   "fullName": "Sabre",
+   "icon": null,
+   "category": "weapon",
+   "catId": 12,
+   "price": 450,
+   "stats": {
+    "hitrate": 5,
+    "damage": 13,
+    "crit": 10
+   }
+  },
+  {
+   "id": 40,
+   "name": "Long  @S",
+   "fullName": "Long Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 13,
+   "price": 1500,
+   "stats": {
+    "hitrate": 10,
+    "damage": 20,
+    "crit": 5
+   }
+  },
+  {
+   "id": 41,
+   "name": "Great @X",
+   "fullName": "Great Axe",
+   "icon": "X",
+   "category": "weapon",
+   "catId": 14,
+   "price": 2000,
+   "stats": {
+    "hitrate": 5,
+    "damage": 22,
+    "crit": 3
+   }
+  },
+  {
+   "id": 42,
+   "name": "Falchon",
+   "fullName": "Falchon",
+   "icon": null,
+   "category": "weapon",
+   "catId": 15,
+   "price": 450,
+   "stats": {
+    "hitrate": 10,
+    "damage": 15,
+    "crit": 5
+   }
+  },
+  {
+   "id": 43,
+   "name": "Silver@K",
+   "fullName": "Silver Knife",
+   "icon": "K",
+   "category": "weapon",
+   "catId": 16,
+   "price": 800,
+   "stats": {
+    "hitrate": 15,
+    "damage": 10,
+    "crit": 5
+   }
+  },
+  {
+   "id": 44,
+   "name": "Silver@S",
+   "fullName": "Silver Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 17,
+   "price": 4000,
+   "stats": {
+    "hitrate": 15,
+    "damage": 23,
+    "crit": 5
+   }
+  },
+  {
+   "id": 45,
+   "name": "Silver@H",
+   "fullName": "Silver Hammer",
+   "icon": "H",
+   "category": "weapon",
+   "catId": 18,
+   "price": 2500,
+   "stats": {
+    "hitrate": 5,
+    "damage": 12,
+    "crit": 1
+   }
+  },
+  {
+   "id": 46,
+   "name": "Silver@X",
+   "fullName": "Silver Axe",
+   "icon": "X",
+   "category": "weapon",
+   "catId": 19,
+   "price": 4500,
+   "stats": {
+    "hitrate": 10,
+    "damage": 25,
+    "crit": 4
+   }
+  },
+  {
+   "id": 47,
+   "name": "Flame @S",
+   "fullName": "Flame Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 20,
+   "price": 10000,
+   "stats": {
+    "hitrate": 20,
+    "damage": 26,
+    "crit": 5
+   }
+  },
+  {
+   "id": 48,
+   "name": "Ice   @S",
+   "fullName": "Ice Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 21,
+   "price": 15000,
+   "stats": {
+    "hitrate": 25,
+    "damage": 29,
+    "crit": 5
+   }
+  },
+  {
+   "id": 49,
+   "name": "Dragon@S",
+   "fullName": "Dragon Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 22,
+   "price": 8000,
+   "stats": {
+    "hitrate": 15,
+    "damage": 19,
+    "crit": 10
+   }
+  },
+  {
+   "id": 50,
+   "name": "Giant @S",
+   "fullName": "Giant Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 23,
+   "price": 8000,
+   "stats": {
+    "hitrate": 20,
+    "damage": 21,
+    "crit": 5
+   }
+  },
+  {
+   "id": 51,
+   "name": "Sun   @S",
+   "fullName": "Sun Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 24,
+   "price": 20000,
+   "stats": {
+    "hitrate": 30,
+    "damage": 32,
+    "crit": 5
+   }
+  },
+  {
+   "id": 52,
+   "name": "Coral @S",
+   "fullName": "Coral Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 25,
+   "price": 8000,
+   "stats": {
+    "hitrate": 15,
+    "damage": 19,
+    "crit": 10
+   }
+  },
+  {
+   "id": 53,
+   "name": "Were  @S",
+   "fullName": "Were Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 26,
+   "price": 6000,
+   "stats": {
+    "hitrate": 15,
+    "damage": 18,
+    "crit": 5
+   }
+  },
+  {
+   "id": 54,
+   "name": "Rune  @S",
+   "fullName": "Rune Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 27,
+   "price": 5000,
+   "stats": {
+    "hitrate": 15,
+    "damage": 18,
+    "crit": 5
+   }
+  },
+  {
+   "id": 55,
+   "name": "Power @F",
+   "fullName": "Power Staff",
+   "icon": "F",
+   "category": "weapon",
+   "catId": 28,
+   "price": 12345,
+   "stats": {
+    "hitrate": 0,
+    "damage": 12,
+    "crit": 1
+   }
+  },
+  {
+   "id": 56,
+   "name": "Light @X",
+   "fullName": "Light Axe",
+   "icon": "X",
+   "category": "weapon",
+   "catId": 29,
+   "price": 10000,
+   "stats": {
+    "hitrate": 15,
+    "damage": 28,
+    "crit": 3
+   }
+  },
+  {
+   "id": 57,
+   "name": "Heal  @F",
+   "fullName": "Heal Staff",
+   "icon": "F",
+   "category": "weapon",
+   "catId": 30,
+   "price": 25000,
+   "stats": {
+    "hitrate": 0,
+    "damage": 6,
+    "crit": 1
+   }
+  },
+  {
+   "id": 58,
+   "name": "Mage  @F",
+   "fullName": "Mage Staff",
+   "icon": "F",
+   "category": "weapon",
+   "catId": 31,
+   "price": 25000,
+   "stats": {
+    "hitrate": 10,
+    "damage": 12,
+    "crit": 1
+   }
+  },
+  {
+   "id": 59,
+   "name": "Defense",
+   "fullName": "Defense",
+   "icon": null,
+   "category": "weapon",
+   "catId": 32,
+   "price": 40000,
+   "stats": {
+    "hitrate": 35,
+    "damage": 30,
+    "crit": 5
+   }
+  },
+  {
+   "id": 60,
+   "name": "Wizard@F",
+   "fullName": "Wizard Staff",
+   "icon": "F",
+   "category": "weapon",
+   "catId": 33,
+   "price": 50000,
+   "stats": {
+    "hitrate": 15,
+    "damage": 15,
+    "crit": 1
+   }
+  },
+  {
+   "id": 61,
+   "name": "Vorpal",
+   "fullName": "Vorpal",
+   "icon": null,
+   "category": "weapon",
+   "catId": 34,
+   "price": 30000,
+   "stats": {
+    "hitrate": 25,
+    "damage": 24,
+    "crit": 30
+   }
+  },
+  {
+   "id": 62,
+   "name": "CatClaw",
+   "fullName": "CatClaw",
+   "icon": null,
+   "category": "weapon",
+   "catId": 35,
+   "price": 65000,
+   "stats": {
+    "hitrate": 35,
+    "damage": 22,
+    "crit": 5
+   }
+  },
+  {
+   "id": 63,
+   "name": "Thor  @H",
+   "fullName": "Thor Hammer",
+   "icon": "H",
+   "category": "weapon",
+   "catId": 36,
+   "price": 40000,
+   "stats": {
+    "hitrate": 15,
+    "damage": 18,
+    "crit": 1
+   }
+  },
+  {
+   "id": 64,
+   "name": "Bane  @S",
+   "fullName": "Bane Sword",
+   "icon": "S",
+   "category": "weapon",
+   "catId": 37,
+   "price": 60000,
+   "stats": {
+    "hitrate": 20,
+    "damage": 22,
+    "crit": 10
+   }
+  },
+  {
+   "id": 65,
+   "name": "Katana",
+   "fullName": "Katana",
+   "icon": null,
+   "category": "weapon",
+   "catId": 38,
+   "price": 60000,
+   "stats": {
+    "hitrate": 35,
+    "damage": 33,
+    "crit": 30
+   }
+  },
+  {
+   "id": 66,
+   "name": "Xcalber",
+   "fullName": "Xcalber",
+   "icon": null,
+   "category": "weapon",
+   "catId": 39,
+   "price": 60000,
+   "stats": {
+    "hitrate": 35,
+    "damage": 45,
+    "crit": 5
+   }
+  },
+  {
+   "id": 67,
+   "name": "Masmune",
+   "fullName": "Masmune",
+   "icon": null,
+   "category": "weapon",
+   "catId": 40,
+   "price": 60000,
+   "stats": {
+    "hitrate": 50,
+    "damage": 56,
+    "crit": 10
+   }
+  },
+  {
+   "id": 68,
+   "name": "Cloth",
+   "fullName": "Cloth",
+   "icon": null,
+   "category": "armor",
+   "catId": 1,
+   "price": 10,
+   "stats": {
+    "evadePenalty": 2,
+    "absorb": 1,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 69,
+   "name": "Wooden@A",
+   "fullName": "Wooden Armor",
+   "icon": "A",
+   "category": "armor",
+   "catId": 2,
+   "price": 50,
+   "stats": {
+    "evadePenalty": 8,
+    "absorb": 4,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 70,
+   "name": "Chain @A",
+   "fullName": "Chain Armor",
+   "icon": "A",
+   "category": "armor",
+   "catId": 3,
+   "price": 80,
+   "stats": {
+    "evadePenalty": 15,
+    "absorb": 15,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 71,
+   "name": "Iron  @A",
+   "fullName": "Iron Armor",
+   "icon": "A",
+   "category": "armor",
+   "catId": 4,
+   "price": 800,
+   "stats": {
+    "evadePenalty": 23,
+    "absorb": 24,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 72,
+   "name": "Steel @A",
+   "fullName": "Steel Armor",
+   "icon": "A",
+   "category": "armor",
+   "catId": 5,
+   "price": 45000,
+   "stats": {
+    "evadePenalty": 33,
+    "absorb": 34,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 73,
+   "name": "Silver@A",
+   "fullName": "Silver Armor",
+   "icon": "A",
+   "category": "armor",
+   "catId": 6,
+   "price": 7500,
+   "stats": {
+    "evadePenalty": 8,
+    "absorb": 18,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 74,
+   "name": "Flame @A",
+   "fullName": "Flame Armor",
+   "icon": "A",
+   "category": "armor",
+   "catId": 7,
+   "price": 30000,
+   "stats": {
+    "evadePenalty": 10,
+    "absorb": 34,
+    "elemResist": 32,
+    "spell": 0
+   }
+  },
+  {
+   "id": 75,
+   "name": "Ice   @A",
+   "fullName": "Ice Armor",
+   "icon": "A",
+   "category": "armor",
+   "catId": 8,
+   "price": 30000,
+   "stats": {
+    "evadePenalty": 10,
+    "absorb": 34,
+    "elemResist": 16,
+    "spell": 0
+   }
+  },
+  {
+   "id": 76,
+   "name": "Opal  @A",
+   "fullName": "Opal Armor",
+   "icon": "A",
+   "category": "armor",
+   "catId": 9,
+   "price": 60000,
+   "stats": {
+    "evadePenalty": 10,
+    "absorb": 42,
+    "elemResist": 64,
+    "spell": 0
+   }
+  },
+  {
+   "id": 77,
+   "name": "Dragon@A",
+   "fullName": "Dragon Armor",
+   "icon": "A",
+   "category": "armor",
+   "catId": 10,
+   "price": 60000,
+   "stats": {
+    "evadePenalty": 10,
+    "absorb": 42,
+    "elemResist": 112,
+    "spell": 0
+   }
+  },
+  {
+   "id": 78,
+   "name": "Copper@B",
+   "fullName": "Copper Bracelet",
+   "icon": "B",
+   "category": "armor",
+   "catId": 11,
+   "price": 1000,
+   "stats": {
+    "evadePenalty": 1,
+    "absorb": 4,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 79,
+   "name": "Silver@B",
+   "fullName": "Silver Bracelet",
+   "icon": "B",
+   "category": "armor",
+   "catId": 12,
+   "price": 5000,
+   "stats": {
+    "evadePenalty": 1,
+    "absorb": 15,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 80,
+   "name": "Gold  @B",
+   "fullName": "Gold Bracelet",
+   "icon": "B",
+   "category": "armor",
+   "catId": 13,
+   "price": 50000,
+   "stats": {
+    "evadePenalty": 1,
+    "absorb": 24,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 81,
+   "name": "Opal  @B",
+   "fullName": "Opal Bracelet",
+   "icon": "B",
+   "category": "armor",
+   "catId": 14,
+   "price": 65000,
+   "stats": {
+    "evadePenalty": 1,
+    "absorb": 34,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 82,
+   "name": "White @T",
+   "fullName": "White Shirt",
+   "icon": "T",
+   "category": "armor",
+   "catId": 15,
+   "price": 2,
+   "stats": {
+    "evadePenalty": 2,
+    "absorb": 24,
+    "elemResist": 24,
+    "spell": 44
+   }
+  },
+  {
+   "id": 83,
+   "name": "Black @T",
+   "fullName": "Black Shirt",
+   "icon": "T",
+   "category": "armor",
+   "catId": 16,
+   "price": 2,
+   "stats": {
+    "evadePenalty": 2,
+    "absorb": 24,
+    "elemResist": 36,
+    "spell": 32
+   }
+  },
+  {
+   "id": 84,
+   "name": "Wooden@s",
+   "fullName": "Wooden Shield",
+   "icon": "s",
+   "category": "armor",
+   "catId": 17,
+   "price": 15,
+   "stats": {
+    "evadePenalty": 0,
+    "absorb": 2,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 85,
+   "name": "Iron  @s",
+   "fullName": "Iron Shield",
+   "icon": "s",
+   "category": "armor",
+   "catId": 18,
+   "price": 100,
+   "stats": {
+    "evadePenalty": 0,
+    "absorb": 4,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 86,
+   "name": "Silver@s",
+   "fullName": "Silver Shield",
+   "icon": "s",
+   "category": "armor",
+   "catId": 19,
+   "price": 2500,
+   "stats": {
+    "evadePenalty": 0,
+    "absorb": 8,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 87,
+   "name": "Flame @s",
+   "fullName": "Flame Shield",
+   "icon": "s",
+   "category": "armor",
+   "catId": 20,
+   "price": 10000,
+   "stats": {
+    "evadePenalty": 0,
+    "absorb": 12,
+    "elemResist": 32,
+    "spell": 0
+   }
+  },
+  {
+   "id": 88,
+   "name": "Ice   @s",
+   "fullName": "Ice Shield",
+   "icon": "s",
+   "category": "armor",
+   "catId": 21,
+   "price": 10000,
+   "stats": {
+    "evadePenalty": 0,
+    "absorb": 12,
+    "elemResist": 16,
+    "spell": 0
+   }
+  },
+  {
+   "id": 89,
+   "name": "Opal  @s",
+   "fullName": "Opal Shield",
+   "icon": "s",
+   "category": "armor",
+   "catId": 22,
+   "price": 15000,
+   "stats": {
+    "evadePenalty": 0,
+    "absorb": 16,
+    "elemResist": 64,
+    "spell": 0
+   }
+  },
+  {
+   "id": 90,
+   "name": "Aegis @s",
+   "fullName": "Aegis Shield",
+   "icon": "s",
+   "category": "armor",
+   "catId": 23,
+   "price": 40000,
+   "stats": {
+    "evadePenalty": 0,
+    "absorb": 16,
+    "elemResist": 2,
+    "spell": 0
+   }
+  },
+  {
+   "id": 91,
+   "name": "Buckler",
+   "fullName": "Buckler",
+   "icon": null,
+   "category": "armor",
+   "catId": 24,
+   "price": 2500,
+   "stats": {
+    "evadePenalty": 0,
+    "absorb": 2,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 92,
+   "name": "ProCape",
+   "fullName": "ProCape",
+   "icon": null,
+   "category": "armor",
+   "catId": 25,
+   "price": 20000,
+   "stats": {
+    "evadePenalty": 2,
+    "absorb": 8,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 93,
+   "name": "Cap",
+   "fullName": "Cap",
+   "icon": null,
+   "category": "armor",
+   "catId": 26,
+   "price": 80,
+   "stats": {
+    "evadePenalty": 1,
+    "absorb": 1,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 94,
+   "name": "Wooden@h",
+   "fullName": "Wooden Helmet",
+   "icon": "h",
+   "category": "armor",
+   "catId": 27,
+   "price": 100,
+   "stats": {
+    "evadePenalty": 3,
+    "absorb": 3,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 95,
+   "name": "Iron  @h",
+   "fullName": "Iron Helmet",
+   "icon": "h",
+   "category": "armor",
+   "catId": 28,
+   "price": 450,
+   "stats": {
+    "evadePenalty": 5,
+    "absorb": 5,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 96,
+   "name": "Silver@h",
+   "fullName": "Silver Helmet",
+   "icon": "h",
+   "category": "armor",
+   "catId": 29,
+   "price": 2500,
+   "stats": {
+    "evadePenalty": 3,
+    "absorb": 6,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 97,
+   "name": "Opal  @h",
+   "fullName": "Opal Helmet",
+   "icon": "h",
+   "category": "armor",
+   "catId": 30,
+   "price": 10000,
+   "stats": {
+    "evadePenalty": 3,
+    "absorb": 8,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 98,
+   "name": "Heal  @h",
+   "fullName": "Heal Helmet",
+   "icon": "h",
+   "category": "armor",
+   "catId": 31,
+   "price": 20000,
+   "stats": {
+    "evadePenalty": 3,
+    "absorb": 6,
+    "elemResist": 0,
+    "spell": 20
+   }
+  },
+  {
+   "id": 99,
+   "name": "Ribbon",
+   "fullName": "Ribbon",
+   "icon": null,
+   "category": "armor",
+   "catId": 32,
+   "price": 2,
+   "stats": {
+    "evadePenalty": 1,
+    "absorb": 1,
+    "elemResist": 255,
+    "spell": 0
+   }
+  },
+  {
+   "id": 100,
+   "name": "Gloves",
+   "fullName": "Gloves",
+   "icon": null,
+   "category": "armor",
+   "catId": 33,
+   "price": 60,
+   "stats": {
+    "evadePenalty": 1,
+    "absorb": 1,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 101,
+   "name": "Copper@G",
+   "fullName": "Copper Gauntlet",
+   "icon": "G",
+   "category": "armor",
+   "catId": 34,
+   "price": 200,
+   "stats": {
+    "evadePenalty": 3,
+    "absorb": 2,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 102,
+   "name": "Iron  @G",
+   "fullName": "Iron Gauntlet",
+   "icon": "G",
+   "category": "armor",
+   "catId": 35,
+   "price": 750,
+   "stats": {
+    "evadePenalty": 5,
+    "absorb": 4,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 103,
+   "name": "Silver@G",
+   "fullName": "Silver Gauntlet",
+   "icon": "G",
+   "category": "armor",
+   "catId": 36,
+   "price": 2500,
+   "stats": {
+    "evadePenalty": 3,
+    "absorb": 6,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 104,
+   "name": "Zeus  @G",
+   "fullName": "Zeus Gauntlet",
+   "icon": "G",
+   "category": "armor",
+   "catId": 37,
+   "price": 15000,
+   "stats": {
+    "evadePenalty": 3,
+    "absorb": 6,
+    "elemResist": 0,
+    "spell": 23
+   }
+  },
+  {
+   "id": 105,
+   "name": "Power @G",
+   "fullName": "Power Gauntlet",
+   "icon": "G",
+   "category": "armor",
+   "catId": 38,
+   "price": 10000,
+   "stats": {
+    "evadePenalty": 3,
+    "absorb": 6,
+    "elemResist": 0,
+    "spell": 55
+   }
+  },
+  {
+   "id": 106,
+   "name": "Opal  @G",
+   "fullName": "Opal Gauntlet",
+   "icon": "G",
+   "category": "armor",
+   "catId": 39,
+   "price": 20000,
+   "stats": {
+    "evadePenalty": 3,
+    "absorb": 8,
+    "elemResist": 0,
+    "spell": 0
+   }
+  },
+  {
+   "id": 107,
+   "name": "ProRing",
+   "fullName": "ProRing",
+   "icon": null,
+   "category": "armor",
+   "catId": 40,
+   "price": 20000,
+   "stats": {
+    "evadePenalty": 1,
+    "absorb": 8,
+    "elemResist": 8,
+    "spell": 0
+   }
+  }
+ ]
+}

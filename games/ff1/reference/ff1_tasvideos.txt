@@ -1,0 +1,599 @@
+   #TASVideos RSS News Feed TASVideos RSS Submission Feed TASVideos RSS
+   Publication Feed TASVideos RSS Wiki Feed
+
+   [tasvideosbg.jpg]
+   [logo-light-2x.png] [logo-light-2x.png]
+   TASVideos
+   Tool-assisted game movies
+   When human skills are just not enough
+   (BUTTON)
+     * Home
+     * (BUTTON) Games
+       Games List Game Resources Platforms
+     * (BUTTON) Movies
+       Publications User Files Stars Recommended for Newcomers Movie
+       Classes
+     * (BUTTON) Submissions
+       Submission Workbench Submit a Movie
+     * (BUTTON) Tools
+       BizHawk libTAS Emulator List
+     * Forum
+     * (BUTTON) Chat
+       Discord and IRC Other TAS Communities
+     * (BUTTON) Resources
+       Articles FAQ How to TAS
+     * (BUTTON) About
+       TASVideos Staff How to Help Site History
+
+     * (BUTTON)
+       (BUTTON) Dark (BUTTON) Light (BUTTON) Auto
+     * Register
+     * Log in
+     * ____________________
+
+    1. Game Resources
+    2. NES
+    3. Final Fantasy 1
+
+   This page documents information about Final Fantasy . Many of the
+   tricks demonstrated here are near impossible in real time and
+   documented for the purposes of creating Tool-assisted Speedruns.
+
+   Table of contents
+     * Disassembly
+     * Name entry
+          + Character codes
+     * Known glitches and quirks
+          + Status immunities aren't 100%
+          + Sword weaknesses don't work
+          + Dark status does nothing
+          + One levelup per battle
+          + Possible to make bosses flee with FEAR
+          + Black belt's defense rating
+     * Encounter Algorithms
+          + Encounter table traversal
+          + Encounter table
+          + Thresholds for different areas
+     * Enemy groups
+          + Formations
+          + Type and number of enemies
+          + Surprise factor
+          + Can't run flag
+          + Enemy group for random battles
+          + Power cycle
+          + Encounter-free spaces
+     * Battle Algorithms
+          + Random numbers
+          + Enemy count
+          + Surprise calculation
+          + Order determination
+          + Running
+          + Enemy attacks
+          + Magic and special attacks
+          + Target selection
+          + Hit and crit rolls
+          + BANE
+          + Levelup
+          + One character
+
+   Much of this information comes from the algorithm FAQs on gamefaqs. The
+   Game Mechanics Guide recently posted by AstralEsper is probably the
+   most comprehensive algorithms guide. There have also been great FAQs
+   written by paulygon and patbuns. FFhackster is also a great source of
+   information. More details come from assembly analysis and don't seem to
+   be posted anywhere else. This page concentrates on the game mechanics
+   useful to a TAS. Because of how the run turned out there were a lot of
+   areas that don't need to be explored in detail. But it is important to
+   know every detail of the encounter system.
+
+Disassembly
+
+   A reassemblable disassembly of the US version:
+     * https://github.com/Entroper/FF1Disassembly
+     * (possibly) originally from
+       https://www.romhacking.net/forum/index.php?topic=19887.0
+
+Name entry
+
+   The name input cursor can move at a speed of up to 1 space per frame.
+   In order to make the cursor move, (i) at least one directional button
+   must be pressed, and (ii) the directional buttons pressed in the
+   current frame must not be exactly the same as the direction buttons
+   pressed in the previous frame.
+   You can wrap the cursor around the edges of the character palette to
+   quickly move to the opposite side.
+   You get 1 free cursor movement per name character. That is, you can
+   move the cursor 1 space up, down, left, or right before pressing A to
+   select the character, with no loss of time.
+   When you have to move the cursor more than 1 space, you can save time
+   by interleaving two different directional buttons, rather than
+   alternating directional buttons with null inputs. For example, if you
+   need to move 3 spaces to the right and 2 spaces down, you can do it
+   with the 5-input sequence ...R .D.. ...R .D.. ...R, which is faster
+   than the naive 8-input sequence ...R .... ...R .... ...R .D.. ....
+   .D...
+   But even beyond that, the name entry menu reacts in surprising ways
+   when two or more directional buttons are pressed at once, which means
+   it is possible to do even some purely horizontal or vertical movements
+   at a speed of 1 space per frame. See the table below. The ↓prev row
+   indicates what directional buttons were pressed on the previous frame;
+   the this→ column indicates what directional buttons are pressed on this
+   frame; the arrow in the cell shows the effect on the cursor. ⭘ means
+   the cursor doesn't move. For example, if the previous frame was ...R,
+   and the current frame is ..LR, the cursor moves 1 frame right. That
+   means it's possible to move directly to the right at a speed of 1 space
+   per frame by alternating ...R and ..LR inputs. Similarly, you can move
+   quickly down by alternating .D.. and UD.. (and in many other ways). The
+   only directions that do not afford such fast movement are up and left.
+  ↓prev this→ .... U... .D.. ..L. ...R UD.. U.L. U..R .DL. .D.R ..LR UDL.
+     UD.R     U.LR .DLR UDLR
+     ....     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     U...     ⭘    ⭘    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     .D..     ⭘    ⬆    ⭘    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     ..L.     ⭘    ⬆    ⬇    ⭘    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     ...R     ⭘    ⬆    ⬇    ⬅    ⭘    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     UD..     ⭘    ⬆    ⬇    ⬅    ⮕    ⭘    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     U.L.     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⭘    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     U..R     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⭘    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     .DL.     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⭘    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     .D.R     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⭘    ⮕    ⬇   ⬇ ⬇ ⬇ ⬇
+     ..LR     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⭘    ⬇   ⬇ ⬇ ⬇ ⬇
+     UDL.     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⭘   ⬇ ⬇ ⬇ ⬇
+     UD.R     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⭘ ⬇ ⬇ ⬇
+     U.LR     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⭘ ⬇ ⬇
+     .DLR     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⭘ ⬇
+     UDLR     ⭘    ⬆    ⬇    ⬅    ⮕    ⬇    ⬇    ⬇    ⬇    ⬇    ⮕    ⬇   ⬇ ⬇ ⬇ ⭘
+
+Character codes
+
+   Each character in a party member's name is represented by 1 byte. See
+   the NESdev wiki for a table of what each 6502 instruction each byte
+   maps to.
+   The character codes in the US version are as follows. The table comes
+   from address 0xa011 in the US ROM (called lut_NameInput in the
+   disassembly).
+   0x8a 0x8b 0x8c 0x8d 0x8e 0x8f 0x90 0x91 0x92 0x93
+   A    B    C    D    E    F    G    H    I    J
+   0x94 0x95 0x96 0x97 0x98 0x99 0x9a 0x9b 0x9c 0x9d
+   K    L    M    N    O    P    Q    R    S    T
+   0x9e 0x9f 0xa0 0xa1 0xa2 0xa3 0xbe 0xbf 0xc0 0xff
+   U    V    W    X    Y    Z    ’    ,    .
+   0x80 0x81 0x82 0x83 0x84 0x85 0x86 0x87 0x88 0x89
+   0    1    2    3    4    5    6    7    8    9
+   0xa4 0xa5 0xa6 0xa7 0xa8 0xa9 0xaa 0xab 0xac 0xad
+   a    b    c    d    e    f    g    h    i    j
+   0xae 0xaf 0xb0 0xb1 0xb2 0xb3 0xb4 0xb5 0xb6 0xb7
+   k    l    m    n    o    p    q    r    s    t
+   0xb8 0xb9 0xba 0xbb 0xbc 0xbd 0xc2 0xc3 0xc4 0xc5
+   u    v    w    x    y    z    -    ‥    !    ?
+   The character codes in the JP version are as follows. The table comes
+   from 0xa013 in the JP ROM.
+   0x8a 0x8b 0x8c 0x8d 0x8e 0x48 0x49 0x4a 0x4b 0x4c
+   あ    い    う    え    お    が    ぎ    ぐ    げ    ご
+   0x8f 0x90 0x91 0x92 0x93 0x4d 0x4e 0x4f 0x50 0x51
+   か    き    く    け    こ    ざ    じ    ず    ぜ    ぞ
+   0x94 0x95 0x96 0x97 0x98 0x52 0x53 0x54 0x55 0x56
+   さ    し    す    せ    そ    だ    ぢ    づ    で    ど
+   0x99 0x9a 0x9b 0x9c 0x9d 0x57 0x58 0x59 0x5a 0x5b
+   た    ち    つ    て    と    ば    び    ぶ    べ    ぼ
+   0x9e 0x9f 0xa0 0xa1 0xa2 0x70 0x71 0x72 0x73 0x74
+   な    に    ぬ    ね    の    ぱ    ぴ    ぷ    ぺ    ぽ
+   0xa3 0xa4 0xa5 0xa6 0xa7 0x7d 0x7e 0x7f 0x7c 0xb9
+   は    ひ    ふ    へ    ほ    ゃ    ゅ    ょ    っ    。
+   0xa8 0xa9 0xaa 0xab 0xac 0x80 0x81 0x82 0x83 0x84
+   ま    み    む    め    も    ０    １    ２    ３    ４
+   0xb0 0xb1 0xb2 0xb3 0xb4 0x85 0x86 0x87 0x88 0x89
+   ら    り    る    れ    ろ    ５    ６    ７    ８    ９
+   0xad 0xae 0xaf 0xb5 0xb6 0xc2 0xc4 0xc5 0xc3 0xff
+   や    ゆ    よ    わ    ん    －    ！    ？    ‥    　
+
+Known glitches and quirks
+
+Status immunities aren't 100%
+
+   Basically, this means that no enemy is immune to status effects
+   including instant death. There is a loophole in how the immunity
+   affects the calculation of whether or not the attack works. This is
+   explained in more detail in the BANE section.
+
+Sword weaknesses don't work
+
+   Coral swd, were swd, rune swd, ice swd, etc were all supposed to do
+   extra damage to some enemies. But they don't.
+
+Dark status does nothing
+
+   Absolutely no change when you have dark status.
+
+One levelup per battle
+
+   If you get enough experience for two levelups, you will only get one
+   right away. You will catch up with the next victorious battle.
+
+Possible to make bosses flee with FEAR
+
+   An enemy runs when:
+EnemyMorale - (2 * LeadCharLevel) + randInRange(0, 50) < 80
+
+   See below for how random numbers are generated. Each enemy has a morale
+   level ranging from 105 for cowardly WOLFs to 255 for bosses. FEAR
+   reduces an enemy's morale by 40. The effect is stackable with multiple
+   casts. Bosses go through the same run mechanics as normal enemies. But
+   because of their high morale they will not run unless affected by FEAR.
+   It has been discussed on the forum a few times.
+
+Black belt's defense rating
+
+   On leveling up, a black belt's defense rating is set to 2*level. This
+   gets reset when you visit the armor screen. However, if you don't visit
+   the armor screen you can keep the armor rating and still get any
+   special effects from equipped armor.
+
+Encounter Algorithms
+
+Encounter table traversal
+
+   A counter at $00F5 changes with each step. It may go down or up
+   depending on the value of $00F6. When the high bit is 1, it decrements,
+   otherwise it increments. Whenever $00F5 hits 0, $00F6 is updated by
+   adding A0. It starts out at FF (on FCEU-may differ on a real NES or
+   other emulators). So the order that the table is traversed goes like
+   this:
+down, down, up, down, up, up, down, up, down, (repeat)
+
+Encounter table
+
+   All values in hex and located at $F100 in RAM
+1F A6 DE BA CC 12 7D 74 1B F3 B4 88 F8 52 F4 07
+90 AB B3 BD AA 55 28 BC 8A 6D 0E C4 83 A9 3B 76
+20 7C 09 92 FD 4A A8 F0 61 E3 F2 69 6C BB 38 C3
+AE B7 43 84 78 23 7B 9B 2D DB 3E 91 CF 02 2A B6
+86 EE 9C 8E B8 6F 1A 57 05 E9 73 31 D2 D9 1D FB
+94 9D B1 0A 3A 11 5A 47 95 2C 44 E0 6A 8C 5B 7A
+A7 5D 36 70 E5 C7 49 DC 68 97 D8 66 A3 0F B0 9F
+03 D6 77 16 13 30 25 3C 10 17 AD 98 6B 2F D7 A1
+FF A4 EB 51 FE 27 8D 93 D5 3D F6 08 75 E1 A5 46
+63 F5 4D DA 32 AF 40 37 D3 C0 89 67 06 21 6E 81
+B5 A0 4F 0C 2E E7 1C 58 85 E8 59 CE 35 CB 1E C6
+2B 9A E6 DD F1 EC 96 CA AC 00 50 C9 4C FC 14 7E
+56 80 D0 79 BF 29 87 48 24 19 C5 22 71 7F 72 0D
+CD 8F BE 3F 9E 34 ED 53 54 04 62 A2 C2 41 5E 82
+4B 26 5C 42 65 99 4E 60 8B F7 0B 33 DF D1 64 C8
+C1 01 EF F9 FA E4 5F 18 B9 B2 39 D4 15 E2 EA 45
+
+Thresholds for different areas
+
+   For each step, the value accessed in that table is compared with a
+   threshold set for that area. If tableValue < threshold then fight!
+     * Outer world:
+          + Walking or canoeing: 10
+          + Sailing on ship: 3
+     * Most dungeons: 8
+     * Exceptions:
+          + Sky Palace 5th (last) floor: 24
+          + Temple of Fiends Revisited Earth floor: 9
+          + Temple of Fiends Revisited Fire floor: 10
+          + Temple of Fiends Revisited Water floor: 11
+          + Temple of Fiends Revisited Wind floor: 12
+
+   So if you know how many steps you are going to take in what areas you
+   can figure out exactly where every battle will occur.
+
+Enemy groups
+
+   In each battle the enemies present are determined by the battle group
+   you have encountered. Even bosses come in battle groups. A table in the
+   ROM contains all battle group data. Specifically:
+
+Formations
+
+   The formation can be 1-9 small enemies, 1-4 large enemies or a mix of
+   up to 6 small and 2 large. There is also a "one big enemy" formation
+   for bosses.
+
+Type and number of enemies
+
+   Each battle group can have up to four different types of enemies. For
+   each enemy type there is a min and max count. If min and max are the
+   same, then the count is fixed.
+
+Surprise factor
+
+   Enemy surprise factor is tracked by battle group. This is used in
+   determining surprise and preemptive battles. (See battle algorithms
+   below)
+
+Can't run flag
+
+   There is a "can't run" flag attached to each enemy group. This is set
+   for all bosses and some random battles. When the flag is set, running
+   always fails and the battle is never a surprise or preemptive. This is
+   probably because you run from preemptive battles 100% of the time.
+
+Enemy group for random battles
+
+   This part of the encounter system has been explained well in several
+   FAQs. I'll summarize. In each area, there are 8 enemy group slots. Area
+   means each floor of a dungeon or each region of the outer world. For
+   this purpose the sea is one area. Canoe-able waterways are divided in
+   to two areas, one for the north and one for the south. Each of these
+   slots specifies one of the enemy groups described above. There is a
+   counter that increments with each battle. That counter is used to index
+   into a list that determines which of those 8 slots you get. Here is the
+   list:
+ 1: 3    33: 3    65: 1     97: 4    129: 8    161: 5    193: 2    225: 1
+ 2: 4    34: 7    66: 4     98: 3    130: 4    162: 3    194: 1    226: 4
+ 3: 3    35: 1    67: 3     99: 6    131: 4    163: 2    195: 2    227: 3
+ 4: 6    36: 2    68: 2    100: 5    132: 2    164: 2    196: 6    228: 1
+ 5: 2    37: 7    69: 6    101: 4    133: 7    165: 4    197: 8    229: 4
+ 6: 2    38: 1    70: 4    102: 1    134: 4    166: 4    198: 4    230: 3
+ 7: 7    39: 4    71: 3    103: 1    135: 2    167: 3    199: 1    231: 2
+ 8: 5    40: 5    72: 2    104: 3    136: 2    168: 3    200: 1    232: 3
+ 9: 3    41: 3    73: 1    105: 4    137: 2    169: 1    201: 4    233: 1
+10: 5    42: 3    74: 4    106: 2    138: 7    170: 4    202: 3    234: 6
+11: 5    43: 5    75: 5    107: 3    139: 6    171: 3    203: 1    235: 1
+12: 1    44: 4    76: 5    108: 4    140: 1    172: 2    204: 3    236: 5
+13: 6    45: 4    77: 2    109: 3    141: 5    173: 5    205: 5    237: 3
+14: 2    46: 6    78: 3    110: 2    142: 3    174: 1    206: 8    238: 2
+15: 5    47: 6    79: 3    111: 5    143: 4    175: 3    207: 5    239: 4
+16: 1    48: 1    80: 6    112: 3    144: 1    176: 1    208: 2    240: 1
+17: 2    49: 4    81: 2    113: 1    145: 3    177: 4    209: 2    241: 1
+18: 4    50: 6    82: 3    114: 2    146: 5    178: 3    210: 2    242: 1
+19: 5    51: 1    83: 5    115: 6    147: 2    179: 4    211: 7    243: 4
+20: 7    52: 1    84: 1    116: 2    148: 3    180: 3    212: 8    244: 6
+21: 4    53: 6    85: 6    117: 2    149: 5    181: 5    213: 3    245: 6
+22: 2    54: 3    86: 2    118: 5    150: 4    182: 4    214: 5    246: 4
+23: 4    55: 6    87: 3    119: 4    151: 1    183: 2    215: 4    247: 3
+24: 7    56: 3    88: 1    120: 7    152: 6    184: 1    216: 2    248: 3
+25: 1    57: 4    89: 2    121: 2    153: 2    185: 4    217: 2    249: 6
+26: 4    58: 3    90: 4    122: 2    154: 1    186: 1    218: 1    250: 5
+27: 2    59: 7    91: 1    123: 4    155: 1    187: 2    219: 3    251: 6
+28: 1    60: 2    92: 3    124: 3    156: 4    188: 1    220: 3    252: 2
+29: 1    61: 2    93: 4    125: 4    157: 1    189: 2    221: 1    253: 2
+30: 4    62: 1    94: 2    126: 4    158: 3    190: 7    222: 1    254: 3
+31: 6    63: 4    95: 3    127: 2    159: 4    191: 2    223: 3    255: 4
+32: 6    64: 6    96: 6    128: 3    160: 1    192: 7    224: 1    256: 1
+
+   Some of the enemy groups are listed many more times than others and as
+   a result the overall chance to encounter them is lower. Group 7 is
+   pretty uncommon at 12/256 and 8 is downright rare at 3/256! WarMech is
+   group 7 on the top floor of the Sky Palace. So it may take quite a few
+   battles to meet him depending on where you are on that list. See
+   FFhackster or one of the FAQs for a complete list of enemy groups for
+   each area.
+
+Power cycle
+
+   If you cycle power, the values at $00F5 and $00F6 are reset as well as
+   the counter for the enemy group. FCEUX and other emulators come up with
+   a different initial value than a real NES. This is the most powerful
+   way to manipulate random encounters. You could avoid all encounters
+   along land by doing this every 12 steps, but it's suboptimal for a TAS
+   due to the time needed to get the save items.
+
+Encounter-free spaces
+
+     * A lot of the field around Coneria
+     * Docks
+     * The squares on either side of a door in dungeons
+     * The southern edge of some walls inside rooms in dungeons
+     * The step that boards or disembarks the canoe or ship (The location
+       doesn't matter)
+
+   FFhackster can show all of the encounter-free squares.
+
+Battle Algorithms
+
+Random numbers
+
+   The random seed at $688A is used to index into this table of numbers:
+   AE D0 38 8A ED 60 DB 72 5C 59 27 D8 0A 4A F4
+34 08 A9 C3 96 56 3B F1 55 F8 6B 31 EF 6D 28 AC
+41 68 1E 2A C1 E5 8F 50 F5 3E 7B B7 4C 14 39 12
+CD B2 62 8B 82 3C BA 63 85 3A 17 B8 2E B5 BE 20
+CB 46 51 2C CF 03 78 53 97 06 69 EB 77 86 E6 EA
+74 0C 21 E2 40 D4 5A 3D C7 2B 94 D5 8C 44 FD EE
+D2 43 00 BB FA C6 1D 98 A0 D3 54 5F 5E DC A8 00
+AF 93 A1 E1 6C 04 DE B6 D7 36 16 C5 C8 C4 E4 0F
+02 AB E8 33 99 73 11 6A 09 67 F3 FF A2 DF 32 0E
+1F 0D 90 25 64 75 B3 65 2F C9 B0 DA 5D 9F EC 29
+CE E3 F0 91 7A 58 45 24 1C 47 A4 89 18 2D CC BD
+6F 80 F6 81 22 E9 07 70 FB DD AD 35 A6 61 B4 A3
+FE B1 30 4B 15 48 6E 4F 5B 13 9C 83 92 01 C2 19
+7F 1A 1B 71 B9 3F 4E 9B BF 9E 87 0B 10 57 F2 26
+79 9A 05 C0 E0 F7 4D 7D CA 52 9D F9 BC AA FC 8D
+7E D1 A5 42 E7 D6 76 A7 84 8E 66 7C 23 88 37 49
+D9
+
+   At first glance it looks like 00-FF were randomly reordered. But some
+   values are duplicated and others are missing. The most interesting
+   aspect is that there are two 0s. This is very nice because those 0s
+   lead to critical hits and BANE deaths.
+   Address $688A is in the savegame memory range, so its value stays the
+   same if you save and power cycle. This index is preserved between
+   battles. Its state at the end of one battle determines the enemy count
+   and surprise calculation for the next battle.
+   There are two important functions for randomization:
+rand8bit: The value accessed by the random seed
+
+randInRange(low, high):
+    randRange = 1 + high - low
+    low + floor( (rand8bit * randRange) / 256 )
+
+   The computation is actually done by taking the high byte after an
+   8bit*8bit => 16bit multiply.
+   The rand seed increments every time a random number is used. It also
+   increments every 2 frames while you are ordering your heroes. So in
+   order to fully analyze battles, you need to know every instance where
+   RNGs are used and how many are used. The seed also increments while
+   moving the cursor, so you need to consider how long it takes to give
+   your orders.
+   The graphical effects that happen with each hit also use the RNG. When
+   your characters are hit the screen shaking animation uses 12 seeds. The
+   number of seeds used by the dust that appears when your chars attack
+   the enemy varies depending on the enemy.
+
+Enemy count
+
+   For each enemy in group, calculate randInRange( minEnemies, maxEnemies
+   ). That's how many enemies of the that type show up.
+
+Surprise calculation
+
+surpriseIndex = floor( (First char's luck + First char's agility) / 8)
+surpriseRoll = surpriseIndex + randInRange( surpriseIndex, 100 ) - enemyGroupSur
+priseFactor
+If surpriseRoll < 0, surpriseRoll = 0
+If surpriseRoll <= 10, surprised!
+If surpriseRoll >= 90, preemptive!
+
+   Otherwise, normal. For "can't run" battles (all bosses), the entire
+   calculation is skipped and the battle is always normal. The
+   enemyGroupSurpriseFactor can vary from 4 for most groups to 90 for
+   shadows. One thing to note is that the thief's massive luck and agility
+   won't help you get the jump on enemies unless he's in front!
+
+Order determination
+
+   It is completely random and does not depend on either enemy or hero
+   stats. Start out with a list of the 9 enemy slots followed by the four
+   hero slots. 13 total. Get two random numbers using randInRange(0,12).
+   Swap those entries in the list. Do this 17 times. The resulting list is
+   the battle order. Empty slots are skipped. If it was a surprise or
+   premptive, the surprised side's slots are skipped as well.
+
+Running
+
+   If it is the first round of a preemptive battle, running is always
+   successful. Otherwise there is a random factor involved.
+maxRand = 15 + status of char two slots down
+runRoll = randInRange(0, maxRand)
+
+   Running succeeds if luck > runRoll
+   The status number is as follows:
+     * 0: ok
+     * 1: dead
+     * 2: stone
+     * 3: poison
+
+   That's right, it depends on that status of the hero two slots down. So
+   the first character has more trouble running when the third character
+   is dead or has a status affliction. Similarly for the second and fourth
+   chars. This gets more complicated for the third and fourth chars
+   because it accesses a different patch of memory. For the third char, it
+   is looking at some of the random numbers used in order determination.
+   It could be 0 to 8 or 128 to 131. The fourth char's pointer hits an
+   area used when displaying each char's HP. The value will either be 128
+   or 137 depending on the ones digit of the fourth char's hp.
+   You can run 100% of the time with 16 luck or more. That is, if you are
+   in one of the first two slots and all heros are alive. The memory
+   accessed for chars 3 and 4 is almost always higher than the status
+   indicator used for the first two chars. It can easily be high enough to
+   throw off your chances of running. So don't count on that thief in back
+   to be able to run more easily!
+
+Enemy attacks
+
+   On each enemy's turn it makes a roll to determine it's attack type:
+   physical, magic or special. Each enemy has two stats that determine
+   what the chances are they will use magic and special attacks. If
+   neither of these are selected, it does a physical attack.
+
+Magic and special attacks
+
+   Each enemy has a list of eight magic and four special attacks. The
+   first time it picks a magic attack, it executes the first attack on the
+   list. It goes down the list each time it picks magic again. Same for
+   specials. The spot on each list is tracked separately. If it gets to
+   the end of the list, it goes back to the beginning. If the enemy is
+   muted and picks magic or special, it does nothing.
+
+Target selection
+
+   If the attacker is an enemy, the target is selected randomly. So pick a
+   targetRoll = rand8bit. Target is selected based on that:
+       targetRoll >= 128   ->   Front hero
+128 >  targetRoll >= 64    ->   Second hero
+64  >  targetRoll >  32    ->   Third hero
+32  >= targetRoll          ->   Rear hero
+
+   If the selected target is not valid on account of being dead or stoned,
+   then keep picking another targetRoll until you get a valid target.
+   There has to be at least one valid target or else the party has
+   perished! The front char gets hit 1/2 of the time, the second 1/4 and
+   the last two are both 1/8. This is why having a knight in front to soak
+   up physical damage is so effective.
+
+Hit and crit rolls
+
+   Two thresholds are involved: hitThreshold and critThreshold. The crit
+   threshold is an item index of the weapon. Hit threshold is computed
+   based on the hit and evade of the entities involved. For an enemy,
+   damage is one of their stats. For a hero, damage is usually
+   weaponDamage + strength. But unarmed blackBelts/masters can behave
+   differently. Each enemy also has an absorption defense rating similar
+   to the hero's absorb stat.
+hitRoll = randInRange(0, 200)
+damageRoll = attackerDamage + randInRange(0, attackerDamage)
+
+   These random values are always computed, even if the attack misses.
+If hitRoll > hitThreshold, miss. No damage.
+If hitRoll <= hitThreshold, it's a hit!
+    hitDamage = damageRoll - targetAbsorb
+    if hitDamage < 1 then hitDamage = 1
+If hitRoll <= critThreshold, it's a critical hit!
+    hitDamage = hitDamage + damageRoll
+
+   If the attacker has multiple hits, repeat, accumulating more and more
+   damage. Enemies have a number of hits stat. For players, number of hits
+   is floor(hit / 32) + 1
+   When hitRoll is 0 it will always be a critical hit. So there's at least
+   a 3/256 chance because there are three entries in the RNG table that
+   will produce a 0 here. Critical hits deal decent damage regardless of
+   target's defense but can do even more damage when the target has low
+   defense.
+
+BANE
+
+   If hitRoll <= successThreshold the enemy is killed. As in the physical
+   attack, hitRoll comes from randInRange(0, 200). The successThreshold is
+   based on the enemy's magic defense. If enemy is immune to poison,
+   successThreshold = 0. So when hitRoll is 0 you always succeed, even
+   when the enemy is immune. This is the essence of the immunity bug.
+   There are 3 entries in the table that will give 0 from randInRange(0,
+   200): the two 0s and the 1. So the chance to BANE an immune enemy is
+   3/256. If we look more specifically at a fight with one living hero in
+   slot 1 vs a poison-immune boss, there is only 1 possible starting seed
+   that will allow the hero to go first and succeed.
+
+Levelup
+
+   Depending on class and level, you either gain each stat unconditionally
+   or have a 25% chance. To make the roll, an rand8bit number is
+   generated. The roll for luck succeeds when the low two bits are 0.
+
+One character
+
+   So if you put everything together you can see why one character is
+   optimal for a TAS. Two characters would have more chances to run, but
+   the chance to run is very high after just a few levels. The third and
+   fourth chars have reduced chances to run. In a fight it's possible to
+   manipulate a miss from the enemy and a strong hit from one low-level
+   char. But at extremely low levels the second char would be much less
+   effective. Finally, you can manipulate stats if you concentrate on one
+   char. Otherwise it's not practical given all the other things that need
+   to be manipulated.
+
+See also
+
+     * Game Resources - we have resource pages for other games too!
+     * Common Tricks - tricks common to many games
+     * Boss Fighting Guide - tricks specific to boss fights
+     __________________________________________________________________
+
+   GameResources/NES/FinalFantasy1 last edited by Sand on 3/5/2025 4:12 AM
+   Page History Latest diff List referrers View Source
+     __________________________________________________________________
+
+   (BUTTON)
+   © 2026 - TASVideos v2.6-d30a62d Terms API

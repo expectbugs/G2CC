@@ -1,0 +1,358 @@
+#!/usr/bin/env python
+"""ff1_daemon.py — JSON-lines stdio daemon hosting the cynes FF1 core
+(PLAN §3/§4; stt.ts-pattern client on the Node side).
+
+Protocol: one JSON object per line on stdin → exactly one JSON object per line
+on stdout carrying the request's `seq`. Success responses carry op-specific
+fields + a full `state` snapshot (unless noted); failures carry
+{seq, error, traceback} — NEVER a silent default (§10). All logging goes to
+stderr; stdout is protocol-pure. Run with -u (unbuffered), cwd games/ff1.
+
+Undo everywhere (§8.4): every ADVANCING op auto-checkpoints the pre-op
+savestate into a labeled ring (depth = config undoDepth, default 30);
+{op:"undo_list"} / {op:"undo", index} restore. undo() does NOT pop — newer
+entries stay until depth-trimmed by new checkpoints.
+
+The daemon idles PAUSED between ops (we own the clock — §5.3): zero frames
+advance unless an op advances them.
+"""
+from __future__ import annotations
+
+import base64
+import io
+import json
+import sys
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+
+BRIDGE = Path(__file__).resolve().parent
+sys.path.insert(0, str(BRIDGE))
+
+import macros
+import ramspec
+import screens
+import scrape
+from macros import BudgetExceeded, Desync, Emu
+
+FF1_DIR = BRIDGE.parent
+DEFAULT_ROM = FF1_DIR / 'rom' / 'Final Fantasy.nes'
+DATA = FF1_DIR / 'data'
+
+VISIBLE_TOP = 8      # §4 frame op: trim 8px overscan top+bottom → 256×224
+
+
+def log(msg: str) -> None:
+    print(f'[ff1-daemon] {msg}', file=sys.stderr, flush=True)
+
+
+class UndoRing:
+    """Labeled savestate ring, newest first (§8.4). ~21.8 KB/state (P0-R)."""
+
+    def __init__(self, depth: int = 30) -> None:
+        self.depth = depth
+        self.entries: List[Dict[str, Any]] = []
+
+    def push(self, label: str, state: np.ndarray) -> None:
+        self.entries.insert(0, {
+            'label': label,
+            'at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            'state': state,
+        })
+        while len(self.entries) > self.depth:
+            self.entries.pop()
+
+    def listing(self) -> List[dict]:
+        return [{'index': i, 'label': e['label'], 'at': e['at']}
+                for i, e in enumerate(self.entries)]
+
+    def get(self, index: int) -> Dict[str, Any]:
+        if not (0 <= index < len(self.entries)):
+            raise IndexError(f'undo index {index} out of range (0..{len(self.entries) - 1})')
+        return self.entries[index]
+
+
+class Daemon:
+    def __init__(self) -> None:
+        self.emu: Optional[Emu] = None
+        self.undo = UndoRing()
+        self.rng_jitter = True
+        self.enemies = json.loads((DATA / 'enemies.json').read_text())['enemies']
+        self.charmap_std = {int(k, 16): v
+                            for k, v in json.loads((DATA / 'charmap.json').read_text())['standard'].items()}
+        self.char_encode = {v: k for k, v in self.charmap_std.items() if len(v) == 1 and v != ' '}
+        self.char_encode[' '] = 0xFF   # pad-space is the name-entry space byte
+
+    # ------------------------------------------------------------- helpers
+    def need_emu(self) -> Emu:
+        if self.emu is None:
+            raise RuntimeError('no ROM booted — send {op:"boot"} first')
+        return self.emu
+
+    def decode_name(self, byts: List[int]) -> str:
+        return ''.join(self.charmap_std.get(b, '?') for b in byts).rstrip()
+
+    def enemy_name(self, eid: int) -> str:
+        if 0 <= eid < len(self.enemies):
+            return self.enemies[eid]['name']
+        return f'enemy#{eid}'
+
+    def checkpoint(self, label: str) -> None:
+        emu = self.need_emu()
+        self.undo.push(label, emu.save())
+
+    # ------------------------------------------------------------- snapshot
+    def snapshot(self) -> dict:
+        emu = self.need_emu()
+        read = emu.read
+        cls = screens.classify(read, emu.frame, emu.patterns(), emu.glyphs,
+                               emu.uniform_frame())
+        party = []
+        for slot in range(4):
+            ch = ramspec.read_char(read, slot, self.decode_name)
+            party.append({
+                'slot': slot, 'name': ch.name, 'class': ch.cls_name, 'classId': ch.cls,
+                'ailments': ch.ailments, 'alive': ch.alive(),
+                'hp': ch.curhp, 'maxhp': ch.maxhp, 'level': ch.level0 + 1,
+                'exp': ch.exp, 'mp': ch.curmp, 'maxmp': ch.maxmp,
+                'spells': ch.spells, 'weapons': ch.weapons, 'armor': ch.armor,
+            })
+        x, y = ramspec.player_tile(read)
+        state: dict = {
+            'party': party,
+            'gold': ramspec.rd24(read, ramspec.GOLD),
+            'pos': {
+                'x': x, 'y': y,
+                'standardMap': bool(read(ramspec.MAPFLAGS) & 1),
+                'mapId': read(ramspec.CUR_MAP),
+                'vehicle': ramspec.VEHICLE_NAME.get(read(ramspec.VEHICLE), f'#{read(ramspec.VEHICLE)}'),
+                'facing': ramspec.FACING_NAME.get(read(ramspec.FACING), '?'),
+            },
+            'battlestep': read(ramspec.BATTLESTEP),
+            'battlecounter': read(ramspec.BATTLECOUNTER),
+            'sramSavePresent': ramspec.sram_save_present(read),
+        }
+        if ramspec.in_battle(read):
+            slots = ramspec.read_enemy_slots(read)
+            state['battle'] = {
+                'result': read(ramspec.BTL_RESULT),
+                'enemies': [{
+                    'slot': e.slot, 'id': e.enemy_id, 'name': self.enemy_name(e.enemy_id),
+                    'hp': e.hp, 'alive': e.alive(), 'exp': e.exp, 'gp': e.gp,
+                } for e in slots],
+                'roster': [self.enemy_name(read(ramspec.BTL_ENEMYROSTER + i))
+                           for i in range(4)
+                           if read(ramspec.BTL_ENEMYROSTER + i) != 0xFF],
+                'curChar': read(ramspec.BTLCMD_CURCHAR),
+                'target': read(ramspec.BTLCMD_TARGET),
+                'cursor': [read(ramspec.BTLCURS_X), read(ramspec.BTLCURS_Y)],
+                'cmdBuf': [read(ramspec.BTL_CHARCMDBUF + i) for i in range(16)],
+                'noRun': bool(read(ramspec.BTLFORM_NORUN) & 1),
+                'surprise': read(ramspec.BTLFORM_SURPRISE),
+                'battleType': read(ramspec.BTL_BATTLETYPE),
+                'enemyCount': read(ramspec.BTL_ENEMYCOUNT),
+            }
+        out = cls.to_json()
+        out['frameHash'] = emu.frame_hash()
+        out['state'] = state
+        return out
+
+    # ------------------------------------------------------------- ops
+    def op_boot(self, req: dict) -> dict:
+        rom = req.get('rom', str(DEFAULT_ROM))
+        if not Path(rom).exists():
+            raise FileNotFoundError(f'ROM not found: {rom}')
+        self.rng_jitter = bool(req.get('rngJitter', self.rng_jitter))
+        self.emu = Emu(rom, rng_jitter=self.rng_jitter)
+        self.undo = UndoRing(int(req.get('undoDepth', self.undo.depth)))
+        if req.get('state'):
+            self.emu.load(np.frombuffer(base64.b64decode(req['state']), dtype=np.uint8))
+            log(f'boot: ROM + savestate restored ({rom})')
+        else:
+            # advance through the power-on sequence to the first settled screen
+            self.emu.step(30)
+            try:
+                self.emu.settle(budget=1200)
+            except BudgetExceeded:
+                log('boot: title sequence still animating after 1200f (expected — title has effects)')
+            log(f'boot: fresh ROM ({rom})')
+        return self.snapshot()
+
+    def op_state(self, _req: dict) -> dict:
+        return self.snapshot()
+
+    def op_press(self, req: dict) -> dict:
+        emu = self.need_emu()
+        buttons = req.get('buttons', [])
+        if not isinstance(buttons, list) or not buttons:
+            raise ValueError('press: buttons must be a non-empty list')
+        label = req.get('label') or f'before {"+".join(buttons)}'
+        self.checkpoint(label)
+        stopped = None
+        for b in buttons:
+            emu.press(b, hold=int(req.get('hold', macros.PRESS_HOLD)))
+            if emu.in_battle():
+                stopped = 'battle'
+                break
+        out = self.snapshot()
+        if stopped:
+            out['stopped'] = stopped
+        return out
+
+    def op_steps(self, req: dict) -> dict:
+        emu = self.need_emu()
+        direction = req['dir']
+        count = int(req.get('count', 1))
+        if count < 1:
+            raise ValueError('steps: count must be ≥ 1')
+        self.checkpoint(f'before Step {direction} ×{count}')
+        outcome = emu.steps(direction, count)
+        out = self.snapshot()
+        out['stopped'] = outcome.stopped
+        out['committed'] = outcome.committed
+        if outcome.stopped == 'battle':
+            self.checkpoint('battle start ' + self._formation_label())
+        return out
+
+    def _formation_label(self) -> str:
+        emu = self.need_emu()
+        if not emu.in_battle():
+            return ''
+        slots = ramspec.read_enemy_slots(emu.read)
+        names: Dict[str, int] = {}
+        for e in slots:
+            if e.alive():
+                names[self.enemy_name(e.enemy_id)] = names.get(self.enemy_name(e.enemy_id), 0) + 1
+        return '(' + ' '.join(f'{n}×{c}' if c > 1 else n for n, c in names.items()) + ')'
+
+    def op_save(self, _req: dict) -> dict:
+        emu = self.need_emu()
+        buf = emu.save()
+        return {'state': base64.b64encode(buf.tobytes()).decode(), 'bytes': int(buf.nbytes)}
+
+    def op_load(self, req: dict) -> dict:
+        emu = self.need_emu()
+        emu.load(np.frombuffer(base64.b64decode(req['state']), dtype=np.uint8))
+        return self.snapshot()
+
+    def op_sram(self, req: dict) -> dict:
+        emu = self.need_emu()
+        if req.get('set'):
+            raw = base64.b64decode(req['set'])
+            if len(raw) != ramspec.SRAM_SIZE:
+                raise ValueError(f'sram set: expected {ramspec.SRAM_SIZE} bytes, got {len(raw)}')
+            for i, b in enumerate(raw):
+                emu.nes[ramspec.UNSRAM + i] = b
+            # a .sav import is only coherent from power-on: reset (RAM persists
+            # through cynes reset — verified .pyi) so the game re-reads it.
+            emu.nes.reset()
+            emu.step(30)
+            log('sram: imported 8 KB + reset')
+            return self.snapshot()
+        data = bytes(emu.read(ramspec.UNSRAM + i) for i in range(ramspec.SRAM_SIZE))
+        return {'sram': base64.b64encode(data).decode(),
+                'savePresent': ramspec.sram_save_present(emu.read)}
+
+    def op_frame(self, req: dict) -> dict:
+        emu = self.need_emu()
+        from PIL import Image
+        crop = req.get('crop', 'full')
+        visible = emu.frame[VISIBLE_TOP:240 - VISIBLE_TOP]   # 224 rows
+        if crop == 'top':
+            img = visible[:112]
+        elif crop == 'bottom':
+            img = visible[112:]
+        elif crop == 'full':
+            img = visible
+        else:
+            raise ValueError(f'frame: unknown crop {crop!r}')
+        buf = io.BytesIO()
+        Image.fromarray(np.ascontiguousarray(img)).save(buf, format='PNG')
+        return {'png': base64.b64encode(buf.getvalue()).decode(),
+                'w': int(img.shape[1]), 'h': int(img.shape[0]),
+                'frameHash': emu.frame_hash()}
+
+    def op_undo_list(self, _req: dict) -> dict:
+        return {'checkpoints': self.undo.listing()}
+
+    def op_undo(self, req: dict) -> dict:
+        emu = self.need_emu()
+        entry = self.undo.get(int(req['index']))
+        emu.load(entry['state'])
+        try:
+            emu.settle()
+        except BudgetExceeded:
+            log('undo: restored state not static (mid-animation checkpoint) — proceeding')
+        log(f'undo: restored "{entry["label"]}" ({entry["at"]})')
+        out = self.snapshot()
+        out['restored'] = entry['label']
+        return out
+
+    def op_checkpoint(self, req: dict) -> dict:
+        self.checkpoint(str(req.get('label', 'manual checkpoint')))
+        return {'checkpoints': self.undo.listing()}
+
+    def op_set_config(self, req: dict) -> dict:
+        if 'rngJitter' in req:
+            self.rng_jitter = bool(req['rngJitter'])
+            if self.emu:
+                self.emu.rng_jitter = self.rng_jitter
+        if 'undoDepth' in req:
+            depth = int(req['undoDepth'])
+            if depth < 1:
+                raise ValueError('undoDepth must be ≥ 1')
+            self.undo.depth = depth
+            while len(self.undo.entries) > depth:
+                self.undo.entries.pop()
+        return {'rngJitter': self.rng_jitter, 'undoDepth': self.undo.depth}
+
+    def op_scrape(self, req: dict) -> dict:
+        """Scrape an arbitrary region (harness/diagnostics + engine text views)."""
+        emu = self.need_emu()
+        r0, r1 = int(req.get('row0', 0)), int(req.get('row1', 30))
+        c0, c1 = int(req.get('col0', 0)), int(req.get('col1', 32))
+        res = scrape.scrape_region(emu.patterns(), emu.glyphs, r0, r1, c0, c1)
+        return {'lines': res.lines, 'unknownTiles': res.unknown}
+
+    def op_ping(self, _req: dict) -> dict:
+        return {'pong': True, 'booted': self.emu is not None}
+
+    # ------------------------------------------------------------- loop
+    def handle(self, req: dict) -> dict:
+        op = req.get('op')
+        fn = getattr(self, f'op_{op}', None)
+        if fn is None:
+            raise ValueError(f'unknown op {op!r}')
+        return fn(req)
+
+    def run(self) -> None:
+        log(f'ready (rom default: {DEFAULT_ROM.name}, undo depth {self.undo.depth})')
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            seq = None
+            try:
+                req = json.loads(line)
+                seq = req.get('seq')
+                if req.get('op') == 'shutdown':
+                    print(json.dumps({'seq': seq, 'ok': True, 'bye': True}), flush=True)
+                    log('shutdown requested')
+                    return
+                resp = self.handle(req)
+                resp['seq'] = seq
+                resp.setdefault('ok', True)
+                print(json.dumps(resp), flush=True)
+            except Exception as e:   # noqa: BLE001 — protocol boundary: EVERY failure
+                # becomes a loud error response (+ stderr trace); never a swallow.
+                err = {'seq': seq, 'error': f'{type(e).__name__}: {e}',
+                       'traceback': traceback.format_exc()}
+                print(json.dumps(err), flush=True)
+                log(f'op failed: {err["error"]}')
+
+
+if __name__ == '__main__':
+    Daemon().run()
