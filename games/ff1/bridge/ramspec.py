@@ -39,7 +39,8 @@ CURSOR = 0x62              # reference/variables.inc :: cursor (OB menu cursor)
 CURSOR_MAX = 0x63          # reference/variables.inc :: cursor_max
 NAMECURS_X = 0x64          # reference/variables.inc :: namecurs_x (name-entry grid cursor)
 NAMECURS_Y = 0x65          # reference/variables.inc :: namecurs_y
-SM_PLAYER_X = 0x68         # reference/variables.inc :: sm_player_x (direct pos on standard maps)
+SM_PLAYER_X = 0x68         # reference/variables.inc :: sm_player_x — ⚠ STALE after menu/shop
+                           #   screens (P1-R); player_tile() uses (sm_scroll+7)&$3F instead
 SM_PLAYER_Y = 0x69         # reference/variables.inc :: sm_player_y
 BTLFORMATION = 0x6A        # reference/variables.inc :: btlformation (pending formation id)
 DESCBOXOPEN = 0x7F         # reference/variables.inc :: descboxopen
@@ -310,10 +311,14 @@ def in_battle(read: Read) -> bool:
 
 
 def player_tile(read: Read) -> tuple[int, int]:
-    """Player map tile. Overworld: scroll+7 (bank_0F 'ADC #7' — P0-R verified);
-    standard maps: sm_player_x/y directly."""
+    """Player map tile from the scroll registers + 7 (bank_0F 'ADC #7 ; +7 to
+    get player's coord' — P0-R verified). Overworld wraps 256×256 → &$FF;
+    standard maps wrap 64×64 → &$3F. sm_player_x/y ($68/$69) is deliberately
+    NOT used: it goes STALE after menu/shop screens and refreshes only on
+    movement (P1-R: post-shop it read (7,68) while (sm_scroll+7)&$3F matched
+    the post-move sm_player exactly)."""
     if read(MAPFLAGS) & 0x01:
-        return read(SM_PLAYER_X), read(SM_PLAYER_Y)
+        return (read(SM_SCROLL_X) + 7) & 0x3F, (read(SM_SCROLL_Y) + 7) & 0x3F
     return (read(OW_SCROLL_X) + 7) & 0xFF, (read(OW_SCROLL_Y) + 7) & 0xFF
 
 
