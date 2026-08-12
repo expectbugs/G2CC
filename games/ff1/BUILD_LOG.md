@@ -179,6 +179,73 @@ screen-OCR. No behavior change; harness stayed 4/4.
    ff1 harness 5/5. gamelist.md FF1 entry (predates session 1) rides this
    commit with its wording aligned ("verified command entry").
 
+## Ph-B (= PLAN P2) — battle vertical slice
+
+**Session 2 (2026-08-12, continued): Ph-B ~85% BUILT, 13/29-ish harness checks
+green, ONE KNOWN FIX PENDING. Work is committed as a `wip(ff1)` checkpoint
+(run_all shows test_battle red until the fix — expected, documented here).
+SESSION 3 STARTS AT "Ph-B resume point" below.**
+
+### Built this session (code map)
+
+- `bridge/battle.py` — `BattleExecutor`: verified command entry (fight /
+  magic / run) + resolution runner + outro. Read its docstring FIRST — it
+  encodes the battle-menu input discipline (4-frame holds, edge-triggered
+  menus, transition-verified presses) and the full menu model with
+  `reference/bank_0C.asm` lineage. `drop_presses` is the desync-drill hook.
+- `bridge/ff1_daemon.py` — new op `battle_round` (auto-checkpoints
+  `battle round (formation)`, runs executor, response carries
+  `battleRound: {log, result, outcome, frames}`); loads spells.json.
+- `bridge/harness/test_battle.py` — the P2 exit harness: fight×4 byte-exact,
+  fight-until-WON (+ exp/gold asserts), CURE one-ally round, fled variant,
+  desync drill, daemon stdio integration. run_all auto-discovers it.
+- `reference/bank_0C.asm` — vendored battle-bank source (README updated).
+  PLAN §12 **P2-R** carries every finding with detail; §6.3 exp byte order
+  is CLOSED (little-endian, `[7,0,0]` per survivor after the 5-IMP win).
+
+### Ph-B resume point (SESSION 3 STARTS HERE)
+
+test_battle.py fails at check 14: `char 3 ally cycle: no effect` — the CURE
+ally-picker Down presses land nowhere. ROOT CAUSE (established by probes, do
+NOT re-derive): the spell-select A uses the standard 4-frame hold, and the
+one-ally picker opens FAST enough that the held A gets re-sampled by the
+picker as a fresh edge → instant auto-confirm at default target (slot 0,
+byte 0x80). After that the game is resolving, so the cycle presses are dead.
+`curs == (16,0)` reads identically in both states — the RELIABLE
+disambiguator is the cmdbuf row: **unwritten ⇒ picker live; already
+`40 xx 8x 00` ⇒ double-consumed** (a 2-frame A + Down was PROVEN to open the
+picker live and move `btlcurs_y` 0→1 in the session probes).
+
+1. In `battle.py` `_enter_spell_target` (one-ally AND one-enemy spell paths):
+   give the spell-select A a **2-frame hold** (add a `hold=` param to
+   `_bpress`/`bpress_verified`; default stays 4), and after the picker-open
+   cond fires assert `self.cmdbuf(ch)[0] != 0x40` — if the row is already
+   written, raise BattleDesync (the pre-round checkpoint recovers; do not
+   try to un-enter). Consider the same 2-frame hold for the fight→enemy-
+   picker A (it has the same shape; it happens to pass today because
+   SelectEnemyTarget preps longer — do not rely on that).
+2. Re-run `./venv/bin/python bridge/harness/test_battle.py` — expect the CURE
+   round green (`rows[3] == (0x40, 0x00, 0x82, 0x00)`, MP 1→0, log mentions
+   CURE), then the UNRUN sections: fled variant (all-run rounds until
+   `outcome == 'ran'`), desync drill (dropped `char 0 fight confirm` must
+   raise BattleDesync with cmdbuf row 0 untouched, pre-round savestate
+   recovers, clean re-entry), daemon integration (battle_round op + undo).
+   Iterate LOUDLY on whatever they surface — they have never executed.
+3. `./venv/bin/python bridge/harness/run_all.py` → expect **6/6**.
+4. §6 light gate (typecheck + server run-all 36/37 baseline + forbidden-
+   pattern grep over the Ph-B diff), then commit
+   `feat(ff1): Ph-B — battle vertical slice` + push, then Ph-C (HANDOFF §5).
+
+### Ph-B deferrals (intentional, don't chase)
+
+- DRINK/ITEM entry paths: raise loudly; need a potion-holding fixture (buy
+  HEAL at the Coneria item shop (27,10) with the existing shop machinery —
+  natural Ph-E work when grind loops land).
+- Magic pages L5-8 (Down-at-row-3 page flip): deferred until a leveled
+  fixture exists; `battle.py` raises loudly on level > 4.
+- `probe_layout.py` grew no battle regions — REGION_BTL_* in screens.py
+  were probed in session 1 and reconfirmed live this session.
+
 ### Ph-A findings your next actions depend on (quick recall)
 
 - Daemon runs from `games/ff1` cwd: `./venv/bin/python -u bridge/ff1_daemon.py`.

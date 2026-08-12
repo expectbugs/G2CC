@@ -32,6 +32,7 @@ import numpy as np
 BRIDGE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BRIDGE))
 
+import battle as battlemod
 import macros
 import ramspec
 import screens
@@ -81,6 +82,7 @@ class Daemon:
         self.undo = UndoRing()
         self.rng_jitter = True
         self.enemies = json.loads((DATA / 'enemies.json').read_text())['enemies']
+        self.spells = json.loads((DATA / 'spells.json').read_text())['spells']
         self.charmap_std = {int(k, 16): v
                             for k, v in json.loads((DATA / 'charmap.json').read_text())['standard'].items()}
         self.char_encode = {v: k for k, v in self.charmap_std.items() if len(v) == 1 and v != ' '}
@@ -274,6 +276,28 @@ class Daemon:
         return {'png': base64.b64encode(buf.getvalue()).decode(),
                 'w': int(img.shape[1]), 'h': int(img.shape[0]),
                 'frameHash': emu.frame_hash()}
+
+    def op_battle_round(self, req: dict) -> dict:
+        """One battle round: verified command entry + resolution (§7.1).
+        commands: [{char, action: fight|magic|run, target?, level?, slot?}]."""
+        emu = self.need_emu()
+        if not emu.in_battle():
+            raise RuntimeError('battle_round: not in a battle')
+        cmds = [battlemod.CharCommand(
+            char=int(c['char']), action=str(c['action']),
+            target=(int(c['target']) if c.get('target') is not None else None),
+            level=int(c.get('level', 0)), slot=int(c.get('slot', 0)))
+            for c in req.get('commands', [])]
+        if not cmds:
+            raise ValueError('battle_round: commands must be non-empty')
+        self.checkpoint('battle round ' + self._formation_label())
+        ex = battlemod.BattleExecutor(emu, self.spells)
+        ex.enter_round(cmds)
+        rr = ex.run_resolution()
+        out = self.snapshot()
+        out['battleRound'] = {'log': rr.log, 'result': rr.result,
+                              'outcome': rr.outcome, 'frames': rr.frames}
+        return out
 
     def op_undo_list(self, _req: dict) -> dict:
         return {'checkpoints': self.undo.listing()}

@@ -284,7 +284,10 @@ cites `reference/variables.inc :: <label>` per address.
 ### 6.3 Remaining gaps (spike items — small now)
 - **Clean "in battle" boolean** — RESOLVED P0-R: `$81 == $68`.
 - **Gold byte order** — RESOLVED P0-R: little-endian. **exp byte order** —
-  still open; read after the first Ph-B battle win (fresh file reads 0).
+  **RESOLVED P2 (2026-08-12, session 2): LITTLE-ENDIAN** — after the first
+  harness battle win each survivor's `ch_exp` read `[7, 0, 0]` (30 exp from
+  5 IMPs split 4 ways); gold reward +30 corroborates. `read_char`'s low-first
+  decode is correct as written.
 - **MP cur/max order** — **RESOLVED P1-R 2026-08-12: $6320=cur / $6328=max**
   (live CURE cast; disassembly right, Data Crystal wrong).
 - **Out-of-battle menu state machine** — P1-R: cursor `$62`/`$63` + scrape
@@ -570,6 +573,58 @@ addresses (§6.2; live-confirm them + find the in-battle boolean, §6.3),
 resolution scrape → battle log. One full authentic round in harness; desync
 drill (deliberately drop a press → loud halt). **Exit: a scripted battle
 plays end-to-end with byte-exact log.**
+
+**P2-R — FINDINGS (2026-08-12 session 2; build ~85% done, one known fix
+pending — resume point + code map in BUILD_LOG "Ph-B"). Authority class of
+P0-R/P1-R; the battle-menu semantics were READ from the now-vendored
+`reference/bank_0C.asm`, then live-verified:**
+- **The battle engine's input rules are the OPPOSITE of the overworld's.**
+  bank_0C menus poll per frame-ish with EDGE detection (`MenuSelection_2x4`:
+  `DoFrame_WithInput` vs `btlinput_prevstate`, delay counter for repeats). A
+  held button that spans a submenu transition is re-sampled by the NEXT menu
+  as a fresh edge: an 8-frame A hold on the battle spell menu instantly
+  auto-confirmed the ally-target picker at its home position (default target
+  = party slot 0). Discipline (encoded in `bridge/battle.py`): **4-frame
+  holds + 20 released frames + every press verified by a TRANSITION**, with
+  bounded retries (short presses can still be eaten — the magic-draw path
+  samples on a ~5-frame cadence).
+- **Command menu 2×4:** (0,0) FIGHT (0,1) MAGIC (0,2) DRINK (0,3) ITEM,
+  column 1 RUN. `btlcurs` y wraps through 255 transiently — never trust raw
+  cursor values outside verified transitions.
+- **FIGHT:** A → enemy picker (`btlcmd_target` live-tracks; Down cycles the
+  ALIVE slots), A confirms → cmdbuf `04 10 target 00` (effect byte $10 is an
+  observed constant). Picker slot n = enemy slot n (identity); resolution
+  ORDER is initiative-shuffled, so damage lands out of entry order — pair
+  effects to targets by RAM deltas, never by message order.
+- **MAGIC:** A → spell menu (page 0 = L1-4 rows, page 1 = L5-8 via Down at
+  row 3; x = slot 0-3 within the level; empty slot or 0 MP → "Nothing" box
+  and the submenu restarts). Spell-select A pre-fills the cmdbuf row; target
+  byte encoding (variables.inc block comment, live-confirmed): `0x` enemy
+  slot, `8x` party slot, `FF` all enemies, `FE` whole party. One-ally spells
+  open `SelectPlayerTarget`; the chosen ally = `btlcurs_y & 3` AT CONFIRM.
+- **The ally picker has NO live-trackable selection var** — `btlcmd_target`
+  does not track allies, the highlight is VRAM-only (nametable blink), and
+  `curs=(16,0)` reads identically whether the picker is live or was just
+  auto-confirmed. Disambiguator: the cmdbuf row — **unwritten ⇒ picker live;
+  already `40 …` ⇒ the A double-consumed** (see BUILD_LOG resume note).
+- **cmdbuf persists across rounds** (never cleared) — byte equality can NEVER
+  verify a press landed; only transitions (curchar advance, combat-box
+  change) can. The byte-exact §7.1 check compares AFTER a verified
+  transition.
+- **Round end** = `btlcmd_curchar` back to the FIRST LIVING slot (char 0 can
+  die) + cursor home + roster box scraping, sustained 10 frames. Static-frame
+  detection CANNOT end a round — message dwells hold static 40+ frames.
+- **Battle end** = `btl_result` 1/2/3. **$81 flips away from $68 BEFORE the
+  victory boxes finish**, and the victory screen's own party pane
+  misclassifies as 'dialog' — the outro must run until the CLASSIFIER reaches
+  ow/sm. Outro any-key boxes advance on B (an A carried onto the map opens
+  "Nothing here."). Party-dead (result 1): game-over screen is terminal — no
+  outro wait.
+- **Verified end-to-end in harness** (test_battle.py, 13 checks green before
+  the pending fix): FIGHT×4 byte-exact rows; full 4-round battle WON with
+  stable message log ("Terminated", "Monsters perished"); outro → overworld;
+  gold +30; exp little-endian (§6.3 closed). CURE/fled/drill/daemon sections
+  written but blocked behind the ally-picker fix.
 
 **P3 — Window integration.** `Ff1Controller` (games.ts level `'ff1'`),
 battle + menus on glass, preview()/summary()/statusLine(), Postgres autosave +

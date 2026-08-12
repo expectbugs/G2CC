@@ -14,6 +14,7 @@ the AUTHORITY for `bridge/ramspec.py` and `data/charmap.json` — cite as
 | `ff1_ram_map.txt` | Data Crystal RAM map snapshot (datacrystal.tcrf.net/wiki/Final_Fantasy/RAM_map, 2024-01-24 revision) | lynx dump 2026-08-12 |
 | `ff1_rom_map.txt` | Data Crystal ROM map snapshot | lynx dump 2026-08-12 |
 | `ff1_tasvideos.txt` | TASVideos GameResources/NES/FinalFantasy1 snapshot (RNG tables + formulas) | fetched 2026-08-12 |
+| `bank_0C.asm` | Battle engine bank source — the battle MENU semantics authority (MenuSelection_2x4 edge-triggered input, SelectPlayerTarget/SelectEnemyTarget, BattleSubMenu_Magic index math, cmdbuf write sites). Vendored at Ph-B when the menu behavior had to be read, not guessed. | github.com/Entroper/FF1Disassembly @ master, fetched 2026-08-12 |
 
 License note: the disassembly ships no LICENSE file; its readme states "This can
 be used for whatever means you want" (Disch, informal permissive). Private-repo
@@ -21,5 +22,6 @@ reference use. Where Data Crystal and the disassembly disagree (MP cur/max
 order, vehicle addr), **the disassembly wins** — it reassembles to the exact US
 ROM — but PLAN.md flags each conflict for a live-RAM sanity check anyway.
 
-Full bank sources (battle engine bank_0C, dialogue/RNG bank_0F, etc.) are NOT
-vendored — clone github.com/Entroper/FF1Disassembly when needed.
+Other full bank sources (dialogue/RNG bank_0F, menus bank_0E, etc.) are NOT
+vendored — clone github.com/Entroper/FF1Disassembly when needed. bank_0C IS
+vendored (above) since Ph-B's executor cites it line-by-line.

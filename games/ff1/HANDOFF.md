@@ -1,17 +1,23 @@
 # FF1 One-Shot Build — Fresh-Session Handoff
 
-> **⏩ SESSION 2+ RESUME (2026-08-12): Ph-A (P1) is ~90 % done and 4/4 green
-> on its harness — a prior session built the daemon/scraper/classifier/data
-> layer and decoded the Coneria shop/menu/dialog flows. DO NOT restart Ph-A.**
-> Read, in order: (1) this doc, (2) `PLAN.md` §12 **P0-R AND P1-R** (P1-R
-> carries session 1's hard-won findings: settle K=12 fade rule, press-eating,
-> condensed-vs-standard rendering, position masks, the decoded shop/menu
-> flows), (3) **`BUILD_LOG.md` "Ph-A open items"** — the exact ordered
-> resume point (first action: the `player_tile` sm mask fix). Journey
-> savestates for the harness live in `bridge/spike_out/*.npy` (gitignored,
-> on disk — see BUILD_LOG for what each contains). A `wip(ff1)` checkpoint
-> commit holds session 1's tree; finish the open items, run the §6 gate,
-> then commit the real `feat(ff1): Ph-A …` and continue to Ph-B (§5).
+> **⏩ SESSION 3+ RESUME (2026-08-12 evening): Ph-A (P1) is COMPLETE —
+> committed `b30659f` and pushed (daemon, scraper, classifier, data files,
+> 9 committed journey fixtures, harness was 5/5 at that commit). Ph-B (P2)
+> is ~85 % BUILT and sits in a `wip(ff1)` checkpoint commit: the battle
+> executor works end-to-end for FIGHT (a full 4-round battle is WON in
+> harness, byte-exact command buffers, message log, outro, exp/gold
+> verified) — one known fix is pending on the CURE ally-picker path, and
+> the fled/desync-drill/daemon test sections have never run. DO NOT restart
+> Ph-A or Ph-B.** Read, in order: (1) this doc, (2) `PLAN.md` §12 **P0-R,
+> P1-R, AND P2-R** (P2-R = the battle-menu model: edge-triggered input,
+> 4-frame holds, cmdbuf semantics, round/battle-end signals — all
+> live-verified against the vendored `reference/bank_0C.asm`), (3)
+> **`BUILD_LOG.md` "Ph-B resume point"** — the exact next action (a
+> 2-frame-hold fix in `battle.py` `_enter_spell_target`, root cause already
+> established there; then finish test_battle.py, run_all 6/6, §6 gate,
+> commit `feat(ff1): Ph-B …`, push, continue to Ph-C per §5). Journey
+> savestates live in `bridge/spike_out/*.npy` (gitignored, on disk);
+> committed fixtures in `bridge/harness/fixtures/`.
 
 **You are building the FF1-on-G2 window, fully automated, end to end, in one
 run.** Adam is at work and will not answer questions — every decision is
