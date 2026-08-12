@@ -280,6 +280,24 @@ structure. No clock.
 
 ---
 
+## Final Fantasy 1 (NES) — *P0 SPIKE PASSED 2026-08-12 → `games/ff1/PLAN.md`*
+
+The real FF1 USA ROM (Adam's dump, verified MMC1+battery) run headlessly in `cynes` as a
+game engine: battles/shops/menus/dialogue re-rendered as NATIVE firmware text (RAM reads +
+framebuffer tile-scraping — zero images, full speed), imagery only for map navigation
+(two stacked 256×112 tiles at 1:1, pushed once per step-macro). Campaign: the unfinished
+"One White Mage, Three Black Mages" challenge run, authenticity-guarded.
+
+- **Bridge:** persistent Python daemon (`games/ff1/bridge/`, stt.ts stdio pattern) hosting
+  cynes; savestates → Postgres; `.sav` export for full-speed home play. Full spec, RAM map
+  with source lineage, and phase plan in `games/ff1/PLAN.md`.
+- **G2 fit:** excellent — the battle/menu loop is scroll+tap-native once text-scraped; maps
+  ride step macros with declarative stops (battle/dialog interrupts flip to text views).
+- **Effort:** Medium-High (the scraper + verified command entry are the new machinery;
+  window side reuses pc/bj patterns).
+
+---
+
 ## Notes / open items
 
 - **Slay the Spire** was researched alongside Balatro (its `CommunicationMod` exposes full

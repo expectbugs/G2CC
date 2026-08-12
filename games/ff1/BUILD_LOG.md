@@ -144,22 +144,40 @@ screen-OCR. No behavior change; harness stayed 4/4.
    charge-table anchor (≥4 rows) so the per-char MAGIC page classifies
    'gamemenu' too. All five journey states verify: menu/magicpage →
    gamemenu, dialog → dialog, shop_open → shop, j_town → sm. Harness 4/4.
-4. **Committed fixtures**: `bridge/harness/gen_fixtures.py` replaying
-   spawn→town→shop→buy→menu→cast from `ckpt_overworld.npy` (all steps are
-   already proven; the scratch scripts to distill live in this entry's
-   flows + PLAN P1-R), writing `bridge/harness/fixtures/*.npy` — commit
-   those (≈22 KB each; PLAN §13 open decision 4 → DECIDED: commit binaries).
-   Un-gitignore `bridge/harness/fixtures/` (the ff1 .gitignore currently
-   covers only rom/venv/saves/spike_out — fixtures dir is fine as-is).
-5. **test_journey.py**: replay the fixture chain asserting each stage's
-   scrape text + RAM effects (menu/dialog/shop exact-text = the P1 exit
-   criterion): shop char-select header "Who will learn the spell?", spell
-   list rows, "1OO Gold OK?"→fold, gold 400→300, ch_spells write, menu
-   ITEM/MAGIC/ARMOR anchor, MAGIC 2×2 cursor path, cast → $6320 drop,
-   dialog "Nothing here.", classifier verdicts at every stage.
-6. **Light review gate (§6 HANDOFF)** over the whole Ph-A diff, then commit
-   `feat(ff1): Ph-A — daemon, scraper, classifier, data files` + push.
-   (Session 1 committed a WIP checkpoint instead — see below.)
+4. ~~**Committed fixtures**~~ **DONE session 2**: `gen_fixtures.py` replays the
+   whole journey live from `ckpt_overworld.npy` and writes **9 fixtures**
+   (town_entry, shop_open, shop_bought, town_after_shop, menu_open,
+   magic_page, after_cast, dialog_open, battle_start; 21.9 KB each, 220 KB
+   total, committed). The town route is NOT hand-coded: a savestate BFS
+   probes steps outward (271 tiles mapped, ~1k probes) until the (7,4) door
+   opens the white-magic shop — regeneration survives layout/NPC drift.
+   NOT a run_all stage (it re-walks everything); run manually on flow change.
+   New findings baked into it (each probed live, PNGs in scratch):
+   - **$63 (cursor_max) goes STALE on the MAGIC char panel** (stays 5); the
+     panel-open signal is the $62 cursor RESET 1→0. Down=+2/Right=+1 confirmed.
+   - **Menu cast ends in an any-key HP-result strip** — condensed small-font
+     box, scrapes NOTHING, misreads as 'sm' (it sits below the dialog
+     region). Dismiss (B) before trusting classify; fixture saves the clean
+     magic page after dismissal.
+   - **Battle-stop fires the frame the encounter triggers; the roster box
+     draws later** — battle_start waits for the roster to scrape (settles
+     can catch a static pre-draw moment).
+   - **Encounter-free terrain around Coneria**: battlestep ($F5) ticks only
+     on encounter-capable tiles — (153,165)-(153,169) NEVER tick; first
+     ticking tile (153,170). Recorded in PLAN §6.2 (pace-macro impact).
+     Encounter fired after 29 paces on the ticking tile: 5 IMPs again.
+5. ~~**test_journey.py**~~ **DONE session 2**: 30 checks green against the
+   committed fixtures — classifier verdicts at every stage, exact text
+   ("Nothing here.", "35/ 35", "L 1", "3OO G", "L1 2/2", 1OO/Gold/OK?
+   with the O/0 fold), LIVE purchase replay (cursor path, spell rows
+   CURE/HARM/FOG/RUSE, gold 400→300, ch_spells write) and LIVE cast replay
+   ($6320 drop 2→1, $6328 untouched), battle roster + enemies.json names.
+   run_all auto-discovered it → **harness now 5/5**.
+6. ~~**Light review gate**~~ **DONE session 2**: forbidden-pattern greps clean
+   (no swallowed excepts, no timeouts; every wait frame-budgeted + LOUD);
+   typecheck clean; server smoke 36/37 (the known env calendar red only);
+   ff1 harness 5/5. gamelist.md FF1 entry (predates session 1) rides this
+   commit with its wording aligned ("verified command entry").
 
 ### Ph-A findings your next actions depend on (quick recall)
 

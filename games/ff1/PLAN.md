@@ -267,7 +267,11 @@ cites `reference/variables.inc :: <label>` per address.
 1. **Encounters:** per-step `battlestep` $F5/$F6 → fixed 256-byte table @ CPU
    $F100; thresholds: overworld walk/canoe 10, ship 3, most dungeons 8.
    **Route-deterministic** — same steps, same fights; frame timing irrelevant;
-   macros cannot distort cadence.
+   macros cannot distort cadence. **P1 session-2 verified: battlestep ticks
+   ONLY on encounter-capable terrain — the tiles around Coneria are
+   encounter-FREE ((153,165)-(153,169) never tick; first ticking tile on the
+   spike column is (153,170)). The §8.2 Battle pace macro must verify the
+   counter advances and surface "safe terrain" if it doesn't.**
 2. **Which formation:** `battlecounter` $F7 → same table → 64-entry weight lut
    (12/12/12/12/6/6/3/1). Advances once per encounter.
 3. **In-battle:** `btl_rngstate` **$688A** → its own scramble lut @ $FCF1;
