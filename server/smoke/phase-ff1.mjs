@@ -161,6 +161,71 @@ try {
   assert.equal(ff1.status().daemonNotice, null, 'a successful op clears the notice')
   console.error('  7. watchdog: kill → notice → respawn → savestate restored ✓')
 
+  // ====== Ph-D: the two-tile map pipeline (PLAN §7.2 / P4 exit) ======
+  // Tile-push counter: distinct consecutive (t0,t2) image signatures across
+  // the scene stream — i.e. how many times map tile CONTENT actually changed.
+  const tileSig = (sc) => {
+    const t0 = sc.regions.find((r) => r.name === 't0' && r.kind === 'image')
+    const t2 = sc.regions.find((r) => r.name === 't2' && r.kind === 'image')
+    return t0 && t2 ? `${t0.content.bmpBase64}|${t2.content.bmpBase64}` : null
+  }
+  const countTilePushes = () => {
+    let n = 0, prev = null
+    for (const sc of scenes) {
+      const sig = tileSig(sc)
+      if (sig === null) continue
+      if (sig !== prev) n++
+      prev = sig
+    }
+    return n
+  }
+
+  // --- 8. town fixture → Reload (a macro boundary) → BOTH tiles appear ---
+  await ff1.loadState(npyRawB64(`${FF1_DIR}/bridge/harness/fixtures/town_after_shop.npy`))
+  await games.onReload()   // the op completion fetches the map tiles
+  sc = await settle((x) => tileSig(x) !== null, 'maptiles view (town)')
+  assert.equal(countTilePushes(), 1, 'exactly one tile push for the initial map')
+  assert.ok(menuOf(sc).includes('Peek') && menuOf(sc).includes('↑'), 'map verbs present')
+  const t0r = sc.regions.find((r) => r.name === 't0')
+  const t2r = sc.regions.find((r) => r.name === 't2')
+  assert.equal(`${t0r.w}x${t0r.h}`, '256x110', 'top tile 256x110')
+  assert.equal(`${t2r.w}x${t2r.h}`, '256x112', 'bottom tile 256x112')
+  checkScene(sc, 'map view')
+  console.error('  8. town map → two stacked 1:1 tiles (256x110 + 256x112), one push ✓')
+
+  // --- 9. ONE steps macro (×2) → exactly ONE more tile push, at the boundary ---
+  const posBefore = { ...ff1.cachedSnapshot().state.pos }
+  await games.onMenuSelect('×N')          // step count 1 → 2
+  await games.onMenuSelect('↓')           // one macro: steps down ×2
+  await until(() => {
+    const p = ff1.cachedSnapshot().state.pos
+    return p.x !== posBefore.x || p.y !== posBefore.y
+  }, 'steps macro committed tiles')
+  await until(() => countTilePushes() === 2, 'the boundary tile push landed')
+  assert.equal(countTilePushes(), 2, `one steps macro = one tile push (got ${countTilePushes()})`)
+  console.error('  9. steps ×2 macro → ONE tile push at the boundary (not per step) ✓')
+
+  // --- 10. battle interrupt: NO map pushes mid-battle; win → map returns ---
+  await ff1.loadState(npyRawB64(FIXTURE))
+  wm.requestRender()
+  await settle((x) => menuOf(x).includes('Fight'), 'battle entry (interrupt flip — no map scene)')
+  const pushesAtBattle = countTilePushes()
+  let outcome = 'continue'
+  for (let r = 0; r < 15 && outcome === 'continue'; r++) {
+    const s2 = ff1.cachedSnapshot()
+    const alive = s2.state.battle.enemies.filter((e) => e.alive).sort((a, b) => a.hp - b.hp)
+    const living = s2.state.party.filter((c) => c.alive).map((c) => c.slot)
+    const cmds = living.map((ch, i) => ({ char: ch, action: 'fight', target: alive[Math.min(i, alive.length - 1)].slot }))
+    outcome = (await ff1.battleRound(cmds)).battleRound.outcome
+  }
+  assert.equal(outcome, 'won', 'scripted battle WON')
+  assert.equal(countTilePushes(), pushesAtBattle, 'zero map pushes during the whole battle')
+  await games.onReload()   // macro boundary after the outro → back on the overworld
+  sc = await settle((x) => tileSig(x) !== null && titleOf(x).includes('Overworld'), 'overworld map after the win')
+  assert.equal(countTilePushes(), pushesAtBattle + 1, 'exactly one push for the post-battle map')
+  checkScene(sc, 'post-battle map')
+  console.error('  10. battle: interrupt flip (0 map pushes) → WON → one overworld push ✓')
+
   console.log('phase-ff1: ALL OK')
 } finally {
   await ff1.shutdown('smoke done').catch((e) => console.error(`    shutdown: ${e.message}`))

@@ -115,11 +115,21 @@ def main() -> None:
     check('sram 8KB', len(base64.b64decode(r['sram'])) == 8192)
     check('no inn save yet', r['savePresent'] is False, r)
 
-    # frame op: PNG halves for the map tiles
+    # frame op: PNG halves (diagnostics) + the Ph-D gray4 map crops
     r = c.call('frame', crop='top')
     check('frame top 256x112', r['w'] == 256 and r['h'] == 112)
     png = base64.b64decode(r['png'])
     check('png magic', png[:8] == b'\x89PNG\r\n\x1a\n')
+    r = c.call('frame', crop='map-top', format='gray4')
+    raw = base64.b64decode(r['gray4'])
+    check('gray4 map-top 256x110 payload',
+          r['w'] == 256 and r['h'] == 110 and len(raw) == 4 + 256 * 110
+          and int.from_bytes(raw[0:2], 'little') == 256
+          and int.from_bytes(raw[2:4], 'little') == 110)
+    check('gray4 pixels are nibbles', max(raw[4:]) <= 15)
+    r = c.call('frame', crop='map-bottom', format='gray4')
+    check('gray4 map-bottom 256x112', r['w'] == 256 and r['h'] == 112
+          and len(base64.b64decode(r['gray4'])) == 4 + 256 * 112)
 
     # battle checkpoint label from the battle ckpt
     r = c.call('boot', state=b64_of_ckpt('ckpt_battle.npy'), rngJitter=False)

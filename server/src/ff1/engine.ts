@@ -269,6 +269,16 @@ class Ff1Engine {
     return this.op(async (b) => { await b.request('checkpoint', { label }) })
   }
 
+  /** One gray4 map crop (raw u16w/u16h/pixels payload, b64) — the Ph-D
+   *  two-tile pipeline (PLAN §7.2). Read-only: no checkpoint, no persist. */
+  frameGray4(crop: 'map-top' | 'map-bottom'): Promise<{ gray4: string; w: number; h: number; frameHash: string }> {
+    return this.op(async (b) => {
+      const r = await b.request('frame', { crop, format: 'gray4' })
+      if (typeof r['gray4'] !== 'string') throw new Error(`frame ${crop}: daemon returned no gray4 payload`)
+      return { gray4: r['gray4'], w: Number(r['w']), h: Number(r['h']), frameHash: String(r['frameHash']) }
+    })
+  }
+
   /** Load a raw savestate (smoke fixtures; Ph-E slots). Persists — the loaded
    *  state IS the new latest. */
   loadState(stateB64: string): Promise<Ff1Snapshot> {

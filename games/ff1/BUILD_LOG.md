@@ -322,6 +322,47 @@ crawl) — correct, it IS a text screen; round 1 on the 5-IMP fixture kills
 1 IMP deterministically (rngJitter false), so asserts on "5 alive" only
 hold at round START (the smoke's undo assert).
 
+## Ph-D (= PLAN P4) — maps
+
+**Session 3 (2026-08-12, continued): Ph-D COMPLETE (off-glass exit).**
+
+Built:
+- **Geometry decision:** PLAN's two 256×112 tiles can't exist — the DE content
+  pane is 222 px tall (2×112=224) and `encodeGray4Single` requires EVEN BMP
+  heights (111+111 illegal). Shipped **256×110 + 256×112** (9 px overscan trim
+  per side, 222 rows exactly). PLAN §7.2 updated with the lineage.
+- Daemon `op_frame` grew crops `map-top`/`map-bottom` + `format:'gray4'` —
+  ITU-601 luma → 4-bit, emitted as the exact `encodeGray4Single` payload
+  (u16 w/h + pixel bytes), so the server-side conversion IS the existing
+  tile machinery (all-black guard + 288×129 caps included). PNG crops stay
+  for diagnostics. test_daemon +3 checks (27 total).
+- os-compose: new mode `'maptiles'` (top=t0 @ FF1_MAP_TOP_RECT, bottom=t2 @
+  FF1_MAP_BOTTOM_RECT — the hands-mode independent-region discipline), in
+  BOTH compose paths (menu shell + fullBleed/ribbon placeImageRegions).
+- Engine `frameGray4(crop)` (read-only op — no checkpoint, no persist).
+- Controller: `syncMapTiles()` runs at **op completions only** (the §7.2
+  one-push-per-macro policy — we own the clock); per-tile raw-payload change
+  keys re-encode/re-push ONLY changed tiles; seq-guarded; `Peek` = forced
+  refresh; LOUD text fallback on fetch failure. Map view = maptiles mode
+  with verbs ↑↓←→ ×N A B Menu Peek Undo Main. Interrupts win for free:
+  battle/dialog screens aren't maps, so no fetch happens mid-flow.
+  Bonus fix: battle entry state now keys on battlecounter ($F7) so a stale
+  half-collected entry from an abandoned battle can't leak into a new one.
+
+phase-ff1.mjs stages 8-10 (the P4 exit criterion): town fixture → both tiles
+push ONCE (256×110/256×112 asserted); ONE steps-×2 macro → exactly ONE more
+push at the boundary (not per step); battle fixture → ZERO map pushes through
+a full engine-driven 4-round WIN; post-outro Reload → exactly one overworld
+push. Scene PNG (scene_to_png over the captured WireScene): Coneria renders
+1:1, seamless tile join, client-rule check OK.
+
+Results: typecheck/build clean; ff1 harness 6/6 (133 checks total); server
+run-all **37/38** (the known calendar env red only).
+
+On-glass items deferred to the §11 checklist: real push-latency measurements
+(PLAN §7.2 records them), gray-ramp legibility (the >>4 luma mapping), Peek
+feel.
+
 ### Ph-B deferrals (intentional, don't chase)
 
 - DRINK/ITEM entry paths: raise loudly; need a potion-holding fixture (buy

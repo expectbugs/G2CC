@@ -333,10 +333,13 @@ IMP C: FIGHTER — 4 DMG.
 - Round cost on glass: native entry ≈ instant; one text update per resolution.
 
 ### 7.2 Maps (overworld / town / dungeon) — the only imagery
-- **Two stacked 256×112 tiles at 1:1** (256×224 visible area, 8 px overscan
-  trimmed) — pixel-sharp, each tile under the ≤288×129 cap; per-tile hash →
-  re-push ONLY changed tiles (blackjack pattern). All-black-tile rule guarded:
-  black floors to gray-level-1 during gray4 conversion.
+- **Two stacked 256-wide tiles at 1:1** — pixel-sharp, each under the ≤288×129
+  cap; per-tile change key → re-push ONLY changed tiles (blackjack pattern).
+  **P4-BUILT geometry: 256×110 + 256×112 (9 px overscan trim each side, 222
+  rows total)** — the original 2×112 spec can't fit the 222 px DE content pane
+  and BMP heights must be even (os-compose FF1_MAP_*_RECT; daemon frame op
+  crops 'map-top'/'map-bottom', format 'gray4' = the encodeGray4Single payload
+  whose all-black guard covers the black-tile rule).
 - **Push policy: one push per completed macro.** We own the clock — the screen
   cannot change while Adam reads. No stability timers, no per-step pushes.
 - Verbs: `↑ ↓ ← →` (step ×N), `×N` (cycle 1/2/3/5/8), `A` (talk/search),

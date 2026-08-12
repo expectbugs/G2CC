@@ -19,7 +19,7 @@ import {
 } from '@g2cc/shared'
 import type { WireScene, SceneRegion, RegionStyle } from '@g2cc/shared'
 
-export type WinMode = 'tiles' | 'tile' | 'browse' | 'text' | 'twocol' | 'hands'
+export type WinMode = 'tiles' | 'tile' | 'browse' | 'text' | 'twocol' | 'hands' | 'maptiles'
 
 /** Browse-mode menu behavior (docs/DE_DESIGN.md §2, revised 2026-06-10;
  *  the 'antenna' per-notch preview mode was REVERTED 2026-06-11 — Adam: "feels
@@ -70,6 +70,14 @@ export interface WinView {
    *  placeholder until the first render lands, then keeps the last bmp. */
   dealerTile?: string
   playerTile?: string
+  /** maptiles mode (FF1 maps, games/ff1/PLAN.md §7.2): the NES viewport as two
+   *  stacked INDEPENDENT 1:1 tiles at the fixed FF1_MAP_*_RECT geometry (top
+   *  256×110 + bottom 256×112 — the 222 px content pane can't hold PLAN's
+   *  2×112, and BMP heights must be even). Independent regions so the client
+   *  re-pushes only the tile whose bytes changed. A null tile is omitted (the
+   *  controller text-fallbacks until the first frame fetch lands). */
+  topTile?: string
+  bottomTile?: string
 }
 
 /** Single-tile mode geometry — the classic proven 200×100, centered. */
@@ -84,6 +92,13 @@ export const SINGLE_TILE_H = 100
 export const BJ_DEALER_RECT = { x: DE_CONTENT_X + 8, y: DE_CONTENT_Y + 8, w: 176, h: 60 }
 export const BJ_PLAYER_RECT = { x: DE_CONTENT_X + 8, y: DE_CONTENT_Y + 80, w: 192, h: 64 }
 export const BJ_TEXT_RECT = { x: DE_CONTENT_X + 208, y: DE_CONTENT_Y + 4, w: DE_CONTENT_W - 212, h: DE_CONTENT_H - 8 }
+
+/** FF1 map layout (games/ff1/PLAN.md §7.2): the 256-wide NES viewport 1:1,
+ *  centered, as two stacked independent tiles filling the 222 px content pane
+ *  exactly (110 + 112 — see the WinView maptiles note for why not 2×112).
+ *  Both under the 288×129 single-image client cap. */
+export const FF1_MAP_TOP_RECT = { x: DE_CONTENT_X + ((DE_CONTENT_W - 256) >> 1), y: DE_CONTENT_Y, w: 256, h: 110 }
+export const FF1_MAP_BOTTOM_RECT = { x: DE_CONTENT_X + ((DE_CONTENT_W - 256) >> 1), y: DE_CONTENT_Y + 110, w: 256, h: 112 }
 
 export interface TabSpec {
   label: string
@@ -381,6 +396,23 @@ export function composeScene(view: WinView, tabs: TabSpec[], statusLeft: string,
       kind: 'text', style: { ...CHROME, padding: 4 },
       content: { kind: 'text', text: view.text ?? '' },
     })
+  } else if (view.mode === 'maptiles') {
+    // FF1 maps: two stacked independent 1:1 tiles (top=t0, bottom=t2) at fixed
+    // geometry — only a changed tile's bytes re-push (hands-mode discipline).
+    if (view.topTile) {
+      regions.push({
+        id: DE_REGION_IDS.tile0, name: 't0',
+        x: FF1_MAP_TOP_RECT.x, y: FF1_MAP_TOP_RECT.y, w: FF1_MAP_TOP_RECT.w, h: FF1_MAP_TOP_RECT.h,
+        kind: 'image', content: { kind: 'image', bmpBase64: view.topTile },
+      })
+    }
+    if (view.bottomTile) {
+      regions.push({
+        id: DE_REGION_IDS.tile2, name: 't2',
+        x: FF1_MAP_BOTTOM_RECT.x, y: FF1_MAP_BOTTOM_RECT.y, w: FF1_MAP_BOTTOM_RECT.w, h: FF1_MAP_BOTTOM_RECT.h,
+        kind: 'image', content: { kind: 'image', bmpBase64: view.bottomTile },
+      })
+    }
   } else {
     regions.push({
       id: DE_REGION_IDS.contentText, name: 'content', x: DE_CONTENT_X, y: DE_CONTENT_Y, w: DE_CONTENT_W, h: contentH,
@@ -533,7 +565,7 @@ export function composeFullBleedScene(
       id: DE_REGION_IDS.contentRight, name: 'content2', x: colW + 6, y: DE_BAR_H, w: colW, h: contentH,
       kind: 'text', content: { kind: 'text', text: clampCol(view.textRight ?? '', 'fb-twocol-right') },
     })
-  } else if (view.mode === 'tiles' || view.mode === 'tile' || view.mode === 'hands') {
+  } else if (view.mode === 'tiles' || view.mode === 'tile' || view.mode === 'hands' || view.mode === 'maptiles') {
     // Image modes keep the proven tile geometry (DE_CONTENT_*-relative); only the
     // menu/chrome reclaim applies. Delegate to the classic placement by reusing the
     // same rects the proven path uses (the left 96 px is simply unused now).
@@ -593,6 +625,15 @@ function placeImageRegions(view: WinView, regions: SceneRegion[]): void {
       id: DE_REGION_IDS.tile0, name: 't0',
       x: DE_CONTENT_X + ((DE_CONTENT_W - SINGLE_TILE_W) >> 1), y: DE_CONTENT_Y + ((DE_CONTENT_H - SINGLE_TILE_H) >> 1),
       w: SINGLE_TILE_W, h: SINGLE_TILE_H, kind: 'image', content: { kind: 'image', bmpBase64: tile },
+    })
+  } else if (view.mode === 'maptiles') {
+    if (view.topTile) regions.push({
+      id: DE_REGION_IDS.tile0, name: 't0', x: FF1_MAP_TOP_RECT.x, y: FF1_MAP_TOP_RECT.y, w: FF1_MAP_TOP_RECT.w, h: FF1_MAP_TOP_RECT.h,
+      kind: 'image', content: { kind: 'image', bmpBase64: view.topTile },
+    })
+    if (view.bottomTile) regions.push({
+      id: DE_REGION_IDS.tile2, name: 't2', x: FF1_MAP_BOTTOM_RECT.x, y: FF1_MAP_BOTTOM_RECT.y, w: FF1_MAP_BOTTOM_RECT.w, h: FF1_MAP_BOTTOM_RECT.h,
+      kind: 'image', content: { kind: 'image', bmpBase64: view.bottomTile },
     })
   } else {   // hands
     if (view.dealerTile) regions.push({

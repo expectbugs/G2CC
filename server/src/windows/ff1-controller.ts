@@ -22,6 +22,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { WmContext, WinView } from './types.js'
 import { paginateText, fwTextWidth } from '../os-compose.js'
+import { encodeGray4Single } from '../os-content.js'
 import { browsePageItems } from './_browse.js'
 import { ff1, type Ff1EngineConfig } from '../ff1/engine.js'
 import { FF1_DIR } from '../ff1/bridge.js'
@@ -61,6 +62,9 @@ interface EntryState {
   commands: Ff1CharCommand[]
   /** A pending action awaiting its target pick (battle-target level). */
   pendingAction: { action: 'fight' | 'magic'; level?: number; slot?: number; spell?: SpellMeta } | null
+  /** battlecounter ($F7) at entry start — a DIFFERENT battle (new encounter
+   *  while a stale entry lingered) rebuilds the collection from scratch. */
+  battleKey: number
 }
 
 function col(s: string, maxPx = 222): string {
@@ -83,6 +87,15 @@ export class Ff1Controller {
   private undoOffset = 0
   private pendingUndo: Ff1Checkpoint | null = null
   private returnLevel: Ff1Level = 'root'      // where Undo's Back returns to
+  // --- Ph-D map tiles (PLAN §7.2): encoded bmps + raw-payload change keys.
+  // Fetched ONLY at op completions (one push per completed macro — we own the
+  // clock); a tile re-encodes/re-pushes only when its bytes changed.
+  private mapTop: string | null = null
+  private mapBottom: string | null = null
+  private mapTopKey: string | null = null
+  private mapBottomKey: string | null = null
+  private mapFailed: string | null = null
+  private mapSeq = 0
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -100,6 +113,7 @@ export class Ff1Controller {
     this.opError = null
     void ff1.ensureStarted(this.cfg()).then(async () => {
       await ff1.state()   // fresh classify for the root view
+      this.syncMapTiles()
       this.requestRender()
     }).catch((e: unknown) => {
       this.ctx.log(`[os] ff1: engine start failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -145,7 +159,11 @@ export class Ff1Controller {
 
   // ------------------------------------------------ op plumbing
 
-  /** Run one engine op with the busy-guard + LOUD error surfacing. */
+  /** Run one engine op with the busy-guard + LOUD error surfacing. Every
+   *  completion is a MACRO BOUNDARY: if the game is on a map screen, the two
+   *  map tiles refresh exactly once here (§7.2 push policy — never mid-op,
+   *  never on a timer; interrupts win because a battle/dialog screen simply
+   *  isn't a map, so no fetch happens). */
   private runOp(label: string, fn: () => Promise<unknown>, after?: (r: unknown) => void): void {
     if (this.opBusy) { this.ctx.log(`[os] ff1: '${label}' while '${this.opBusy}' runs — ignored (LOUD)`); return }
     this.opBusy = label
@@ -154,11 +172,44 @@ export class Ff1Controller {
     void fn().then((r) => {
       this.opBusy = null
       if (after) after(r)
+      this.syncMapTiles()
       this.requestRender()
     }).catch((e: unknown) => {
       this.opBusy = null
       this.opError = e instanceof Error ? e.message : String(e)
       this.ctx.log(`[os] ff1: ${label} FAILED: ${this.opError}`)
+      this.requestRender()
+    })
+  }
+
+  /** Fetch both map crops and re-encode ONLY the changed one(s). No-op off
+   *  map screens. `force` (Peek) drops the change keys first. Seq-guarded so
+   *  a superseded fetch can't paint stale tiles. */
+  private syncMapTiles(force = false): void {
+    const snap = this.snap()
+    if (!snap || (snap.screen !== 'ow' && snap.screen !== 'sm')) return
+    if (force) { this.mapTopKey = null; this.mapBottomKey = null }
+    const seq = ++this.mapSeq
+    void (async () => {
+      const [top, bottom] = await Promise.all([ff1.frameGray4('map-top'), ff1.frameGray4('map-bottom')])
+      if (seq !== this.mapSeq) return
+      let changed = false
+      if (top.gray4 !== this.mapTopKey) {
+        this.mapTop = encodeGray4Single(Buffer.from(top.gray4, 'base64'), 'ff1 map-top').bmpBase64
+        this.mapTopKey = top.gray4
+        changed = true
+      }
+      if (bottom.gray4 !== this.mapBottomKey) {
+        this.mapBottom = encodeGray4Single(Buffer.from(bottom.gray4, 'base64'), 'ff1 map-bottom').bmpBase64
+        this.mapBottomKey = bottom.gray4
+        changed = true
+      }
+      this.mapFailed = null
+      if (changed) this.requestRender()
+    })().catch((e: unknown) => {
+      if (seq !== this.mapSeq) return
+      this.mapFailed = e instanceof Error ? e.message : String(e)
+      this.ctx.log(`[os] ff1: map tile fetch FAILED: ${this.mapFailed}`)
       this.requestRender()
     })
   }
@@ -173,7 +224,7 @@ export class Ff1Controller {
 
   private beginEntry(snap: Ff1Snapshot): void {
     const living = snap.state.party.filter((c) => c.alive).map((c) => c.slot)
-    this.entry = { living, idx: 0, commands: [], pendingAction: null }
+    this.entry = { living, idx: 0, commands: [], pendingAction: null, battleKey: snap.state.battlecounter }
     this.level = 'root'
   }
 
@@ -283,12 +334,20 @@ export class Ff1Controller {
       case 'ow':
       case 'sm': {
         const where = snap.screen === 'ow' ? 'Overworld' : `Map ${s.pos.mapId}`
-        return {
-          mode: 'text',
-          title: `FF1 · ${where} (${s.pos.x},${s.pos.y}) ×${STEP_COUNTS[this.stepIdx]}${busy}`,
-          menu: ['↑', '↓', '←', '→', '×N', 'A', 'B', 'Menu', 'Undo', 'Main'],
-          text: `${err}${partyLine}\n${s.gold} G · ${s.pos.vehicle} · facing ${s.pos.facing}\n\n(map tiles land in Ph-D — text placeholder)\nsteps ×${STEP_COUNTS[this.stepIdx]} per direction tap`,
+        const title = `FF1 · ${where} (${s.pos.x},${s.pos.y}) ×${STEP_COUNTS[this.stepIdx]}${busy}`
+        const menu = ['↑', '↓', '←', '→', '×N', 'A', 'B', 'Menu', 'Peek', 'Undo', 'Main']
+        if (!this.mapTop || !this.mapBottom) {
+          // Text fallback until the first tile fetch lands (or after a LOUD
+          // fetch failure — Peek retries; the game state is untouched).
+          const why = this.mapFailed
+            ? `map tiles FAILED: ${this.mapFailed}\nPeek retries.`
+            : '⏳ map tiles rendering…'
+          return {
+            mode: 'text', title, menu,
+            text: `${err}${why}\n\n${partyLine}\n${s.gold} G · ${s.pos.vehicle} · facing ${s.pos.facing}`,
+          }
         }
+        return { mode: 'maptiles', title, menu, topTile: this.mapTop, bottomTile: this.mapBottom }
       }
       case 'dialog':
         return {
@@ -329,7 +388,7 @@ export class Ff1Controller {
   /** Battle command entry (§7.1): our menus, per living char. */
   private entryView(snap: Ff1Snapshot, err: string, busy: string): WinView {
     const b = snap.state.battle!
-    if (!this.entry) this.beginEntry(snap)
+    if (!this.entry || this.entry.battleKey !== snap.state.battlecounter) this.beginEntry(snap)
     const e = this.entry!
     const ch = this.entryChar(snap)
     const left: string[] = [col(this.formation(snap))]
@@ -487,6 +546,7 @@ export class Ff1Controller {
       if (label === 'A') { this.press(['A'], 'A (talk/search)'); return }
       if (label === 'B') { this.press(['B'], 'B'); return }
       if (label === 'Menu') { this.press(['Start'], 'open game menu'); return }
+      if (label === 'Peek') { this.syncMapTiles(true); return }
     } else {
       // Cursor mode (dialog/shop/gamemenu/title/party/name screens).
       const cursor: Record<string, string> = { ...dirs, A: 'A', B: 'B' }
@@ -497,7 +557,7 @@ export class Ff1Controller {
   }
 
   private entrySelect(snap: Ff1Snapshot, label: string): void {
-    if (!this.entry) this.beginEntry(snap)
+    if (!this.entry || this.entry.battleKey !== snap.state.battlecounter) this.beginEntry(snap)
     const e = this.entry!
     const ch = this.entryChar(snap)
     if (!ch) { this.ctx.log('[os] ff1: entry char missing — resyncing (LOUD)'); this.entry = null; this.requestRender(); return }

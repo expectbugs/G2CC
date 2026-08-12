@@ -260,22 +260,41 @@ class Daemon:
 
     def op_frame(self, req: dict) -> dict:
         emu = self.need_emu()
-        from PIL import Image
         crop = req.get('crop', 'full')
-        visible = emu.frame[VISIBLE_TOP:240 - VISIBLE_TOP]   # 224 rows
-        if crop == 'top':
-            img = visible[:112]
-        elif crop == 'bottom':
-            img = visible[112:]
-        elif crop == 'full':
-            img = visible
+        fmt = req.get('format', 'png')
+        if crop in ('map-top', 'map-bottom'):
+            # §7.2 two-tile map layout: 222 visible rows (9 px overscan trim
+            # top+bottom — one MORE row than the PNG crops each side, because
+            # the 222 px content pane + the even-BMP-height rule force a
+            # 110+112 split; see server FF1_MAP_*_RECT).
+            visible = emu.frame[9:231]
+            img = visible[:110] if crop == 'map-top' else visible[110:]
+        elif crop in ('top', 'bottom', 'full'):
+            visible = emu.frame[VISIBLE_TOP:240 - VISIBLE_TOP]   # 224 rows
+            img = {'top': visible[:112], 'bottom': visible[112:],
+                   'full': visible}[crop]
         else:
             raise ValueError(f'frame: unknown crop {crop!r}')
-        buf = io.BytesIO()
-        Image.fromarray(np.ascontiguousarray(img)).save(buf, format='PNG')
-        return {'png': base64.b64encode(buf.getvalue()).decode(),
-                'w': int(img.shape[1]), 'h': int(img.shape[0]),
-                'frameHash': emu.frame_hash()}
+        out = {'w': int(img.shape[1]), 'h': int(img.shape[0]),
+               'frameHash': emu.frame_hash()}
+        if fmt == 'gray4':
+            # ITU-R 601 luma → 4-bit, one byte/pixel, prefixed u16-LE w,h —
+            # exactly the server's encodeGray4Single payload contract
+            # (os-content.ts; it applies the all-black guard + client caps).
+            lum = (0.299 * img[:, :, 0] + 0.587 * img[:, :, 1]
+                   + 0.114 * img[:, :, 2]).astype(np.uint8)
+            g4 = (lum >> 4).astype(np.uint8)
+            h, w = g4.shape
+            payload = w.to_bytes(2, 'little') + h.to_bytes(2, 'little') + g4.tobytes()
+            out['gray4'] = base64.b64encode(payload).decode()
+        elif fmt == 'png':
+            from PIL import Image
+            buf = io.BytesIO()
+            Image.fromarray(np.ascontiguousarray(img)).save(buf, format='PNG')
+            out['png'] = base64.b64encode(buf.getvalue()).decode()
+        else:
+            raise ValueError(f'frame: unknown format {fmt!r}')
+        return out
 
     def op_battle_round(self, req: dict) -> dict:
         """One battle round: verified command entry + resolution (§7.1).
