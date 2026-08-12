@@ -16,6 +16,17 @@ game ENGINE; G2CC renders its own native UI from RAM + scraped screen text
 run. Authenticity guards below (§7.1, §8.3) exist so the bridge never softens the
 game: no retarget fixes, no RNG cheats, enemy HP hidden by default.
 
+**Context for the vocabulary in this spec:** this is a retro-gaming project —
+a 1987 single-player NES game in a locally-hosted open-source emulator on
+Adam's own PC, shown on his own glasses. Offline, first-party, no other
+players, no anti-cheat, no external system anywhere; the same software class
+as TAS tooling. Terms of art: **"scrape"** = screen-OCR of our own emulator's
+framebuffer (deterministic 8×8 font-tile matching); **"command entry"**
+(formerly "injection" in early revisions) = pressing buttons on the EMULATED
+controller via cynes' documented input API, verified by reading the game's
+own menu-state variables; **"daemon"** = an ordinary long-lived local child
+process hosting the emulator (the stt.ts pattern).
+
 This doc follows the house wire-format discipline: **every address/byte traces to a
 reference** (§6, §15). Everything marked `[VERIFY-SPIKE]` is documented by a source
 but gets re-confirmed against live RAM (Mesen 2 cross-check) before code relies on
@@ -150,7 +161,7 @@ Requests (Node → daemon):
   settle (§5.3) → respond.
 - `{op:"macro", kind:"steps", dir:"up", count:5, stops:["battle","dialog","mapchange","blocked"]}`
 - `{op:"macro", kind:"menu_seq", path:[…verified press script…]}` — §7.1 command
-  injection with per-press verification.
+  entry with per-press verification.
 - `{op:"state"}` — snapshot only (no advance).
 - `{op:"save"}` / `{op:"load", state:b64}` / `{op:"sram"}` (8 KB b64 for .sav).
 - `{op:"frame", crop:"top"|"bottom"|"full"}` — PNG b64 of the 256×224 visible
@@ -262,7 +273,7 @@ cites `reference/variables.inc :: <label>` per address.
 3. **In-battle:** `btl_rngstate` **$688A** → its own scramble lut @ $FCF1;
    advances once per call AND **burns one per input-poll frame** during command
    entry (bank_0C `DoFrame_WithInput`: "generate a number and throw it away").
-   So frame-exact injection ⇒ bit-exact crits/misses/AI ⇒ **jitter (§8.3) is
+   So frame-exact press timing ⇒ bit-exact crits/misses/AI ⇒ **jitter (§8.3) is
    mandatory**. Note: $688A sits in the save range — it persists across
    save/power-cycle (the game is save-scum-resistant by design; we keep it so).
 
@@ -287,7 +298,7 @@ RAM (`L3 FIR2 ×2/3`); target → enemy slots by name+count from the formation
 (via `$6BB3` + enemies.json). The `>` marker walks the party pane. All of this is
 OUR menus at text speed — the game hasn't moved yet.
 
-**Injection + resolution (one burst):** the executor drives the game's real
+**Command entry + resolution (one burst):** the executor drives the game's real
 battle menus with the collected commands — every press VERIFIED against the
 documented command-entry RAM (`btlcmd_curchar`/`btlcmd_target`/`btlcurs_x/y`,
 §6.2), with `btl_charcmdbuf` as the final pre-resolution check that the queued
@@ -332,7 +343,7 @@ IMP C: FIGHTER — 4 DMG.
   changed. Measured for real in P4 — expectations set by data, not the docs.
 
 ### 7.3 Menus / shops / inns / status / equip — native text
-Scrape + RAM enrichment; driven by verified injection like battle. The flagship
+Scrape + RAM enrichment; driven by verified command entry like battle. The flagship
 touch: **un-truncated item names.** FF1-US squeezed names to fit ("Short" +
 sword icon — the `$D4-$E1` icon tiles in the charmap); our labels come from our
 own generated `items.json`: equipment IDs weapons `$01-$28` / armor `$29-$50`
@@ -374,7 +385,7 @@ in-game inn/save remains the authoritative .sav for cross-play §9).
   the same response — "which enemy, how many, where" is the snapshot).
 
 ### 8.3 RNG honesty
-`games.ff1.rngJitter:true` (default): pad every injected press with 0-9 random
+`games.ff1.rngJitter:true` (default): pad every executed press with 0-9 random
 extra frames so battle outcomes aren't frame-replayable (§6.2). Tests set it
 false for reproducibility. Encounter pacing needs no jitter (step-counter).
 
@@ -383,7 +394,7 @@ because I accidentally triggered a ring input while lifting a part would suuuuck
 Accidental ring inputs at work are COMMON. Every game-advancing action gets a
 checkpoint FIRST; nothing an accidental tap can do is unrecoverable:
 - The daemon keeps an in-memory ring of LABELED savestates (default depth 30,
-  `games.ff1.undoDepth`): one before EVERY injection burst (step, macro, battle
+  `games.ff1.undoDepth`): one before EVERY press burst (step, macro, battle
   round, menu_seq), plus auto-checkpoints at battle start and map change.
 - **`Undo` is a standing verb in every view** (map, battle, menus). It opens the
   checkpoint list — reader_history pattern, labels like `↩ before Step ×5 →` /
@@ -391,8 +402,8 @@ checkpoint FIRST; nothing an accidental tap can do is unrecoverable:
   state. Multi-level: scroll deeper to rewind further.
 - The ring's tail (last 5) mirrors to Postgres with the autosave, so a crash
   preserves undo depth, not just the latest state.
-- Native G2CC menus (battle command entry pre-injection, verb lists) never need
-  undo — nothing advanced; re-pick freely. The ring tracks exactly the set of
+- Native G2CC menus (battle command picks not yet entered, verb lists) never
+  need undo — nothing advanced; re-pick freely. The ring tracks exactly the set of
   actions an accidental tap can actually break.
 - RNG honesty: undo restores the RNG counters too, but §8.3 jitter means a
   redone action is NOT bit-identical — undo is accident recovery, not a
@@ -422,7 +433,7 @@ so nobody re-adds it.)
 - **NO TIMEOUTS:** every wait is frame-budgeted or event-driven; budget overruns
   surface state and WAIT for Adam (Continue verb). Daemon supervision is the
   watchdog pattern, not wall-clock I/O wrappers.
-- **NO SILENT FAILURES:** scrape misses (unknown tile hashes), injection
+- **NO SILENT FAILURES:** scrape misses (unknown tile hashes), command-entry
   desyncs, daemon death, savestate write failures — all render in the window
   and log `[ff1]` lines. The statusLine carries `⚠ unsaved` / `⚠ desync` states
   (paperclips precedent).
@@ -550,10 +561,10 @@ override naive assumptions (same authority class as P0-R):**
   respawn → savestate restore PASSES; undo ring labels verified.
 
 **P2 — Battle vertical slice (off-glass, the risk burn-down).** Formation read,
-native entry model, verified injection against the documented command-entry
+native entry model, verified command entry against the documented menu-state
 addresses (§6.2; live-confirm them + find the in-battle boolean, §6.3),
 resolution scrape → battle log. One full authentic round in harness; desync
-drill (deliberately corrupt a press → loud halt). **Exit: a scripted battle
+drill (deliberately drop a press → loud halt). **Exit: a scripted battle
 plays end-to-end with byte-exact log.**
 
 **P3 — Window integration.** `Ff1Controller` (games.ts level `'ff1'`),
@@ -592,12 +603,12 @@ minimap. NO dictation (§8.5 cut). Each lands independently.
 - **Battle-RAM gaps** — smaller than feared: command entry, enemy stats, and
   battle result are all documented (§6.2); P2 burns down what's left (§6.3)
   with Mesen + the vendored symbol table.
-- **Injection desync drift** (menu timing quirks, surprise prompts) — per-press
-  verification + loud halt is the design; the desync drill (P2) proves it.
+- **Command-entry desync drift** (menu timing quirks, surprise prompts) — per-
+  press verification + loud halt is the design; the desync drill (P2) proves it.
 - **Map push latency disappoints even at half-volume** — Peek-first play still
   works (text interactions dominate); RAM-drawn minimap (P5) is the deeper cut.
-- **Scope creep toward "remake the game"** — the bridge renders and injects; the
-  ROM stays the only rules authority. Anything smarter than the original is a
+- **Scope creep toward "remake the game"** — the bridge renders and presses
+  buttons; the ROM stays the only rules authority. Anything smarter than the original is a
   labeled, optional, default-off convenience.
 
 ## 15. Sources

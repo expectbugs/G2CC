@@ -146,7 +146,7 @@ class Emu:
 
     # ---------------------------------------------------------------- input
     def _hold_frames(self, base: int) -> int:
-        # §8.3 RNG honesty: pad injected presses 0-9 frames so battle outcomes
+        # §8.3 RNG honesty: pad presses 0-9 frames so battle outcomes
         # aren't frame-replayable. Tests run rng_jitter=False.
         return base + (random.randint(0, 9) if self.rng_jitter else 0)
 
@@ -176,7 +176,7 @@ class Emu:
         apply silently."""
         if cond():
             raise Desync(f'press_verified({what}): condition ALREADY true before the press — '
-                         'caller drift, refusing to inject')
+                         'caller drift, refusing to press')
         for attempt in range(1, attempts + 1):
             self.press(button, settle=False)
             for _ in range(budget):

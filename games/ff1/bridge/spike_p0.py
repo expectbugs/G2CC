@@ -4,7 +4,7 @@
 Checks, in order (each prints a PASS/FAIL/MEASURE line; no silent outcomes):
   1. boot + headless step throughput (frames/sec)
   2. framebuffer capture → PNG dumps (visual verification)
-  3. input injection (Start on title changes the screen)
+  3. controller input (Start on title changes the screen)
   4. CPU-bus reads incl. $6000-$7FFF (gold/party once a file exists)
   5. savestate: in-process roundtrip + size + save/load cost (undo ring math)
   6. savestate: THROUGH DISK IN A FRESH PROCESS (the flagged cynes unknown —
@@ -76,7 +76,7 @@ def main() -> None:
     dt = time.perf_counter() - t0
     print(f"MEASURE throughput: {n/dt:,.0f} frames/sec headless ({dt:.2f}s for {n})")
 
-    # -- 2/3. title screen + input injection. FF1 boot sequence is unknown
+    # -- 2/3. title screen + controller input. FF1 boot sequence is unknown
     # empirically — dump PNGs at checkpoints so a human (or the next script
     # iteration) can see where we are.
     f = nes.step(frames=1)
@@ -87,7 +87,7 @@ def main() -> None:
     nes.controller = 0
     f = nes.step(frames=60)
     png(f, "02_after_start")
-    print(f"{'PASS' if frame_hash(f) != h_before else 'FAIL'} input-injection: Start changed the screen")
+    print(f"{'PASS' if frame_hash(f) != h_before else 'FAIL'} controller-input: Start changed the screen")
 
     # -- 7. static sweep wherever we are now (menu-ish screen)
     sweep(nes, "post-start-screen")

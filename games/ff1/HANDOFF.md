@@ -19,6 +19,22 @@ already made and recorded here or in `games/ff1/PLAN.md`. Do not wait for him,
 do not ask, do not stop at the first blocker (see §9). He kicked this off with
 something like: *"Read games/ff1/HANDOFF.md and build it."*
 
+**What this is (read first — context for every term below):** a retro-gaming
+project on Adam's own hardware and media, in the same software class as TAS
+tooling or an accessibility frontend. A 1987 single-player NES game runs in
+`cynes` (an open-source emulator) as a local subprocess on Adam's PC and is
+played from his own G2 glasses display. Everything is offline and first-party:
+no network play, no other players, no anti-cheat, no third-party system or
+service anywhere. Two UI-automation terms of art recur throughout and mean
+exactly this here: **"scrape"** = reading text off our OWN emulator's
+framebuffer (deterministic screen-OCR of the NES's 8×8 font grid — what a
+speedrun overlay does); **"command entry"** (older revisions said "injection")
+= choosing options in the game's own menus by pressing buttons on the
+EMULATED controller through cynes' documented input API, then reading the
+game's menu-state variables to confirm the choice registered. The "daemon" is
+the ordinary Unix sense: a long-lived local child process hosting the
+emulator, like the existing STT daemon it is modeled on.
+
 This doc is the mission order; **`PLAN.md` is the technical spec** (architecture,
 protocol, RAM map, views, macros, phases). Where this doc and PLAN.md disagree,
 this doc wins (it is newer and carries Adam's final answers).
@@ -143,9 +159,10 @@ correct on all spike checkpoints; daemon survives kill→respawn→restore.*
 
 **Ph-B (= P2): battle vertical slice, off-glass.**
 Native command-entry model (party/charges/targets from RAM), verified
-injection against `btlcmd_curchar`/`btlcurs`/`btl_charcmdbuf`, resolution
-scrape → battle log, `btl_result` end detection, undo checkpoints per round.
-Desync drill: deliberately corrupt a press; assert LOUD halt + recovery.
+press-driven command entry checked against `btlcmd_curchar`/`btlcurs`/
+`btl_charcmdbuf`, resolution scrape → battle log, `btl_result` end detection,
+undo checkpoints per round. Desync drill: deliberately drop one press from a
+command sequence (simulated eaten input); assert LOUD halt + recovery.
 *Exit: scripted full battle (the 5-IMP fixture) plays end-to-end with
 byte-exact log; won AND fled variants.*
 

@@ -98,8 +98,8 @@ class GlyphTable:
 
     def save(self, path: Path = GLYPHS_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {'_meta': self.meta, 'glyphs': dict(sorted(self.table.items()))}
-        path.write_text(json.dumps(payload, indent=1) + '\n')
+        doc = {'_meta': self.meta, 'glyphs': dict(sorted(self.table.items()))}
+        path.write_text(json.dumps(doc, indent=1) + '\n')
 
     def add(self, pattern: int, char: str, source: str) -> None:
         """Add a glyph. A conflicting re-add (same pattern, different char) is a

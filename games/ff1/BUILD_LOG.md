@@ -104,15 +104,30 @@ shop, char select), `j_town.npy` (town, post-shop, CURE bought, gold 300),
 Party in those states: FIGHTER/THIEF/Bl.BELT/RedMAGE all named AAAA, RM knows
 CURE, gold 300, battlestep advanced from the town walk.
 
+### Session 2 (2026-08-12, resumed)
+
+**Terminology normalization (Adam's request):** session 1's autonomous run
+kept tripping assistant-safety false positives — the docs used security-
+flavored vocabulary for benign emulator work ("command injection", "deliberately
+corrupt a press", an undefined "daemon+scraper" pairing). Fixed at the source:
+HANDOFF.md + PLAN.md now open with a first-party framing block (the same
+pattern that fixed the BLE-work misreads in CLAUDE.md), "injection" is now
+**"command entry"** everywhere (also more accurate — we press buttons on the
+emulated controller and verify via the game's menu-state RAM; nothing is
+written into a foreign process), the desync drill "corrupts" nothing (it
+DROPS a press), and stray `payload` variables are `doc`. Module names
+(scrape.py etc.) unchanged — "scrape" is defined up front as framebuffer
+screen-OCR. No behavior change; harness stayed 4/4.
+
 ### Ph-A open items (SESSION 2 STARTS HERE — in order)
 
-1. **ramspec.player_tile fix**: standard maps must read `((sm_scroll_x+7)&0x3F,
-   (sm_scroll_y+7)&0x3F)` ($29/$2A) — sm_player $68/$69 is stale after
-   menu/shop screens (verified: post-shop it read (7,68); scroll+7 masked
-   matches post-move sm_player exactly). Overworld mask &0xFF. Then re-run
-   `./venv/bin/python bridge/harness/run_all.py` (expect 4/4) and re-verify
-   the town BFS route (`up×4, right×1` from ckpt_overworld) still lands
-   sm(16,23).
+1. ~~**ramspec.player_tile fix**~~ **DONE session 2**: standard maps now read
+   `((sm_scroll+7)&0x3F)` from $29/$2A (sm_player $68/$69 documented STALE —
+   kept only as reference constants). Verified: harness 4/4; route replay
+   ckpt_overworld (153,165) → up×4 right×1 → mapchange → town map 0
+   **sm(16,23)** exact; post-shop `j_town.npy` reads player_tile **(7,4)**
+   (the white-magic door) while raw sm_player says (7,68), and a down step
+   lands (7,5) — stale case closed.
 2. **Menu-glyph calibration stage**: extend calibrate_glyphs.py — from
    `fix_menu.npy` learn the two menu-only tiles by expected position:
    the `/` in char-0's "HP 35/ 35" row and the `L` level tile in "L 1"

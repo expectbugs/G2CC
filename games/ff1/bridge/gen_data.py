@@ -250,10 +250,10 @@ def main() -> None:
         'spells.json': gen_spells(rom, std),
         'enemies.json': gen_enemies(rom, std),
     }
-    for name, payload in outputs.items():
+    for name, doc in outputs.items():
         p = DATA / name
-        p.write_text(json.dumps(payload, indent=1) + '\n')
-        body = next(iter([v for k, v in payload.items() if k != '_meta']))
+        p.write_text(json.dumps(doc, indent=1) + '\n')
+        body = next(iter([v for k, v in doc.items() if k != '_meta']))
         n = len(body) if isinstance(body, (list, dict)) else '?'
         print(f'WROTE {p} ({n} entries)')
 
