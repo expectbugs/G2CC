@@ -124,6 +124,19 @@ CMD_MAGIC = 0x40
 
 BTLCURS_X = 0x6AAA         # reference/variables.inc :: btlcurs_x (menu coords, not pixels)
 BTLCURS_Y = 0x6AAB         # reference/variables.inc :: btlcurs_y
+# $6AAA/$6AAB are OVERLOADED (variables.inc :: btlcurs / btlcurs_max = same
+# addresses): the enemy-target picker stores its slot index in $6AAA and the
+# formation's slot max in $6AAB (bank_0C.asm :: EnemyTargetMenu), while the
+# 2x4 menus (command menu, ally picker) store x/y here and ZERO both at entry
+# (bank_0C.asm :: MenuSelection_2x4 / MenuSelection_Magic). Never read these
+# without knowing which menu is live — see btlcursspr below for that.
+BTLCURSSPR_X = 0x6AE3      # reference/variables.inc :: btlcursspr_x (cursor SPRITE pixel pos —
+BTLCURSSPR_Y = 0x6AE4      # reference/variables.inc :: btlcursspr_y   rewritten every menu-loop
+                           #   iteration from per-menu pixel luts; bank_0C.asm ::
+                           #   lut_MagicCursorPos / lut_PlayerTargetCursorPos /
+                           #   lut_Target{9Small,4Large,Mix}CursorPos. The luts occupy
+                           #   DISJOINT screen areas, so this pair identifies WHICH menu
+                           #   is (or was last) live. Stays stale after a menu exits.)
 BTLCMD_CURCHAR = 0x6B7A    # reference/variables.inc :: btlcmd_curchar (whose command, 0-3)
 BTLCMD_TARGET = 0x6B7B     # reference/variables.inc :: btlcmd_target (current enemy slot targetted)
 BTL_RESULT = 0x6B86        # reference/variables.inc :: btl_result (0 fighting / 1 party dead / 2 won /

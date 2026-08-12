@@ -203,7 +203,42 @@ SESSION 3 STARTS AT "Ph-B resume point" below.**
   PLAN §12 **P2-R** carries every finding with detail; §6.3 exp byte order
   is CLOSED (little-endian, `[7,0,0]` per survivor after the 5-IMP win).
 
-### Ph-B resume point (SESSION 3 STARTS HERE)
+### Session 3 (2026-08-12, resumed): Ph-B COMPLETE — 30/30 checks, 6/6 harness
+
+The prescribed resume-point fix (2-frame hold, unchanged cond) did NOT pass:
+with the shorter hold the wait-cond `curs()[0] == 16` never fired at all.
+Frame-by-frame probe + reading the vendored `reference/bank_0C.asm` gave the
+real model (PLAN §12 P2-R now carries the session-3 CORRECTION):
+
+- Session 2's "(16,0) = picker live" was post-confirm resolution SCRATCH —
+  the cond only ever fired on the failure (auto-confirm) case. A live ally
+  picker is `MenuSelection_2x4`, which zeroes btlcurs to (0,0) at entry —
+  indistinguishable from the spell menu's home position.
+- Correct picker-open signature: the cursor SPRITE `btlcursspr_x/y` ($6AE3/4,
+  new in ramspec with lineage), rewritten every menu-loop iteration from
+  per-menu pixel luts occupying disjoint screen areas. Stale after exit, so
+  battle.py pairs "sprite reached picker area" with the cmdbuf double-consume
+  guard `_assert_picker_live` (row freshly written vs pre-press capture ⇒
+  desync; compared against the captured row because cmdbuf persists across
+  rounds — a stale `40 …` from a previous round must not trip it).
+- Auto-confirm root cause refined: the menus' input-delay REPEAT re-fires a
+  held A after ~3-5 unchanged samples (~6-10 frames) — PICKER_HOLD=2 cannot
+  reach it; 4 f holds stay for every other battle press. Fight→enemy-picker A
+  also moved to PICKER_HOLD + guard (was passing by luck of prep length).
+- cmdbuf write timing asm-confirmed: ONLY at picker confirm
+  (`SetCharacterBattleCommand`) — never at spell select — so the guard and
+  the byte-exact post-entry check are both sound.
+
+Results: test_battle.py ALL 30 checks green — CURE round byte-exact
+(`40 00 82 00`, MP 1→0, log mentions CURE), fled variant (outcome 'ran',
+overworld classify), desync drill (dropped `char 0 fight confirm` raises
+BattleDesync, cmdbuf row 0 untouched, pre-round savestate recovers, clean
+re-entry), daemon battle_round + auto-checkpoint + undo through real stdio.
+run_all **6/6**. Light gate: typecheck clean; server smoke 36/37 (known
+calendar env red only); forbidden-pattern grep clean (`visible[:112]` is the
+frame-crop parameter, not text truncation).
+
+### Ph-B resume point (superseded — kept for the record; SESSION 3 landed it)
 
 test_battle.py fails at check 14: `char 3 ally cycle: no effect` — the CURE
 ally-picker Down presses land nowhere. ROOT CAUSE (established by probes, do

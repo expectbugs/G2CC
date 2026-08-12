@@ -602,11 +602,27 @@ P0-R/P1-R; the battle-menu semantics were READ from the now-vendored
   byte encoding (variables.inc block comment, live-confirmed): `0x` enemy
   slot, `8x` party slot, `FF` all enemies, `FE` whole party. One-ally spells
   open `SelectPlayerTarget`; the chosen ally = `btlcurs_y & 3` AT CONFIRM.
-- **The ally picker has NO live-trackable selection var** — `btlcmd_target`
-  does not track allies, the highlight is VRAM-only (nametable blink), and
-  `curs=(16,0)` reads identically whether the picker is live or was just
-  auto-confirmed. Disambiguator: the cmdbuf row — **unwritten ⇒ picker live;
-  already `40 …` ⇒ the A double-consumed** (see BUILD_LOG resume note).
+- **The ally picker (session-3 CORRECTION, asm-verified then live-proven):**
+  session 2's "picker = `curs(16,0)`" was WRONG — that value was post-confirm
+  resolution scratch, so the wait-cond only ever fired on the FAILURE case.
+  Ground truth (bank_0C.asm): the ally picker is `MenuSelection_2x4`, which
+  ZEROES btlcurs_x/y at entry — a LIVE picker reads (0,0), indistinguishable
+  from the spell menu's home. The reliable picker-open signature is the cursor
+  SPRITE `btlcursspr_x/y` ($6AE3/4), rewritten every menu-loop iteration from
+  per-menu pixel luts with DISJOINT areas (ally x≥$90,y≤$7C; enemy x≤$50,
+  y $30-$70; magic x≤$70,y≥$A6; command y≥$9E) — but stale after a menu
+  exits, so "sprite reached picker area" + "cmdbuf row NOT freshly written
+  vs a pre-press capture" together prove "picker live" (the guard compares
+  against the captured row, not 'unwritten': cmdbuf persists across rounds).
+  The cmdbuf row is written ONLY at picker confirm (`SetCharacterBattleCommand`,
+  `BattleSubMenu_Magic @Target_10`) — the picker-confirm A IS the completing
+  press. $6AAA/$6AAB are OVERLOADED labels (btlcurs_x/btlcurs = $6AAA,
+  btlcurs_y/btlcurs_max = $6AAB): enemy pickers store slot/max there (why the
+  old fight cond "y≥3" worked — btlcurs_max ∈ {3,7,8} at prep), 2x4 menus
+  store x/y. **Auto-confirm mechanism**: a held A re-fires via the menu's
+  input-delay REPEAT (~3-5 unchanged samples ≈ 6-10 frames), so
+  picker-opening A presses use a 2-frame hold (`PICKER_HOLD`) — too short to
+  reach the repeat window — while other battle presses stay at 4 f.
 - **cmdbuf persists across rounds** (never cleared) — byte equality can NEVER
   verify a press landed; only transitions (curchar advance, combat-box
   change) can. The byte-exact §7.1 check compares AFTER a verified

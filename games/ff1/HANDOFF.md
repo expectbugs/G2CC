@@ -1,23 +1,18 @@
 # FF1 One-Shot Build — Fresh-Session Handoff
 
-> **⏩ SESSION 3+ RESUME (2026-08-12 evening): Ph-A (P1) is COMPLETE —
-> committed `b30659f` and pushed (daemon, scraper, classifier, data files,
-> 9 committed journey fixtures, harness was 5/5 at that commit). Ph-B (P2)
-> is ~85 % BUILT and sits in a `wip(ff1)` checkpoint commit: the battle
-> executor works end-to-end for FIGHT (a full 4-round battle is WON in
-> harness, byte-exact command buffers, message log, outro, exp/gold
-> verified) — one known fix is pending on the CURE ally-picker path, and
-> the fled/desync-drill/daemon test sections have never run. DO NOT restart
-> Ph-A or Ph-B.** Read, in order: (1) this doc, (2) `PLAN.md` §12 **P0-R,
-> P1-R, AND P2-R** (P2-R = the battle-menu model: edge-triggered input,
-> 4-frame holds, cmdbuf semantics, round/battle-end signals — all
-> live-verified against the vendored `reference/bank_0C.asm`), (3)
-> **`BUILD_LOG.md` "Ph-B resume point"** — the exact next action (a
-> 2-frame-hold fix in `battle.py` `_enter_spell_target`, root cause already
-> established there; then finish test_battle.py, run_all 6/6, §6 gate,
-> commit `feat(ff1): Ph-B …`, push, continue to Ph-C per §5). Journey
-> savestates live in `bridge/spike_out/*.npy` (gitignored, on disk);
-> committed fixtures in `bridge/harness/fixtures/`.
+> **⏩ SESSION 4+ RESUME: Ph-A (P1) COMPLETE (`b30659f`, pushed). Ph-B (P2)
+> COMPLETE (session 3): battle executor proven for FIGHT / MAGIC (CURE
+> one-ally) / RUN — full battle WON and FLED end-to-end, byte-exact
+> cmdbufs, desync drill + daemon battle_round green, harness 6/6, docs
+> corrected (PLAN §12 P2-R session-3 CORRECTION: sprite-lut picker
+> signatures, PICKER_HOLD=2, cmdbuf-at-confirm). DO NOT restart Ph-A/Ph-B.
+> NEXT: Ph-C (window integration) per §5.** Read, in order: (1) this doc,
+> (2) `PLAN.md` §12 **P0-R, P1-R, AND P2-R** (the battle-menu model:
+> edge-triggered input, 4 f holds / 2 f picker-opens, cmdbuf semantics,
+> round/battle-end signals — asm-verified against the vendored
+> `reference/bank_0C.asm`), (3) **`BUILD_LOG.md` session-3 entry** (tail).
+> Journey savestates live in `bridge/spike_out/*.npy` (gitignored, on
+> disk); committed fixtures in `bridge/harness/fixtures/`.
 
 **You are building the FF1-on-G2 window, fully automated, end to end, in one
 run.** Adam is at work and will not answer questions — every decision is

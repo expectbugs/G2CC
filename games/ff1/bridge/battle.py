@@ -26,7 +26,24 @@ Menu model (reference/bank_0C.asm, fetched 2026-08-12 — see reference/README):
                  flips to page 1 (L5-8); empty slot / 0 MP → "Nothing" box
   spell targets  MAGDATA_TARGET: one-enemy → enemy picker; one-ally →
                  SelectPlayerTarget (btlcurs_y&3 = party slot at confirm);
-                 caster/all-enemies/whole-party → no picker
+                 caster/all-enemies/whole-party → no picker. The cmdbuf row
+                 is written ONLY at picker confirm (SetCharacterBattleCommand
+                 — bank_0C.asm :: BattleSubMenu_Magic @Target_10), never at
+                 spell select; the picker-confirm A IS the completing press.
+  picker-open    A LIVE ally picker reads btlcurs=(0,0) — MenuSelection_2x4
+  signatures     zeroes x/y at entry, indistinguishable from the spell menu's
+                 home. (Session-2's "(16,0) = picker" was post-confirm scratch
+                 — it detected the FAILURE case.) The real signature is the
+                 cursor SPRITE (btlcursspr_x/y, rewritten every menu-loop
+                 iteration from per-menu pixel luts, disjoint areas):
+                   ally picker   x ∈ {$90,$98,$A0}, y ∈ {$34,$4C,$64,$7C}
+                   enemy picker  x ≤ $50, y ∈ [$30,$70]
+                   magic menu    x ∈ {$20,$48,$70}, y ∈ [$A6,$D6]
+                   command menu  x ∈ [$58,$90], y ∈ [$9E,$CE]
+                 Enemy pickers also write btlcurs_max($6AAB) ∈ {3,7,8} at
+                 prep. btlcursspr stays STALE after a menu exits — "picker
+                 reached" (sprite) + "row not freshly written" (cmdbuf guard)
+                 together prove "picker live".
   cmdbuf         4 B/char: cmd, effect, target, pad. cmd: 04 fight / 40 magic
                  / 20 run / 08 drink / 10 item. target: 0x = enemy slot,
                  8x = party slot, FF = all enemies, FE = whole party.
@@ -47,6 +64,11 @@ import screens
 from macros import BUTTONS, Emu
 
 BPRESS_HOLD = 4         # short: must NOT span a submenu transition (see docstring)
+PICKER_HOLD = 2         # shorter still, for presses that OPEN a target picker:
+                        # the one-ally picker (SelectPlayerTarget) opens fast
+                        # enough that even a 4 f held A is re-sampled by it as a
+                        # fresh edge → instant auto-confirm at the home slot
+                        # (probed session 2; 2 f A was PROVEN to open it live).
 BPRESS_GAP = 20         # released frames after every press (clean edges)
 PRESS_BUDGET = 150      # frames to wait for a press's verified effect
 PRESS_ATTEMPTS = 4      # eaten-press retries (magic-draw cadence eats 4 f presses)
@@ -102,6 +124,20 @@ class BattleExecutor:
     def curs(self) -> Tuple[int, int]:
         return self._r(ramspec.BTLCURS_X), self._r(ramspec.BTLCURS_Y)
 
+    def sprite_pos(self) -> Tuple[int, int]:
+        return self._r(ramspec.BTLCURSSPR_X), self._r(ramspec.BTLCURSSPR_Y)
+
+    def _ally_picker_reached(self) -> bool:
+        # lut_PlayerTargetCursorPos x=$A0 (dead −8, current char −16 → ≥$90),
+        # y ∈ {$34,$4C,$64,$7C} — disjoint from every other battle menu's lut
+        x, y = self.sprite_pos()
+        return x >= 0x90 and y <= 0x7C
+
+    def _enemy_picker_reached(self) -> bool:
+        # lut_Target{9Small,4Large,Mix}CursorPos: x ≤ $50, y ∈ [$30,$70]
+        x, y = self.sprite_pos()
+        return x <= 0x50 and 0x30 <= y <= 0x70
+
     def curchar(self) -> int:
         return self._r(ramspec.BTLCMD_CURCHAR)
 
@@ -109,21 +145,22 @@ class BattleExecutor:
         base = ramspec.BTL_CHARCMDBUF + char * 4
         return tuple(self._r(base + i) for i in range(4))
 
-    def _bpress(self, button: str, label: str) -> None:
+    def _bpress(self, button: str, label: str, hold: int = BPRESS_HOLD) -> None:
         if label in self.drop_presses:
-            self.emu.step(BPRESS_HOLD)      # the drill: frames pass, no button
+            self.emu.step(hold)             # the drill: frames pass, no button
         else:
             self.emu.nes.controller = BUTTONS[button]
-            self.emu.step(BPRESS_HOLD)
+            self.emu.step(hold)
             self.emu.nes.controller = 0
         self.emu.step(BPRESS_GAP)
 
     def bpress_verified(self, button: str, cond: Callable[[], bool], what: str,
-                        attempts: int = PRESS_ATTEMPTS, budget: int = PRESS_BUDGET) -> None:
+                        attempts: int = PRESS_ATTEMPTS, budget: int = PRESS_BUDGET,
+                        hold: int = BPRESS_HOLD) -> None:
         if cond():
             raise BattleDesync(f'{what}: condition already true before the press — caller drift')
         for _ in range(attempts):
-            self._bpress(button, what)
+            self._bpress(button, what, hold=hold)
             for _ in range(budget):
                 if cond():
                     return
@@ -194,9 +231,14 @@ class BattleExecutor:
         if cmd.action == 'fight':
             if cmd.target is None:
                 raise BattleDesync(f'char {ch}: fight needs an enemy target slot')
+            row_before = self.cmdbuf(ch)
             self._nav_command(ch, 'fight')
-            self.bpress_verified('A', lambda: self.curs()[1] >= 3 and self.curchar() == ch,
-                                 f'char {ch} fight→enemy picker')
+            # PICKER_HOLD: same auto-confirm shape as the spell pickers — this
+            # path happened to pass at 4 f (SelectEnemyTarget preps longer) but
+            # the resume-note verdict is "do not rely on that".
+            self.bpress_verified('A', self._enemy_picker_reached,
+                                 f'char {ch} fight→enemy picker', hold=PICKER_HOLD)
+            self._assert_picker_live(ch, row_before, 0x04, f'char {ch} enemy picker')
             self._pick_enemy(ch, cmd.target)
             self._confirm(ch, last, f'char {ch} fight confirm')
             return (0x04, FIGHT_EFFECT_BYTE, cmd.target, 0x00)
@@ -261,13 +303,34 @@ class BattleExecutor:
                                  f'char {ch} enemy cycle')
         raise BattleDesync(f'char {ch}: enemy target {target} unreachable by cycling')
 
+    def _assert_picker_live(self, ch: int, row_before: Tuple[int, ...],
+                            cmd_byte: int, what: str) -> None:
+        """Double-consume guard (P2-R): the picker-open cursor position reads
+        identically whether the picker is LIVE or the opening A was re-sampled
+        by it as a fresh edge (instant auto-confirm at the home slot). The
+        reliable disambiguator is the cmdbuf row: still as-before ⇒ picker
+        live; freshly written with this command's byte ⇒ double-consumed.
+        (Compared against the PRE-press row, not against 'unwritten': cmdbuf
+        persists across rounds, so a stale row from a previous round must not
+        trip this.) Recovery is the pre-round checkpoint — never un-enter."""
+        row = self.cmdbuf(ch)
+        if row != row_before and row[0] == cmd_byte:
+            raise BattleDesync(
+                f'{what}: cmdbuf row freshly written {[f"{b:02x}" for b in row]} — '
+                'the opening A was double-consumed (auto-confirm at home slot); '
+                'undo the pre-round checkpoint to recover')
+
     def _enter_spell_target(self, ch: int, meta: dict, cmd: CharCommand) -> int:
         """Press A on the spell; drive whatever target picker its type opens.
-        Returns the expected cmdbuf target byte."""
+        Returns the expected cmdbuf target byte. The opening A uses
+        PICKER_HOLD (2 f): at 4 f the one-ally picker opens fast enough to
+        re-sample the held A as its own confirm — see _assert_picker_live."""
         ttype = meta['target']
+        row_before = self.cmdbuf(ch)
         if ttype == 'one-enemy':
-            self.bpress_verified('A', lambda: self.curs()[1] >= 3,
-                                 f'char {ch} spell→enemy picker')
+            self.bpress_verified('A', self._enemy_picker_reached,
+                                 f'char {ch} spell→enemy picker', hold=PICKER_HOLD)
+            self._assert_picker_live(ch, row_before, 0x40, f'char {ch} spell enemy picker')
             if cmd.target is None:
                 raise BattleDesync(f'char {ch}: {meta["name"]} needs an enemy target')
             self._pick_enemy(ch, cmd.target)
@@ -275,8 +338,9 @@ class BattleExecutor:
         if ttype == 'one-ally':
             if cmd.target is None:
                 raise BattleDesync(f'char {ch}: {meta["name"]} needs an ally target')
-            self.bpress_verified('A', lambda: self.curs()[0] == 16,
-                                 f'char {ch} spell→ally picker')
+            self.bpress_verified('A', self._ally_picker_reached,
+                                 f'char {ch} spell→ally picker', hold=PICKER_HOLD)
+            self._assert_picker_live(ch, row_before, 0x40, f'char {ch} ally picker')
             for _ in range(8):
                 if self.curs()[1] & 0x03 == cmd.target:
                     return 0x80 | cmd.target
