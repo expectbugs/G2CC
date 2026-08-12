@@ -224,6 +224,58 @@ def main() -> None:
             raise RuntimeError(f'ROUND-TRIP FAIL [battle]: "{want}" not on screen:\n{got_b}')
     print('round-trip [battle]: roster + party pane + ITEM/RUN OK (bold command font: intentionally unlearned)')
 
+    # --- menu-only tiles: the level 'L' and the HP '/' (BUILD_LOG open item 2) ---
+    # The game menu draws two glyphs that appear nowhere else in the standard
+    # font flow: a small 'L' level tile ("L 1") and the HP separator ("35/ 35").
+    # Self-locating (no probed coords): scrape the menu, then classify each
+    # unknown cell by its known neighbors. The game menu never settles
+    # (portraits animate — P1-R), but its TEXT cells are static: any frame is
+    # scrape-coherent.
+    nes6 = NES(str(ROM))
+    menu_state = OUT / 'fix_menu.npy'
+    if not menu_state.exists():
+        raise RuntimeError(f'{menu_state} missing — the menu calibration stage needs the '
+                           'session-1 journey savestate (see BUILD_LOG)')
+    nes6.load(np.load(menu_state))
+    f6 = nes6.step(frames=30)
+    p6 = cell_patterns(f6)
+    menu_res = scrape.scrape_full(p6, glyphs)
+
+    def _known(r: int, c: int) -> str | None:
+        return glyphs.char(int(p6[r, c])) if 0 <= r < 30 and 0 <= c < 32 else None
+
+    def _digitish(ch: str | None) -> bool:
+        return ch is not None and (ch.isdigit() or ch == 'O')   # O/0 shared bitmap
+
+    def _blank(ch: str | None) -> bool:
+        return ch in (' ', '')           # empty cell OR learned chrome (panel border)
+
+    slash_pats: set[int] = set()
+    level_pats: set[int] = set()
+    for u in menu_res.unknown:
+        r, c, pat = u['row'], u['col'], int(u['pattern'], 16)
+        if (_digitish(_known(r, c - 2)) and _digitish(_known(r, c - 1))
+                and _known(r, c + 1) == ' ' and _digitish(_known(r, c + 2))):
+            slash_pats.add(pat)          # dd�<sp>d → the HP-row separator
+        if (_blank(_known(r, c - 1)) and _known(r, c + 1) == ' '
+                and _known(r, c + 2) == '1'):
+            level_pats.add(pat)          # <blank>�<sp>1 → the level tile
+    if len(slash_pats) != 1:
+        raise RuntimeError(f'menu stage: expected exactly 1 HP-slash pattern, got {sorted(map(pat_hex, slash_pats))}')
+    if len(level_pats) != 1:
+        raise RuntimeError(f'menu stage: expected exactly 1 level-L pattern, got {sorted(map(pat_hex, level_pats))}')
+    glyphs.add(slash_pats.pop(), '/', 'gamemenu HP row (self-located)')
+    glyphs.add(level_pats.pop(), 'L', 'gamemenu level row (self-located)')
+    glyphs.meta['menu_stage'] = ('fix_menu.npy: / and L self-located by known-neighbor '
+                                 'context (BUILD_LOG Ph-A open item 2)')
+    # round trip: both strings must now scrape back somewhere on the menu
+    menu_after = scrape.scrape_full(p6, glyphs)
+    for want in ('35/ 35', 'L 1'):
+        if not any(want in ln for ln in menu_after.lines):
+            raise RuntimeError(f'ROUND-TRIP FAIL [gamemenu]: "{want}" not on screen:\n'
+                               + '\n'.join(menu_after.lines))
+    print('round-trip [gamemenu]: "35/ 35" + "L 1" OK (menu-only tiles learned)')
+
     # anti-false-anchor guard: an overworld frame (pure map graphics) must
     # contain ~no known text cells in the dialog-box region (screens.py anchor).
     nes5 = NES(str(ROM))

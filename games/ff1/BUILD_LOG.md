@@ -128,18 +128,22 @@ screen-OCR. No behavior change; harness stayed 4/4.
    **sm(16,23)** exact; post-shop `j_town.npy` reads player_tile **(7,4)**
    (the white-magic door) while raw sm_player says (7,68), and a down step
    lands (7,5) — stale case closed.
-2. **Menu-glyph calibration stage**: extend calibrate_glyphs.py — from
-   `fix_menu.npy` learn the two menu-only tiles by expected position:
-   the `/` in char-0's "HP 35/ 35" row and the `L` level tile in "L 1"
-   (both currently scrape �). Round-trip assert "35/ 35" and "L 1"
-   afterward. (Screen layout: see scratch shot notes — HP row is the 4th
-   text row of each char panel; find cells by scraping char-0's panel and
-   locating the � between the two '35' runs — self-locating, no new probe
-   needed.)
-3. **screens.py `_menuish`** → anchor on the STANDARD-font trio
-   ITEM+MAGIC+ARMOR (≥2 of 3; WEAPON/STATUS are condensed and never scrape).
-   Currently requires ≥3 of 5 — works but only because exactly 3 can match;
-   make it intentional.
+2. ~~**Menu-glyph calibration stage**~~ **DONE session 2**: calibrate_glyphs.py
+   gained a self-locating menu stage — unknowns classified by known-neighbor
+   context (`dd�<sp>d` → the HP `/`; `<blank>�<sp>1` → the level `L`, where
+   blank includes learned chrome — the panel border sits left of the L).
+   glyphs.json 77 → **79 patterns**; round-trip "35/ 35" + "L 1" green.
+   Bonus: the magic page now scrapes fully (`L1 2/2 · CURE`, L2-L8 charge
+   rows) — those rows became the magic-page classifier anchor (below).
+3. ~~**screens.py `_menuish`**~~ **DONE session 2**, plus a REAL classifier bug
+   found while verifying: the dialog/shop branch ran BEFORE the menu check,
+   and the game menu has name/HP text in the dialog rows + a gold line
+   containing 'G' — `fix_menu.npy` classified **'shop'** and
+   `fix_magicpage.npy` 'dialog' (verified live pre-fix). Fix: `_menuish`
+   FIRST (trio ITEM+MAGIC+ARMOR ≥2-of-3, per this item), plus an L1..L8
+   charge-table anchor (≥4 rows) so the per-char MAGIC page classifies
+   'gamemenu' too. All five journey states verify: menu/magicpage →
+   gamemenu, dialog → dialog, shop_open → shop, j_town → sm. Harness 4/4.
 4. **Committed fixtures**: `bridge/harness/gen_fixtures.py` replaying
    spawn→town→shop→buy→menu→cast from `ckpt_overworld.npy` (all steps are
    already proven; the scratch scripts to distill live in this entry's

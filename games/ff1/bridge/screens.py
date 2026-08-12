@@ -91,6 +91,11 @@ def classify(read, frame: np.ndarray, patterns: np.ndarray, glyphs: GlyphTable,
 
     # --- on-map states ---
     on_sm = bool(read(ramspec.MAPFLAGS) & 1)
+    # game-menu family FIRST (open item 3): the menu's own name/HP text sits in
+    # the dialog rows and its gold line contains 'G' — evaluated after the
+    # dialog branch it misreads as 'shop' (verified on fix_menu.npy).
+    if _menuish(joined, full.lines):
+        return Classification('gamemenu', full.lines, [])
     # shop: entering_shop/shop_id are transient/latched — the reliable live
     # anchor is shop text (box headers/prices) while a shop screen is up.
     # The shop screen replaces the map view (probed in the Ph-A CURE run).
@@ -104,11 +109,6 @@ def classify(read, frame: np.ndarray, patterns: np.ndarray, glyphs: GlyphTable,
         if any('G' in ln or 'GP' in ln for ln in lower.lines) or read(ramspec.ENTERING_SHOP) or _shopish(lower.lines):
             return Classification('shop', dlg.lines + lower.lines, dlg.unknown)
         return Classification('dialog', dlg.lines, dlg.unknown)
-
-    # the Start menu / status screens (full-screen menus while "on map"):
-    # anchor on the OB menu strings (probed in the Ph-A menu run).
-    if _menuish(joined):
-        return Classification('gamemenu', full.lines, [])
 
     return Classification('sm' if on_sm else 'ow')
 
@@ -133,6 +133,19 @@ def _shopish(lines: List[str]) -> bool:
     return any(w in txt for w in ('WELCOME', 'welcome', 'Welcome'))
 
 
-def _menuish(joined: str) -> bool:
-    hits = sum(1 for w in ('ITEM', 'MAGIC', 'WEAPON', 'ARMOR', 'STATUS') if w in joined)
-    return hits >= 3
+def _menuish(joined: str, lines: List[str]) -> bool:
+    """Game-menu family anchor (open item 3). Main menu: the STANDARD-font
+    header trio ITEM/MAGIC/ARMOR — WEAPON and STATUS are composed in the
+    condensed CHR-RAM font and NEVER scrape (P1-R), so the old ≥3-of-5 rule
+    passed only because exactly these three matched. ≥2 of 3 tolerates one
+    overlapped header. The per-char MAGIC page shows none of the trio; its
+    anchor is the L1..L8 per-level charge table (probed fix_magicpage.npy)."""
+    hits = sum(1 for w in ('ITEM', 'MAGIC', 'ARMOR') if w in joined)
+    if hits >= 2:
+        return True
+    charge_rows = 0
+    for ln in lines:
+        s = ln.strip()
+        if len(s) >= 2 and s[0] == 'L' and s[1].isdigit():
+            charge_rows += 1
+    return charge_rows >= 4
