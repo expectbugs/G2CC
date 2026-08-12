@@ -175,6 +175,9 @@ export interface G2CCConfig {
       rngJitter: boolean
       /** Undo-ring depth (labeled savestates, PLAN §8.4). */
       undoDepth: number
+      /** Show the battle-start formation glance tile (small image, one push,
+       *  battle start only — PLAN §7 toggle, default OFF). */
+      formationTile: boolean
     }
   }
   /** DE shell config (Phase 2 overhaul.md — the ribbon DE/WM). */
@@ -326,6 +329,7 @@ function defaultConfig(): G2CCConfig {
         showEnemyHp: false,
         rngJitter: true,
         undoDepth: 30,
+        formationTile: false,
       },
     },
     de: {

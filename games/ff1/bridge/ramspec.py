@@ -39,6 +39,7 @@ CURSOR = 0x62              # reference/variables.inc :: cursor (OB menu cursor)
 CURSOR_MAX = 0x63          # reference/variables.inc :: cursor_max
 NAMECURS_X = 0x64          # reference/variables.inc :: namecurs_x (name-entry grid cursor)
 NAMECURS_Y = 0x65          # reference/variables.inc :: namecurs_y
+# (ptygen constants live below with the other absolute addresses)
 SM_PLAYER_X = 0x68         # reference/variables.inc :: sm_player_x — ⚠ STALE after menu/shop
                            #   screens (P1-R); player_tile() uses (sm_scroll+7)&$3F instead
 SM_PLAYER_Y = 0x69         # reference/variables.inc :: sm_player_y

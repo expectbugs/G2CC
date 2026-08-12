@@ -271,11 +271,103 @@ class Ff1Engine {
 
   /** One gray4 map crop (raw u16w/u16h/pixels payload, b64) — the Ph-D
    *  two-tile pipeline (PLAN §7.2). Read-only: no checkpoint, no persist. */
-  frameGray4(crop: 'map-top' | 'map-bottom'): Promise<{ gray4: string; w: number; h: number; frameHash: string }> {
+  frameGray4(crop: 'map-top' | 'map-bottom' | 'formation'): Promise<{ gray4: string; w: number; h: number; frameHash: string }> {
     return this.op(async (b) => {
       const r = await b.request('frame', { crop, format: 'gray4' })
       if (typeof r['gray4'] !== 'string') throw new Error(`frame ${crop}: daemon returned no gray4 payload`)
       return { gray4: r['gray4'], w: Number(r['w']), h: Number(r['h']), frameHash: String(r['frameHash']) }
+    })
+  }
+
+  // ------------------------------------------------------------ Ph-E macros
+
+  /** Ring-driven name entry (PLAN §7.4): 4 grid glyphs on an OPEN grid. */
+  nameEntry(name: string): Promise<Ff1Snapshot & { entered?: string }> {
+    return this.op(async (b) =>
+      await b.request('name_entry', { name }) as unknown as Ff1Snapshot & { entered?: string },
+    { persist: true })
+  }
+
+  /** Cosmetic rename of a committed party member (the vanilla grid's 4-glyph
+   *  constraint makes short names unreachable by input — daemon op docs). */
+  rename(slot: number, name: string): Promise<Ff1Snapshot> {
+    return this.op(async (b) =>
+      await b.request('rename', { slot, name }) as unknown as Ff1Snapshot,
+    { persist: true })
+  }
+
+  /** The Battle pace macro (PLAN §8.2): alternate steps until an encounter. */
+  pace(maxPaces = 200): Promise<Ff1Snapshot & { pace?: { paces: number; stopped: string; battlestep0: number; battlestep1: number } }> {
+    return this.op(async (b) =>
+      await b.request('pace', { maxPaces }) as unknown as Ff1Snapshot & { pace?: { paces: number; stopped: string; battlestep0: number; battlestep1: number } },
+    { persist: true })
+  }
+
+  /** The fight-until grind loop (PLAN §8.2). */
+  battleAuto(commands: Ff1CharCommand[], opts: { minHpPct?: number; maxRounds?: number } = {}):
+      Promise<Ff1Snapshot & { battleAuto?: { rounds: number; outcome: string; stopped: string; log: string[] } }> {
+    return this.op(async (b) =>
+      await b.request('battle_auto', {
+        commands, minHpPct: opts.minHpPct ?? 0, maxRounds: opts.maxRounds ?? 30,
+      }) as unknown as Ff1Snapshot & { battleAuto?: { rounds: number; outcome: string; stopped: string; log: string[] } },
+    { persist: true })
+  }
+
+  /** .sav export (PLAN §9) — the daemon refuses LOUDLY off a save point. */
+  savExport(): Promise<{ path: string; bytes: number }> {
+    return this.op(async (b) => {
+      const r = await b.request('sav_export')
+      return { path: String(r['path']), bytes: Number(r['bytes']) }
+    })
+  }
+
+  /** Trail-minimap data (PLAN §7 minimap v1 = breadcrumbs). Read-only. */
+  minimap(): Promise<{ standardMap: boolean; mapId: number; player: [number, number]; tiles: [number, number][] }> {
+    return this.op(async (b) =>
+      await b.request('minimap') as unknown as { standardMap: boolean; mapId: number; player: [number, number]; tiles: [number, number][] })
+  }
+
+  // ------------------------------------------------------------ labeled slots
+
+  /** Save the CURRENT state into a labeled PG slot (PLAN §9 Slots UI). */
+  async saveSlot(label: string): Promise<void> {
+    return this.op(async (b) => {
+      const saveResp = await b.request('save')
+      const stateB64 = String(saveResp['state'] ?? '')
+      if (!stateB64) throw new Error('save op returned no state')
+      const snapJson = JSON.stringify(this.lastSnap ? { screen: this.lastSnap.screen, state: this.lastSnap.state } : {})
+      const id = `slot:${Date.now()}`
+      await query(
+        `INSERT INTO ff1_save (id, state, snapshot, undo_tail, updated_at)
+         VALUES ($1, $2, $3, $4, now())`,
+        [id, Buffer.from(stateB64, 'base64'), snapJson, JSON.stringify([{ label }])],
+      )
+      console.log(`[ff1] slot saved: ${id} ("${label}")`)
+    })
+  }
+
+  /** List labeled slots, newest first. */
+  async listSlots(): Promise<{ id: string; label: string; screen: string; at: string }[]> {
+    const r = await query<{ id: string; snapshot: { screen?: string }; undo_tail: { label?: string }[]; updated_at: Date }>(
+      `SELECT id, snapshot, undo_tail, updated_at FROM ff1_save
+       WHERE id LIKE 'slot:%' ORDER BY updated_at DESC LIMIT 30`)
+    return r.rows.map((row) => ({
+      id: row.id,
+      label: row.undo_tail?.[0]?.label ?? row.id,
+      screen: row.snapshot?.screen ?? '?',
+      at: row.updated_at.toISOString(),
+    }))
+  }
+
+  /** Load a labeled slot into the live game (persists — it IS the new latest). */
+  loadSlot(id: string): Promise<Ff1Snapshot> {
+    return this.op(async (b) => {
+      const r = await query<{ state: Buffer }>('SELECT state FROM ff1_save WHERE id = $1', [id])
+      const row = r.rows[0]
+      if (!row?.state?.length) throw new Error(`slot ${id} not found`)
+      const snap = await b.request('load', { state: Buffer.from(row.state).toString('base64') }) as unknown as Ff1Snapshot
+      await this.capturePersist(b)
+      return snap
     })
   }
 

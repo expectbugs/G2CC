@@ -18,6 +18,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 assert.equal(process.env.G2CC_PG_DATABASE, 'g2cc_smoke', 'refusing to run: G2CC_PG_DATABASE is not g2cc_smoke')
 await query('DELETE FROM ff1_save WHERE id = $1', ['latest'])
+await query(`DELETE FROM ff1_save WHERE id LIKE 'slot:%'`)
 
 const FIXTURE = `${FF1_DIR}/bridge/harness/fixtures/battle_start.npy`
 if (!existsSync(FIXTURE)) {
@@ -225,6 +226,58 @@ try {
   assert.equal(countTilePushes(), pushesAtBattle + 1, 'exactly one push for the post-battle map')
   checkScene(sc, 'post-battle map')
   console.error('  10. battle: interrupt flip (0 map pushes) → WON → one overworld push ✓')
+
+  // --- 11. Ph-E fight-until through the WM: round 1 by hand, Auto finishes ---
+  // (reloading the fixture restores the same battlecounter, so stage 4's
+  // commands remain valid — Auto may already be offered; that's correct)
+  await ff1.loadState(npyRawB64(FIXTURE))
+  wm.requestRender()
+  await settle((x) => menuOf(x).includes('Fight'), 'battle entry')
+  for (let i = 0; i < 4; i++) {
+    await games.onMenuSelect('Fight')
+    await settle((x) => titleOf(x).includes('→ target'), `char ${i} target`)
+    await games.onMenuSelect(`IMP s${i}`)
+  }
+  await settle((x) => titleOf(x).includes('round ready'), 'go confirm')
+  await games.onMenuSelect('Go')
+  await settle((x) => titleOf(x).includes('round — continue'), 'round 1 done')
+  await games.onMenuSelect('Continue')
+  sc = await settle((x) => menuOf(x).includes('Auto'), 'entry offers Auto (last round exists)')
+  await games.onMenuSelect('Auto')
+  sc = await settle((x) => titleOf(x).includes('fight until'), 'auto Cancel-first confirm')
+  assert.ok(menuOf(sc).includes('Cancel'), 'auto confirm is Cancel-first')
+  checkScene(sc, 'auto confirm')
+  await games.onMenuSelect('Go')
+  sc = await settle((x) => titleOf(x).includes('round —'), 'fight-until finished')
+  assert.match(regionText(sc, 'content'), /Stopped:/, 'fight-until reports its stop reason')
+  console.error('  11. fight-until: manual round → Auto (Cancel-first) → grind report ✓')
+
+  // --- 12. Ph-E Sys: SaveSlot → Slots list → Cancel-first load ---
+  await games.onMenuSelect('Continue')   // leave the grind log
+  await games.onReload()   // classify (post-battle overworld) + map refresh
+  sc = await settle((x) => menuOf(x).includes('Sys'), 'map view with Sys')
+  await games.onMenuSelect('Sys')
+  sc = await settle((x) => titleOf(x).includes('system'), 'sys view')
+  checkScene(sc, 'sys view')
+  await games.onMenuSelect('SaveSlot')
+  {
+    const t0 = Date.now()
+    let n = 0
+    while (Date.now() - t0 < 30000) {
+      n = (await query(`SELECT 1 FROM ff1_save WHERE id LIKE 'slot:%'`)).rowCount
+      if (n > 0) break
+      await sleep(50)
+    }
+    assert.ok(n > 0, 'slot row written to PG')
+  }
+  await games.onMenuSelect('Slots')
+  sc = await settle((x) => titleOf(x).includes('Slots (1)'), 'slots list')
+  await games.onBrowseSelect(0)
+  sc = await settle((x) => titleOf(x).includes('load slot?'), 'slot confirm')
+  assert.ok(menuOf(sc).includes('Cancel'), 'slot load is Cancel-first')
+  await games.onMenuSelect('Confirm')
+  await settle((x) => menuOf(x).includes('Peek'), 'slot loaded back to the map view')
+  console.error('  12. Sys: SaveSlot → Slots → Cancel-first load ✓')
 
   console.log('phase-ff1: ALL OK')
 } finally {

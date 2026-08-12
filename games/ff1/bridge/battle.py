@@ -108,6 +108,24 @@ class RoundResult:
 OUTCOMES = {0: 'continue', 1: 'party-dead', 2: 'won', 3: 'ran'}
 
 
+def _log_push(log: List[str], msg: str) -> None:
+    """Battle-log hygiene (Ph-E, found via the grind-loop logs):
+    - the round-end COMMAND-MENU redraw bleeds into the combat-box region as
+      condensed-font junk ('… ���� RUN …') — never a message; dropped. (Real
+      messages are standard-font with every glyph learned; genuine scrape
+      misses still surface via the scrape unknown-tile side channel.)
+    - the box draws incrementally, so a message arrives as prefix stages
+      (' AAAA', ' AAAA · IMP', ' AAAA · IMP 6DMG') — a new message that
+      EXTENDS the last replaces it (the completed line is the message)."""
+    if '�' in msg:
+        return
+    if log and msg.startswith(log[-1]):
+        log[-1] = msg
+        return
+    if not log or log[-1] != msg:
+        log.append(msg)
+
+
 class BattleExecutor:
     def __init__(self, emu: Emu, spells: List[dict]) -> None:
         self.emu = emu
@@ -370,9 +388,7 @@ class BattleExecutor:
             run = run + 1 if t == cur else 1
             cur = t
             if run == STABLE_FRAMES and t:
-                msg = ' · '.join(t)
-                if not log or log[-1] != msg:
-                    log.append(msg)
+                _log_push(log, ' · '.join(t))
             result = self._r(ramspec.BTL_RESULT)
             if result != 0:
                 if result in (2, 3):
@@ -389,6 +405,61 @@ class BattleExecutor:
             else:
                 stable_home = 0
         raise BattleDesync(f'resolution: no round end within {RESOLUTION_BUDGET} frames')
+
+    # ------------------------------------------------------------- grind loop
+    def fight_until(self, commands: List[CharCommand],
+                    min_hp_pct: int = 0, max_rounds: int = 30) -> dict:
+        """The `fight-until` grind loop (PLAN §8.2): repeat `commands` each
+        round until the battle ends or a stop condition trips. Stops are
+        RAM-read BEFORE each round (never guessed):
+          - hp: any LIVING ally hp < maxhp × min_hp_pct% (0 = off)
+          - charges: a magic command's caster has 0 charges at its level
+            (always on — entering it would "Nothing"-box and desync)
+          - rounds: max_rounds cap (LOUD — a stuck battle never spins)
+        Fight targets re-resolve to the lowest-HP LIVING enemy at entry time
+        (the game's own picker only offers living slots — entry-time behavior,
+        not a resolution retarget assist; §7.1 authenticity is untouched).
+        Returns {rounds, outcome, stopped, log} with the FULL accumulated log."""
+        log: List[str] = []
+        rounds = 0
+        while rounds < max_rounds:
+            if min_hp_pct > 0:
+                for ch in self.living_slots():
+                    c = ramspec.read_char(self._r, ch, lambda b: '')
+                    if c.curhp < c.maxhp * min_hp_pct / 100:
+                        return {'rounds': rounds, 'outcome': 'continue',
+                                'stopped': f'ally {ch} hp {c.curhp} < {min_hp_pct}% of {c.maxhp}',
+                                'log': log}
+            for cmd in commands:
+                if cmd.action == 'magic':
+                    mp = self._r(ramspec.CH_MAGIC + cmd.char * ramspec.CH_STRIDE
+                                 + ramspec.CH_CURMP + (cmd.level - 1))
+                    if mp <= 0:
+                        return {'rounds': rounds, 'outcome': 'continue',
+                                'stopped': f'char {cmd.char} L{cmd.level} charges exhausted',
+                                'log': log}
+            alive = sorted((e for e in ramspec.read_enemy_slots(self._r) if e.alive()),
+                           key=lambda e: e.hp)
+            if not alive:
+                raise BattleDesync('fight_until: no living enemies but battle not resolved')
+            living = set(self.living_slots())
+            round_cmds: List[CharCommand] = []
+            for cmd in commands:
+                if cmd.char not in living:
+                    continue   # a dead ally enters no command (the game skips them)
+                if cmd.action == 'fight' and not any(e.slot == cmd.target for e in alive):
+                    cmd = CharCommand(char=cmd.char, action='fight', target=alive[0].slot)
+                round_cmds.append(cmd)
+            missing = [ch for ch in living if not any(c.char == ch for c in round_cmds)]
+            for ch in missing:   # an ally who died and RECOVERED (undo) fights
+                round_cmds.append(CharCommand(char=ch, action='fight', target=alive[0].slot))
+            self.enter_round(round_cmds)
+            rr = self.run_resolution()
+            rounds += 1
+            log.extend(rr.log)
+            if rr.outcome != 'continue':
+                return {'rounds': rounds, 'outcome': rr.outcome, 'stopped': 'battle-end', 'log': log}
+        return {'rounds': rounds, 'outcome': 'continue', 'stopped': f'{max_rounds}-round cap', 'log': log}
 
     def _run_outro(self, log: List[str]) -> None:
         """Won/ran: collect the outro messages ("Monsters perished", EXP/gold
@@ -407,9 +478,7 @@ class BattleExecutor:
             run = run + 1 if t == cur else 1
             cur = t
             if run == STABLE_FRAMES and t:
-                msg = ' · '.join(t)
-                if not log or log[-1] != msg:
-                    log.append(msg)
+                _log_push(log, ' · '.join(t))
             if not self.emu.in_battle() and f % 10 == 0:
                 cls = screens.classify(self.emu.read, self.emu.frame,
                                        self.emu.patterns(), self.emu.glyphs,

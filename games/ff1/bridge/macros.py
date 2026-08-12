@@ -46,6 +46,43 @@ SETTLE_BUDGET = 600     # frames — generous; fades + battle intros settle < 40
 STEP_BUDGET = 90        # frames/tile before 'blocked' (~24 f/tile when moving)
 
 
+# --- name-entry grid layout (PLAN §7.4 / P0-R 6-press protocol) -------------
+# Same visual layout calibrate_glyphs.py learns glyphs from (its round-trip
+# validates that copy; the name-entry harness validates this one). Grid cell
+# (row i, col j) sits at tile (GRID_R0+2i, GRID_C0+2j); cursor position reads
+# from namecurs_x/y ($64/$65, reference/variables.inc).
+GRID_TEXT = [
+    'ABCDEFGHIJ',
+    'KLMNOPQRST',
+    "UVWXYZ',.",
+    '0123456789',
+    'abcdefghij',
+    'klmnopqrst',
+    'uvwxyz-‥!?',
+]
+# The blank 10th cell of the quote row is DEAD (live-probed 2026-08-12: A on
+# namecurs (9,2) enters nothing — almost certainly the JP END key the US
+# release removed). The vanilla grid therefore types EXACTLY 4 glyphs, no
+# spaces, no early end — short names (NOX/ZOT) go through the daemon's
+# `rename` op afterwards ($FF pad, the byte the game itself renders blank).
+# The name-under-construction preview (the small red box top-center of the
+# grid screen, f_00_grid_open.png): scraped to verify letters 1-3 landed;
+# letter 4 is verified by the grid CLOSING (ptygen_name commits at close —
+# probed: the bytes stay 00 during entry).
+REGION_NAME_PREVIEW = (3, 6, 12, 18)
+
+
+def grid_cell_of(ch: str):
+    """Grid (row, col) for a character; LOUD on one the grid can't type."""
+    for i, row in enumerate(GRID_TEXT):
+        j = row.find(ch)
+        if j >= 0:
+            return (i, j)
+    raise ValueError(f'name-entry: {ch!r} is not on the FF1 letter grid '
+                     '(no spaces — the US grid types exactly 4 glyphs; '
+                     'use rename for shorter names)')
+
+
 class BudgetExceeded(RuntimeError):
     """A frame budget ran out — surfaced LOUD, never swallowed (§10)."""
 
@@ -258,3 +295,95 @@ class Emu:
                 return finish('blocked')
             committed += 1
         return finish('done')
+
+
+# --------------------------------------------------------------- Ph-E macros
+
+def name_preview_len(emu: Emu) -> int:
+    """Letters currently typed in the grid screen's name box (scraped)."""
+    res = scrape.scrape_region(emu.patterns(), emu.glyphs, *REGION_NAME_PREVIEW)
+    return sum(len(ln.replace(' ', '')) for ln in res.lines)
+
+
+def name_entry(emu: Emu, name: str) -> str:
+    """Enter `name` (EXACTLY 4 grid glyphs — the vanilla-US constraint, see
+    the grid notes above) on an OPEN letter grid (PLAN §7.4; the P0-R
+    6-press protocol = open + 4 letters + CONFIRM). Every cursor move is
+    position-verified (namecurs_x/y); each letter press is verified by the
+    scraped name-box count growing (ptygen_name also fills PER LETTER —
+    probed 2026-08-12: $FF-initialized at open, one byte per keystroke); the
+    CONFIRM press is verified by the preview box EMPTYING as the grid
+    closes. Returns the name entered."""
+    if len(name) != 4:
+        raise ValueError(f'name-entry: {name!r} — the US grid types exactly 4 '
+                         'glyphs (no spaces/early end; probed 2026-08-12). '
+                         'Type a 4-glyph scaffold, then rename for short names.')
+    cells = [grid_cell_of(ch) for ch in name]   # LOUD before any press
+    for n, (row, col) in enumerate(cells):
+        # navigate (position-verified, one axis at a time)
+        for axis, target, btn_pos, btn_neg in (
+                ('y', row, 'Down', 'Up'), ('x', col, 'Right', 'Left')):
+            addr = ramspec.NAMECURS_Y if axis == 'y' else ramspec.NAMECURS_X
+            for _ in range(12):
+                cur = emu.read(addr)
+                if cur == target:
+                    break
+                btn = btn_pos if target > cur else btn_neg
+                emu.press_verified(btn, lambda a=addr, c=cur: emu.read(a) != c,
+                                   f'name grid {btn}→{axis}={target}')
+            if emu.read(addr) != target:
+                raise Desync(f'name-entry: cursor {axis} stuck at {emu.read(addr)}, '
+                             f'wanted {target} (letter {n + 1} {name[n]!r})')
+        before = name_preview_len(emu)
+        emu.press_verified('A', lambda b=before: name_preview_len(emu) > b,
+                           f'name letter {n + 1} ({name[n]!r})')
+    # CONFIRM: the letters are already in ptygen (per-keystroke); this press
+    # CLOSES the box — verified by the preview emptying (4 → 0 glyphs).
+    emu.press_verified('A', lambda: name_preview_len(emu) == 0,
+                       f'name confirm ("{name}")')
+    emu.settle(budget=900, allow_animated=True)
+    return name
+
+
+@dataclass
+class PaceOutcome:
+    paces: int
+    stopped: str            # 'battle' | 'blocked' | 'mapchange' | 'no-encounter'
+    battlestep0: int
+    battlestep1: int
+
+
+def pace(emu: Emu, max_paces: int = 200) -> PaceOutcome:
+    """The `Battle` macro (PLAN §8.2): alternate one step left/right (falling
+    back to right/left, then up/down pairs if walled) until the battle stop
+    fires. Encounter cadence is step-deterministic ($F5 battlestep ticks only
+    on encounter-capable tiles — PLAN §6.2), so pacing is exactly as honest as
+    walking; the battlestep delta rides the outcome so a non-ticking spot is
+    VISIBLE, not a mystery. Budget overrun → 'no-encounter' (LOUD, state OK)."""
+    step0 = emu.read(ramspec.BATTLESTEP)
+    pairs = [('left', 'right'), ('right', 'left'), ('up', 'down'), ('down', 'up')]
+    pair = None
+    for a, b in pairs:
+        out = emu.steps(a, 1)
+        if out.stopped == 'battle':
+            return PaceOutcome(1, 'battle', step0, emu.read(ramspec.BATTLESTEP))
+        if out.stopped == 'mapchange':
+            return PaceOutcome(1, 'mapchange', step0, emu.read(ramspec.BATTLESTEP))
+        if out.stopped == 'done':
+            pair = (b, a)   # we stand one tile toward `a`; alternate back first
+            break
+    if pair is None:
+        return PaceOutcome(0, 'blocked', step0, emu.read(ramspec.BATTLESTEP))
+    paces = 1
+    while paces < max_paces:
+        out = emu.steps(pair[(paces - 1) % 2], 1)   # back first, then out again
+        paces += 1
+        if out.stopped == 'battle':
+            return PaceOutcome(paces, 'battle', step0, emu.read(ramspec.BATTLESTEP))
+        if out.stopped == 'mapchange':
+            return PaceOutcome(paces, 'mapchange', step0, emu.read(ramspec.BATTLESTEP))
+        if out.stopped == 'blocked':
+            # an NPC wandered onto the return tile (towns) — LOUD stop; the
+            # caller repositions. Never silently re-route.
+            return PaceOutcome(paces, 'blocked', step0, emu.read(ramspec.BATTLESTEP))
+    return PaceOutcome(paces, 'no-encounter', step0, emu.read(ramspec.BATTLESTEP))

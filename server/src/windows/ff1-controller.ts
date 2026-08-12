@@ -24,6 +24,7 @@ import type { WmContext, WinView } from './types.js'
 import { paginateText, fwTextWidth } from '../os-compose.js'
 import { encodeGray4Single } from '../os-content.js'
 import { browsePageItems } from './_browse.js'
+import { kbdModel, type KbdCell } from './_kbd.js'
 import { ff1, type Ff1EngineConfig } from '../ff1/engine.js'
 import { FF1_DIR } from '../ff1/bridge.js'
 import type {
@@ -50,8 +51,15 @@ type Ff1Level =
   | 'battle-target'   // enemy/ally pick for the pending action
   | 'battle-confirm'  // Cancel-first Go over the collected round
   | 'battle-log'      // post-round paginated log
+  | 'auto-confirm'    // Cancel-first fight-until (repeat last round) confirm
   | 'undo'            // checkpoint browse list
   | 'undo-confirm'    // Cancel-first restore confirm
+  | 'sys'             // Save/Slots/Export system menu (Ph-E)
+  | 'slots'           // labeled-slot browse list
+  | 'slot-confirm'    // Cancel-first slot load confirm
+  | 'name-kbd'        // ring keyboard composing a 4-glyph name (§7.4)
+  | 'minimap'         // trail minimap tile (sm maps)
+  | 'formation'       // battle-start formation glance (config toggle)
 
 const STEP_COUNTS = [1, 2, 3, 5, 8] as const
 
@@ -96,6 +104,19 @@ export class Ff1Controller {
   private mapBottomKey: string | null = null
   private mapFailed: string | null = null
   private mapSeq = 0
+  // --- Ph-E state
+  private lastCommands: Ff1CharCommand[] | null = null   // fight-until repeats these
+  private lastCommandsKey = -1                            // battlecounter they belong to
+  private slots: { id: string; label: string; screen: string; at: string }[] = []
+  private slotsOffset = 0
+  private pendingSlot: { id: string; label: string } | null = null
+  private kbdBuf = ''
+  private kbdGroup: string | null = null
+  private kbdShift = true                                 // names lead uppercase
+  private kbdCells: KbdCell[] = []
+  private miniTile: string | null = null
+  private formationTileBmp: string | null = null
+  private formationKey = -1                               // battlecounter it was rendered for
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -104,6 +125,7 @@ export class Ff1Controller {
     return { rngJitter: g?.rngJitter ?? true, undoDepth: g?.undoDepth ?? 30 }
   }
   private showEnemyHp(): boolean { return this.ctx.config.games?.ff1?.showEnemyHp ?? false }
+  private showFormationTile(): boolean { return this.ctx.config.games?.ff1?.formationTile ?? false }
 
   // ------------------------------------------------ lifecycle (from GamesWindow)
 
@@ -278,6 +300,8 @@ export class Ff1Controller {
     const e = this.entry
     if (!e || e.commands.length === 0) { this.ctx.log('[os] ff1: Go with no commands — ignored (LOUD)'); return }
     const cmds = e.commands
+    this.lastCommands = cmds            // fight-until repeats these (§8.2)
+    this.lastCommandsKey = e.battleKey
     this.entry = null
     this.runOp('battle round', () => ff1.battleRound(cmds), (r) => {
       const resp = r as Ff1Snapshot & { battleRound?: { log: string[]; outcome: string } }
@@ -286,6 +310,24 @@ export class Ff1Controller {
       this.roundOutcome = br.outcome
       const body = br.log.length ? br.log.join('\n') : '(no combat messages scraped)'
       this.roundPages = paginateText(`Outcome: ${br.outcome}\n\n${body}`)
+      this.roundPage = 0
+      this.level = 'battle-log'
+    })
+  }
+
+  /** Fight-until (§8.2): repeat the last round's commands until battle end /
+   *  any ally under 25 % HP / charges out / the round cap. */
+  private fireAuto(): void {
+    const cmds = this.lastCommands
+    if (!cmds) { this.ctx.log('[os] ff1: Auto with no last round — ignored (LOUD)'); return }
+    this.runOp('fight-until', () => ff1.battleAuto(cmds, { minHpPct: 25, maxRounds: 30 }), (r) => {
+      const resp = r as Ff1Snapshot & { battleAuto?: { rounds: number; outcome: string; stopped: string; log: string[] } }
+      const ba = resp.battleAuto
+      if (!ba) { this.opError = 'battle_auto returned no data'; this.level = 'root'; return }
+      this.roundOutcome = ba.outcome
+      const body = ba.log.length ? ba.log.join('\n') : '(no combat messages scraped)'
+      this.roundPages = paginateText(
+        `Outcome: ${ba.outcome} after ${ba.rounds} round(s)\nStopped: ${ba.stopped}\n\n${body}`)
       this.roundPage = 0
       this.level = 'battle-log'
     })
@@ -308,6 +350,11 @@ export class Ff1Controller {
 
     if (this.level === 'undo') return this.undoView()
     if (this.level === 'undo-confirm') return this.undoConfirmView()
+    if (this.level === 'sys') return this.sysView(snap, err)
+    if (this.level === 'slots') return this.slotsView()
+    if (this.level === 'slot-confirm') return this.slotConfirmView()
+    if (this.level === 'name-kbd') return this.kbdView()
+    if (this.level === 'minimap') return this.minimapView(snap, err)
     if (this.level === 'battle-log') {
       const suffix = this.roundPages.length > 1 ? ` · ${this.roundPage + 1}/${this.roundPages.length}` : ''
       return {
@@ -318,9 +365,19 @@ export class Ff1Controller {
       }
     }
     if (snap.screen === 'battle' && snap.state.battle) {
+      if (this.level === 'formation') return this.formationView(snap, err)
+      // battle-start glance (config toggle, default OFF): once per encounter
+      if (this.showFormationTile() && this.formationKey !== snap.state.battlecounter) {
+        this.formationKey = snap.state.battlecounter
+        this.formationTileBmp = null
+        this.level = 'formation'
+        this.syncFormationTile()
+        return this.formationView(snap, err)
+      }
       if (this.level === 'battle-magic') return this.magicView(snap, err)
       if (this.level === 'battle-target') return this.targetView(snap, err)
       if (this.level === 'battle-confirm') return this.goConfirmView(snap, err)
+      if (this.level === 'auto-confirm') return this.autoConfirmView(snap, err)
       return this.entryView(snap, err, busy)
     }
     return this.screenView(snap, err, busy)
@@ -335,7 +392,8 @@ export class Ff1Controller {
       case 'sm': {
         const where = snap.screen === 'ow' ? 'Overworld' : `Map ${s.pos.mapId}`
         const title = `FF1 · ${where} (${s.pos.x},${s.pos.y}) ×${STEP_COUNTS[this.stepIdx]}${busy}`
-        const menu = ['↑', '↓', '←', '→', '×N', 'A', 'B', 'Menu', 'Peek', 'Undo', 'Main']
+        const menu = ['↑', '↓', '←', '→', '×N', 'A', 'B', 'Battle', 'Menu', 'Peek',
+          ...(snap.screen === 'sm' ? ['Mini'] : []), 'Sys', 'Undo', 'Main']
         if (!this.mapTop || !this.mapBottom) {
           // Text fallback until the first tile fetch lands (or after a LOUD
           // fetch failure — Peek retries; the game state is untouched).
@@ -365,10 +423,15 @@ export class Ff1Controller {
           shop: 'shop', gamemenu: 'menu', mainmenu: 'title menu',
           partyselect: 'party select', nameentry: 'name entry',
         }
+        // The naming grid gets the ring-driven macro (§7.4): Name opens the
+        // tap keyboard, the macro drives the 6-press protocol. Cursor mode
+        // stays available for manual play. gamemenu gets Sys (save/export).
+        const extra = snap.screen === 'nameentry' ? ['Name']
+          : snap.screen === 'gamemenu' ? ['Sys'] : []
         return {
           mode: 'text',
           title: `FF1 · ${labels[snap.screen]}${busy}`,
-          menu: ['↑', '↓', '←', '→', 'A', 'B', 'Undo', 'Main'],
+          menu: [...extra, '↑', '↓', '←', '→', 'A', 'B', 'Undo', 'Main'],
           text: `${err}${(snap.text ?? []).join('\n') || '(no scraped text)'}\n\ncursor mode: arrows move, A confirms, B backs`,
         }
       }
@@ -403,10 +466,11 @@ export class Ff1Controller {
       const chg = c.maxmp.some((m) => m > 0) ? ` c${c.mp.slice(0, 4).join('/')}` : ''
       return col(`${mark}${c.name} ${c.hp}/${c.maxhp}${chg}`)
     })
+    const auto = this.lastCommands && this.lastCommandsKey === snap.state.battlecounter ? ['Auto'] : []
     return {
       mode: 'twocol',
       title: `FF1 · ${ch?.name ?? '?'} (${e.idx + 1}/${e.living.length})${busy}`,
-      menu: ['Fight', 'Magic', 'Drink', 'Item', 'Run', 'RunAll', 'Undo', 'Main'],
+      menu: ['Fight', 'Magic', 'Drink', 'Item', 'Run', 'RunAll', ...auto, 'Undo', 'Main'],
       textLeft: `${err}${left.join('\n')}`,
       textRight: right.join('\n'),
     }
@@ -481,6 +545,19 @@ export class Ff1Controller {
     }
   }
 
+  /** Cancel-first fight-until confirm (§8.2 — repeats the LAST round). */
+  private autoConfirmView(snap: Ff1Snapshot, err: string): WinView {
+    const lines = (this.lastCommands ?? []).map((c) => col(this.describeCommand(snap, c)))
+    return {
+      mode: 'text',
+      title: 'FF1 · fight until…',
+      menu: ['Cancel', 'Go', 'Undo', 'Main'],
+      text: `${err}Repeats the last round each round:\n${lines.join('\n')}\n\n`
+        + 'Stops: battle end · any ally < 25% HP ·\ncharges out · 30-round cap.\n'
+        + 'Fight targets re-pick the weakest LIVING enemy\nat entry (the picker only offers living slots).',
+    }
+  }
+
   /** Cancel-first Go (the last pick FIRES the round — §8.4 insurance). */
   private goConfirmView(snap: Ff1Snapshot, err: string): WinView {
     const e = this.entry
@@ -490,6 +567,123 @@ export class Ff1Controller {
       title: 'FF1 · round ready',
       menu: ['Cancel', 'Go', 'Undo', 'Main'],
       text: `${err}${lines.join('\n')}\n\nGo runs the round through the real battle menus.\nCancel re-picks from the first character.`,
+    }
+  }
+
+  /** Formation glance tile fetch (once per encounter, seq-free: keyed by
+   *  battlecounter so a stale fetch of a PAST battle just never lands). */
+  private syncFormationTile(): void {
+    const key = this.formationKey
+    void ff1.frameGray4('formation').then((r) => {
+      if (this.formationKey !== key) return
+      this.formationTileBmp = encodeGray4Single(Buffer.from(r.gray4, 'base64'), 'ff1 formation').bmpBase64
+      this.requestRender()
+    }).catch((e: unknown) => {
+      if (this.formationKey !== key) return
+      this.ctx.log(`[os] ff1: formation tile FAILED (entry continues without it): ${e instanceof Error ? e.message : String(e)}`)
+      this.level = 'root'
+      this.requestRender()
+    })
+  }
+
+  private formationView(snap: Ff1Snapshot, err: string): WinView {
+    const title = `FF1 · ${this.formation(snap)}`
+    if (!this.formationTileBmp) {
+      return { mode: 'text', title, menu: ['Enter', 'Undo', 'Main'], text: `${err}⏳ formation rendering…` }
+    }
+    return { mode: 'tile', title, menu: ['Enter', 'Undo', 'Main'], tile: this.formationTileBmp }
+  }
+
+  /** Trail minimap (PLAN §7 v1 = breadcrumbs): a 200×100 gray4 tile, 2 px per
+   *  map tile, windowed ±50/±25 around the player. Explored trail = gray-6,
+   *  player = white. Advisory (session-lifetime daemon trail). */
+  private renderMinimap(data: { player: [number, number]; tiles: [number, number][] }): string {
+    const W = 200, H = 100
+    const px = new Uint8Array(W * H)
+    const [pxx, pyy] = data.player
+    const x0 = pxx - 50, y0 = pyy - 25
+    const plot = (tx: number, ty: number, v: number): void => {
+      const gx = (tx - x0) * 2, gy = (ty - y0) * 2
+      if (gx < 0 || gy < 0 || gx > W - 2 || gy > H - 2) return
+      for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) {
+        px[(gy + dy) * W + gx + dx] = v
+      }
+    }
+    for (const [tx, ty] of data.tiles) plot(tx, ty, 6)
+    plot(pxx, pyy, 15)
+    const buf = Buffer.alloc(4 + W * H)
+    buf.writeUInt16LE(W, 0)
+    buf.writeUInt16LE(H, 2)
+    Buffer.from(px).copy(buf, 4)
+    return encodeGray4Single(buf, 'ff1 minimap').bmpBase64
+  }
+
+  private minimapView(snap: Ff1Snapshot, err: string): WinView {
+    const s = snap.state
+    const title = `FF1 · minimap · map ${s.pos.mapId} (${s.pos.x},${s.pos.y})`
+    if (!this.miniTile) {
+      return { mode: 'text', title, menu: ['Reload', 'Undo', 'Main'], text: `${err}⏳ trail rendering…` }
+    }
+    return { mode: 'tile', title, menu: ['Reload', 'Undo', 'Main'], tile: this.miniTile }
+  }
+
+  private openMinimap(): void {
+    this.miniTile = null
+    this.level = 'minimap'
+    this.runOp('minimap', () => ff1.minimap(), (r) => {
+      this.miniTile = this.renderMinimap(r as { player: [number, number]; tiles: [number, number][] })
+    })
+  }
+
+  private sysView(snap: Ff1Snapshot, err: string): WinView {
+    const s = snap.state
+    return {
+      mode: 'text',
+      title: 'FF1 · system',
+      menu: ['SaveSlot', 'Slots', 'Export', 'Back', 'Main'],
+      text: `${err}In-game save present: ${s.sramSavePresent ? 'YES' : 'no (inn-sleep to create one)'}\n`
+        + `Gold ${s.gold} · battles ${s.battlecounter}\n\n`
+        + 'SaveSlot stores a labeled savestate slot (PG).\n'
+        + 'Slots lists/loads them (Cancel-first).\n'
+        + 'Export writes the 8 KB .sav for PC emulators —\n'
+        + 'refused loudly unless an in-game save exists.',
+    }
+  }
+
+  private slotsView(): WinView {
+    const rows = this.slots.map((s2) => `${s2.label} · ${s2.screen} · ${s2.at.slice(5, 16)}`)
+    const display = rows.length ? rows : ['(no slots saved yet)']
+    const paged = browsePageItems(display, this.slotsOffset)
+    return {
+      mode: 'browse',
+      menuMode: 'passive',
+      title: `FF1 · Slots (${this.slots.length})`,
+      menu: ['Back', 'Main'],
+      items: paged.items,
+    }
+  }
+
+  private slotConfirmView(): WinView {
+    const p = this.pendingSlot
+    return {
+      mode: 'text',
+      title: 'FF1 · load slot?',
+      menu: ['Cancel', 'Confirm', 'Main'],
+      text: p
+        ? `Load slot:\n${p.label}\n\n⚠ Replaces the LIVE game (the current state\nauto-checkpoints first — Undo recovers).\nConfirm loads · Cancel keeps playing.`
+        : '(nothing pending)',
+    }
+  }
+
+  private kbdView(): WinView {
+    const { items, cells } = kbdModel(this.kbdGroup, this.kbdShift)
+    this.kbdCells = cells
+    return {
+      mode: 'browse',
+      menuMode: 'passive',
+      title: `FF1 · name: "${this.kbdBuf}" (${this.kbdBuf.length}/4)`,
+      menu: ['Back', 'Main'],
+      items: [...items],
     }
   }
 
@@ -532,10 +726,77 @@ export class Ff1Controller {
     if (this.level === 'undo-confirm') { this.undoConfirmSelect(label); return }
     if (this.level === 'battle-log') { this.battleLogSelect(label); return }
     if (this.level === 'battle-confirm') { this.goConfirmSelect(label); return }
+    if (this.level === 'auto-confirm') { this.autoConfirmSelect(label); return }
     if (this.level === 'battle-magic') { this.magicSelect(snap, label); return }
     if (this.level === 'battle-target') { this.targetSelect(snap, label); return }
+    if (this.level === 'sys') { this.sysSelect(snap, label); return }
+    if (this.level === 'slot-confirm') { this.slotConfirmSelect(label); return }
+    if (this.level === 'minimap') {
+      if (label === 'Reload') { this.openMinimap(); return }
+      this.ctx.log(`[os] ff1 minimap: unknown verb '${label}' (LOUD)`)
+      return
+    }
+    if (this.level === 'formation') {
+      if (label === 'Enter') { this.level = 'root'; this.requestRender(); return }
+      this.ctx.log(`[os] ff1 formation: unknown verb '${label}' (LOUD)`)
+      return
+    }
     if (snap.screen === 'battle' && snap.state.battle) { this.entrySelect(snap, label); return }
     this.screenSelect(snap, label)
+  }
+
+  private sysSelect(snap: Ff1Snapshot, label: string): void {
+    if (label === 'SaveSlot') {
+      const s = snap.state
+      const lead = s.party[0]?.name ?? '?'
+      const slotLabel = `${lead} · ${snap.screen} (${s.pos.x},${s.pos.y}) · ${s.gold}G`
+      this.runOp('save slot', () => ff1.saveSlot(slotLabel), () => { this.opError = null })
+      return
+    }
+    if (label === 'Slots') {
+      this.runOp('list slots', () => ff1.listSlots(), (r) => {
+        this.slots = r as { id: string; label: string; screen: string; at: string }[]
+        this.slotsOffset = 0
+        this.level = 'slots'
+      })
+      return
+    }
+    if (label === 'Export') {
+      this.runOp('.sav export', () => ff1.savExport(), (r) => {
+        const res = r as { path: string; bytes: number }
+        this.opError = null
+        this.roundPages = paginateText(`.sav exported:\n${res.path}\n(${res.bytes} bytes — loads in Mesen-class emulators)`)
+        this.roundPage = 0
+        this.roundOutcome = 'export'
+        this.level = 'battle-log'   // reuse the pager view for the receipt
+      })
+      return
+    }
+    this.ctx.log(`[os] ff1 sys: unknown verb '${label}' (LOUD)`)
+  }
+
+  private slotConfirmSelect(label: string): void {
+    if (label === 'Confirm') {
+      const p = this.pendingSlot
+      if (!p) { this.level = 'slots'; this.requestRender(); return }
+      this.pendingSlot = null
+      this.runOp('load slot', async () => {
+        await ff1.checkpoint('before slot load')   // §8.4: the accidental-tap escape
+        return ff1.loadSlot(p.id)
+      }, () => {
+        this.entry = null
+        this.level = 'root'
+      })
+      return
+    }
+    if (label === 'Cancel') { this.pendingSlot = null; this.level = 'slots'; this.requestRender(); return }
+    this.ctx.log(`[os] ff1 slot-confirm: unknown verb '${label}' (LOUD)`)
+  }
+
+  private autoConfirmSelect(label: string): void {
+    if (label === 'Go') { this.level = 'root'; this.fireAuto(); return }
+    if (label === 'Cancel') { this.level = 'root'; this.requestRender(); return }
+    this.ctx.log(`[os] ff1 auto-confirm: unknown verb '${label}' (LOUD)`)
   }
 
   private screenSelect(snap: Ff1Snapshot, label: string): void {
@@ -547,13 +808,38 @@ export class Ff1Controller {
       if (label === 'B') { this.press(['B'], 'B'); return }
       if (label === 'Menu') { this.press(['Start'], 'open game menu'); return }
       if (label === 'Peek') { this.syncMapTiles(true); return }
+      if (label === 'Battle') { this.runOp('pace', () => ff1.pace(200), (r) => this.paceDone(r)); return }
+      if (label === 'Mini') { this.openMinimap(); return }
+      if (label === 'Sys') { this.level = 'sys'; this.requestRender(); return }
     } else {
       // Cursor mode (dialog/shop/gamemenu/title/party/name screens).
+      if (label === 'Name' && snap.screen === 'nameentry') {
+        this.kbdBuf = ''
+        this.kbdGroup = null
+        this.kbdShift = true
+        this.level = 'name-kbd'
+        this.requestRender()
+        return
+      }
+      if (label === 'Sys' && snap.screen === 'gamemenu') { this.level = 'sys'; this.requestRender(); return }
       const cursor: Record<string, string> = { ...dirs, A: 'A', B: 'B' }
       const btn = cursor[label] ? { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right', A: 'A', B: 'B' }[label] : null
       if (btn) { this.press([btn], `${snap.screen} ${btn}`); return }
     }
     this.ctx.log(`[os] ff1 ${snap.screen}: menu '${label}' — not a verb here (LOUD)`)
+  }
+
+  /** Pace outcome → LOUD report; a battle stop flips to entry via dispatch. */
+  private paceDone(r: unknown): void {
+    const resp = r as Ff1Snapshot & { pace?: { paces: number; stopped: string; battlestep0: number; battlestep1: number } }
+    const p = resp.pace
+    if (!p) { this.opError = 'pace returned no report'; return }
+    if (p.stopped !== 'battle') {
+      const tick = p.battlestep1 === p.battlestep0
+        ? ' — battlestep NEVER TICKED (this spot cannot encounter; move elsewhere)'
+        : ''
+      this.opError = `pace: ${p.stopped} after ${p.paces} paces${tick}`
+    }
   }
 
   private entrySelect(snap: Ff1Snapshot, label: string): void {
@@ -593,6 +879,14 @@ export class Ff1Controller {
         this.requestRender()
         return
       }
+      case 'Auto':
+        if (!this.lastCommands || this.lastCommandsKey !== snap.state.battlecounter) {
+          this.ctx.log('[os] ff1: Auto without a last round for THIS battle — ignored (LOUD)')
+          return
+        }
+        this.level = 'auto-confirm'
+        this.requestRender()
+        return
       default:
         this.ctx.log(`[os] ff1 battle-entry: unknown verb '${label}' (LOUD)`)
     }
@@ -698,6 +992,8 @@ export class Ff1Controller {
   }
 
   async onBrowseSelect(index: number): Promise<void> {
+    if (this.level === 'name-kbd') { this.kbdSelect(index); return }
+    if (this.level === 'slots') { this.slotsSelect(index); return }
     if (this.level !== 'undo') { this.ctx.log(`[os] ff1: browse select at ${this.level} — ignored (LOUD)`); return }
     const rows = this.undoList.map((c) => `↩ ${c.label} · ${c.at.slice(11, 19)}`)
     const display = rows.length ? rows : ['(no checkpoints yet)']
@@ -713,11 +1009,84 @@ export class Ff1Controller {
     this.requestRender()
   }
 
+  /** The name keyboard (kbdModel; groups → chars; Run/Done fires the macro). */
+  private kbdSelect(index: number): void {
+    const cell = this.kbdCells[index]
+    if (!cell) { this.ctx.log(`[os] ff1 kbd: index ${index} out of range (LOUD)`); return }
+    if (cell.t === 'group') { this.kbdGroup = cell.chars; this.requestRender(); return }
+    if (cell.t === 'char') {
+      if (this.kbdBuf.length >= 4) { this.ctx.log('[os] ff1 kbd: name is 4 glyphs max — ignored (LOUD)'); return }
+      this.kbdBuf += cell.ch
+      this.kbdGroup = null
+      this.requestRender()
+      return
+    }
+    switch (cell.a) {
+      case 'groups': this.kbdGroup = null; this.requestRender(); return
+      case 'bksp': this.kbdBuf = this.kbdBuf.slice(0, -1); this.requestRender(); return
+      case 'clear': this.kbdBuf = ''; this.requestRender(); return
+      case 'shift': this.kbdShift = !this.kbdShift; this.requestRender(); return
+      case 'space':
+        this.ctx.log('[os] ff1 kbd: the FF1 grid has no space — Rename pads short names (LOUD)')
+        return
+      case 'run':
+      case 'done': {
+        const name = this.kbdBuf
+        if (name.length !== 4) {
+          this.opError = `"${name}" — the vanilla grid types exactly 4 glyphs (Rename shortens after)`
+          this.ctx.log(`[os] ff1 kbd: ${this.opError}`)
+          this.requestRender()
+          return
+        }
+        this.level = 'root'
+        this.runOp(`name "${name}"`, () => ff1.nameEntry(name))
+        return
+      }
+    }
+  }
+
+  private slotsSelect(index: number): void {
+    const rows = this.slots.map((s2) => `${s2.label} · ${s2.screen} · ${s2.at.slice(5, 16)}`)
+    const display = rows.length ? rows : ['(no slots saved yet)']
+    const { map, prevOffset, nextOffset } = browsePageItems(display, this.slotsOffset)
+    const m = map[index]
+    if (m === undefined) { this.ctx.log(`[os] ff1 slots: index ${index} out of range`); return }
+    if (m === -1) { this.slotsOffset = prevOffset; this.requestRender(); return }
+    if (m === -2) { this.slotsOffset = nextOffset; this.requestRender(); return }
+    const slot = this.slots[m]
+    if (!slot) { this.ctx.log('[os] ff1 slots: no slot at row — resyncing'); this.requestRender(); return }
+    this.pendingSlot = { id: slot.id, label: slot.label }
+    this.level = 'slot-confirm'
+    this.requestRender()
+  }
+
   /** Pop one level. false = at root (GamesWindow pops ff1 → games list). */
   async onBack(): Promise<boolean> {
     switch (this.level) {
       case 'undo-confirm': this.pendingUndo = null; this.level = 'undo'; this.requestRender(); return true
       case 'undo': this.level = this.returnLevel; this.requestRender(); return true
+      case 'slot-confirm': this.pendingSlot = null; this.level = 'slots'; this.requestRender(); return true
+      case 'slots': this.level = 'sys'; this.requestRender(); return true
+      case 'sys':
+      case 'minimap':
+        this.level = 'root'
+        this.requestRender()
+        return true
+      case 'name-kbd':
+        if (this.kbdGroup !== null) { this.kbdGroup = null; this.requestRender(); return true }
+        this.level = 'root'
+        this.requestRender()
+        return true
+      case 'formation':
+        // double-tap on the glance = skip straight to entry
+        this.level = 'root'
+        this.requestRender()
+        return true
+      case 'auto-confirm':
+        // Double-tap on a confirm = Cancel, never silently fire (§8.4).
+        this.level = 'root'
+        this.requestRender()
+        return true
       case 'battle-magic':
       case 'battle-target':
         if (this.entry) this.entry.pendingAction = null

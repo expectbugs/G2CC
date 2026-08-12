@@ -81,6 +81,12 @@ class Daemon:
         self.emu: Optional[Emu] = None
         self.undo = UndoRing()
         self.rng_jitter = True
+        # Ph-E minimap trail (PLAN §7 "explored-layout"): tiles the party has
+        # been OBSERVED on, per (standardMap, mapId) — recorded at op-endpoint
+        # snapshots (coarse breadcrumbs, ≤8 tiles apart on step macros).
+        # Session-lifetime + advisory: a daemon respawn or undo starts the
+        # trail fresh/stale respectively — it never claims map authority.
+        self.trail: Dict[tuple, set] = {}
         self.enemies = json.loads((DATA / 'enemies.json').read_text())['enemies']
         self.spells = json.loads((DATA / 'spells.json').read_text())['spells']
         self.charmap_std = {int(k, 16): v
@@ -123,6 +129,9 @@ class Daemon:
                 'spells': ch.spells, 'weapons': ch.weapons, 'armor': ch.armor,
             })
         x, y = ramspec.player_tile(read)
+        if not ramspec.in_battle(read):
+            key = (bool(read(ramspec.MAPFLAGS) & 1), read(ramspec.CUR_MAP))
+            self.trail.setdefault(key, set()).add((x, y))
         state: dict = {
             'party': party,
             'gold': ramspec.rd24(read, ramspec.GOLD),
@@ -269,6 +278,11 @@ class Daemon:
             # 110+112 split; see server FF1_MAP_*_RECT).
             visible = emu.frame[9:231]
             img = visible[:110] if crop == 'map-top' else visible[110:]
+        elif crop == 'formation':
+            # Ph-E formation glance (default-off toggle): the battle tableau —
+            # enemy pane + character strip at 1:1, sized for 'tile' mode
+            # (200×100; picked off m_00_battle.png).
+            img = emu.frame[24:124, 4:204]
         elif crop in ('top', 'bottom', 'full'):
             visible = emu.frame[VISIBLE_TOP:240 - VISIBLE_TOP]   # 224 rows
             img = {'top': visible[:112], 'bottom': visible[112:],
@@ -317,6 +331,116 @@ class Daemon:
         out['battleRound'] = {'log': rr.log, 'result': rr.result,
                               'outcome': rr.outcome, 'frames': rr.frames}
         return out
+
+    # ------------------------------------------------------------- Ph-E macros
+    def op_name_entry(self, req: dict) -> dict:
+        """Ring-driven name entry (PLAN §7.4): from an OPEN letter grid,
+        enter req['name'] (1-4 chars; shorter names space-pad via the grid's
+        blank cell). Auto-checkpoints first — a mis-tap is one Undo away."""
+        emu = self.need_emu()
+        name = str(req['name'])
+        self.checkpoint(f'before naming "{name}"')
+        entered = macros.name_entry(emu, name)
+        out = self.snapshot()
+        out['entered'] = entered
+        return out
+
+    def op_pace(self, req: dict) -> dict:
+        """The Battle pace macro (PLAN §8.2): alternate steps until an
+        encounter. Auto-checkpoints; reports battlestep so a non-ticking
+        pacing spot is visible, never a mystery."""
+        emu = self.need_emu()
+        self.checkpoint('before Pace')
+        po = macros.pace(emu, int(req.get('maxPaces', 200)))
+        if po.stopped == 'battle':
+            self.checkpoint('battle start ' + self._formation_label())
+        out = self.snapshot()
+        out['pace'] = {'paces': po.paces, 'stopped': po.stopped,
+                       'battlestep0': po.battlestep0, 'battlestep1': po.battlestep1}
+        return out
+
+    def op_battle_auto(self, req: dict) -> dict:
+        """The fight-until grind loop (PLAN §8.2): repeat `commands` each
+        round; stop on battle end / any-ally-HP-below-% / charges out /
+        round cap. Auto-checkpoints the pre-loop state."""
+        emu = self.need_emu()
+        if not emu.in_battle():
+            raise RuntimeError('battle_auto: not in a battle')
+        cmds = [battlemod.CharCommand(
+            char=int(c['char']), action=str(c['action']),
+            target=(int(c['target']) if c.get('target') is not None else None),
+            level=int(c.get('level', 0)), slot=int(c.get('slot', 0)))
+            for c in req.get('commands', [])]
+        if not cmds:
+            raise ValueError('battle_auto: commands must be non-empty')
+        self.checkpoint('battle auto ' + self._formation_label())
+        ex = battlemod.BattleExecutor(emu, self.spells)
+        result = ex.fight_until(cmds, min_hp_pct=int(req.get('minHpPct', 0)),
+                                max_rounds=int(req.get('maxRounds', 30)))
+        out = self.snapshot()
+        out['battleAuto'] = result
+        return out
+
+    def op_rename(self, req: dict) -> dict:
+        """Cosmetic name edit on a COMMITTED party member (PLAN §7.4 note):
+        the vanilla-US grid types exactly 4 glyphs (its END key was removed;
+        live-probed), so 3-letter names like NOX/ZOT are unreachable by
+        input. This writes ch_name directly — 1-4 grid glyphs, $FF-padded,
+        the byte the game itself renders blank everywhere. Cosmetic ONLY
+        (names have zero gameplay effect); auto-checkpoints first."""
+        emu = self.need_emu()
+        slot = int(req['slot'])
+        name = str(req['name'])
+        if not (0 <= slot <= 3):
+            raise ValueError(f'rename: slot {slot} out of 0..3')
+        if not (1 <= len(name) <= 4):
+            raise ValueError(f'rename: {name!r} must be 1-4 characters')
+        byts = []
+        for ch in name:
+            b = self.char_encode.get(ch)
+            if b is None or ch == ' ':
+                raise ValueError(f'rename: {ch!r} is not a name glyph')
+            byts.append(b)
+        while len(byts) < 4:
+            byts.append(0xFF)   # charmap pad-space — renders blank in-game
+        cur = self.decode_name([emu.read(ramspec.CH_STATS + slot * ramspec.CH_STRIDE
+                                         + ramspec.CH_NAME + i) for i in range(4)])
+        self.checkpoint(f'before renaming {cur or f"slot {slot}"} → "{name}"')
+        for i, b in enumerate(byts):
+            emu.nes[ramspec.CH_STATS + slot * ramspec.CH_STRIDE + ramspec.CH_NAME + i] = b
+        log(f'rename: slot {slot} "{cur}" → "{name}"')
+        return self.snapshot()
+
+    def op_sav_export(self, req: dict) -> dict:
+        """.sav export (PLAN §9): dump $6000-$7FFF to games/ff1/saves/.
+        Only coherent with an in-game save present and no battle in
+        progress — refused LOUDLY otherwise."""
+        emu = self.need_emu()
+        if not ramspec.sram_save_present(emu.read):
+            raise RuntimeError('sav export refused: no in-game save in SRAM — '
+                               'sleep at an inn (or save at title) first')
+        if emu.in_battle():
+            raise RuntimeError('sav export refused: battle in progress')
+        data = bytes(emu.read(ramspec.UNSRAM + i) for i in range(ramspec.SRAM_SIZE))
+        saves = FF1_DIR / 'saves'
+        saves.mkdir(exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+        path = saves / f'ff1-{stamp}.sav'
+        path.write_bytes(data)
+        log(f'sav export: {path} ({len(data)} B)')
+        return {'path': str(path), 'bytes': len(data)}
+
+    def op_minimap(self, req: dict) -> dict:
+        """Trail minimap data (PLAN §7 dungeon minimap, v1 = breadcrumbs):
+        the visited tiles of the CURRENT map + the player position. The
+        server renders the small tile; re-push on growth is its job."""
+        emu = self.need_emu()
+        read = emu.read
+        key = (bool(read(ramspec.MAPFLAGS) & 1), read(ramspec.CUR_MAP))
+        x, y = ramspec.player_tile(read)
+        tiles = sorted(self.trail.get(key, set()))
+        return {'standardMap': key[0], 'mapId': key[1], 'player': [x, y],
+                'tiles': [[tx, ty] for tx, ty in tiles]}
 
     def op_undo_list(self, _req: dict) -> dict:
         return {'checkpoints': self.undo.listing()}

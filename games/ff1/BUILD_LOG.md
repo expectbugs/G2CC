@@ -363,6 +363,61 @@ On-glass items deferred to the §11 checklist: real push-latency measurements
 (PLAN §7.2 records them), gray-ramp legibility (the >>4 luma mapping), Peek
 feel.
 
+## Ph-E (= PLAN P5, minus dictation) — macros + polish
+
+**Session 3 (2026-08-12, continued): Ph-E COMPLETE.**
+
+Built (python side; every finding live-probed, PLAN updated where reality won):
+- **Name entry (`macros.name_entry`)**: the P0-R 6-press protocol confirmed =
+  open + 4 letters + CONFIRM. New probed facts: ptygen_name fills PER
+  KEYSTROKE ($FF-initialized at grid open); the preview box (rows 3-6, cols
+  12-18) counts letters; the CONFIRM press closes the box (verified by the
+  preview emptying). **The blank grid cell (2,9) is DEAD** (the JP END key
+  the US release removed) → **the vanilla grid types EXACTLY 4 glyphs — no
+  spaces, no early end**. Short names (Adam's NOX/ZOT) are UNREACHABLE by
+  input; shipped the documented cosmetic bridge: daemon op `rename` writes
+  ch_name directly (grid glyphs only, $FF-padded — the byte the game itself
+  renders blank). Names have zero gameplay effect; auto-checkpoints first.
+  ALSO CAUGHT: my duplicate PTYGEN constants shadowed the pre-existing
+  absolute-address block in ramspec (PTYGEN_NAME is $0302 absolute, not an
+  offset) — the phantom "ptygen reads 00" chase; duplicate removed.
+- **Pace (`macros.pace`)**: alternate one step out/back (left/right, falling
+  back through pairs on walls) until battle/mapchange/blocked/cap; reports
+  paces + battlestep delta so a non-ticking spot is VISIBLE ("battlestep
+  NEVER TICKED" surfaces in the window). NPC-blocked town pacing stops LOUD
+  (observed live — Coneria NPCs wander into the lane).
+- **fight-until (`BattleExecutor.fight_until`)**: repeat commands per round;
+  RAM-read stops (any-ally-HP<pct BEFORE each round, charges-out for magic
+  commands, 30-round cap) + battle end. Fight targets re-resolve to the
+  weakest LIVING enemy at entry (the game's picker only offers living slots
+  — entry-time behavior, not a resolution retarget). Battle-log hygiene while
+  here (`_log_push`): the round-end command-menu redraw bleeding into the
+  combat box as condensed-font junk is dropped, and incremental box draws
+  collapse to the completed line (prefix-replace) — logs read clean now.
+- **.sav export (`op_sav_export`)**: writes games/ff1/saves/ff1-<stamp>.sav;
+  REFUSES loudly without the SRAM save asserts ($55/$AA) or mid-battle.
+- **Minimap v1 (`op_minimap`)**: breadcrumb trail per (mapType,mapId),
+  recorded at op-endpoint snapshots (≤8 tiles apart), session-lifetime,
+  advisory-by-design. Server renders a 200×100 'tile' (2 px/map-tile window
+  ±50/±25 around the player; trail gray-6, player white).
+- **Formation glance (`frame` crop 'formation')**: the battle tableau at 1:1
+  (200×100, x[4:204] y[24:124]) behind `games.ff1.formationTile` (default
+  OFF) — one small tile at battle start, Enter proceeds.
+
+Server (engine ops + controller): nameEntry/rename/pace/battleAuto/savExport/
+minimap/saveSlot/listSlots/loadSlot; map verbs grew Battle (pace) + Sys +
+Mini (sm); battle entry grew Auto (Cancel-first fight-until confirm, repeats
+the last round, stops at 25 % HP); nameentry screen grew Name (the _kbd ring
+keyboard → the macro; 4-glyph rule enforced with the rename hint); Sys level
+= SaveSlot / Slots (Cancel-first load, pre-load checkpoint) / Export.
+
+Tests: `test_macros.py` (24 checks — ROUX typed end-to-end + ptygen bytes,
+4-glyph refusal, town pace battlestep-frozen, REAL overworld encounter after
+28 paces, hp-guard stop, grind-to-WIN, sav refusal, rename NOX, trail op,
+daemon pace + auto-checkpoint) → **ff1 harness 7/7**. phase-ff1 stages 11-12
+(fight-until through the WM + Sys/Slots round-trip) → **run-all 37/38**
+(known calendar red). Typecheck/build clean; forbidden-pattern grep clean.
+
 ### Ph-B deferrals (intentional, don't chase)
 
 - DRINK/ITEM entry paths: raise loudly; need a potion-holding fixture (buy
