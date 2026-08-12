@@ -118,7 +118,7 @@ try {
   // --- games list now has Blackjack as the 4th row ---
   let sc = await settle((x) => /Games/.test(titleOf(x)) && (region(x, 'browse')?.content?.items?.length ?? 0) >= 4, 'games list')
   const rows = region(sc, 'browse').content.items
-  assert.equal(rows.length, 4, 'four games listed')
+  assert.equal(rows.length, 5, 'five games listed (FF1 joined 2026-08-12)')
   assert.match(rows[3], /Blackjack/, 'row 3 is Blackjack')
   console.error('  2. games list shows Blackjack (4th row) ✓')
 

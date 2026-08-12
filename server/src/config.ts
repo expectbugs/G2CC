@@ -163,6 +163,20 @@ export interface G2CCConfig {
     /** Canned prompts for Scout's `Prompts` menu (web-research flavored). */
     quickPrompts: string[]
   }
+  /** Games window sub-apps (FF1 2026-08-12, games/ff1/PLAN.md). */
+  games: {
+    /** FF1-on-G2 (games/ff1) — the emulated NES original, ring-driven. */
+    ff1: {
+      /** Show live enemy HP in battle views. Default OFF — the RAM knows it,
+       *  the challenge run shouldn't (PLAN §7.1). */
+      showEnemyHp: boolean
+      /** Pad every executed press with 0-9 random frames so battle outcomes
+       *  aren't frame-replayable (RNG honesty, PLAN §8.3). Tests run false. */
+      rngJitter: boolean
+      /** Undo-ring depth (labeled savestates, PLAN §8.4). */
+      undoDepth: number
+    }
+  }
   /** DE shell config (Phase 2 overhaul.md — the ribbon DE/WM). */
   de: {
     /** Root navigation shell. 'menu' = the proven Main category-launcher (the
@@ -307,6 +321,13 @@ function defaultConfig(): G2CCConfig {
       // Drop noisy/privacy notifications outright (Adam 2026-06-14).
       blockTitles: ['Device ID accessed'],
     },
+    games: {
+      ff1: {
+        showEnemyHp: false,
+        rngJitter: true,
+        undoDepth: 30,
+      },
+    },
     de: {
       // Default to the proven menu shell; the ribbon is opt-in until its
       // on-glass soak is done (overhaul.md Phase 2 — the cutover flips this).
@@ -363,6 +384,9 @@ export function loadConfig(): G2CCConfig {
       resolver: { ...defaults.music.resolver, ...(saved.music?.resolver ?? {}) },
     },
     companion: { ...defaults.companion, ...(saved.companion ?? {}) },
+    games: {
+      ff1: { ...defaults.games.ff1, ...(saved.games?.ff1 ?? {}) },
+    },
   }
 
   // authToken stability (review 2026-06-11b): defaultConfig() mints a FRESH

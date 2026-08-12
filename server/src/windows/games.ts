@@ -16,6 +16,7 @@ import {
 import { Blackjack, isBust, type Phase as BjPhase } from '../blackjack.js'
 import { notify } from '../os-notify.js'
 import { paperclips, type PcSnapshot, type PcPhase } from '../paperclips.js'
+import { Ff1Controller } from './ff1-controller.js'
 
 const RPG_ACTIONS = ['» stat', '» battle', '» ls (inspect)', '» todo', '» buy (list shop)'] as const
 const CHESS_SKILLS = [1, 5, 10, 20] as const
@@ -890,12 +891,14 @@ export class GamesWindow implements OsWindow {
   readonly tab = 'Games'
   readonly label = 'Games'
   readonly category = 'Games' as const
-  private level: 'menu' | 'rpg' | 'rpg-out' | 'chess' | 'chess-pieces' | 'chess-moves' | 'chess-confirm' | 'pc' | 'bj' = 'menu'
+  private level: 'menu' | 'rpg' | 'rpg-out' | 'chess' | 'chess-pieces' | 'chess-moves' | 'chess-confirm' | 'pc' | 'bj' | 'ff1' = 'menu'
   private focus: 'content' | 'menu' = 'content'
   /** Universal Paperclips (Adam 2026-06-27) — delegated to while level === 'pc'. */
   private readonly pc: PaperclipsController
-  /** Blackjack (Adam 2026-06-29) — delegated to while level === 'bj'. */
+  /** Blackjack (2026-06-29) — delegated to while level === 'bj'. */
   private readonly bj: BlackjackController
+  /** FF1 (2026-08-12, games/ff1/PLAN.md) — delegated to while level === 'ff1'. */
+  private readonly ff1c: Ff1Controller
   // --- rpg state ---
   private cwd = DUNGEON_ROOT
   private rpgDirs: string[] = []
@@ -936,19 +939,22 @@ export class GamesWindow implements OsWindow {
   constructor(private ctx: WmContext, private requestRender: () => void) {
     this.pc = new PaperclipsController(ctx, requestRender)
     this.bj = new BlackjackController(ctx, requestRender)
+    this.ff1c = new Ff1Controller(ctx, requestRender)
   }
 
   summary(): string {
     if (this.level === 'pc') return this.pc.summary()
     if (this.level === 'bj') return this.bj.summary()
+    if (this.level === 'ff1') return this.ff1c.summary()
     if (this.fen && !this.gameOver) return `chess · ${this.chessTitle}`
     if (paperclips.status().running) return this.pc.summary()
-    return 'rpg · chess · clips · 21'
+    return 'rpg · chess · clips · 21 · ff1'
   }
 
   statusLine(): string | null {
     if (this.level === 'pc') return this.pc.statusLine()
     if (this.level === 'bj') return this.bj.statusLine()
+    if (this.level === 'ff1') return this.ff1c.statusLine()
     return null
   }
 
@@ -959,6 +965,7 @@ export class GamesWindow implements OsWindow {
   preview(): string | null {
     if (this.level === 'pc') return this.pc.preview()
     if (this.level === 'bj') return this.bj.preview()
+    if (this.level === 'ff1') return this.ff1c.preview()
     if (this.level === 'chess' || this.level === 'chess-pieces' || this.level === 'chess-moves' || this.level === 'chess-confirm') {
       const lines = [`Chess · skill ${this.skill}`, this.fen ? this.chessTitle : 'no game — New game to start']
       if (this.moveInFlight) lines.push('Stockfish thinking…')
@@ -979,12 +986,14 @@ export class GamesWindow implements OsWindow {
       `chess · ${this.fen && !this.gameOver ? this.chessTitle : 'no game'}`,
       this.pc.summary(),
       this.bj.summary(),
+      this.ff1c.summary(),
     ].join('\n')
   }
 
   onDeactivate(): void {
     if (this.level === 'pc') this.pc.onDeactivate()
     if (this.level === 'bj') this.bj.onDeactivate()
+    if (this.level === 'ff1') this.ff1c.onDeactivate()
   }
   /** Foregrounding Games (from Main) ALWAYS lands on the games list — not the
    *  last game played — so you can switch games freely (a chess move while the
@@ -995,10 +1004,11 @@ export class GamesWindow implements OsWindow {
   onActivate(): void {
     if (this.level === 'pc') this.pc.leave()
     if (this.level === 'bj') this.bj.leave()
+    if (this.level === 'ff1') this.ff1c.leave()
     this.level = 'menu'
     this.focus = 'content'
   }
-  dispose(): void { this.pc.dispose(); this.bj.dispose() }
+  dispose(): void { this.pc.dispose(); this.bj.dispose(); this.ff1c.dispose() }
 
   // ------------------------------------------------ rpg helpers
 
@@ -1225,6 +1235,7 @@ export class GamesWindow implements OsWindow {
   async view(): Promise<WinView> {
     if (this.level === 'pc') return this.pc.view()
     if (this.level === 'bj') return this.bj.view()
+    if (this.level === 'ff1') return this.ff1c.view()
     const menuMode = this.focus === 'menu' ? 'capture' as const : 'passive' as const
     if (this.level === 'rpg-out') {
       const pageSuffix = this.rpgPages.length > 1 ? ` · ${this.rpgPage + 1}/${this.rpgPages.length}` : ''
@@ -1301,7 +1312,7 @@ export class GamesWindow implements OsWindow {
       menuMode,
       title: 'Games',
       menu: ['Reload', 'Main'],
-      items: ['rpg-cli — the filesystem dungeon', 'Chess vs Stockfish', 'Universal Paperclips — idle game', 'Blackjack — vs the dealer'],
+      items: ['rpg-cli — the filesystem dungeon', 'Chess vs Stockfish', 'Universal Paperclips — idle game', 'Blackjack — vs the dealer', 'Final Fantasy — NES, ring-driven'],
     }
   }
 
@@ -1309,11 +1320,13 @@ export class GamesWindow implements OsWindow {
 
   async onBrowseSelect(index: number): Promise<void> {
     if (this.level === 'pc') { await this.pc.onBrowseSelect(index); return }
+    if (this.level === 'ff1') { await this.ff1c.onBrowseSelect(index); return }
     if (this.level === 'menu') {
       if (index === 0) { this.level = 'rpg'; this.rpgOffset = 0; this.focus = 'content'; this.requestRender(); return }
       if (index === 1) { this.level = 'chess'; this.focus = 'content'; this.requestRender(); return }
       if (index === 2) { this.level = 'pc'; this.pc.enter(); return }
       if (index === 3) { this.level = 'bj'; this.focus = 'content'; this.bj.enter(); return }
+      if (index === 4) { this.level = 'ff1'; this.focus = 'content'; this.ff1c.enter(); return }
       this.ctx.log(`[os] games: menu index ${index} out of range`)
       return
     }
@@ -1367,6 +1380,7 @@ export class GamesWindow implements OsWindow {
   async onMenuSelect(label: string): Promise<void> {
     if (this.level === 'pc') { await this.pc.onMenuSelect(label); return }
     if (this.level === 'bj') { await this.bj.onMenuSelect(label); return }
+    if (this.level === 'ff1') { await this.ff1c.onMenuSelect(label); return }
     if (this.level === 'rpg-out') {
       switch (label) {
         case 'Next': if (this.rpgPage < this.rpgPages.length - 1) { this.rpgPage++; this.requestRender() } break
@@ -1443,6 +1457,7 @@ export class GamesWindow implements OsWindow {
   async onReload(): Promise<void> {
     if (this.level === 'pc') { await this.pc.onReload(); return }
     if (this.level === 'bj') { await this.bj.onReload(); return }
+    if (this.level === 'ff1') { await this.ff1c.onReload(); return }
     this.focus = 'content'
     // Unstick a wedged in-flight flag (the documented Reload contract). The
     // chessSeq bump makes the orphaned subprocess result ACTUALLY drop — the
@@ -1478,6 +1493,11 @@ export class GamesWindow implements OsWindow {
     if (this.level === 'bj') {
       if (await this.bj.onBack()) return true
       this.bj.leave()
+      this.level = 'menu'; this.focus = 'content'; this.requestRender(); return true
+    }
+    if (this.level === 'ff1') {
+      if (await this.ff1c.onBack()) return true
+      this.ff1c.leave()
       this.level = 'menu'; this.focus = 'content'; this.requestRender(); return true
     }
     if (this.level === 'rpg-out') { this.level = 'rpg'; this.focus = 'content'; this.requestRender(); return true }

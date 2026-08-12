@@ -271,6 +271,57 @@ picker live and move `btlcurs_y` 0→1 in the session probes).
    pattern grep over the Ph-B diff), then commit
    `feat(ff1): Ph-B — battle vertical slice` + push, then Ph-C (HANDOFF §5).
 
+## Ph-C (= PLAN P3) — window integration
+
+**Session 3 (2026-08-12, continued): Ph-C COMPLETE (off-glass exit).**
+
+Built:
+- `server/src/ff1/types.ts` — protocol/snapshot types, field-verified against
+  the daemon's snapshot() builder + screens.py SCREENS tuple.
+- `server/src/ff1/bridge.ts` — `Ff1Bridge`, the stt.ts pattern verbatim:
+  single-inflight queue/pump, identity-gated respawn, reject-on-'close',
+  16 MB runaway backstop, seq-checked JSON-lines, daemon stderr forwarded
+  as `[ff1]` lines. `Ff1OpError` distinguishes in-protocol failures (desync,
+  budget) from daemon death.
+- `server/src/ff1/engine.ts` — process-lifetime singleton (paperclips
+  lifecycle): single-flight boot restoring the PG savestate (restore-throws-
+  on-DB-down, C-F1), serialized opChain + persistChain, the blackjack loadOk
+  clobber-guard, autosave after every advancing op (savestate + snapshot +
+  §8.4 undo TAIL ×5 → `ff1_save` row 'latest'), WATCHDOG: daemon death →
+  LOUD notice + lazy respawn restoring the in-memory savestate. New daemon op
+  `undo_state` (read a checkpoint without loading it) feeds the tail mirror.
+- `server/src/windows/ff1-controller.ts` — screen-adaptive root (classifier
+  verdict → view+verbs): battle entry per §7.1 (native menus: Fight/Magic/
+  Drink/Item/Run/RunAll per living char, spell list with live charges from
+  RAM, target picks, Cancel-first Go), one `battle_round` op → paginated
+  full-history log; dialog/shop/gamemenu/title cursor mode; ow/sm text
+  placeholder (tiles land Ph-D); **Undo standing verb in every view**
+  (checkpoint browse → Cancel-first confirm). Drink/Item refuse LOUDLY
+  (Ph-E inventory fixtures).
+- `server/src/windows/games.ts` — minimal delta: level 'ff1', 5th games-list
+  row, delegation in the same spots as pc/bj.
+- `server/src/config.ts` — `games.ff1.{showEnemyHp,rngJitter,undoDepth}`
+  defaults + merge-list entry (the known lost-overrides gotcha).
+- `server/smoke/phase-ff1.mjs` — 7 stages through the REAL WM: list row →
+  daemon boot → fixture battle → Fight×4 native entry → Go → real round +
+  log → Undo drill (restores 5×8 HP) → PG mirror row (21,773 B state +
+  snapshot + tail) → watchdog drill (`debugKillDaemon` → notice → respawn →
+  battle restored). Menu-width + frame-byte guards on every scene.
+
+Results: typecheck + build clean; **server run-all 37/38** (baseline+1; the
+one red stays the known calendar env red) — phase-blackjack's stale
+"4 games listed" assert updated to 5 (the FF1 row is a legitimate list
+change, not a regression). ff1 harness still 6/6. Scene verification
+(scripts/scene_to_png.py over captured WireScenes): battle-entry twocol
+(formation left / `>`-marked party pane + charge line right), magic list,
+ally target, Go confirm, paginated log, undo list — all render correctly,
+client-rule check OK on all 7 (regions/text/list/image caps).
+
+Notes for later phases: fresh ROM boot classifies 'dialog' (the prologue
+crawl) — correct, it IS a text screen; round 1 on the 5-IMP fixture kills
+1 IMP deterministically (rngJitter false), so asserts on "5 alive" only
+hold at round START (the smoke's undo assert).
+
 ### Ph-B deferrals (intentional, don't chase)
 
 - DRINK/ITEM entry paths: raise loudly; need a potion-holding fixture (buy

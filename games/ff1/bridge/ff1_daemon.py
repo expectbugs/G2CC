@@ -302,6 +302,14 @@ class Daemon:
     def op_undo_list(self, _req: dict) -> dict:
         return {'checkpoints': self.undo.listing()}
 
+    def op_undo_state(self, req: dict) -> dict:
+        """Read a checkpoint's savestate WITHOUT loading it — the §8.4 PG
+        undo-tail mirror (server engine.capturePersist) fetches the last few
+        labeled states this way on the autosave cadence."""
+        entry = self.undo.get(int(req['index']))
+        return {'label': entry['label'], 'at': entry['at'],
+                'state': base64.b64encode(entry['state'].tobytes()).decode()}
+
     def op_undo(self, req: dict) -> dict:
         emu = self.need_emu()
         entry = self.undo.get(int(req['index']))
