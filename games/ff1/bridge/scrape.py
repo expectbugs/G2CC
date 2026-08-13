@@ -80,6 +80,14 @@ def fold_digit_token(token: str) -> str:
     return token
 
 
+def fold_line(line: str) -> str:
+    """fold_digit_token over every space-separated token, spacing preserved
+    (split(' ') keeps empty runs, so join round-trips). The DISPLAY-boundary
+    fold (Ph-F review find: numbers scraped for the HUD showed '3OO G') —
+    raw scrapes stay unfolded so calibration/harness byte-exact checks hold."""
+    return ' '.join(fold_digit_token(t) for t in line.split(' '))
+
+
 class GlyphTable:
     """hex-pattern → char mapping with LOUD load/save + provenance header."""
 

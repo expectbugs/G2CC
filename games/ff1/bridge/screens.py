@@ -44,7 +44,10 @@ class Classification:
     def to_json(self) -> dict:
         out: dict = {'screen': self.screen}
         if self.text:
-            out['text'] = self.text
+            # wire/display boundary: numeric tokens fold the shared O/0 glyph
+            # back to digits ("3OO G" → "300 G" — Ph-F review find). The raw
+            # .text stays unfolded for harness byte-exact scrape checks.
+            out['text'] = [scrape.fold_line(ln) for ln in self.text]
         if self.unknown:
             out['unknownTiles'] = self.unknown
         if self.battle_result is not None:
@@ -106,7 +109,11 @@ def classify(read, frame: np.ndarray, patterns: np.ndarray, glyphs: GlyphTable,
         # and draw price/GP text. Classify shop when the shop screen owns the
         # whole display (no map visible): heuristic = also text in rows 11-27.
         lower = _lines(patterns, glyphs, (11, 28, 1, 31))
-        if any('G' in ln or 'GP' in ln for ln in lower.lines) or read(ramspec.ENTERING_SHOP) or _shopish(lower.lines):
+        # NOTE (Ph-F review): the latched entering_shop OR-term is GONE — the
+        # branch's own comment calls $50 transient/latched-unreliable; the
+        # live anchors (price/GP text in the lower rows, WELCOME) carried the
+        # whole journey suite on their own.
+        if any('G' in ln or 'GP' in ln for ln in lower.lines) or _shopish(lower.lines):
             return Classification('shop', dlg.lines + lower.lines, dlg.unknown)
         return Classification('dialog', dlg.lines, dlg.unknown)
 

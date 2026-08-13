@@ -60,11 +60,25 @@ def gen_charmap() -> dict:
     }
 
 
+# The exact dump every table decode + anchor was verified against. A different
+# revision/overdump could pass the handful of spot anchors while differing in
+# un-anchored entries — and would then silently REWRITE the committed
+# data/*.json on the next harness run (Ph-F review find: this CRC was claimed
+# in _meta but never computed). Pinned = verified, LOUD on any other dump.
+ROM_CRC32 = 0xAB12ECE6
+
+
 class Rom:
     def __init__(self, path: Path) -> None:
         self.data = path.read_bytes()
         if self.data[:4] != b'NES\x1a':
             raise ValueError('not an iNES ROM')
+        import zlib
+        crc = zlib.crc32(self.data) & 0xFFFFFFFF
+        if crc != ROM_CRC32:
+            raise ValueError(
+                f'ROM CRC32 {crc:08X} != pinned {ROM_CRC32:08X} — different dump; '
+                'refusing to regenerate data/*.json (re-verify every anchor first)')
 
     def rd(self, bank: int, cpu: int, n: int) -> bytes:
         off = ramspec.rom_offset(bank, cpu)
@@ -181,7 +195,9 @@ def gen_spells(rom: Rom, std: dict[int, str]) -> dict:
     verified by anchor CURE(white L1) / LIT(black L1, idx 7)). Magic data from
     0C:$81E0, 8 bytes/spell (Constants.inc :: MAGDATA_*)."""
     spells: list[dict] = []
-    targets = {0x01: 'all-enemies', 0x02: 'one-enemy', 0x04: 'caster', 0x08: 'party', 0x10: 'one-ally'}
+    # target names MUST match battle.py's executor branches (whole-party ↔ the
+    # $FE cmdbuf byte; caught at the Ph-F cold read — 'party' desync-raised)
+    targets = {0x01: 'all-enemies', 0x02: 'one-enemy', 0x04: 'caster', 0x08: 'whole-party', 0x10: 'one-ally'}
     for idx in range(64):
         name = item_name(rom, std, ramspec.MG_START + idx)
         m = rom.rd(ramspec.BANK_EQUIPSTATS, ramspec.LUT_MAGIC + 8 * idx, 8)

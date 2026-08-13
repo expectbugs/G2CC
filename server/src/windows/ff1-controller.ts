@@ -117,12 +117,18 @@ export class Ff1Controller {
   private miniTile: string | null = null
   private formationTileBmp: string | null = null
   private formationKey = -1                               // battlecounter it was rendered for
+  /** Battle picker rows as last RENDERED + their slot map — picks resolve by
+   *  browse INDEX against these (Ph-F review: label matching wrapped/collided). */
+  private pickRows: string[] = []
+  private pickTargets: number[] = []
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
   private cfg(): Ff1EngineConfig {
     const g = this.ctx.config.games?.ff1
-    return { rngJitter: g?.rngJitter ?? true, undoDepth: g?.undoDepth ?? 30 }
+    // undoDepth clamps to ≥1 (review find: 0 passed `?? 30` straight through
+    // and silently disabled the whole §8.4 undo net; the daemon also refuses)
+    return { rngJitter: g?.rngJitter ?? true, undoDepth: Math.max(1, g?.undoDepth ?? 30) }
   }
   private showEnemyHp(): boolean { return this.ctx.config.games?.ff1?.showEnemyHp ?? false }
   private showFormationTile(): boolean { return this.ctx.config.games?.ff1?.formationTile ?? false }
@@ -133,6 +139,9 @@ export class Ff1Controller {
     this.level = 'root'
     this.entry = null
     this.opError = null
+    // Idle daemon deaths repaint immediately (Ph-F review find: with no
+    // inflight op nothing re-rendered — the glass froze on a stale frame).
+    ff1.onStatusChange = () => this.requestRender()
     void ff1.ensureStarted(this.cfg()).then(async () => {
       await ff1.state()   // fresh classify for the root view
       this.syncMapTiles()
@@ -160,6 +169,10 @@ export class Ff1Controller {
     if (st.daemonNotice) return '⚠ ff1 daemon respawned'
     if (st.loadError) return `⚠ ${st.loadError}`.slice(0, 46)
     if (st.saveError) return '⚠ unsaved'
+    // op failures ride the status bar too (Ph-F review find: the maptiles
+    // view has no text region, so a pace/steps failure was invisible there;
+    // the full text still renders in the map view's error fallback).
+    if (this.opError) return `⚠ ${this.opError}`.slice(0, 46)
     if (this.opBusy) return `ff1 · ${this.opBusy}…`
     return null
   }
@@ -185,8 +198,10 @@ export class Ff1Controller {
    *  completion is a MACRO BOUNDARY: if the game is on a map screen, the two
    *  map tiles refresh exactly once here (§7.2 push policy — never mid-op,
    *  never on a timer; interrupts win because a battle/dialog screen simply
-   *  isn't a map, so no fetch happens). */
-  private runOp(label: string, fn: () => Promise<unknown>, after?: (r: unknown) => void): void {
+   *  isn't a map, so no fetch happens). `onFail` runs after the error is
+   *  recorded (level recovery for confirm flows). */
+  private runOp(label: string, fn: () => Promise<unknown>, after?: (r: unknown) => void,
+    onFail?: () => void): void {
     if (this.opBusy) { this.ctx.log(`[os] ff1: '${label}' while '${this.opBusy}' runs — ignored (LOUD)`); return }
     this.opBusy = label
     this.opError = null
@@ -200,6 +215,7 @@ export class Ff1Controller {
       this.opBusy = null
       this.opError = e instanceof Error ? e.message : String(e)
       this.ctx.log(`[os] ff1: ${label} FAILED: ${this.opError}`)
+      if (onFail) onFail()
       this.requestRender()
     })
   }
@@ -299,6 +315,9 @@ export class Ff1Controller {
   private fireRound(): void {
     const e = this.entry
     if (!e || e.commands.length === 0) { this.ctx.log('[os] ff1: Go with no commands — ignored (LOUD)'); return }
+    // Busy pre-guard BEFORE any mutation (Ph-F review find: clearing entry
+    // first meant a Go during a busy op silently discarded the whole round).
+    if (this.opBusy) { this.ctx.log(`[os] ff1: Go while '${this.opBusy}' runs — kept the collected round, tap again (LOUD)`); return }
     const cmds = e.commands
     this.lastCommands = cmds            // fight-until repeats these (§8.2)
     this.lastCommandsKey = e.battleKey
@@ -312,6 +331,12 @@ export class Ff1Controller {
       this.roundPages = paginateText(`Outcome: ${br.outcome}\n\n${body}`)
       this.roundPage = 0
       this.level = 'battle-log'
+    }, () => {
+      // battle_round FAILED (desync raised — the daemon's pre-round
+      // checkpoint recovers via Undo). Leaving level at 'battle-confirm'
+      // with a null entry was a dead end (review find) — the root view
+      // rebuilds entry and shows the error.
+      this.level = 'root'
     })
   }
 
@@ -320,6 +345,7 @@ export class Ff1Controller {
   private fireAuto(): void {
     const cmds = this.lastCommands
     if (!cmds) { this.ctx.log('[os] ff1: Auto with no last round — ignored (LOUD)'); return }
+    if (this.opBusy) { this.ctx.log(`[os] ff1: Auto while '${this.opBusy}' runs — ignored (LOUD)`); return }
     this.runOp('fight-until', () => ff1.battleAuto(cmds, { minHpPct: 25, maxRounds: 30 }), (r) => {
       const resp = r as Ff1Snapshot & { battleAuto?: { rounds: number; outcome: string; stopped: string; log: string[] } }
       const ba = resp.battleAuto
@@ -394,12 +420,13 @@ export class Ff1Controller {
         const title = `FF1 · ${where} (${s.pos.x},${s.pos.y}) ×${STEP_COUNTS[this.stepIdx]}${busy}`
         const menu = ['↑', '↓', '←', '→', '×N', 'A', 'B', 'Battle', 'Menu', 'Peek',
           ...(snap.screen === 'sm' ? ['Mini'] : []), 'Sys', 'Undo', 'Main']
-        if (!this.mapTop || !this.mapBottom) {
-          // Text fallback until the first tile fetch lands (or after a LOUD
-          // fetch failure — Peek retries; the game state is untouched).
+        // An op failure DROPS to the text fallback even when tiles exist —
+        // maptiles mode has no text region, so this is where the full error
+        // renders (Ph-F review find; statusLine carries the short form).
+        if (!this.mapTop || !this.mapBottom || this.opError || this.mapFailed) {
           const why = this.mapFailed
             ? `map tiles FAILED: ${this.mapFailed}\nPeek retries.`
-            : '⏳ map tiles rendering…'
+            : (this.mapTop && this.mapBottom ? '' : '⏳ map tiles rendering…')
           return {
             mode: 'text', title, menu,
             text: `${err}${why}\n\n${partyLine}\n${s.gold} G · ${s.pos.vehicle} · facing ${s.pos.facing}`,
@@ -512,42 +539,57 @@ export class Ff1Controller {
     return SPELLS[(c.level - 1) * 8 + (v - 1)]?.target === 'one-enemy'
   }
 
-  /** Spell pick (charges live from RAM — §7.1 "L3 FIR2 ×2/3"). */
+  /** Spell pick (charges live from RAM — §7.1 "L3 FIR2 ×2/3"). BROWSE mode
+   *  (Ph-F review find: as MENU rows, 'L1 CURE 2/2' measures 111 px against
+   *  the 90 px menu cap and wraps on glass, breaking tap→row mapping — the
+   *  full-width browse pane holds them; picks resolve by INDEX). */
   private magicView(snap: Ff1Snapshot, err: string): WinView {
     const ch = this.entryChar(snap)
     if (!ch) return this.entryView(snap, err, '')
-    const rows = this.knownSpells(ch).map((s2) =>
+    this.pickRows = this.knownSpells(ch).map((s2) =>
       `L${s2.level} ${s2.meta.name} ${s2.charges}/${ch.maxmp[s2.level - 1] ?? 0}`)
     return {
-      mode: 'text',
-      title: `FF1 · ${ch.name} magic`,
-      menu: [...rows, 'Back', 'Main'],
-      text: `${err}Pick a spell (charges shown cur/max).\nEmpty-charge picks are refused loudly.\nL5-8 pages land in Ph-E.`,
+      mode: 'browse',
+      menuMode: 'passive',
+      title: `FF1 · ${ch.name} magic${err ? ' · ⚠' : ''}`,
+      menu: ['Back', 'Main'],
+      items: this.pickRows.length ? [...this.pickRows] : ['(no castable spells)'],
     }
   }
 
-  /** Target pick for the pending fight/magic action. */
+  /** Target pick for the pending fight/magic action. BROWSE mode + index
+   *  resolution (same review find; also disambiguates twin party members —
+   *  label-matching sent every heal to the first of two identical names). */
   private targetView(snap: Ff1Snapshot, err: string): WinView {
     const e = this.entry
     const ch = this.entryChar(snap)
     const pa = e?.pendingAction
     if (!e || !ch || !pa) return this.entryView(snap, err, '')
     const targetsEnemies = pa.action === 'fight' || pa.spell?.target === 'one-enemy'
-    const rows = targetsEnemies
-      ? this.aliveEnemies(snap).map((en) => `${en.name} s${en.slot}${this.showEnemyHp() ? ` ${en.hp}hp` : ''}`)
-      : snap.state.party.map((c) => `${c.alive ? '' : '✝'}${c.name} ${c.hp}/${c.maxhp}`)
+    if (targetsEnemies) {
+      this.pickTargets = this.aliveEnemies(snap).map((en) => en.slot)
+      this.pickRows = this.aliveEnemies(snap).map((en) =>
+        `${en.name} s${en.slot}${this.showEnemyHp() ? ` ${en.hp}hp` : ''}`)
+    } else {
+      this.pickTargets = snap.state.party.map((c) => c.slot)
+      this.pickRows = snap.state.party.map((c) =>
+        `${c.slot}: ${c.alive ? '' : '✝'}${c.name} ${c.hp}/${c.maxhp}`)
+    }
     const what = pa.action === 'fight' ? 'FIGHT' : pa.spell?.name ?? 'spell'
     return {
-      mode: 'text',
-      title: `FF1 · ${ch.name} ${what} → target`,
-      menu: [...rows, 'Back', 'Main'],
-      text: `${err}Pick the target for ${what}.\n(slots stay authentic — a dead slot whiffs "Ineffective", 1987 rules)`,
+      mode: 'browse',
+      menuMode: 'passive',
+      title: `FF1 · ${ch.name} ${what} → target${err ? ' · ⚠' : ''}`,
+      menu: ['Back', 'Main'],
+      items: [...this.pickRows],
     }
   }
 
-  /** Cancel-first fight-until confirm (§8.2 — repeats the LAST round). */
+  /** Cancel-first fight-until confirm (§8.2 — repeats the LAST round).
+   *  Command lines UN-clamped (Ph-F review: col() silently cut approval
+   *  text; the text region wraps long lines instead). */
   private autoConfirmView(snap: Ff1Snapshot, err: string): WinView {
-    const lines = (this.lastCommands ?? []).map((c) => col(this.describeCommand(snap, c)))
+    const lines = (this.lastCommands ?? []).map((c) => this.describeCommand(snap, c))
     return {
       mode: 'text',
       title: 'FF1 · fight until…',
@@ -558,10 +600,11 @@ export class Ff1Controller {
     }
   }
 
-  /** Cancel-first Go (the last pick FIRES the round — §8.4 insurance). */
+  /** Cancel-first Go (the last pick FIRES the round — §8.4 insurance).
+   *  Command lines UN-clamped (review: never truncate approval text). */
   private goConfirmView(snap: Ff1Snapshot, err: string): WinView {
     const e = this.entry
-    const lines = (e?.commands ?? []).map((c) => col(this.describeCommand(snap, c)))
+    const lines = (e?.commands ?? []).map((c) => this.describeCommand(snap, c))
     return {
       mode: 'text',
       title: 'FF1 · round ready',
@@ -581,7 +624,9 @@ export class Ff1Controller {
     }).catch((e: unknown) => {
       if (this.formationKey !== key) return
       this.ctx.log(`[os] ff1: formation tile FAILED (entry continues without it): ${e instanceof Error ? e.message : String(e)}`)
-      this.level = 'root'
+      // only fall through to entry if the user is still ON the glance —
+      // never yank them out of Undo/anywhere else (Ph-F review find)
+      if (this.level === 'formation') this.level = 'root'
       this.requestRender()
     })
   }
@@ -665,13 +710,14 @@ export class Ff1Controller {
 
   private slotConfirmView(): WinView {
     const p = this.pendingSlot
+    const err = this.opError ? `⚠ ${this.opError}\n\n` : ''
     return {
       mode: 'text',
       title: 'FF1 · load slot?',
       menu: ['Cancel', 'Confirm', 'Main'],
-      text: p
+      text: err + (p
         ? `Load slot:\n${p.label}\n\n⚠ Replaces the LIVE game (the current state\nauto-checkpoints first — Undo recovers).\nConfirm loads · Cancel keeps playing.`
-        : '(nothing pending)',
+        : '(nothing pending)'),
     }
   }
 
@@ -702,13 +748,14 @@ export class Ff1Controller {
 
   private undoConfirmView(): WinView {
     const p = this.pendingUndo
+    const err = this.opError ? `⚠ ${this.opError}\n\n` : ''
     return {
       mode: 'text',
       title: 'FF1 · confirm rewind',
       menu: ['Cancel', 'Confirm', 'Main'],
-      text: p
-        ? `Rewind to:\n${p.label}\n(${p.at})\n\nNewer checkpoints stay until trimmed — redo is possible.\nConfirm restores · Cancel keeps playing.`
-        : '(nothing pending)',
+      text: err + (p
+        ? `Rewind to:\n${p.label}\n(${p.at})\n\nThe current state checkpoints first — an undo can be undone.\nConfirm restores · Cancel keeps playing.`
+        : '(nothing pending)'),
     }
   }
 
@@ -716,9 +763,15 @@ export class Ff1Controller {
 
   async onMenuSelect(label: string): Promise<void> {
     const st = ff1.status()
-    if (!st.running) return
+    if (!st.running) {
+      // LOUD, not a silent drop (Ph-F review find): the not-running view
+      // (with Reload) re-renders so the user sees why the tap did nothing.
+      this.ctx.log(`[os] ff1: '${label}' while the engine is not running (${st.loadError ?? st.daemonNotice ?? 'starting'}) — repainting (LOUD)`)
+      this.requestRender()
+      return
+    }
     const snap = this.snap()
-    if (!snap) return
+    if (!snap) { this.ctx.log('[os] ff1: tap before the first snapshot — repainting (LOUD)'); this.requestRender(); return }
 
     // Standing verbs first (§8.4).
     if (label === 'Undo') { this.openUndo(); return }
@@ -727,12 +780,14 @@ export class Ff1Controller {
     if (this.level === 'battle-log') { this.battleLogSelect(label); return }
     if (this.level === 'battle-confirm') { this.goConfirmSelect(label); return }
     if (this.level === 'auto-confirm') { this.autoConfirmSelect(label); return }
-    if (this.level === 'battle-magic') { this.magicSelect(snap, label); return }
-    if (this.level === 'battle-target') { this.targetSelect(snap, label); return }
+    if (this.level === 'battle-magic' || this.level === 'battle-target') {
+      this.ctx.log(`[os] ff1 ${this.level}: menu '${label}' — rows are content taps (Back/Main are WM-handled) (LOUD)`)
+      return
+    }
     if (this.level === 'sys') { this.sysSelect(snap, label); return }
     if (this.level === 'slot-confirm') { this.slotConfirmSelect(label); return }
     if (this.level === 'minimap') {
-      if (label === 'Reload') { this.openMinimap(); return }
+      // Reload (the refresh) is WM-handled → onReload routes it here.
       this.ctx.log(`[os] ff1 minimap: unknown verb '${label}' (LOUD)`)
       return
     }
@@ -892,13 +947,19 @@ export class Ff1Controller {
     }
   }
 
-  private magicSelect(snap: Ff1Snapshot, label: string): void {
+  /** Spell pick by browse INDEX (rows = pickRows as last rendered). */
+  private magicPick(snap: Ff1Snapshot, index: number): void {
     const ch = this.entryChar(snap)
     const e = this.entry
     if (!ch || !e) { this.level = 'root'; this.requestRender(); return }
     const known = this.knownSpells(ch)
-    const hit = known.find((s2) => `L${s2.level} ${s2.meta.name} ${s2.charges}/${ch.maxmp[s2.level - 1] ?? 0}` === label)
-    if (!hit) { this.ctx.log(`[os] ff1 magic: unknown row '${label}' (LOUD)`); return }
+    const hit = known[index]
+    const expectRow = hit ? `L${hit.level} ${hit.meta.name} ${hit.charges}/${ch.maxmp[hit.level - 1] ?? 0}` : undefined
+    if (!hit || this.pickRows[index] !== expectRow) {
+      this.ctx.log(`[os] ff1 magic: row ${index} drifted (rendered '${this.pickRows[index]}') — resyncing (LOUD)`)
+      this.requestRender()
+      return
+    }
     if (hit.charges <= 0) {
       this.opError = `${hit.meta.name}: no charges left (L${hit.level} is 0/${ch.maxmp[hit.level - 1] ?? 0})`
       this.ctx.log(`[os] ff1: ${hit.meta.name} refused — 0 charges (LOUD)`)
@@ -916,23 +977,22 @@ export class Ff1Controller {
     this.commitCommand({ char: ch.slot, action: 'magic', level: hit.level, slot: hit.slotIdx })
   }
 
-  private targetSelect(snap: Ff1Snapshot, label: string): void {
+  /** Target pick by browse INDEX (slot from pickTargets — twins stay distinct). */
+  private targetPick(snap: Ff1Snapshot, index: number): void {
     const e = this.entry
     const ch = this.entryChar(snap)
     const pa = e?.pendingAction
     if (!e || !ch || !pa) { this.level = 'root'; this.requestRender(); return }
+    const slot = this.pickTargets[index]
+    if (slot === undefined) { this.ctx.log(`[os] ff1 target: row ${index} out of range (LOUD)`); return }
     const targetsEnemies = pa.action === 'fight' || pa.spell?.target === 'one-enemy'
-    if (targetsEnemies) {
-      const hit = this.aliveEnemies(snap).find((en) =>
-        `${en.name} s${en.slot}${this.showEnemyHp() ? ` ${en.hp}hp` : ''}` === label)
-      if (!hit) { this.ctx.log(`[os] ff1 target: unknown enemy row '${label}' (LOUD)`); return }
-      if (pa.action === 'fight') this.commitCommand({ char: ch.slot, action: 'fight', target: hit.slot })
-      else this.commitCommand({ char: ch.slot, action: 'magic', level: pa.level, slot: pa.slot, target: hit.slot })
+    if (targetsEnemies && !this.aliveEnemies(snap).some((en) => en.slot === slot)) {
+      this.ctx.log(`[os] ff1 target: enemy slot ${slot} no longer alive — resyncing (LOUD)`)
+      this.requestRender()
       return
     }
-    const hit = snap.state.party.find((c) => `${c.alive ? '' : '✝'}${c.name} ${c.hp}/${c.maxhp}` === label)
-    if (!hit) { this.ctx.log(`[os] ff1 target: unknown ally row '${label}' (LOUD)`); return }
-    this.commitCommand({ char: ch.slot, action: 'magic', level: pa.level, slot: pa.slot, target: hit.slot })
+    if (pa.action === 'fight') this.commitCommand({ char: ch.slot, action: 'fight', target: slot })
+    else this.commitCommand({ char: ch.slot, action: 'magic', level: pa.level, slot: pa.slot, target: slot })
   }
 
   private goConfirmSelect(label: string): void {
@@ -994,6 +1054,9 @@ export class Ff1Controller {
   async onBrowseSelect(index: number): Promise<void> {
     if (this.level === 'name-kbd') { this.kbdSelect(index); return }
     if (this.level === 'slots') { this.slotsSelect(index); return }
+    const snap = this.snap()
+    if (this.level === 'battle-magic') { if (snap) this.magicPick(snap, index); return }
+    if (this.level === 'battle-target') { if (snap) this.targetPick(snap, index); return }
     if (this.level !== 'undo') { this.ctx.log(`[os] ff1: browse select at ${this.level} — ignored (LOUD)`); return }
     const rows = this.undoList.map((c) => `↩ ${c.label} · ${c.at.slice(11, 19)}`)
     const display = rows.length ? rows : ['(no checkpoints yet)']
@@ -1027,17 +1090,18 @@ export class Ff1Controller {
       case 'clear': this.kbdBuf = ''; this.requestRender(); return
       case 'shift': this.kbdShift = !this.kbdShift; this.requestRender(); return
       case 'space':
-        this.ctx.log('[os] ff1 kbd: the FF1 grid has no space — Rename pads short names (LOUD)')
+        this.ctx.log('[os] ff1 kbd: the FF1 grid has no space — type 4 glyphs (LOUD)')
         return
       case 'run':
       case 'done': {
         const name = this.kbdBuf
         if (name.length !== 4) {
-          this.opError = `"${name}" — the vanilla grid types exactly 4 glyphs (Rename shortens after)`
+          this.opError = `"${name}" — the vanilla grid types exactly 4 glyphs`
           this.ctx.log(`[os] ff1 kbd: ${this.opError}`)
           this.requestRender()
           return
         }
+        if (this.opBusy) { this.ctx.log(`[os] ff1 kbd: Run while '${this.opBusy}' runs — buffer kept, tap again (LOUD)`); return }
         this.level = 'root'
         this.runOp(`name "${name}"`, () => ff1.nameEntry(name))
         return
@@ -1120,6 +1184,9 @@ export class Ff1Controller {
       })
       return
     }
+    // The minimap's refresh (the WM owns the 'Reload' label — review find:
+    // a level-local handler for it was unreachable).
+    if (this.level === 'minimap') { this.openMinimap(); return }
     // Fresh classify (also clears a stale transition verdict).
     this.runOp('reload state', () => ff1.state())
   }

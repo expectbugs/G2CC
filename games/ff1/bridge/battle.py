@@ -111,14 +111,20 @@ OUTCOMES = {0: 'continue', 1: 'party-dead', 2: 'won', 3: 'ran'}
 def _log_push(log: List[str], msg: str) -> None:
     """Battle-log hygiene (Ph-E, found via the grind-loop logs):
     - the round-end COMMAND-MENU redraw bleeds into the combat-box region as
-      condensed-font junk ('… ���� RUN …') — never a message; dropped. (Real
-      messages are standard-font with every glyph learned; genuine scrape
-      misses still surface via the scrape unknown-tile side channel.)
+      condensed-font junk ('… ���� RUN …') — never a message; dropped. The
+      drop keys on a RUN of unknown glyphs (the condensed-font signature),
+      not a single one, so a real message containing one genuinely new
+      glyph still logs (visibly, with its �) instead of vanishing (review
+      find). Genuine misses also ride the scrape unknown-tile side channel.
     - the box draws incrementally, so a message arrives as prefix stages
       (' AAAA', ' AAAA · IMP', ' AAAA · IMP 6DMG') — a new message that
-      EXTENDS the last replaces it (the completed line is the message)."""
-    if '�' in msg:
+      EXTENDS the last replaces it (the completed line is the message).
+    - numeric tokens fold the shared O/0 font glyph back to digits
+      ('1O DMG' → '10 DMG', review find — fold_digit_token existed but no
+      shipping path applied it)."""
+    if '���' in msg:
         return
+    msg = scrape.fold_line(msg)
     if log and msg.startswith(log[-1]):
         log[-1] = msg
         return
@@ -195,9 +201,21 @@ class BattleExecutor:
                                    *screens.REGION_BTL_ROSTER)
         return tuple(ln for ln in res.lines if ln.strip())
 
+    def _spr_in_command_area(self) -> bool:
+        # The command menu's loop rewrites btlcursspr from lut_CommandCursorPos
+        # (x $58-$90, y $9E-$CE) every iteration; during resolution the sprite
+        # stays STALE at the last confirm's menu. A self-cast's last menu is
+        # the MAGIC box (y ≥ $A6 at x ≤ $70) and a fight's is the enemy picker
+        # (x ≤ $50) — both fail this gate, which kills the review-found
+        # false round-end (combat-box text bleeding into the roster region
+        # while curchar/curs sit stale at 0/(0,0) for a solo self-cast).
+        x, y = self.sprite_pos()
+        return 0x58 <= x <= 0x90 and 0x9E <= y <= 0xCE
+
     def at_command_menu(self, char: int) -> bool:
         return (self.emu.in_battle() and self.curchar() == char
-                and self.curs() == (0, 0) and len(self.roster_text()) > 0)
+                and self.curs() == (0, 0) and self._spr_in_command_area()
+                and len(self.roster_text()) > 0)
 
     # ------------------------------------------------------------- entry
     def living_slots(self) -> List[int]:
@@ -218,7 +236,14 @@ class BattleExecutor:
         """Drive the game's menus to enter `commands`. Returns the expected
         cmdbuf rows for the final byte-exact check (also asserted here)."""
         by_char = {c.char: c for c in commands}
+        if len(by_char) != len(commands):
+            # protocol boundary (Ph-F review find: the dict silently kept only
+            # the LAST duplicate and reported ok)
+            raise BattleDesync(f'duplicate char in commands: {[c.char for c in commands]}')
         living = self.living_slots()
+        extra = [c.char for c in commands if c.char not in living]
+        if extra:
+            raise BattleDesync(f'command(s) for non-living/unknown char(s) {extra}')
         missing = [ch for ch in living if ch not in by_char]
         if missing:
             raise BattleDesync(f'no command supplied for living char(s) {missing}')
@@ -398,7 +423,8 @@ class BattleExecutor:
             # next round's menu prompts the FIRST LIVING char (char 0 can die)
             first_living = next((i for i in range(4) if ramspec.read_char(
                 self._r, i, lambda b: '').alive()), 0)
-            if self.curchar() == first_living and self.curs() == (0, 0) and f > 30:
+            if (self.curchar() == first_living and self.curs() == (0, 0)
+                    and self._spr_in_command_area() and f > 30):
                 stable_home += 1
                 if stable_home >= 10 and len(self.roster_text()) > 0:
                     return RoundResult(log, 0, 'continue', f)
@@ -430,14 +456,6 @@ class BattleExecutor:
                         return {'rounds': rounds, 'outcome': 'continue',
                                 'stopped': f'ally {ch} hp {c.curhp} < {min_hp_pct}% of {c.maxhp}',
                                 'log': log}
-            for cmd in commands:
-                if cmd.action == 'magic':
-                    mp = self._r(ramspec.CH_MAGIC + cmd.char * ramspec.CH_STRIDE
-                                 + ramspec.CH_CURMP + (cmd.level - 1))
-                    if mp <= 0:
-                        return {'rounds': rounds, 'outcome': 'continue',
-                                'stopped': f'char {cmd.char} L{cmd.level} charges exhausted',
-                                'log': log}
             alive = sorted((e for e in ramspec.read_enemy_slots(self._r) if e.alive()),
                            key=lambda e: e.hp)
             if not alive:
@@ -450,6 +468,16 @@ class BattleExecutor:
                 if cmd.action == 'fight' and not any(e.slot == cmd.target for e in alive):
                     cmd = CharCommand(char=cmd.char, action='fight', target=alive[0].slot)
                 round_cmds.append(cmd)
+            # charge stop AFTER the living filter (review find: a dead caster's
+            # spent charges must not stop a loop that would drop their command)
+            for cmd in round_cmds:
+                if cmd.action == 'magic':
+                    mp = self._r(ramspec.CH_MAGIC + cmd.char * ramspec.CH_STRIDE
+                                 + ramspec.CH_CURMP + (cmd.level - 1))
+                    if mp <= 0:
+                        return {'rounds': rounds, 'outcome': 'continue',
+                                'stopped': f'char {cmd.char} L{cmd.level} charges exhausted',
+                                'log': log}
             missing = [ch for ch in living if not any(c.char == ch for c in round_cmds)]
             for ch in missing:   # an ally who died and RECOVERED (undo) fights
                 round_cmds.append(CharCommand(char=ch, action='fight', target=alive[0].slot))

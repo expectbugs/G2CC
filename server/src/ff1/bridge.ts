@@ -127,16 +127,21 @@ export class Ff1Bridge {
 
   private onStdout(chunk: string): void {
     this.buf += chunk
-    if (this.inflight && this.buf.length > MAX_BUF) {
-      // Wedged/flooding daemon: reject loudly, drop it, let the next pump
-      // respawn (no-timeouts honored — supervision, not a clock).
-      console.error(`[ff1] daemon stdout exceeded ${MAX_BUF} bytes with no complete response — killing + respawning`)
+    if (this.buf.length > MAX_BUF) {
+      // Wedged/flooding daemon (inflight or not — an idle daemon emitting at
+      // all is already wrong; Ph-F review closed the idle-unbounded gap).
+      // Treat as a DEATH: reject everything and fire onDeath so the ENGINE
+      // re-boots the replacement — the old path spawned a fresh daemon with
+      // no ROM loaded and never told the engine, wedging every later op on
+      // 'no ROM booted' (Ph-F review find).
+      console.error(`[ff1] daemon stdout exceeded ${MAX_BUF} bytes with no complete response — killing (engine reboots via onDeath)`)
       this.buf = ''
-      const job = this.inflight; this.inflight = null
       const dying = this.proc; this.proc = null
-      job.reject(new Error('ff1 daemon stdout overflow (no response line); respawning'))
+      const err = new Error('ff1 daemon stdout overflow (no response line)')
+      if (this.inflight) { const j = this.inflight; this.inflight = null; j.reject(err) }
+      while (this.queue.length) this.queue.shift()!.reject(err)
       try { dying?.kill('SIGKILL') } catch { /* already dead */ }
-      this.pump()
+      if (this.onDeath) this.onDeath(err)
       return
     }
     let nl: number

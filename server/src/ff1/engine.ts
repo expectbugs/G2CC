@@ -88,34 +88,58 @@ class Ff1Engine {
     }
     // Restore BEFORE boot so a transient DB-down THROWS (paperclips C-F1):
     // we must not silently fresh-boot and then autosave over the real save.
-    const saved = await this.restore()
+    const restored = await this.restore()
     const bridge = new Ff1Bridge()
-    bridge.onDeath = (err) => this.handleDaemonDeath(err)
-    this.bridge = bridge
-    const req: Record<string, unknown> = {
-      rngJitter: this.cfg.rngJitter,
-      undoDepth: this.cfg.undoDepth,
+    bridge.onDeath = (err) => this.handleDaemonDeath(bridge, err)
+    try {
+      const req: Record<string, unknown> = {
+        rngJitter: this.cfg.rngJitter,
+        undoDepth: this.cfg.undoDepth,
+      }
+      if (restored) req['state'] = restored.stateB64
+      const snap = await bridge.request('boot', req) as unknown as Ff1Snapshot
+      // Rehydrate the undo ring from the mirrored tail (§8.4 — the mirror
+      // was write-only until the Ph-F review; a restart kept only the
+      // latest state and silently emptied the ring).
+      if (restored && restored.tail.length) {
+        await bridge.request('undo_seed', { entries: restored.tail }).catch((e: unknown) => {
+          console.error(`[ff1] undo-tail rehydration failed (ring starts empty): ${e instanceof Error ? e.message : String(e)}`)
+        })
+      }
+      // Publish the bridge only once the boot SUCCEEDED — a failed boot used
+      // to leak a live orphan daemon per retry (Ph-F review find).
+      this.bridge = bridge
+      this.lastSnap = snap
+      this.loadOk = true
+      this.loadError = null
+      if (restored) this.lastStateB64 = restored.stateB64
+      console.log(`[ff1] engine started (${restored ? 'resumed savestate' : 'fresh boot'}; screen=${snap.screen})`)
+    } catch (e) {
+      bridge.onDeath = null   // a deliberate cleanup kill is not a watchdog event
+      bridge.kill()
+      throw e
     }
-    if (saved) req['state'] = saved
-    const snap = await bridge.request('boot', req) as unknown as Ff1Snapshot
-    this.lastSnap = snap
-    this.loadOk = true
-    this.loadError = null
-    if (saved) this.lastStateB64 = saved
-    console.log(`[ff1] engine started (${saved ? 'resumed savestate' : 'fresh boot'}; screen=${snap.screen})`)
   }
 
   /** WATCHDOG (PLAN §3): the daemon died. Respawn + restore the last known
    *  savestate, loudly. The notice rides status() into the window/statusLine
-   *  until the next successful op clears it. */
-  private handleDaemonDeath(err: Error): void {
+   *  until the next successful op clears it. Identity-gated: a leaked or
+   *  superseded bridge's late death must not clobber the healthy one
+   *  (Ph-F review find). */
+  private handleDaemonDeath(from: Ff1Bridge, err: Error): void {
+    if (this.bridge !== from) return
     this.daemonNotice = `daemon died (${err.message}) — respawned + restored last savestate`
     console.error(`[ff1] WATCHDOG: ${err.message} — respawning with last savestate (${this.lastStateB64 ? 'in-memory' : 'PG row'})`)
     this.bridge = null
     this.starting = null
     // Lazy respawn: the next op (or Reload) runs ensureStarted → start() →
     // restore() prefers the in-memory copy via restore()'s fallback below.
+    if (this.onStatusChange) this.onStatusChange()
   }
+
+  /** UI hook (Ph-F review find: an idle daemon death repainted nothing) —
+   *  the controller registers its requestRender here. */
+  onStatusChange: (() => void) | null = null
 
   status(): Ff1Status {
     const running = this.bridge?.alive() === true && this.loadOk
@@ -161,6 +185,11 @@ class Ff1Engine {
     return p
   }
 
+  /** States already fetched for the tail mirror, keyed label|at — the mirror
+   *  refetches only NEW checkpoints instead of all five per op (Ph-F review:
+   *  the naive loop cost ~7 daemon round-trips per press). */
+  private tailCache = new Map<string, string>()
+
   /** Grab savestate + undo tail from the daemon, then mirror to PG on the
    *  serialized persistChain (fire-and-forget; saveError surfaces on status). */
   private async capturePersist(bridge: Ff1Bridge): Promise<void> {
@@ -173,13 +202,25 @@ class Ff1Engine {
       const checkpoints = (listResp['checkpoints'] as Ff1Checkpoint[] | undefined) ?? []
       const tail: UndoTailEntry[] = []
       for (const c of checkpoints.slice(0, UNDO_TAIL_DEPTH)) {
-        const u = await bridge.request('undo_state', { index: c.index }).catch(() => null)
-        if (u && typeof u['state'] === 'string') tail.push({ label: c.label, at: c.at, state: u['state'] })
+        const key = `${c.label}|${c.at}`
+        let state = this.tailCache.get(key)
+        if (state === undefined) {
+          // A fetch failure here must NOT silently thin the mirrored tail
+          // (Ph-F review find: `.catch(() => null)` overwrote the stored
+          // tail with fewer entries and reported success) — throw to the
+          // outer catch, which keeps the previous mirror + sets saveError.
+          const u = await bridge.request('undo_state', { index: c.index })
+          if (typeof u['state'] !== 'string') throw new Error(`undo_state ${c.index} returned no state`)
+          state = u['state']
+        }
+        tail.push({ label: c.label, at: c.at, state })
       }
+      this.tailCache = new Map(tail.map((t) => [`${t.label}|${t.at}`, t.state]))
+      this.lastGoodTail = tail
       this.persist(stateB64, this.lastSnap, tail)
     } catch (e) {
       this.saveError = e instanceof Error ? e.message : String(e)
-      console.error(`[ff1] capture-for-persist failed: ${this.saveError}`)
+      console.error(`[ff1] capture-for-persist failed (previous PG mirror kept): ${this.saveError}`)
     }
   }
 
@@ -206,15 +247,23 @@ class Ff1Engine {
       })
   }
 
-  /** Read the saved state b64 from PG — or the in-memory copy after a daemon
-   *  death (fresher than the last PG mirror). A DB error THROWS (C-F1) unless
-   *  the in-memory copy exists to respawn from. */
-  private async restore(): Promise<string | null> {
-    if (this.lastStateB64) return this.lastStateB64
-    const r = await query<{ state: Buffer }>('SELECT state FROM ff1_save WHERE id = $1', [SAVE_ID])
+  /** Read the saved state (+ undo tail for ring rehydration) from PG — or the
+   *  in-memory copy after a daemon death (fresher than the last PG mirror).
+   *  A DB error THROWS (C-F1) unless the in-memory copy exists to respawn from. */
+  private lastGoodTail: UndoTailEntry[] = []
+
+  private async restore(): Promise<{ stateB64: string; tail: UndoTailEntry[] } | null> {
+    if (this.lastStateB64) {
+      return { stateB64: this.lastStateB64, tail: this.lastGoodTail }
+    }
+    const r = await query<{ state: Buffer; undo_tail: UndoTailEntry[] }>(
+      'SELECT state, undo_tail FROM ff1_save WHERE id = $1', [SAVE_ID])
     const row = r.rows[0]
     if (!row || !row.state?.length) return null
-    return Buffer.from(row.state).toString('base64')
+    const tail = Array.isArray(row.undo_tail)
+      ? row.undo_tail.filter((t) => typeof t?.state === 'string' && t.state.length > 0)
+      : []
+    return { stateB64: Buffer.from(row.state).toString('base64'), tail }
   }
 
   /** Persist now (deactivate/leave/dispose). Fire-and-forget-able; awaits the
@@ -318,6 +367,23 @@ class Ff1Engine {
     return this.op(async (b) => {
       const r = await b.request('sav_export')
       return { path: String(r['path']), bytes: Number(r['bytes']) }
+    })
+  }
+
+  /** Full-frame PNG (b64) — acceptance screenshots + diagnostics. */
+  framePng(): Promise<string> {
+    return this.op(async (b) => {
+      const r = await b.request('frame', { crop: 'full', format: 'png' })
+      if (typeof r['png'] !== 'string') throw new Error('frame: daemon returned no png')
+      return r['png']
+    })
+  }
+
+  /** Read-only RAM peek (acceptance/harness verification only). */
+  peek(addr: number, n = 1): Promise<number[]> {
+    return this.op(async (b) => {
+      const r = await b.request('peek', { addr, n })
+      return (r['bytes'] as number[] | undefined) ?? []
     })
   }
 

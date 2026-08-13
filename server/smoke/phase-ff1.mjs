@@ -103,11 +103,16 @@ try {
   console.error(`  2. battle fixture → native entry (twocol, ${est2}B) ✓`)
 
   // --- 3. command collection: Fight×4 with targets s0-s3, Cancel-first Go ---
+  // (target picker is a BROWSE list since the Ph-F review — menu rows wrapped
+  // the 90px cap; picks resolve by content-row index)
   for (let i = 0; i < 4; i++) {
     await games.onMenuSelect('Fight')
     sc = await settle((x) => titleOf(x).includes('→ target'), `char ${i} target view`)
     checkScene(sc, `target pick ${i}`)
-    await games.onMenuSelect(`IMP s${i}`)
+    const rows = itemsOf(sc)
+    const idx = rows.findIndex((r2) => r2.startsWith(`IMP s${i}`))
+    assert.ok(idx >= 0, `target row IMP s${i} listed (got ${JSON.stringify(rows)})`)
+    await games.onBrowseSelect(idx)
   }
   sc = await settle((x) => titleOf(x).includes('round ready'), 'Go confirm view')
   assert.ok(menuOf(sc).includes('Cancel') && menuOf(sc).includes('Go'), 'Cancel-first Go menu')
@@ -235,8 +240,10 @@ try {
   await settle((x) => menuOf(x).includes('Fight'), 'battle entry')
   for (let i = 0; i < 4; i++) {
     await games.onMenuSelect('Fight')
-    await settle((x) => titleOf(x).includes('→ target'), `char ${i} target`)
-    await games.onMenuSelect(`IMP s${i}`)
+    sc = await settle((x) => titleOf(x).includes('→ target'), `char ${i} target`)
+    const idx = itemsOf(sc).findIndex((r2) => r2.startsWith(`IMP s${i}`))
+    assert.ok(idx >= 0, `stage-11 target row IMP s${i} listed`)
+    await games.onBrowseSelect(idx)
   }
   await settle((x) => titleOf(x).includes('round ready'), 'go confirm')
   await games.onMenuSelect('Go')

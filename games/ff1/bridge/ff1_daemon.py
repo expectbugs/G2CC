@@ -177,8 +177,13 @@ class Daemon:
         if not Path(rom).exists():
             raise FileNotFoundError(f'ROM not found: {rom}')
         self.rng_jitter = bool(req.get('rngJitter', self.rng_jitter))
+        depth = int(req.get('undoDepth', self.undo.depth))
+        if depth < 1:
+            # mirrors op_set_config's guard (Ph-F review find: UndoRing(0)
+            # silently discarded every checkpoint — the whole §8.4 net gone)
+            raise ValueError('undoDepth must be ≥ 1')
         self.emu = Emu(rom, rng_jitter=self.rng_jitter)
-        self.undo = UndoRing(int(req.get('undoDepth', self.undo.depth)))
+        self.undo = UndoRing(depth)
         if req.get('state'):
             self.emu.load(np.frombuffer(base64.b64decode(req['state']), dtype=np.uint8))
             log(f'boot: ROM + savestate restored ({rom})')
@@ -453,9 +458,29 @@ class Daemon:
         return {'label': entry['label'], 'at': entry['at'],
                 'state': base64.b64encode(entry['state'].tobytes()).decode()}
 
+    def op_undo_seed(self, req: dict) -> dict:
+        """Rehydrate the undo ring from the PG tail after a boot (§8.4 "a
+        crash preserves undo depth" — Ph-F review find: the mirror was
+        write-only). entries arrive NEWEST-FIRST (the mirror's order)."""
+        entries = req.get('entries', [])
+        if self.undo.entries:
+            raise RuntimeError('undo_seed: ring is not empty — seed only right after boot')
+        for e in entries:
+            state = np.frombuffer(base64.b64decode(e['state']), dtype=np.uint8)
+            self.undo.entries.append({'label': str(e['label']), 'at': str(e['at']),
+                                      'state': state})
+        while len(self.undo.entries) > self.undo.depth:
+            self.undo.entries.pop()
+        log(f'undo_seed: ring rehydrated with {len(self.undo.entries)} checkpoint(s)')
+        return {'checkpoints': self.undo.listing()}
+
     def op_undo(self, req: dict) -> dict:
         emu = self.need_emu()
-        entry = self.undo.get(int(req['index']))
+        entry = self.undo.get(int(req['index']))   # resolve BEFORE the push below shifts indices
+        # §8.4 "nothing is unrecoverable" cuts BOTH ways (Ph-F review find):
+        # the CURRENT state (e.g. a just-won battle) gets its own checkpoint
+        # before the rewind, so an undo can itself be undone.
+        self.checkpoint(f'before undo → "{entry["label"]}"')
         emu.load(entry['state'])
         try:
             emu.settle()
@@ -491,6 +516,17 @@ class Daemon:
         c0, c1 = int(req.get('col0', 0)), int(req.get('col1', 32))
         res = scrape.scrape_region(emu.patterns(), emu.glyphs, r0, r1, c0, c1)
         return {'lines': res.lines, 'unknownTiles': res.unknown}
+
+    def op_peek(self, req: dict) -> dict:
+        """Read-only RAM peek (harness/acceptance verification — e.g. the
+        party-select ptygen fields no snapshot carries). Never writes,
+        never advances a frame."""
+        emu = self.need_emu()
+        addr = int(req['addr'])
+        n = int(req.get('n', 1))
+        if not (0 <= addr <= 0xFFFF and 1 <= n <= 256 and addr + n <= 0x10000):
+            raise ValueError(f'peek: addr {addr:#x} n {n} out of range')
+        return {'bytes': [emu.read(addr + i) for i in range(n)]}
 
     def op_ping(self, _req: dict) -> dict:
         return {'pong': True, 'booted': self.emu is not None}

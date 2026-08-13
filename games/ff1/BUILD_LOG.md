@@ -418,6 +418,109 @@ daemon pace + auto-checkpoint) → **ff1 harness 7/7**. phase-ff1 stages 11-12
 (fight-until through the WM + Sys/Slots round-trip) → **run-all 37/38**
 (known calendar red). Typecheck/build clean; forbidden-pattern grep clean.
 
+## Ph-F — final deep review (HANDOFF §8.1)
+
+**Session 3 (2026-08-13). Pass 1 = cold re-read of every ff1 file + a
+max-effort /code-review (11 finder angles + a gap sweep, adversarially
+verified). 16 findings CONFIRMED-and-FIXED, 3 REJECTED with reasons, a
+handful accepted-and-documented. Every fix was verified against a concrete
+trace before changing code (Adam's verify-before-fix rule); full regression
+green after each batch.**
+
+### Fixed (verification note per item)
+
+1. **Cold read:** gen_data emitted spell target `'party'` where battle.py
+   matches `'whole-party'` — casting any of the 11 party-wide spells (AFIR,
+   FOG2, INV2…) would desync-raise. Traced both sides; normalized at the
+   generator, spells.json regenerated.
+2. **Battle pickers wrapped the 96 px menu** (measured: 'L1 CURE 2/2'=111 px
+   vs the 90 px cap our own smoke enforces) → magic/target pickers are now
+   BROWSE lists (full-width rows, picks resolve by INDEX, drift re-checked at
+   tap). Also fixes the twin-name ally ambiguity (rows now slot-prefixed, and
+   index → slot mapping never label-matches).
+3. **Solo-survivor self-cast false round-end** (roster region nests inside
+   the combat-box region; curchar/curs stale at 0/(0,0)) → round-end +
+   at_command_menu now also require btlcursspr in the COMMAND-MENU lut area
+   (the same sprite-signature machinery as the picker conds).
+4. **Bridge stdout-overflow wedge**: the recovery respawned an UNBOOTED
+   daemon and never told the engine ('no ROM booted' forever). Overflow now
+   = death (rejects all + fires onDeath → the engine re-boots); the cap also
+   applies when idle.
+5. **Engine boot-failure daemon leak** + missing identity guard: bridge is
+   published only after a successful boot; a failed candidate is killed
+   (onDeath disarmed); handleDaemonDeath is identity-gated.
+6. **Write-only undo mirror**: restore() now returns the tail and boot
+   rehydrates the ring via the new `undo_seed` op — a restart preserves undo
+   depth as §8.4 promises. Tail states are cached (label|at) so the mirror
+   refetches only NEW checkpoints (was ~7 round-trips per press).
+7. **capturePersist silently thinned the tail** (`.catch(() => null)`) → a
+   fetch failure now keeps the previous PG mirror + sets saveError LOUDLY.
+8. **op_undo didn't checkpoint the current state** → it now pushes
+   `before undo → "<label>"` first (index resolved before the push), so an
+   undo can itself be undone.
+9. **Map-view op errors were invisible** (maptiles has no text region) →
+   opError drops the view to the text fallback + rides statusLine; undo/slot
+   confirm views gained the error prefix.
+10. **Idle daemon death froze the frame** → engine.onStatusChange hook (the
+    controller registers requestRender); not-running taps now log + repaint.
+11. **Go-during-busy discarded the collected round** (entry cleared before
+    the guard) → busy pre-guards in fireRound/fireAuto/kbd-run; a FAILED
+    battle round now recovers to root instead of a dead-end confirm.
+12. **fight_until charge-stop ran before the dead-caster filter** → a dead
+    ally's spent charges stopped the grind at 0 rounds; check moved after
+    the living filter.
+13. **fold_digit_token was never applied on shipping paths** ('3OO G' on the
+    HUD) → fold_line() applied at the wire boundary (Classification.to_json)
+    + battle logs; raw scrapes stay unfolded for the byte-exact harness.
+14. **undoDepth 0 silently disabled the whole undo net** (`?? 30` passes 0;
+    UndoRing(0) pops every push) → daemon boot refuses < 1 (matches
+    set_config); controller clamps ≥ 1.
+15. **gen_data claimed 'CRC32 AB12ECE6' without computing it** — a different
+    dump could silently rewrite the committed data tables under a false
+    lineage. The CRC is now COMPUTED and pinned (verified: Adam's dump
+    matches); any other dump refuses regeneration LOUDLY.
+16. **enter_round silently collapsed duplicate-char commands** (dict build)
+    → LOUD BattleDesync on duplicates or commands for non-living chars.
+    Plus: battle-log junk-drop keys on a '���' RUN (a single genuinely new
+    glyph now logs visibly instead of vanishing); formation-tile failure no
+    longer yanks the level from non-formation views; minimap refresh moved
+    to the WM-owned Reload path; ENTERING_SHOP latch term dropped from the
+    shop classifier (its own comment called it unreliable; the text anchors
+    carried the whole suite — verified green without it).
+
+### Rejected (with reasons — the agent-misunderstanding guard)
+
+- **"statusLine/preview fixed-width slices violate NO TRUNCATION"** — the
+  status bar and ribbon preview are fixed-width single-line/glance surfaces;
+  every window slices there (paperclips slice(0,40/46) precedent) and the
+  FULL text renders in the view body. The rule targets content/log/prompt
+  strings, which now never clamp (the confirm-list col() calls WERE a real
+  violation and were fixed, #11 above).
+- **"Dialog misclassifies as shop via the 'G' heuristic / gamemenu-first
+  order"** — PLAUSIBLE only: plain dialogs draw map tiles in rows 11-27
+  (calibration's anti-false-anchor guard proved map graphics scrape ~0 known
+  glyphs), and gamemenu-before-dialog was the deliberate session-2 fix for a
+  VERIFIED misclassification. The latch term was still dropped (see #16).
+- **"battlecounter collision revalidates a stale entry"** — undo completion
+  nulls the entry, and same-counter-same-battle reloads are genuinely the
+  same battle; fight targets re-resolve at entry. No reachable harm traced.
+
+### Accepted + documented (not fixed, on the record)
+
+- Pre-game title/prologue frames classify 'ow' (a wasted tile fetch, no
+  correctness effect — Adam plays from a resumed save).
+- opBusy has no manual unstick; daemon ops are frame-budgeted + the crash
+  flag raises, so a true wedge requires a native cynes hang (watchdog covers
+  death; server restart covers the theoretical rest).
+- setConfig/last_settled wiring is dormant (config flips apply at the next
+  daemon (re)boot; 'settled:false' rides daemon responses unused).
+- Cleanup tier (dup compose blocks, games.ts per-game wiring, per-frame
+  full-frame scrapes in resolution loops) — quality items, out of Ph-F
+  correctness scope, listed for a future pass.
+
+Regression after the full fix batch: ff1 harness 7/7 (131 checks), server
+run-all 37/38 (known calendar red), typecheck/build clean.
+
 ### Ph-B deferrals (intentional, don't chase)
 
 - DRINK/ITEM entry paths: raise loudly; need a potion-holding fixture (buy
