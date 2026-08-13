@@ -630,6 +630,13 @@ fixtures never landed — LOUD refusal in the entry menu); magic L5-8 page
 flip (needs a leveled party); on-glass gray-ramp legibility of the map
 tiles (the >>4 luma mapping is the tuning knob, daemon op_frame).
 
+> **SUPERSEDED 2026-08-13 (session 4).** DRINK and magic L5-8 both SHIPPED —
+> see the session-4 entry at the end of this file. Only battle ITEM (casting
+> from equipped gear), live fiend/chaos verification and the on-glass gray
+> ramp are still open. The checklist above also predates the ribbon fixes:
+> the minimap's refresh is now `Refresh` (not `Reload`) and has a `Back`,
+> and double-tap pops FF1 levels instead of parking out of the window.
+
 ### Review PASS 3 (loop cap reached — churn noted per HANDOFF §8.1.5)
 
 Pass 3 still found real bugs: 13 CONFIRMED (+2 PLAUSIBLE hardened anyway).
@@ -738,3 +745,124 @@ gold 80 · overworld (153,170), south of Coneria · inn save present
   bizhawk-README.md, cynes-emulator.pyi, cynes-wrapper.cpp,
   mesen2-CommandLineHelper.cs, nespy-tree.json (P0 research droppings —
   leave them; games/gamelist.md modification predates this session too).
+
+---
+
+# Session 4 — 2026-08-13: the end-to-end test, and what it found
+
+Adam asked for a real end-to-end test of the shipped window, off-glass AND
+through the live production server via the `/pc` mirror (a headless browser
+surface speaking the same wire as `server/static/pc/`: `auth` → `os_attach
+{surface:'browser'}` → `render` scenes in, `input` events out), rendering
+every scene to PNG with `scripts/scene_to_png.py` and looking at it. Then he
+asked for the findings to be fixed properly and the whole test re-run.
+
+## The showstopper: a party could only ever fight ONE battle
+
+Every round of every battle after a party's first died with
+`BattleDesync: char N <action> confirm: condition already true before the
+press`. Fight, Run, RunAll and fight-until all failed identically — the party
+could neither win nor flee, so **the game could not progress at all**. The
+second attempt was worse: the failed entry left the game half-way through its
+own command menus, so the retry burned the whole 20000-frame budget (~30 s of
+frozen glass) before failing again.
+
+**Root cause.** `btl_result` ($6B86) is zeroed by `bank_0C.asm ::
+DoBattleRound` — which runs at RESOLUTION start, i.e. AFTER every character's
+command has been entered. Nothing clears it when a battle BEGINS. So from
+battle #2 onward the byte still holds battle #1's outcome (2 = won) for the
+whole entry phase, and:
+
+* `_confirm(last=True)` verified its press with `btl_result != 0` — already
+  true before the press → instant desync;
+* `run_resolution()` read the same stale value on frame 1 as "the battle
+  ended" → an instant bogus `won` and an outro that never arrives.
+
+`ExitBattle` also hijacks $6B86 as a frame counter (stores 120), so the byte
+is never a standalone battle-phase flag — only its CHANGES mean anything.
+
+**Fix.** Both tests are transitions now: `enter_round` captures
+`result_baseline` and the last confirm watches for a change away from it (the
+`STY btl_result` IS the transition), and `run_resolution` ignores the byte
+until it has observed the DoBattleRound zeroing. Plus `ff1_daemon.battle_guard`
+makes battle ops ATOMIC — any failure rewinds to the pre-op savestate before
+the error propagates, so a desync leaves a clean, retryable battle instead of
+a 30-second brick wall.
+
+**Why nothing caught it.** Every fixture and the whole §8.3 acceptance start
+from a party whose `btl_result` is still 0 — a party's FIRST fight. The suite
+was structurally blind. Closed with `fixtures/battle_start_stale.npy`
+(btl_result = 2), `test_battle`'s stale-2/stale-3 cases, and `phase-ff1`
+stage 13, which plays a full round through the WINDOW from that state.
+
+## The other blockers (all found in the same pass, all fixed)
+
+1. **Equipping was impossible.** The WEAPON/ARMOR grids and the field ITEM
+   screen classified as `dialog`, whose view offers only `A`/`B` — no arrows,
+   so the cursor could not be moved — and `REGION_DIALOG` is rows 1..10 while
+   the equip rows sit at 7/13/19/25, so only party slot 0 was even visible.
+   They are `gamemenu` now (full-screen scrape + cursor verbs), anchored on
+   `EQUIP`+`TRADE`+`DROP` / a bare `ITEM` header / `FOR LEV UP`.
+2. **Spell levels 5-8 were refused** on a missing-fixture guard, killing every
+   late-game spell. `MenuSelection_Magic` flips its own page ($6AF8) when Down
+   is pressed on row 3, so the existing one-Down-per-level walk already reaches
+   L5-8 — the guard was the only obstacle.
+3. **DRINK implemented** (`bank_0C :: BattleSubMenu_Drink`), byte-exact
+   `08 / 40+potion / 80|slot`, with an empty-container refusal BEFORE any
+   press (the game would Nothing-box and cancel the whole action). Battle
+   ITEM casts from equipped gear; with no such gear in the party there is
+   nothing to verify, so it stays out and now SAYS SO instead of citing a
+   phase number.
+4. **Ribbon/fullBleed dead ends.** A menu of only reserved labels rendered
+   ZERO cells — the daemon-death card is exactly `['Reload','Main']`, so its
+   own "Reload respawns the daemon" was unclickable. The strip cursor did not
+   wrap, leaving `Undo` 11 notches from home. Double-tap parked out of FF1
+   instead of popping a level, so the entire `onBack` ladder (including
+   "double-tap on a confirm = Cancel") was unreachable. Fixed with
+   `fullBleedMenu()`, a wrapping cursor, and the `wantsBackNav` hook.
+5. **No way to start a new game** — the engine always resumes the stored
+   savestate and there was no reset. `op_reset` + a Cancel-first Sys → New;
+   the checkpoint makes it undoable and SRAM survives, so CONTINUE still
+   works. This is also what makes the title / party-select / ring name
+   keyboard reachable at all.
+6. **Readability.** Screen scrapes are cleaned (sprite tiles collapse to `·`)
+   and PAGINATED — the weapon shop's Sell/Exit/gold and the game menu's lower
+   half had no way to be seen. `0` no longer reads as `O`. The field-menu
+   cursor is reported from `$62` (`▶ WEAPON`) because it is a SPRITE the tile
+   scraper cannot see — and WEAPON/STATUS never scrape at all.
+7. **Silent failures.** Blocked steps report; `unknownTiles` is logged;
+   twocol errors wrap instead of being clipped; the Go card shows the round
+   that is running instead of blanking; errors retire after one action.
+8. **Cosmetics.** Map tiles centred for the fullBleed layout (they used the
+   classic left-menu geometry), party HP + gold on the map status bar (a
+   maptiles frame has no text region, so HP was invisible while exploring),
+   3 px/tile minimap with a per-committed-tile trail (an ×8 leg used to leave
+   one dot), honest Slots rows, `.sav` receipt no longer titled "round".
+
+## Re-test results (same method, live production server)
+
+Battle from Adam's exact save: encounter → 4 × Fight → Go → `Outcome:
+continue`, then fight-until → **won after 4 rounds**, gold 80 → 110. Equip
+screen shows all four party rows with cursor verbs. Field menu reads
+`▶ ITEM/MAGIC/WEAPON/ARMOR/STATUS` as the cursor moves. `New` → title →
+NEW GAME → party select → ring keyboard typed `TEST` → committed → Undo
+straight back into the running party. Daemon `kill -9` → the card's own
+Reload recovers in place. Blocked step says so. Double-tap pops minimap and
+Sys, and parks only at root. Screenshots in the session scratchpad.
+
+**Adam's save is exactly as he left it**: (153,170), 80 G, ROUX 30/30 Rapier,
+IRIS 28/28 Iron Hammer + CURE, NOX 17/25, ZOT 25/25, inn save present.
+A labeled slot `ROUX · ow (153,170) · 80G` is kept as a restore point.
+
+Suites: ff1 harness 7/7 (46 battle + 29 scrape/classify checks), run-all
+37/38 (the known `phase10-calendar` OAuth env red).
+
+## Still out of scope (honest list)
+
+* Battle ITEM (casting from equipped gear) — no such gear exists to verify
+  against; refused with a real reason.
+* Fiend/Chaos (battleType ≥ 3) entry is still asm-derived only. No boss
+  fixture exists, and forcing one would fabricate a state the game never
+  produces that way. First real boss fight is the verification.
+* On-glass image latency for the two 256×110/112 map tiles is still
+  unmeasured — the run cannot touch the glasses.

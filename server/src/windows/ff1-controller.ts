@@ -120,6 +120,12 @@ export class Ff1Controller {
   private stepIdx = 0
   private opBusy: string | null = null        // op label while one runs (LOUD ignore on overlap)
   private opError: string | null = null       // last op failure — rendered until the next op
+  /** True while the current opError has not yet survived a user action. It is
+   *  cleared by the SECOND input after the error appeared, so a message is
+   *  always seen once but stops following the player into unrelated levels
+   *  (2026-08-13 — a refused Drink still headed the magic, target and Go
+   *  screens three levels later). */
+  private errorFresh = false
   private roundPages: string[] = []
   private roundPage = 0
   private roundOutcome: string | null = null
@@ -273,7 +279,7 @@ export class Ff1Controller {
       this.requestRender()
     }).catch((e: unknown) => {
       this.opBusy = null
-      this.opError = e instanceof Error ? e.message : String(e)
+      this.fail(e instanceof Error ? e.message : String(e))
       this.ctx.log(`[os] ff1: ${label} FAILED: ${this.opError}`)
       if (onFail) onFail()
       this.requestRender()
@@ -323,6 +329,17 @@ export class Ff1Controller {
   // ------------------------------------------------ battle entry helpers
 
   private snap(): Ff1Snapshot | null { return ff1.cachedSnapshot() }
+
+  /** Record an error and give it one guaranteed rendering. */
+  private fail(msg: string): void { this.opError = msg; this.errorFresh = true }
+
+  /** Called at the top of every user input: retire an error that has already
+   *  been on screen for an action. */
+  private ageError(): void {
+    if (!this.opError) return
+    if (this.errorFresh) { this.errorFresh = false; return }
+    this.opError = null
+  }
 
   private beginEntry(snap: Ff1Snapshot): void {
     // canInput (daemon-computed: not DEAD|STONE|STUN|SLEEP) — the game skips
@@ -401,9 +418,9 @@ export class Ff1Controller {
       this.runningCmds = null
       const resp = r as Ff1Snapshot & { battleRound?: { log: string[]; outcome: string } }
       const br = resp.battleRound
-      if (!br) { this.opError = 'battle_round returned no round data'; this.level = 'root'; return }
+      if (!br) { this.fail('battle_round returned no round data'); this.level = 'root'; return }
       this.roundOutcome = br.outcome
-      const body = br.log.length ? br.log.join('\n') : '(no combat messages scraped)'
+      const body = br.log.length ? cleanScrape(br.log).join('\n') : '(no combat messages scraped)'
       this.roundPages = paginateText(`Outcome: ${br.outcome}\n\n${body}`)
       this.roundPage = 0
       this.level = 'battle-log'
@@ -428,9 +445,9 @@ export class Ff1Controller {
     this.runOp('fight-until', () => ff1.battleAuto(cmds, { minHpPct: 25, maxRounds: 30 }), (r) => {
       const resp = r as Ff1Snapshot & { battleAuto?: { rounds: number; outcome: string; stopped: string; log: string[] } }
       const ba = resp.battleAuto
-      if (!ba) { this.opError = 'battle_auto returned no data'; this.level = 'root'; return }
+      if (!ba) { this.fail('battle_auto returned no data'); this.level = 'root'; return }
       this.roundOutcome = ba.outcome
-      const body = ba.log.length ? ba.log.join('\n') : '(no combat messages scraped)'
+      const body = ba.log.length ? cleanScrape(ba.log).join('\n') : '(no combat messages scraped)'
       this.roundPages = paginateText(
         `Outcome: ${ba.outcome} after ${ba.rounds} round(s)\nStopped: ${ba.stopped}\n\n${body}`)
       this.roundPage = 0
@@ -531,10 +548,31 @@ export class Ff1Controller {
   /** One page of a cleaned screen scrape + whether paging verbs are needed.
    *  The page resets whenever the screen's TEXT changes, so moving the game's
    *  own cursor never leaves you stranded on a page that no longer exists. */
+  /** Where the game's own menu cursor points. FF1 draws it as a SPRITE, so it
+   *  never reaches the tile scraper — before this the player could see the
+   *  cursor only as a `·` that moved, and on the field menu two of the five
+   *  entries (WEAPON, STATUS) do not scrape at all (condensed CHR-RAM font).
+   *  $62 is probe-verified as a plain 0-4 index there; elsewhere the raw index
+   *  is reported rather than guessed at. */
+  private cursorLine(snap: Ff1Snapshot): string {
+    const c = snap.state.menuCursor
+    if (c === undefined) return ''
+    const joined = (snap.text ?? []).join('\n')
+    const fieldMenu = joined.includes('ITEM') && joined.includes('MAGIC') && joined.includes('ARMOR')
+    // ONLY the field menu. $62 is a shared zero-page temporary: it is a clean
+    // 0-4 entry index there (probe-verified), but on the equip screen's
+    // mode row it still holds the field menu's value — reporting that would
+    // be a confident lie, which is worse than saying nothing.
+    if (!fieldMenu) return ''
+    const ENTRIES = ['ITEM', 'MAGIC', 'WEAPON', 'ARMOR', 'STATUS']
+    return `▶ ${ENTRIES[c] ?? `entry ${c}`}\n`
+  }
+
   private scrapePages(snap: Ff1Snapshot, err: string, tail: string): string[] {
     this.reportUnknownTiles(snap)
+    const cursor = snap.screen === 'gamemenu' ? this.cursorLine(snap) : ''
     const body = cleanScrape(snap.text ?? [])
-    const text = `${err}${body.join('\n') || '(no scraped text)'}${tail}`
+    const text = `${err}${cursor}${body.join('\n') || '(no scraped text)'}${tail}`
     if (text !== this.scrapeKey) { this.scrapeKey = text; this.scrapePage = 0 }
     const pages = paginateText(text)
     if (this.scrapePage >= pages.length) this.scrapePage = Math.max(0, pages.length - 1)
@@ -656,8 +694,10 @@ export class Ff1Controller {
   private describeCommand(snap: Ff1Snapshot, c: Ff1CharCommand): string {
     const name = snap.state.party.find((p) => p.slot === c.char)?.name ?? `#${c.char}`
     if (c.action === 'fight') {
+      // A slot emptied since the pick (fight-until re-targets at entry) has no
+      // record left — say 'enemy', not '?'.
       const en = snap.state.battle?.enemies.find((x) => x.slot === c.target)
-      return `${name}: FIGHT ${en?.name ?? '?'} s${c.target}`
+      return `${name}: FIGHT ${en?.name ?? 'enemy'} s${c.target}`
     }
     if (c.action === 'drink') {
       const who = snap.state.party.find((p) => p.slot === c.target)?.name ?? `#${c.target}`
@@ -833,8 +873,11 @@ export class Ff1Controller {
     // street was a scatter of near-invisible specks. 68×34 tiles still spans a
     // whole 64-wide standard map horizontally, and the trail is gray-9 against
     // black with a white player block.
+    // W/H MUST stay SINGLE_TILE_W × SINGLE_TILE_H — 'tile' mode composes a
+    // fixed 200×100 region and the client rejects a BMP that does not match it
+    // (caught by scene_to_png's rule check when this was briefly 204×102).
     const SCALE = 3
-    const W = 204, H = 102
+    const W = 200, H = 100
     const px = new Uint8Array(W * H)
     const [pxx, pyy] = data.player
     const x0 = pxx - Math.floor(W / SCALE / 2), y0 = pyy - Math.floor(H / SCALE / 2)
@@ -989,14 +1032,9 @@ export class Ff1Controller {
     const snap = this.snap()
     if (!snap) { this.ctx.log('[os] ff1: tap before the first snapshot — repainting (LOUD)'); this.requestRender(); return }
 
+    this.ageError()
     // Standing verbs first (§8.4).
-    if (label === 'Undo') { this.opError = null; this.openUndo(); return }
-    // A verb that OPENS a level is the user moving on: drop a stale error so
-    // it stops following them into unrelated views (2026-08-13 — a refused
-    // Drink still headed the magic, target and Go screens three levels later).
-    if (this.opError && ['Magic', 'Fight', 'Sys', 'Mini', 'Cancel', 'Back', 'Continue'].includes(label)) {
-      this.opError = null
-    }
+    if (label === 'Undo') { this.openUndo(); return }
 
     if (this.level === 'undo-confirm') { this.undoConfirmSelect(label); return }
     if (this.level === 'battle-log') { this.battleLogSelect(label); return }
@@ -1157,14 +1195,14 @@ export class Ff1Controller {
     const resp = r as Ff1Snapshot
     if (resp.stopped === 'blocked') {
       const got = resp.committed ?? 0
-      this.opError = got === 0
+      this.fail(got === 0
         ? `can't go ${dir} — blocked`
-        : `${dir} stopped after ${got}/${want} — blocked`
+        : `${dir} stopped after ${got}/${want} — blocked`)
       return
     }
     if (resp.stopped === 'done' || resp.stopped === undefined) return
     if ((resp.committed ?? want) < want && resp.stopped !== 'battle' && resp.stopped !== 'mapchange') {
-      this.opError = `${dir}: ${resp.stopped} after ${resp.committed ?? 0}/${want}`
+      this.fail(`${dir}: ${resp.stopped} after ${resp.committed ?? 0}/${want}`)
     }
   }
 
@@ -1172,12 +1210,12 @@ export class Ff1Controller {
   private paceDone(r: unknown): void {
     const resp = r as Ff1Snapshot & { pace?: { paces: number; stopped: string; battlestep0: number; battlestep1: number } }
     const p = resp.pace
-    if (!p) { this.opError = 'pace returned no report'; return }
+    if (!p) { this.fail('pace returned no report'); return }
     if (p.stopped !== 'battle') {
       const tick = p.battlestep1 === p.battlestep0
         ? ' — battlestep NEVER TICKED (this spot cannot encounter; move elsewhere)'
         : ''
-      this.opError = `pace: ${p.stopped} after ${p.paces} paces${tick}`
+      this.fail(`pace: ${p.stopped} after ${p.paces} paces${tick}`)
     }
   }
 
@@ -1204,7 +1242,7 @@ export class Ff1Controller {
       case 'Drink': {
         const p = snap.state.potions
         if (!p || (p.heal <= 0 && p.pure <= 0)) {
-          this.opError = 'no HEAL or PURE potions — buy some at an item shop'
+          this.fail('no HEAL or PURE potions — buy some at an item shop')
           this.ctx.log('[os] ff1: Drink with no potions — refused LOUDLY')
           this.requestRender()
           return
@@ -1220,7 +1258,7 @@ export class Ff1Controller {
         // :: BattleSubMenu_Item walks ch_weapons/ch_armor). With no such item
         // in the party there is nothing to drive and nothing to verify, so it
         // stays out rather than shipping unexercised press code.
-        this.opError = 'ITEM casts a spell from EQUIPPED gear — this party has none'
+        this.fail('ITEM casts a spell from EQUIPPED gear — this party has none')
         this.ctx.log('[os] ff1: Item refused — no spell-casting equipment (LOUD)')
         this.requestRender()
         return
@@ -1261,7 +1299,7 @@ export class Ff1Controller {
       return
     }
     if (hit.charges <= 0) {
-      this.opError = `${hit.meta.name}: no charges left (L${hit.level} is 0/${ch.maxmp[hit.level - 1] ?? 0})`
+      this.fail(`${hit.meta.name}: no charges left (L${hit.level} is 0/${ch.maxmp[hit.level - 1] ?? 0})`)
       this.ctx.log(`[os] ff1: ${hit.meta.name} refused — 0 charges (LOUD)`)
       this.requestRender()
       return
@@ -1287,7 +1325,7 @@ export class Ff1Controller {
     const p = snap.state.potions ?? { heal: 0, pure: 0 }
     const have = index === 0 ? p.heal : p.pure
     if (have <= 0) {
-      this.opError = `${index === 0 ? 'HEAL' : 'PURE'}: none left`
+      this.fail(`${index === 0 ? 'HEAL' : 'PURE'}: none left`)
       this.ctx.log(`[os] ff1: drink row ${index} refused — 0 left (LOUD)`)
       this.requestRender()
       return
@@ -1377,6 +1415,7 @@ export class Ff1Controller {
   }
 
   async onBrowseSelect(index: number): Promise<void> {
+    this.ageError()
     if (this.level === 'name-kbd') { this.kbdSelect(index); return }
     if (this.level === 'slots') { this.slotsSelect(index); return }
     const snap = this.snap()
@@ -1422,7 +1461,7 @@ export class Ff1Controller {
       case 'done': {
         const name = this.kbdBuf
         if (name.length !== 4) {
-          this.opError = `"${name}" — the vanilla grid types exactly 4 glyphs`
+          this.fail(`"${name}" — the vanilla grid types exactly 4 glyphs`)
           this.ctx.log(`[os] ff1 kbd: ${this.opError}`)
           this.requestRender()
           return

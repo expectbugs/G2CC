@@ -73,6 +73,9 @@ export interface Ff1State {
   /** HEAL/PURE counts — the IN-BATTLE containers while a battle is up, the
    *  SRAM item counts otherwise (they can diverge; variables.inc). */
   potions?: { heal: number; pure: number }
+  /** The game's own out-of-battle menu cursor ($62). It is a sprite, so it is
+   *  invisible to the tile scraper — this is how the view says where it is. */
+  menuCursor?: number
   battle?: Ff1BattleState
 }
 

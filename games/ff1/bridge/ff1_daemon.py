@@ -220,6 +220,10 @@ class Daemon:
             # DRINK counts. In battle the menu reads its OWN containers
             # (variables.inc: they can fall out of sync with the SRAM items),
             # so report whichever set is authoritative right now.
+            # The game's own menu cursor. It is a SPRITE, so it never appears
+            # in the tile scrape — without this the player cannot see which
+            # entry is selected (and WEAPON/STATUS do not scrape at all).
+            'menuCursor': read(ramspec.MENU_CURSOR),
             'potions': ({'heal': read(ramspec.BTL_POTION_HEAL),
                          'pure': read(ramspec.BTL_POTION_PURE)}
                         if ramspec.in_battle(read) else

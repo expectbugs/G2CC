@@ -142,6 +142,12 @@ BTLCMD_CURCHAR = 0x6B7A    # reference/variables.inc :: btlcmd_curchar (whose co
 BTLCMD_TARGET = 0x6B7B     # reference/variables.inc :: btlcmd_target (current enemy slot targetted)
 BTL_RESULT = 0x6B86        # reference/variables.inc :: btl_result (0 fighting / 1 party dead / 2 won /
                            #   3 ran / $FF chaos-wait) — the battle-end detector
+MENU_CURSOR = 0x62         # reference/variables.inc :: cursor — the OUT-OF-BATTLE menu
+                           #   cursor index. Probe-verified 2026-08-13: the field menu
+                           #   runs 0-4 (ITEM/MAGIC/WEAPON/ARMOR/STATUS) and the equip
+                           #   grid is a 2-wide linear index (slot*2 + column). The
+                           #   cursor is a SPRITE, so it never lands in the tile scrape —
+                           #   this is the only way to say where it points.
 BTL_POTION_HEAL = 0x6BAF   # reference/variables.inc :: btl_potion_heal — the IN-BATTLE
 BTL_POTION_PURE = 0x6BB0   # reference/variables.inc :: btl_potion_pure   potion containers
                            #   ("stored separately because it can fall out of sync with the

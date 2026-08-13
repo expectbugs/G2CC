@@ -81,6 +81,13 @@ interface OsWindow {
                                       // §3.4 fullBleed scroll-reading ONLY: a scroll-notch boundary event
                                       //   while the view set scrollContent (the content is the capture).
                                       //   Reader turns pages here. Never fires outside fullBleed.
+  wantsBackNav?(): boolean             // RIBBON double-tap routing (2026-08-13). Ribbon sends a
+                                       //   double-tap straight to the ribbon for every NON-browse
+                                       //   view. Return true while your view is a LEVEL that should
+                                       //   pop instead (FF1's confirm cards / system menu / battle
+                                       //   log / map tiles) — the host then runs onBack() and only
+                                       //   parks when onBack() returns false. Return false at your
+                                       //   root: double-tap = exit is the house rule.
   onScrollReadBack?(): Promise<boolean>
                                       // §SCOUT: double-tap while YOUR scrollContent view is on glass.
                                       //   true = consumed (you surfaced a menu); false/absent = the host
@@ -182,6 +189,14 @@ throw new SwitchTo('mail', undefined, { kind: 'mail', key })    // switch + open
 `Retry` · `Reload` · `Back` · `Main` are handled by `window-manager.ts` **before** delegating to your
 `onMenuSelect`, so they work identically in every window and state (including the error screen). If a
 window menu reuses one of these strings, the host intercepts the tap and your handler never sees it.
+
+**fullBleed strips `Main` and `Reload`** from the rendered top bar (Main is ribbon slot 0). A menu made
+ONLY of reserved labels would therefore render zero cells — `fullBleedMenu()` keeps `Reload` in that
+case so a window can never become a dead end (2026-08-13: FF1's daemon-death card was exactly
+`['Reload','Main']`, so its own "Reload respawns the daemon" was unclickable). If a verb must survive
+fullBleed, give it your OWN label (FF1's minimap uses `Refresh`, not `Reload`). The fullBleed cell
+cursor **wraps**, so the last cell is one notch back from cell 0 — keep cell 0 harmless (the cursor
+resets there on every menu-set change) and put a standing safety verb last.
 
 | label    | host behaviour |
 |----------|----------------|
