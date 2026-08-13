@@ -146,6 +146,14 @@ export interface OsWindow {
    *  false/absent = the host parks to the ribbon as before. Scroll-reading
    *  windows only — Scout surfaces its Ask/Type menu here; Reader keeps the
    *  straight-to-ribbon park by not implementing it. */
+  /** RIBBON double-tap routing (2026-08-13). Ribbon mode sends a double-tap
+   *  straight to the ribbon for every NON-browse view, because reading windows
+   *  reach their sub-levels through menu Cancel/Back rows. A window that is
+   *  currently a hierarchical navigator in a non-browse mode (FF1's confirm
+   *  cards, system menu, battle log, map tiles) returns true here to get the
+   *  browse treatment instead: double-tap runs onBack(), and only a false
+   *  from onBack() parks to the ribbon. Absent/false = the old behaviour. */
+  wantsBackNav?(): boolean
   onScrollReadBack?(): Promise<boolean>
   /** May a notification OVERLAY repaint this window right now? (Phase 4, B5.)
    *  Session windows answer false while listening/transcribing/pendingStt/

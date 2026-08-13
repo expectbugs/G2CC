@@ -52,6 +52,22 @@ Menu model (reference/bank_0C.asm, fetched 2026-08-12 — see reference/README):
                  scrapes (the command menu is back); battle end = btl_result
                  nonzero (1 dead / 2 won / 3 ran). cmdbuf is NOT cleared
                  between rounds — verification keys on transitions, not bytes.
+
+btl_result IS STALE DURING COMMAND ENTRY (2026-08-13 — the bug that made every
+battle after a party's FIRST one unplayable). bank_0C.asm :: DoBattleRound
+zeroes it (`STY btl_result`) only at the START OF RESOLUTION, i.e. AFTER the
+player has entered every character's command; nothing clears it when a battle
+BEGINS. So from the moment battle #2 starts until the first round resolves,
+$6B86 still holds battle #1's outcome (2 = won / 3 = ran). Two consequences,
+both fixed here by making the tests TRANSITIONS instead of comparisons to 0:
+  * the last character's confirm verified `btl_result != 0`, which was already
+    true before the press → BattleDesync 'condition already true' on every
+    round-1 entry (fight AND run AND fight-until);
+  * run_resolution treated the same stale value as "the battle ended" on its
+    first frame → an instant bogus 'won' + an outro that never arrives.
+bank_0C.asm :: ExitBattle also HIJACKS $6B86 as a frame counter (stores 120),
+so it is never a trustworthy standalone battle-phase flag — only its changes
+are meaningful.
 """
 from __future__ import annotations
 
@@ -94,10 +110,11 @@ class BattleDesync(RuntimeError):
 @dataclass
 class CharCommand:
     char: int               # party slot 0-3
-    action: str             # 'fight' | 'magic' | 'run'
-    target: Optional[int] = None   # fight: enemy slot; magic one-ally: party slot
-    level: int = 0          # magic: spell level 1-8 (page 1 levels 5-8 deferred)
+    action: str             # 'fight' | 'magic' | 'drink' | 'run'
+    target: Optional[int] = None   # fight: enemy slot; magic one-ally/drink: party slot
+    level: int = 0          # magic: spell level 1-8
     slot: int = 0           # magic: slot within the level, 0-3
+    potion: int = 0         # drink: 0 = HEAL, 1 = PURE (bank_0C BattleSubMenu_Drink)
 
 
 @dataclass
@@ -143,6 +160,11 @@ class BattleExecutor:
         # controller writes are suppressed (the press "happens" but no button
         # reaches the pad — a fully-eaten input). Never set in production.
         self.drop_presses: set = set()
+        # btl_result AS OF entry start. It is NOT zeroed when a battle begins
+        # (bank_0C.asm :: DoBattleRound zeroes it at RESOLUTION start), so the
+        # only honest test is "did it CHANGE", never "is it nonzero" — see the
+        # module docstring's btl_result section. Refreshed by enter_round.
+        self.result_baseline: int = self._r(ramspec.BTL_RESULT)
 
     # ------------------------------------------------------------- low level
     def _r(self, addr: int) -> int:
@@ -288,6 +310,10 @@ class BattleExecutor:
         # Tests run rng_jitter=False and stay deterministic.
         if self.emu.rng_jitter:
             self.emu.step(random.randint(0, 9))
+        # Re-read the stale-carrying result byte NOW: everything downstream
+        # (the last char's confirm, run_resolution's end test) measures the
+        # DoBattleRound transition against this, never against 0.
+        self.result_baseline = self._r(ramspec.BTL_RESULT)
         expected: dict = {}
         for idx, ch in enumerate(living):
             cmd = by_char[ch]
@@ -342,14 +368,19 @@ class BattleExecutor:
             return (0x04, FIGHT_EFFECT_BYTE, cmd.target, 0x00)
 
         if cmd.action == 'magic':
-            if not (1 <= cmd.level <= 4):
-                raise BattleDesync(
-                    f'char {ch}: magic level {cmd.level} — page-1 levels (5-8) are '
-                    'deferred until a leveled fixture exists (BUILD_LOG Ph-B note)')
+            if not (1 <= cmd.level <= 8):
+                raise BattleDesync(f'char {ch}: magic level {cmd.level} out of range 1-8')
             meta = self.spell_meta(cmd.level, cmd.slot, ch)
             self._nav_command(ch, 'magic')
             self.bpress_verified('A', lambda: self._spell_menu_open(),
                                  f'char {ch} magic submenu')
+            # Levels 5-8 need NO special handling: bank_0C.asm ::
+            # MenuSelection_Magic keeps btlcurs_y as a raw 0-7 counter and
+            # flips the magic PAGE itself ($6AF8) when Down is pressed on row
+            # 3 (`AND #$03 / CMP #$03 / INC $6AF8` then the normal INC), so
+            # the same one-Down-per-level walk lands on L5-8 and the box
+            # redraws under it. Verified against the disassembly 2026-08-13
+            # (the old 1-4 guard was a fixture gap, not a mechanism gap).
             for want in range(1, cmd.level):
                 self.bpress_verified('Down', lambda w=want: self.curs()[1] == w,
                                      f'char {ch} spell row→{want}')
@@ -361,6 +392,32 @@ class BattleExecutor:
             # (caster / all-enemies / whole-party) this IS the spell-select A
             self._confirm(ch, last, f'char {ch} magic confirm')
             return (0x40, meta['id'], tgt_byte, 0x00)
+
+        if cmd.action == 'drink':
+            # bank_0C.asm :: BattleSubMenu_Drink — a 2-row box (Heal / Pure)
+            # picked with btlcurs_y AND #$01, then SelectPlayerTarget, then the
+            # completing A. Empty containers open the "Nothing" box and CANCEL
+            # the action, which would strand entry, so the counts are checked
+            # from RAM first (btl_potion_heal/pure are the IN-BATTLE copies —
+            # variables.inc says they can fall out of sync with the SRAM item
+            # counts, so these are the ones the menu actually reads).
+            if cmd.potion not in (0, 1):
+                raise BattleDesync(f'char {ch}: drink potion {cmd.potion} — 0 = HEAL, 1 = PURE')
+            if cmd.target is None:
+                raise BattleDesync(f'char {ch}: drink needs an ally target slot')
+            have = self._r(ramspec.BTL_POTION_HEAL + cmd.potion)
+            if have <= 0:
+                raise BattleDesync(f'char {ch}: no {"HEAL" if cmd.potion == 0 else "PURE"} '
+                                   'potions left (the game would Nothing-box and cancel)')
+            self._nav_command(ch, 'drink')
+            self.bpress_verified('A', self._drink_menu_open, f'char {ch} drink submenu',
+                                 hold=PICKER_HOLD)
+            if cmd.potion == 1:
+                self.bpress_verified('Down', lambda: self.curs()[1] & 1 == 1,
+                                     f'char {ch} drink→PURE')
+            self._enter_ally_target(ch, cmd.target, f'char {ch} drink')
+            self._confirm(ch, last, f'char {ch} drink confirm')
+            return (0x08, 0x40 + cmd.potion, 0x80 | cmd.target, 0x00)
 
         if cmd.action == 'run':
             self._nav_command(ch, 'run')
@@ -376,13 +433,21 @@ class BattleExecutor:
         across rounds, so byte comparison alone cannot prove the press
         landed): next char's menu for chars before the last, resolution
         start (combat-box change captured AT confirm time — the submenus
-        draw into that region during navigation) for the last living char."""
+        draw into that region during navigation) for the last living char.
+
+        The btl_result half is measured against result_baseline, NOT against
+        0: DoBattleRound's `STY btl_result` is itself the transition we are
+        watching for (2→0 on a party's second battle, 0→0 on its first, where
+        the combat-box change carries the test). Comparing to 0 made the
+        condition true BEFORE the press for every battle after the first —
+        the 2026-08-13 'condition already true before the press' desync."""
         if not last:
             self.bpress_verified('A', lambda: self.curchar() > ch, what)
         else:
             before = self.combat_text()
+            base = self.result_baseline
             self.bpress_verified('A', lambda: (self.combat_text() != before
-                                 or self._r(ramspec.BTL_RESULT) != 0), what)
+                                 or self._r(ramspec.BTL_RESULT) != base), what)
 
     def _spell_menu_open(self) -> bool:
         # the magic submenu redraws the box with L1..L4 rows (standard font)
@@ -400,6 +465,32 @@ class BattleExecutor:
             self.bpress_verified('Down', lambda: self._r(ramspec.BTLCMD_TARGET) != t0,
                                  f'char {ch} enemy cycle')
         raise BattleDesync(f'char {ch}: enemy target {target} unreachable by cycling')
+
+    def _drink_menu_open(self) -> bool:
+        """The DRINK box (bank_0C.asm :: DrawDrinkBox_L) prints the two potion
+        names; 'HEAL' is the stable anchor (PURE alone would also match the
+        magic box's spell names)."""
+        full = scrape.scrape_full(self.emu.patterns(), self.emu.glyphs)
+        return any('HEAL' in ln for ln in full.lines)
+
+    def _enter_ally_target(self, ch: int, target: int, what: str,
+                           row_before: Optional[Tuple[int, ...]] = None,
+                           cmd_byte: int = 0x40) -> None:
+        """Open SelectPlayerTarget and walk its cursor onto `target` (party
+        slot 0-3). Shared by one-ally spells and DRINK — the same routine
+        backs both in bank_0C (BattleSubMenu_Magic @Target_10 /
+        BattleSubMenu_Drink @GetTarget)."""
+        if row_before is None:
+            row_before = self.cmdbuf(ch)
+        self.bpress_verified('A', self._ally_picker_reached,
+                             f'{what}→ally picker', hold=PICKER_HOLD)
+        self._assert_picker_live(ch, row_before, cmd_byte, f'{what} ally picker')
+        for _ in range(8):
+            if self.curs()[1] & 0x03 == target:
+                return
+            y0 = self.curs()[1]
+            self.bpress_verified('Down', lambda: self.curs()[1] != y0, f'{what} ally cycle')
+        raise BattleDesync(f'{what}: ally target {target} unreachable')
 
     def _assert_picker_live(self, ch: int, row_before: Tuple[int, ...],
                             cmd_byte: int, what: str) -> None:
@@ -444,16 +535,8 @@ class BattleExecutor:
         if ttype == 'one-ally':
             if cmd.target is None:
                 raise BattleDesync(f'char {ch}: {meta["name"]} needs an ally target')
-            self.bpress_verified('A', self._ally_picker_reached,
-                                 f'char {ch} spell→ally picker', hold=PICKER_HOLD)
-            self._assert_picker_live(ch, row_before, 0x40, f'char {ch} ally picker')
-            for _ in range(8):
-                if self.curs()[1] & 0x03 == cmd.target:
-                    return 0x80 | cmd.target
-                y0 = self.curs()[1]
-                self.bpress_verified('Down', lambda: self.curs()[1] != y0,
-                                     f'char {ch} ally cycle')
-            raise BattleDesync(f'char {ch}: ally target {cmd.target} unreachable')
+            self._enter_ally_target(ch, cmd.target, f'char {ch} spell', row_before, 0x40)
+            return 0x80 | cmd.target
         if ttype in ('caster', 'all-enemies', 'whole-party'):
             # no picker opens; the confirm A (caller's) completes the command
             return {'caster': 0x80 | ch, 'all-enemies': 0xFF,
@@ -470,6 +553,13 @@ class BattleExecutor:
         cur = self.combat_text()
         run = 0
         stable_home = 0
+        # btl_result is only trustworthy once DoBattleRound has zeroed it for
+        # THIS round (module docstring). Until then the byte still holds the
+        # PREVIOUS battle's outcome and reading it as an end-of-battle signal
+        # declares an instant bogus 'won' on frame 1 (the 2026-08-13 bug).
+        # A round that starts at 0 (a party's first battle, or any round after
+        # the first) is trustworthy immediately.
+        result_trusted = self._r(ramspec.BTL_RESULT) == 0
         for f in range(RESOLUTION_BUDGET):
             self.emu.step(1)
             t = self.combat_text()
@@ -478,6 +568,10 @@ class BattleExecutor:
             if run == STABLE_FRAMES and t:
                 _log_push(log, ' · '.join(t))
             result = self._r(ramspec.BTL_RESULT)
+            if not result_trusted:
+                if result == 0:
+                    result_trusted = True   # DoBattleRound ran — the byte is ours now
+                continue                    # a stale value can never end a round
             if result != 0:
                 if result in (2, 3):
                     self._run_outro(log)   # won/ran → back to the map

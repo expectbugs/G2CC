@@ -99,6 +99,12 @@ export const BJ_TEXT_RECT = { x: DE_CONTENT_X + 208, y: DE_CONTENT_Y + 4, w: DE_
  *  Both under the 288×129 single-image client cap. */
 export const FF1_MAP_TOP_RECT = { x: DE_CONTENT_X + ((DE_CONTENT_W - 256) >> 1), y: DE_CONTENT_Y, w: 256, h: 110 }
 export const FF1_MAP_BOTTOM_RECT = { x: DE_CONTENT_X + ((DE_CONTENT_W - 256) >> 1), y: DE_CONTENT_Y + 110, w: 256, h: 112 }
+/** …and the same pair centred on the FULL width, for the fullBleed layout
+ *  (2026-08-13): there is no 96 px action-menu column there, so the classic
+ *  rects left the map visibly off-centre — 208 px of black on the left, 112 on
+ *  the right. Same size and stacking, x recomputed against SCREEN_WIDTH. */
+export const FF1_MAP_TOP_RECT_FB = { x: (SCREEN_WIDTH - 256) >> 1, y: DE_CONTENT_Y, w: 256, h: 110 }
+export const FF1_MAP_BOTTOM_RECT_FB = { x: (SCREEN_WIDTH - 256) >> 1, y: DE_CONTENT_Y + 110, w: 256, h: 112 }
 
 export interface TabSpec {
   label: string
@@ -628,11 +634,11 @@ function placeImageRegions(view: WinView, regions: SceneRegion[]): void {
     })
   } else if (view.mode === 'maptiles') {
     if (view.topTile) regions.push({
-      id: DE_REGION_IDS.tile0, name: 't0', x: FF1_MAP_TOP_RECT.x, y: FF1_MAP_TOP_RECT.y, w: FF1_MAP_TOP_RECT.w, h: FF1_MAP_TOP_RECT.h,
+      id: DE_REGION_IDS.tile0, name: 't0', x: FF1_MAP_TOP_RECT_FB.x, y: FF1_MAP_TOP_RECT_FB.y, w: FF1_MAP_TOP_RECT_FB.w, h: FF1_MAP_TOP_RECT_FB.h,
       kind: 'image', content: { kind: 'image', bmpBase64: view.topTile },
     })
     if (view.bottomTile) regions.push({
-      id: DE_REGION_IDS.tile2, name: 't2', x: FF1_MAP_BOTTOM_RECT.x, y: FF1_MAP_BOTTOM_RECT.y, w: FF1_MAP_BOTTOM_RECT.w, h: FF1_MAP_BOTTOM_RECT.h,
+      id: DE_REGION_IDS.tile2, name: 't2', x: FF1_MAP_BOTTOM_RECT_FB.x, y: FF1_MAP_BOTTOM_RECT_FB.y, w: FF1_MAP_BOTTOM_RECT_FB.w, h: FF1_MAP_BOTTOM_RECT_FB.h,
       kind: 'image', content: { kind: 'image', bmpBase64: view.bottomTile },
     })
   } else {   // hands

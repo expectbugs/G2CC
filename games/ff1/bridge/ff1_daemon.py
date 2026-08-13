@@ -112,9 +112,53 @@ class Daemon:
             return self.enemies[eid]['name']
         return f'enemy#{eid}'
 
+    def _record_tile(self) -> None:
+        """One minimap breadcrumb at the CURRENT position. Called per committed
+        tile via Emu.tile_sink AND once per snapshot (so a press-driven move or
+        a teleport still leaves a mark). Map screens only — Ph-F pass-2 find:
+        title/menu screens read power-on zeros and polluted the overworld trail
+        key with phantom tiles."""
+        emu = self.emu
+        if emu is None:
+            return
+        read = emu.read
+        if ramspec.in_battle(read):
+            return
+        key = (bool(read(ramspec.MAPFLAGS) & 1), read(ramspec.CUR_MAP))
+        self.trail.setdefault(key, set()).add(ramspec.player_tile(read))
+
     def checkpoint(self, label: str) -> None:
         emu = self.need_emu()
         self.undo.push(label, emu.save())
+
+    def battle_guard(self, label: str, run):
+        """Checkpoint, then run a battle op that DRIVES the game's own menus.
+
+        A desync mid-entry strands the game half-way through the command
+        menus: the next attempt waits for char 0's menu that will never come
+        and burns its whole 20000-frame budget before failing again (observed
+        2026-08-13 — the battle became a 30 s brick wall per tap). Battle ops
+        are therefore ATOMIC: on ANY failure the pre-op savestate is restored
+        before the error propagates, so the battle is exactly as it was and
+        the next tap is a clean retry. The checkpoint stays in the ring, so
+        §8.4 Undo still reaches this point deliberately.
+        """
+        emu = self.need_emu()
+        before = emu.save()
+        self.checkpoint(label)
+        try:
+            return run()
+        except Exception as e:
+            try:
+                emu.load(before)
+                emu.settle(budget=900, allow_animated=True)
+                log(f'{type(e).__name__} in {label!r} — REWOUND to the pre-op state '
+                    f'(the battle is intact; retry or Undo): {e}')
+            except Exception as restore_err:      # loud: never hide a failed rescue
+                log(f'{type(e).__name__} in {label!r} AND the rewind FAILED '
+                    f'({restore_err}) — the emulator state is suspect')
+                raise
+            raise
 
     def decode_state(self, b64: str) -> np.ndarray:
         """Validate + decode a savestate payload. cynes' load() streams a
@@ -159,11 +203,7 @@ class Daemon:
             })
         x, y = ramspec.player_tile(read)
         if cls.screen in ('ow', 'sm'):
-            # trail breadcrumbs only on REAL map screens (Ph-F pass-2 find:
-            # title/menu screens read power-on zeros and polluted the
-            # overworld trail key with phantom tiles)
-            key = (bool(read(ramspec.MAPFLAGS) & 1), read(ramspec.CUR_MAP))
-            self.trail.setdefault(key, set()).add((x, y))
+            self._record_tile()
         state: dict = {
             'party': party,
             'gold': ramspec.rd24(read, ramspec.GOLD),
@@ -177,6 +217,13 @@ class Daemon:
             'battlestep': read(ramspec.BATTLESTEP),
             'battlecounter': read(ramspec.BATTLECOUNTER),
             'sramSavePresent': ramspec.sram_save_present(read),
+            # DRINK counts. In battle the menu reads its OWN containers
+            # (variables.inc: they can fall out of sync with the SRAM items),
+            # so report whichever set is authoritative right now.
+            'potions': ({'heal': read(ramspec.BTL_POTION_HEAL),
+                         'pure': read(ramspec.BTL_POTION_PURE)}
+                        if ramspec.in_battle(read) else
+                        {'heal': read(ramspec.ITEM_HEAL), 'pure': read(ramspec.ITEM_PURE)}),
         }
         if ramspec.in_battle(read):
             slots = ramspec.read_enemy_slots(read)
@@ -215,6 +262,7 @@ class Daemon:
             # silently discarded every checkpoint — the whole §8.4 net gone)
             raise ValueError('undoDepth must be ≥ 1')
         self.emu = Emu(rom, rng_jitter=self.rng_jitter)
+        self.emu.tile_sink = self._record_tile   # minimap breadcrumb per committed tile
         self.undo = UndoRing(depth)
         if req.get('state'):
             self.emu.load(self.decode_state(req['state']))
@@ -230,6 +278,24 @@ class Daemon:
         return self.snapshot()
 
     def op_state(self, _req: dict) -> dict:
+        return self.snapshot()
+
+    def op_reset(self, _req: dict) -> dict:
+        """Hard-reset the console — the ONLY route back to the title screen,
+        i.e. the only way to start a NEW GAME once a savestate exists (the
+        window otherwise always resumes the stored party). Checkpoints first,
+        so §8.4 Undo rewinds straight back into the running game: nothing here
+        is destructive, and the cartridge SRAM survives a reset exactly like
+        real hardware, so CONTINUE still finds the in-game save."""
+        emu = self.need_emu()
+        self.checkpoint('before New Game (reset)')
+        emu.nes.reset()
+        emu.step(30)
+        try:
+            emu.settle(budget=1200)
+        except BudgetExceeded:
+            log('reset: title sequence still animating after 1200f (expected — title has effects)')
+        log('reset: console reset — back at the title screen')
         return self.snapshot()
 
     def op_press(self, req: dict) -> dict:
@@ -368,14 +434,16 @@ class Daemon:
         cmds = [battlemod.CharCommand(
             char=int(c['char']), action=str(c['action']),
             target=(int(c['target']) if c.get('target') is not None else None),
-            level=int(c.get('level', 0)), slot=int(c.get('slot', 0)))
+            level=int(c.get('level', 0)), slot=int(c.get('slot', 0)),
+            potion=int(c.get('potion', 0)))
             for c in req.get('commands', [])]
         if not cmds:
             raise ValueError('battle_round: commands must be non-empty')
-        self.checkpoint('battle round ' + self._formation_label())
-        ex = battlemod.BattleExecutor(emu, self.spells)
-        ex.enter_round(cmds)
-        rr = ex.run_resolution()
+        def go():
+            ex = battlemod.BattleExecutor(emu, self.spells)
+            ex.enter_round(cmds)
+            return ex.run_resolution()
+        rr = self.battle_guard('battle round ' + self._formation_label(), go)
         out = self.snapshot()
         out['battleRound'] = {'log': rr.log, 'result': rr.result,
                               'outcome': rr.outcome, 'frames': rr.frames}
@@ -418,14 +486,16 @@ class Daemon:
         cmds = [battlemod.CharCommand(
             char=int(c['char']), action=str(c['action']),
             target=(int(c['target']) if c.get('target') is not None else None),
-            level=int(c.get('level', 0)), slot=int(c.get('slot', 0)))
+            level=int(c.get('level', 0)), slot=int(c.get('slot', 0)),
+            potion=int(c.get('potion', 0)))
             for c in req.get('commands', [])]
         if not cmds:
             raise ValueError('battle_auto: commands must be non-empty')
-        self.checkpoint('battle auto ' + self._formation_label())
-        ex = battlemod.BattleExecutor(emu, self.spells)
-        result = ex.fight_until(cmds, min_hp_pct=int(req.get('minHpPct', 0)),
-                                max_rounds=int(req.get('maxRounds', 30)))
+        def go():
+            ex = battlemod.BattleExecutor(emu, self.spells)
+            return ex.fight_until(cmds, min_hp_pct=int(req.get('minHpPct', 0)),
+                                  max_rounds=int(req.get('maxRounds', 30)))
+        result = self.battle_guard('battle auto ' + self._formation_label(), go)
         out = self.snapshot()
         out['battleAuto'] = result
         return out

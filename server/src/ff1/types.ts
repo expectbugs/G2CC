@@ -70,6 +70,9 @@ export interface Ff1State {
   battlestep: number
   battlecounter: number
   sramSavePresent: boolean
+  /** HEAL/PURE counts — the IN-BATTLE containers while a battle is up, the
+   *  SRAM item counts otherwise (they can diverge; variables.inc). */
+  potions?: { heal: number; pure: number }
   battle?: Ff1BattleState
 }
 
@@ -119,10 +122,12 @@ export interface Ff1Checkpoint {
 /** One battle command for battle_round (daemon op_battle_round contract). */
 export interface Ff1CharCommand {
   char: number
-  action: 'fight' | 'magic' | 'run'
+  action: 'fight' | 'magic' | 'drink' | 'run'
   target?: number
   level?: number
   slot?: number
+  /** drink: 0 = HEAL, 1 = PURE (bank_0C.asm :: BattleSubMenu_Drink row order). */
+  potion?: number
 }
 
 /** Engine status for statusLine/summary (paperclips PcStatus shape). */

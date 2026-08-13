@@ -367,6 +367,19 @@ class MainWindow implements OsWindow {
 
 
 
+/** The menu a fullBleed top bar actually shows. `Main` and `Reload` are
+ *  dropped (Adam: removed; Main is ribbon slot 0) — but NEVER to nothing:
+ *  a window whose whole menu is reserved labels (FF1's daemon-death card is
+ *  exactly `['Reload','Main']`) rendered ZERO cells, so every tap logged
+ *  "empty/out-of-range" and the only way out of the window was a double-tap
+ *  the card didn't mention. Keeping `Reload` in that case leaves the documented
+ *  recovery verb reachable and can never make a window a dead end. */
+export function fullBleedMenu(menu: string[]): string[] {
+  const stripped = menu.filter((m) => m !== 'Main' && m !== 'Reload')
+  if (stripped.length > 0) return stripped
+  return menu.includes('Reload') ? ['Reload'] : menu.slice(0, 1)
+}
+
 /** Compose `left …spaces… right` so [right] lands at the status bar's right
  *  edge (Adam 2026-06-12: the battery cluster rides there, always). Space
  *  width ≈5.2 px (fwTextWidth) → ±a few px of true right-alignment, plenty
@@ -997,7 +1010,7 @@ export class WindowManager {
           // reserved Main/Reload (Adam: removed; Main is ribbon slot 0). Classic browse
           // normalizes to DEFAULT_BROWSE_MENU so compose + tap agree (review 2026-06-11).
           let renderedMenu: string[] | undefined = useFullBleed
-            ? (view.menu ?? []).filter((m) => m !== 'Main' && m !== 'Reload')
+            ? fullBleedMenu(view.menu ?? [])
             : (view.mode === 'browse' ? (view.menu ?? [...DEFAULT_BROWSE_MENU]) : view.menu)
           const ribbonChrome = (): RibbonChrome | undefined => this.rootNav === 'ribbon'
             ? { battery: this.g2BatteryText(), bottomBar: this.active.statusLine?.() ?? null }
@@ -1549,7 +1562,13 @@ export class WindowManager {
       // exit to the ribbon. READING windows (the menu already captures, actions
       // directly tappable; their own sub-levels exit via menu Cancel/Back) go
       // STRAIGHT to the ribbon — Adam's straight-to-ribbon, the common case.
-      if (this.lastView?.mode === 'browse') {
+      // wantsBackNav (2026-08-13) opts a NON-browse view into the same
+      // hierarchical treatment: FF1's confirm cards / system menu / battle log
+      // / map tiles are levels, not reading panes, and double-tap used to
+      // eject the player out of the game window instead of popping one level
+      // (its whole onBack ladder — including "double-tap on a confirm =
+      // Cancel" — was unreachable on glass).
+      if (this.lastView?.mode === 'browse' || this.active.wantsBackNav?.() === true) {
         try {
           if (await this.active.onBack()) return
         } catch (e) {
@@ -1600,7 +1619,14 @@ export class WindowManager {
     if (this.fullBleed && this.fullBleedMenuCaptures()) {
       const menu = this.lastView?.menu ?? []
       if (menu.length === 0) return
-      const next = Math.max(0, Math.min(menu.length - 1, dir === 'down' ? this.winMenuCursor + 1 : this.winMenuCursor - 1))
+      // WRAP (2026-08-13). The strip shows 3 of N cells; with a long menu the
+      // tail verbs were a one-way trip — FF1's map bar is 12 cells and `Undo`,
+      // the standing whoops-tap net, sat 11 notches from the cursor's reset
+      // position. Wrapping makes the LAST cell one notch back from cell 0, and
+      // cell 0 is harmless in every window by construction (the cursor resets
+      // there on every menu-set change, §3.3).
+      const n = menu.length
+      const next = ((dir === 'down' ? this.winMenuCursor + 1 : this.winMenuCursor - 1) + n) % n
       if (next === this.winMenuCursor) return
       this.winMenuCursor = next
       this.requestRender()

@@ -388,6 +388,16 @@ class Ff1Engine {
     })
   }
 
+  /** Hard console reset → the title screen (PLAN §7: the ONLY route to NEW
+   *  GAME once a savestate exists, since boot always resumes it). The daemon
+   *  checkpoints first, so §8.4 Undo rewinds straight back into the running
+   *  game; cartridge SRAM survives, so CONTINUE still finds the in-game save. */
+  reset(): Promise<Ff1Snapshot> {
+    return this.op(async (b) =>
+      await b.request('reset') as unknown as Ff1Snapshot,
+    { persist: true })
+  }
+
   /** Full-frame PNG (b64) — acceptance screenshots + diagnostics. */
   framePng(): Promise<string> {
     return this.op(async (b) => {

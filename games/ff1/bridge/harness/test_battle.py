@@ -147,6 +147,71 @@ def main() -> None:
                            emu.uniform_frame())
     check('back on the overworld after flee', cls.screen == 'ow', cls.screen)
 
+    # --- REGRESSION (2026-08-13): a party's SECOND battle ---
+    # btl_result ($6B86) is not cleared when a battle begins — bank_0C.asm ::
+    # DoBattleRound zeroes it only at RESOLUTION start — so from battle #2
+    # onward it still holds the previous battle's outcome all through command
+    # entry. Every verify that compared it to 0 fired before its own press
+    # ('condition already true before the press') and killed fight, run AND
+    # fight-until: the game was unplayable past one battle. This is the exact
+    # state, staged on the fixture so the whole suite can never be blind to it
+    # again (the end-to-end version — win battle #1, walk into #2 — is in
+    # BUILD_LOG; it costs ~2 min, this costs seconds and pins the mechanism).
+    for stale in (2, 3):
+        ex = fresh_battle(emu)
+        emu.nes[ramspec.BTL_RESULT] = stale
+        emu.step(1)
+        check(f'staged stale btl_result={stale}', emu.read(ramspec.BTL_RESULT) == stale)
+        rows = ex.enter_round(fights([0, 1, 2, 3]))
+        check(f'entry works with a stale btl_result={stale} (4 × fight)',
+              rows == [(0x04, 0x10, 0, 0), (0x04, 0x10, 1, 0),
+                       (0x04, 0x10, 2, 0), (0x04, 0x10, 3, 0)], str(rows))
+        rr = ex.run_resolution()
+        check(f'resolution is honest with a stale btl_result={stale} '
+              '(no instant bogus win)', rr.outcome == 'continue', rr.outcome)
+        check(f'round log survives the stale btl_result={stale}',
+              len(rr.log) >= 4, str(rr.log))
+
+    # --- DRINK (2026-08-13): the potion verb, previously refused as deferred ---
+    # bank_0C.asm :: BattleSubMenu_Drink — box (Heal/Pure) → SelectPlayerTarget
+    # → confirm; cmdbuf = 08 / 40+potion / 80|slot. Fixture = battle_start with
+    # the in-battle containers stocked (3 HEAL, 1 PURE), which is exactly what
+    # the game syncs from the SRAM item counts at battle start.
+    emu.load(np.load(FIXTURES / 'battle_potions.npy'))
+    emu.settle(budget=900)
+    ex = BattleExecutor(emu, SPELLS)
+    check('fixture stocks 3 HEAL / 1 PURE',
+          emu.read(ramspec.BTL_POTION_HEAL) == 3 and emu.read(ramspec.BTL_POTION_PURE) == 1)
+    rows = ex.enter_round([CharCommand(char=0, action='drink', potion=0, target=2)]
+                          + [CharCommand(char=i, action='fight', target=0) for i in (1, 2, 3)])
+    check('drink cmdbuf byte-exact (08 / 40 heal / 80|slot2)',
+          rows[0] == (0x08, 0x40, 0x82, 0x00), str(rows[0]))
+    rr = ex.run_resolution()
+    check('drink round resolves', rr.outcome == 'continue', rr.outcome)
+    check('HEAL message in the log', any('HEAL' in m for m in rr.log), str(rr.log))
+    check('a HEAL potion was consumed', emu.read(ramspec.BTL_POTION_HEAL) == 2,
+          str(emu.read(ramspec.BTL_POTION_HEAL)))
+    # PURE is the second row of the same box
+    emu.load(np.load(FIXTURES / 'battle_potions.npy'))
+    emu.settle(budget=900)
+    ex = BattleExecutor(emu, SPELLS)
+    rows = ex.enter_round([CharCommand(char=0, action='drink', potion=1, target=0)]
+                          + [CharCommand(char=i, action='fight', target=0) for i in (1, 2, 3)])
+    check('PURE cmdbuf byte-exact (08 / 41 pure / 80|slot0)',
+          rows[0] == (0x08, 0x41, 0x80, 0x00), str(rows[0]))
+    ex.run_resolution()
+    check('a PURE potion was consumed', emu.read(ramspec.BTL_POTION_PURE) == 0,
+          str(emu.read(ramspec.BTL_POTION_PURE)))
+    # an empty container must be refused BEFORE any press (the game would open
+    # its Nothing box and CANCEL the action, stranding entry)
+    ex = fresh_battle(emu)
+    try:
+        ex.enter_round([CharCommand(char=0, action='drink', potion=0, target=0)]
+                       + [CharCommand(char=i, action='fight', target=0) for i in (1, 2, 3)])
+        raise AssertionError('FAIL drink-with-no-potions did not raise')
+    except BattleDesync as e:
+        check('drink with no potions refuses LOUD', 'potions left' in str(e), str(e))
+
     # --- desync drill: a fully-dropped press halts LOUD, undo recovers ---
     ex = fresh_battle(emu)
     pre_round = emu.save()

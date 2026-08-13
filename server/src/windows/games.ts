@@ -958,6 +958,14 @@ export class GamesWindow implements OsWindow {
     return null
   }
 
+  /** windows/types.ts :: wantsBackNav — FF1's sub-levels are text/twocol/tile
+   *  views, so ribbon double-tap parked out of the window instead of popping
+   *  one level (2026-08-13). Only the FF1 sub-controller opts in; every other
+   *  games level is a browse list, which the host already routes. */
+  wantsBackNav(): boolean {
+    return this.level === 'ff1' && this.ff1c.wantsBackNav()
+  }
+
   /** Ribbon preview (READ-ONLY, in-memory): delegate to the live controller for
    *  Paperclips/Blackjack, summarize the chess position (skill / title / whose
    *  move / last engine move) or rpg location, or — idle — the games list with

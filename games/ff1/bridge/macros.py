@@ -113,6 +113,11 @@ class Emu:
         # False when the last press landed on a perpetually-animating screen
         # (game menu) — rides daemon responses so nothing is silently unstable.
         self.last_settled = True
+        # Called once per COMMITTED map tile (steps/pace). The daemon hangs the
+        # minimap breadcrumb trail off this: recording only at snapshot time
+        # captured a single tile per op, so an ×8 leg left one dot and the
+        # trail was unreadable (2026-08-13 review).
+        self.tile_sink: Optional[Callable[[], None]] = None
 
     # ---------------------------------------------------------------- core
     def read(self, addr: int) -> int:
@@ -294,6 +299,8 @@ class Emu:
             if self.pos() == before:
                 return finish('blocked')
             committed += 1
+            if self.tile_sink is not None:
+                self.tile_sink()          # breadcrumb per COMMITTED tile
         return finish('done')
 
 

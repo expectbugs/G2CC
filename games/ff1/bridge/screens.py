@@ -10,6 +10,7 @@ A uniform frame is ALWAYS 'transition' (settle-v2 rule) — never classified.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -108,7 +109,15 @@ def classify(read, frame: np.ndarray, patterns: np.ndarray, glyphs: GlyphTable,
     # game-menu family FIRST (open item 3): the menu's own name/HP text sits in
     # the dialog rows and its gold line contains 'G' — evaluated after the
     # dialog branch it misreads as 'shop' (verified on fix_menu.npy).
-    if _menuish(joined, full.lines):
+    #
+    # The FULL-SCREEN sub-menus reached FROM that menu belong to the same
+    # family and are anchored here too (2026-08-13 review). They carry none of
+    # the ITEM/MAGIC/ARMOR trio, so they used to fall through to 'dialog' —
+    # which hands the window an A/B-only verb set and a rows-1..10 scrape:
+    # the equip grid's IRIS/NOX/ZOT rows (13/19/25) were invisible and the
+    # cursor could not be moved at all, i.e. equipping and item use were
+    # impossible from the glasses.
+    if _equipish(joined) or _statusish(joined) or _menuish(joined, full.lines):
         return Classification('gamemenu', full.lines, [])
     # shop: entering_shop/shop_id are transient/latched — the reliable live
     # anchor is shop text (box headers/prices) while a shop screen is up.
@@ -124,8 +133,17 @@ def classify(read, frame: np.ndarray, patterns: np.ndarray, glyphs: GlyphTable,
         # branch's own comment calls $50 transient/latched-unreliable; the
         # live anchors (price/GP text in the lower rows, WELCOME) carried the
         # whole journey suite on their own.
-        if any('G' in ln or 'GP' in ln for ln in lower.lines) or _shopish(lower.lines):
+        # The price anchor now needs a DIGIT next to the G (2026-08-13 review):
+        # a bare 'G' also matches the stat label 'AGL.', which classified the
+        # STATUS screen as a shop.
+        if _priced(lower.lines) or _shopish(lower.lines):
             return Classification('shop', dlg.lines + lower.lines, dlg.unknown)
+        # The field ITEM screen (bare 'ITEM' header, an item grid, NO prices
+        # and no Welcome) is a game-menu screen, not a dialog box — checked
+        # AFTER the shop test so an ITEM SHOP, which shows the same header
+        # plus prices, still classifies as a shop.
+        if _item_screenish(full.lines):
+            return Classification('gamemenu', full.lines, [])
         return Classification('dialog', dlg.lines, dlg.unknown)
 
     return Classification('sm' if on_sm else 'ow')
@@ -149,6 +167,40 @@ def _has_word_run(lines: List[str]) -> bool:
 def _shopish(lines: List[str]) -> bool:
     txt = ' '.join(lines)
     return any(w in txt for w in ('WELCOME', 'welcome', 'Welcome'))
+
+
+# A NUMERAL immediately before G/GP. 'O' is in the class because the FF1 font
+# draws 0 and O with the same 8x8 bitmap (scrape.AMBIGUOUS_PAIRS) and classify
+# runs on RAW, unfolded lines — a shop's '8O G' is a price too.
+_PRICE_RE = re.compile(r'[0-9O]\s*GP?\b')
+
+
+def _priced(lines: List[str]) -> bool:
+    """A real gold/price readout: a numeral next to G/GP. A bare 'G' anywhere
+    also matched the status screen's 'AGL.' label, which put STATUS in the
+    shop class (2026-08-13 review find)."""
+    return any(_PRICE_RE.search(ln) for ln in lines)
+
+
+def _equipish(joined: str) -> bool:
+    """The WEAPON/ARMOR equip grids — their own header is drawn in the
+    condensed CHR-RAM font and never scrapes, but the verb row always does
+    (probed 2026-08-13: 'EQUIP  TRADE  DROP' at row 3)."""
+    return 'EQUIP' in joined and 'TRADE' in joined and 'DROP' in joined
+
+
+def _statusish(joined: str) -> bool:
+    """The per-character STATUS page (probed 2026-08-13: 'FOR LEV UP' plus the
+    STR./AGL./INT./VIT./LUCK block)."""
+    return 'FOR LEV UP' in joined or ('LUCK' in joined and 'STR.' in joined)
+
+
+def _item_screenish(lines: List[str]) -> bool:
+    """The field ITEM screen: a line that is EXACTLY the 'ITEM' header (probed
+    2026-08-13 at row 3, with the item grid at rows 6-8 and no gold line).
+    Deliberately strict — an NPC saying the word must not match, and the
+    caller has already ruled out shops."""
+    return any(ln.strip() == 'ITEM' for ln in lines)
 
 
 def _menuish(joined: str, lines: List[str]) -> bool:

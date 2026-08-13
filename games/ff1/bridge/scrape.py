@@ -73,9 +73,10 @@ AMBIGUOUS_PAIRS = {frozenset(('O', '0'))}
 
 def fold_digit_token(token: str) -> str:
     """Fold letter-aliases back to digits inside a numeric token: a token made
-    only of [0-9O] with at least one real digit is a number the font drew with
-    the shared O/0 glyph ("4OO" → "400"). Anything else passes through."""
-    if any(ch.isdigit() for ch in token) and all(ch.isdigit() or ch == 'O' for ch in token):
+    only of [0-9O] (plus '/' — FF1 prints charge rows as "2/0/0/0/" and HP as
+    "30/ 30") with at least one real digit is a number the font drew with the
+    shared O/0 glyph ("4OO" → "400"). Anything else passes through."""
+    if any(ch.isdigit() for ch in token) and all(ch.isdigit() or ch in 'O/' for ch in token):
         return token.replace('O', '0')
     return token
 
@@ -84,8 +85,22 @@ def fold_line(line: str) -> str:
     """fold_digit_token over every space-separated token, spacing preserved
     (split(' ') keeps empty runs, so join round-trips). The DISPLAY-boundary
     fold (Ph-F review find: numbers scraped for the HUD showed '3OO G') —
-    raw scrapes stay unfolded so calibration/harness byte-exact checks hold."""
-    return ' '.join(fold_digit_token(t) for t in line.split(' '))
+    raw scrapes stay unfolded so calibration/harness byte-exact checks hold.
+
+    All-alias tokens ('O', 'O/O/O/O') carry no digit of their own, so
+    fold_digit_token cannot judge them alone. They fold when the LINE has a
+    real number somewhere — the FF1 numeric readouts that produce them always
+    do ('ABSORB     O' sits beside 'VIT.     5'; the charge row 'O/O/O/O'
+    beside '2/O/O/O/'). A line of pure prose keeps its capital Os.
+    (2026-08-13 review: HP/MP/stat zeroes rendered as the letter O.)"""
+    numeric_line = any(any(ch.isdigit() for ch in t) for t in line.split(' '))
+    out = []
+    for t in line.split(' '):
+        if numeric_line and t and all(ch in 'O/' for ch in t) and 'O' in t:
+            out.append(t.replace('O', '0'))
+        else:
+            out.append(fold_digit_token(t))
+    return ' '.join(out)
 
 
 class GlyphTable:

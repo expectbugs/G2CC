@@ -21,7 +21,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { WmContext, WinView } from './types.js'
-import { paginateText, fwTextWidth } from '../os-compose.js'
+import { paginateText, fwTextWidth, wrapLinesPx } from '../os-compose.js'
 import { encodeGray4Single } from '../os-content.js'
 import { browsePageItems } from './_browse.js'
 import { kbdModel, type KbdCell } from './_kbd.js'
@@ -48,13 +48,15 @@ const SPELLS: SpellMeta[] = (() => {
 type Ff1Level =
   | 'root'            // screen-adaptive (map/dialog/shop/menu/title/battle-entry)
   | 'battle-magic'    // spell pick for the current entry char
+  | 'battle-drink'    // HEAL/PURE potion pick for the current entry char
   | 'battle-target'   // enemy/ally pick for the pending action
   | 'battle-confirm'  // Cancel-first Go over the collected round
   | 'battle-log'      // post-round paginated log
   | 'auto-confirm'    // Cancel-first fight-until (repeat last round) confirm
   | 'undo'            // checkpoint browse list
   | 'undo-confirm'    // Cancel-first restore confirm
-  | 'sys'             // Save/Slots/Export system menu (Ph-E)
+  | 'sys'             // Save/Slots/Export/New system menu (Ph-E)
+  | 'reset-confirm'   // Cancel-first NEW GAME (console reset)
   | 'slots'           // labeled-slot browse list
   | 'slot-confirm'    // Cancel-first slot load confirm
   | 'name-kbd'        // ring keyboard composing a 4-glyph name (§7.4)
@@ -69,7 +71,10 @@ interface EntryState {
   idx: number                       // index into living
   commands: Ff1CharCommand[]
   /** A pending action awaiting its target pick (battle-target level). */
-  pendingAction: { action: 'fight' | 'magic'; level?: number; slot?: number; spell?: SpellMeta } | null
+  pendingAction: {
+    action: 'fight' | 'magic' | 'drink'
+    level?: number; slot?: number; spell?: SpellMeta; potion?: number
+  } | null
   /** battlecounter ($F7) at entry start — a DIFFERENT battle (new encounter
    *  while a stale entry lingered) rebuilds the collection from scratch. */
   battleKey: number
@@ -79,6 +84,33 @@ function col(s: string, maxPx = 222): string {
   if (fwTextWidth(s) <= maxPx) return s
   let out = ''
   for (const ch of s) { if (fwTextWidth(out + ch) > maxPx) break; out += ch }
+  return out
+}
+
+/** One Slots row. The label already carries the screen ("ROUX · ow (153,170)
+ *  · 80G"), so appending `screen` again just pushed the timestamp — the only
+ *  thing that tells two slots apart — off the 40-byte row (2026-08-13). */
+function slotRow(s: { label: string; screen: string; at: string }): string {
+  return `${s.at.slice(5, 16).replace('T', ' ')} ${s.label}`
+}
+
+/** The scraper's unknown-tile marker (bridge/scrape.py :: UNKNOWN_CHAR). */
+const UNKNOWN = '\u{FFFD}'
+
+/** Make a raw screen scrape READABLE on 7 glass rows (2026-08-13 review).
+ *  FF1 draws shopkeepers, window borders and class sprites as 8×8 tiles, and
+ *  those land in the text grid as unknown glyphs: the Coneria weapon shop
+ *  scraped 18 lines of which TEN were a solid diamond of `\u{FFFD}`, pushing
+ *  Sell/Exit/gold off the bottom of the pane. So: drop lines that carry no
+ *  real character, collapse each run of unknowns to a single `·` (the tile is
+ *  still SHOWN — never silently dropped, the no-truncation rule), and trim
+ *  blank edges. Nothing readable is removed; only sprite noise is compressed. */
+export function cleanScrape(lines: string[]): string[] {
+  const out = lines
+    .filter((ln) => [...ln].some((ch) => ch !== ' ' && ch !== UNKNOWN))
+    .map((ln) => ln.replace(new RegExp(`${UNKNOWN}+`, 'gu'), '·').replace(/\s+$/, ''))
+  while (out.length && !out[0].trim()) out.shift()
+  while (out.length && !out[out.length - 1].trim()) out.pop()
   return out
 }
 
@@ -122,6 +154,19 @@ export class Ff1Controller {
    *  browse INDEX against these (Ph-F review: label matching wrapped/collided). */
   private pickRows: string[] = []
   private pickTargets: number[] = []
+  // --- scraped-screen paging (shops, the game's own menus, dialog boxes).
+  // Those screens are up to 21 lines and the pane shows ~7, with no scroll —
+  // Sell/Exit and three of four equip rows were simply unreachable before.
+  private scrapePage = 0
+  private scrapeKey = ''
+  /** Commands of a round that is IN FLIGHT (entry is cleared at fire time, so
+   *  the confirm card used to blank for the ~1 s the op runs). */
+  private runningCmds: Ff1CharCommand[] | null = null
+  /** Pending 'New Game' confirm (Sys → New → Cancel-first). */
+  private pendingReset = false
+  /** frameHashes whose unknown-tile report has already been logged — the LOUD
+   *  scrape-miss channel was declared in the wire types and read by nobody. */
+  private unknownSeen = new Set<string>()
 
   constructor(private ctx: WmContext, private requestRender: () => void) {}
 
@@ -178,6 +223,17 @@ export class Ff1Controller {
     // the full text still renders in the map view's error fallback).
     if (this.opError) return `⚠ ${this.opError}`.slice(0, 46)
     if (this.opBusy) return `ff1 · ${this.opBusy}…`
+    // Walking a map shows IMAGE tiles, which have no text region — so party HP
+    // was invisible for the entire exploration half of the game (2026-08-13
+    // review). The status bar is the one text channel a maptiles frame still
+    // has: compact HP in party order + gold, no names (they are on the ribbon
+    // preview and every menu).
+    const snap = this.snap()
+    if (snap && (snap.screen === 'ow' || snap.screen === 'sm') && !this.opBusy) {
+      const hp = snap.state.party
+        .map((c) => (c.alive ? `${c.hp}/${c.maxhp}` : '✝')).join(' ')
+      return `${hp} · ${snap.state.gold}G`
+    }
     return null
   }
 
@@ -296,11 +352,15 @@ export class Ff1Controller {
     return [...counts.entries()].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(' · ') || '(none)'
   }
 
-  /** A char's known spells at LEVELS 1-4 (the Ph-B executor page-0 limit;
-   *  L5-8 need the page flip — lands with a leveled party in Ph-E). */
+  /** A char's known spells at ALL EIGHT levels. L5-8 sit on the magic box's
+   *  second page, which bank_0C.asm :: MenuSelection_Magic flips ITSELF when
+   *  Down is pressed on row 3 — so the executor's one-Down-per-level walk
+   *  reaches them unchanged (2026-08-13: the old 1-4 cap was a missing-fixture
+   *  guard, and it made every late-game spell — CUR4, LIF2, NUKE, FADE, WALL —
+   *  uncastable). */
   private knownSpells(c: Ff1Char): { meta: SpellMeta; charges: number; level: number; slotIdx: number }[] {
     const out: { meta: SpellMeta; charges: number; level: number; slotIdx: number }[] = []
-    for (let lv = 1; lv <= 4; lv++) {
+    for (let lv = 1; lv <= 8; lv++) {
       const slots = c.spells[lv - 1] ?? []
       slots.forEach((v, slotIdx) => {
         if (v === 0) return
@@ -335,7 +395,10 @@ export class Ff1Controller {
     this.lastCommands = cmds            // fight-until repeats these (§8.2)
     this.lastCommandsKey = e.battleKey
     this.entry = null
+    this.runningCmds = cmds             // keeps the confirm card honest while it runs
+    this.level = 'battle-confirm'
     this.runOp('battle round', () => ff1.battleRound(cmds), (r) => {
+      this.runningCmds = null
       const resp = r as Ff1Snapshot & { battleRound?: { log: string[]; outcome: string } }
       const br = resp.battleRound
       if (!br) { this.opError = 'battle_round returned no round data'; this.level = 'root'; return }
@@ -345,10 +408,13 @@ export class Ff1Controller {
       this.roundPage = 0
       this.level = 'battle-log'
     }, () => {
-      // battle_round FAILED (desync raised — the daemon's pre-round
-      // checkpoint recovers via Undo). Leaving level at 'battle-confirm'
-      // with a null entry was a dead end (review find) — the root view
-      // rebuilds entry and shows the error.
+      // battle_round FAILED (desync raised). The daemon REWINDS to its
+      // pre-round savestate before the error reaches us (ff1_daemon
+      // battle_guard), so the battle is intact and the next tap is a clean
+      // retry; Undo still reaches the same point deliberately. Leaving level
+      // at 'battle-confirm' with a null entry was a dead end (review find) —
+      // the root view rebuilds entry and shows the error.
+      this.runningCmds = null
       this.level = 'root'
     })
   }
@@ -394,15 +460,18 @@ export class Ff1Controller {
     if (this.level === 'undo') return this.undoView()
     if (this.level === 'undo-confirm') return this.undoConfirmView()
     if (this.level === 'sys') return this.sysView(snap, err)
+    if (this.level === 'reset-confirm') return this.resetConfirmView()
     if (this.level === 'slots') return this.slotsView()
     if (this.level === 'slot-confirm') return this.slotConfirmView()
     if (this.level === 'name-kbd') return this.kbdView()
     if (this.level === 'minimap') return this.minimapView(snap, err)
     if (this.level === 'battle-log') {
       const suffix = this.roundPages.length > 1 ? ` · ${this.roundPage + 1}/${this.roundPages.length}` : ''
+      // the pager view is reused for the .sav receipt — don't call that a round
+      const head = this.roundOutcome === 'export' ? 'FF1 · .sav exported' : `FF1 · round — ${this.roundOutcome ?? '?'}`
       return {
         mode: 'text',
-        title: `FF1 · round — ${this.roundOutcome ?? '?'}${suffix}`,
+        title: `${head}${suffix}`,
         menu: ['Continue', 'Next', 'Prev', 'Undo', 'Main'],
         text: this.roundPages[this.roundPage] ?? '',
       }
@@ -412,7 +481,11 @@ export class Ff1Controller {
       // in-battle — Ph-F pass-2 find: entry with living=[] rendered a
       // nonsense '1/0' view with every verb dead): the §8.4 net IS the way
       // out, say so plainly.
-      if (snap.state.battle.result === 1 || !snap.state.party.some((c) => c.alive)) {
+      // Keyed on "nobody is up" ALONE (2026-08-13): btl_result is stale
+      // during command entry (it holds the PREVIOUS battle's outcome until
+      // DoBattleRound zeroes it — bridge/battle.py), so a `result === 1` term
+      // could declare a game over over a perfectly healthy party.
+      if (!snap.state.party.some((c) => c.alive)) {
         return {
           mode: 'text',
           title: 'FF1 · the party has fallen',
@@ -430,12 +503,60 @@ export class Ff1Controller {
         return this.formationView(snap, err)
       }
       if (this.level === 'battle-magic') return this.magicView(snap, err)
+      if (this.level === 'battle-drink') return this.drinkView(snap, err)
       if (this.level === 'battle-target') return this.targetView(snap, err)
       if (this.level === 'battle-confirm') return this.goConfirmView(snap, err)
       if (this.level === 'auto-confirm') return this.autoConfirmView(snap, err)
       return this.entryView(snap, err, busy)
     }
     return this.screenView(snap, err, busy)
+  }
+
+  /** LOUD scrape-miss channel (Ff1Snapshot.unknownTiles): one compact line per
+   *  distinct frame, so a font/format drift is visible in the log instead of
+   *  only as `·` on glass. Rate-limited by frameHash — a static screen is
+   *  reported once, not once per render. */
+  private reportUnknownTiles(snap: Ff1Snapshot): void {
+    const unknown = snap.unknownTiles
+    if (!Array.isArray(unknown) || unknown.length === 0) return
+    const key = snap.frameHash ?? ''
+    if (this.unknownSeen.has(key)) return
+    if (this.unknownSeen.size > 200) this.unknownSeen.clear()
+    this.unknownSeen.add(key)
+    const pats = [...new Set(unknown.map((u) => (u as { pattern?: string }).pattern ?? '?'))]
+    this.ctx.log(`[os] ff1 scrape: ${unknown.length} unknown tile(s) on '${snap.screen}' `
+      + `(${pats.length} distinct, e.g. ${pats.slice(0, 3).join(' ')}) — shown as '·' (LOUD)`)
+  }
+
+  /** One page of a cleaned screen scrape + whether paging verbs are needed.
+   *  The page resets whenever the screen's TEXT changes, so moving the game's
+   *  own cursor never leaves you stranded on a page that no longer exists. */
+  private scrapePages(snap: Ff1Snapshot, err: string, tail: string): string[] {
+    this.reportUnknownTiles(snap)
+    const body = cleanScrape(snap.text ?? [])
+    const text = `${err}${body.join('\n') || '(no scraped text)'}${tail}`
+    if (text !== this.scrapeKey) { this.scrapeKey = text; this.scrapePage = 0 }
+    const pages = paginateText(text)
+    if (this.scrapePage >= pages.length) this.scrapePage = Math.max(0, pages.length - 1)
+    return pages
+  }
+
+  /** The game's OWN screens (shop / menus / dialog): cleaned, paginated, and
+   *  always with the full cursor verb set. Dialog boxes ignore the arrows
+   *  harmlessly; the equip and item screens NEED them (2026-08-13: they landed
+   *  in the A/B-only dialog view, so nothing below party slot 1 could be
+   *  reached and equipping was impossible). */
+  private scrapedView(snap: Ff1Snapshot, err: string, busy: string,
+    label: string, extra: string[], tail: string): WinView {
+    const pages = this.scrapePages(snap, err, tail)
+    const paging = pages.length > 1 ? ['Next', 'Prev'] : []
+    const suffix = pages.length > 1 ? ` · ${this.scrapePage + 1}/${pages.length}` : ''
+    return {
+      mode: 'text',
+      title: `FF1 · ${label}${suffix}${busy}`,
+      menu: [...extra, '↑', '↓', '←', '→', 'A', 'B', ...paging, 'Undo', 'Main'],
+      text: pages[this.scrapePage] ?? '',
+    }
   }
 
   /** The screen-adaptive non-battle root. */
@@ -464,12 +585,7 @@ export class Ff1Controller {
         return { mode: 'maptiles', title, menu, topTile: this.mapTop, bottomTile: this.mapBottom }
       }
       case 'dialog':
-        return {
-          mode: 'text',
-          title: `FF1 · dialog${busy}`,
-          menu: ['A', 'B', 'Undo', 'Main'],
-          text: `${err}${(snap.text ?? []).join('\n') || '(empty dialog box)'}\n\nA advances · B closes`,
-        }
+        return this.scrapedView(snap, err, busy, 'dialog', [], '\n\nA advances · B closes')
       case 'shop':
       case 'gamemenu':
       case 'mainmenu':
@@ -484,21 +600,14 @@ export class Ff1Controller {
         // stays available for manual play. gamemenu gets Sys (save/export).
         const extra = snap.screen === 'nameentry' ? ['Name']
           : snap.screen === 'gamemenu' ? ['Sys'] : []
-        return {
-          mode: 'text',
-          title: `FF1 · ${labels[snap.screen]}${busy}`,
-          menu: [...extra, '↑', '↓', '←', '→', 'A', 'B', 'Undo', 'Main'],
-          text: `${err}${(snap.text ?? []).join('\n') || '(no scraped text)'}\n\ncursor mode: arrows move, A confirms, B backs`,
-        }
+        return this.scrapedView(snap, err, busy, labels[snap.screen], extra,
+          '\n\ncursor mode: arrows move, A confirms, B backs')
       }
       case 'title':
         // the pre-game attract/prologue family (classifier: no live party) —
         // Start drives it forward; full cursor mode for the menus beyond
-        return {
-          mode: 'text', title: `FF1 · title${busy}`,
-          menu: ['Start', 'A', 'B', 'Undo', 'Main'],
-          text: `${err}${(snap.text ?? []).join('\n') || 'Title / story screen.'}\n\nStart advances · then cursor mode takes over`,
-        }
+        return this.scrapedView(snap, err, busy, 'title', ['Start'],
+          '\n\nStart advances · then cursor mode takes over')
       case 'transition':
         return {
           mode: 'text', title: `FF1 · …${busy}`, menu: ['A', 'B', 'Reload', 'Undo', 'Main'],
@@ -518,7 +627,11 @@ export class Ff1Controller {
     if (!this.entry || this.entry.battleKey !== snap.state.battlecounter) this.beginEntry(snap)
     const e = this.entry!
     const ch = this.entryChar(snap)
-    const left: string[] = [col(this.formation(snap))]
+    // The twocol columns clamp PER LINE (os-compose clampCol), so a long
+    // error was cut mid-sentence with an ellipsis and its tail existed only
+    // in the server log. Wrap it to the column width first (2026-08-13).
+    const errLines = err ? wrapLinesPx(err.trim(), 262).concat('') : []
+    const left: string[] = [...errLines, col(this.formation(snap))]
     if (this.showEnemyHp()) {
       for (const en of this.aliveEnemies(snap)) left.push(col(`${en.name} s${en.slot} ${en.hp}hp`))
     }
@@ -535,7 +648,7 @@ export class Ff1Controller {
       mode: 'twocol',
       title: `FF1 · ${ch?.name ?? '?'} (${e.idx + 1}/${e.living.length})${busy}`,
       menu: ['Fight', 'Magic', 'Drink', 'Item', 'Run', 'RunAll', ...auto, 'Undo', 'Main'],
-      textLeft: `${err}${left.join('\n')}`,
+      textLeft: left.join('\n'),
       textRight: right.join('\n'),
     }
   }
@@ -545,6 +658,10 @@ export class Ff1Controller {
     if (c.action === 'fight') {
       const en = snap.state.battle?.enemies.find((x) => x.slot === c.target)
       return `${name}: FIGHT ${en?.name ?? '?'} s${c.target}`
+    }
+    if (c.action === 'drink') {
+      const who = snap.state.party.find((p) => p.slot === c.target)?.name ?? `#${c.target}`
+      return `${name}: ${c.potion === 1 ? 'PURE' : 'HEAL'} → ${who}`
     }
     if (c.action === 'magic') {
       const spellName = this.spellNameFor(snap, c) ?? `L${c.level} s${c.slot}`
@@ -594,6 +711,23 @@ export class Ff1Controller {
     }
   }
 
+  /** DRINK potion pick (HEAL / PURE, live counts from RAM). Rows the game
+   *  cannot use (0 left) are shown but refused on tap, exactly like a spell
+   *  with no charges — the game's own menu would open a "Nothing" box and
+   *  CANCEL the whole action, which strands entry. */
+  private drinkView(snap: Ff1Snapshot, err: string): WinView {
+    const ch = this.entryChar(snap)
+    const p = snap.state.potions ?? { heal: 0, pure: 0 }
+    this.pickRows = [`HEAL ×${p.heal}`, `PURE ×${p.pure}`]
+    return {
+      mode: 'browse',
+      menuMode: 'passive',
+      title: `FF1 · ${ch?.name ?? '?'} drink${err ? ' · ⚠' : ''}`,
+      menu: ['Back', 'Main'],
+      items: [...this.pickRows],
+    }
+  }
+
   /** Target pick for the pending fight/magic action. BROWSE mode + index
    *  resolution (same review find; also disambiguates twin party members —
    *  label-matching sent every heal to the first of two identical names). */
@@ -602,7 +736,8 @@ export class Ff1Controller {
     const ch = this.entryChar(snap)
     const pa = e?.pendingAction
     if (!e || !ch || !pa) return this.entryView(snap, err, '')
-    const targetsEnemies = pa.action === 'fight' || pa.spell?.target === 'one-enemy'
+    const targetsEnemies = pa.action === 'fight'
+      || (pa.action === 'magic' && pa.spell?.target === 'one-enemy')
     if (targetsEnemies) {
       this.pickTargets = this.aliveEnemies(snap).map((en) => en.slot)
       this.pickRows = this.aliveEnemies(snap).map((en) =>
@@ -612,7 +747,9 @@ export class Ff1Controller {
       this.pickRows = snap.state.party.map((c) =>
         `${c.slot}: ${c.alive ? '' : '✝'}${c.name} ${c.hp}/${c.maxhp}`)
     }
-    const what = pa.action === 'fight' ? 'FIGHT' : pa.spell?.name ?? 'spell'
+    const what = pa.action === 'fight' ? 'FIGHT'
+      : pa.action === 'drink' ? (pa.potion === 1 ? 'PURE' : 'HEAL')
+        : pa.spell?.name ?? 'spell'
     return {
       mode: 'browse',
       menuMode: 'passive',
@@ -638,10 +775,22 @@ export class Ff1Controller {
   }
 
   /** Cancel-first Go (the last pick FIRES the round — §8.4 insurance).
-   *  Command lines UN-clamped (review: never truncate approval text). */
+   *  Command lines UN-clamped (review: never truncate approval text).
+   *  While the round is IN FLIGHT the same card shows the commands that are
+   *  running, with no Go: firing cleared `entry` first, so the glass showed an
+   *  empty confirm card with a live Go button for the ~1 s of the op. */
   private goConfirmView(snap: Ff1Snapshot, err: string): WinView {
-    const e = this.entry
-    const lines = (e?.commands ?? []).map((c) => this.describeCommand(snap, c))
+    const running = this.runningCmds
+    const cmds = running ?? this.entry?.commands ?? []
+    const lines = cmds.map((c) => this.describeCommand(snap, c))
+    if (running) {
+      return {
+        mode: 'text',
+        title: 'FF1 · round running…',
+        menu: ['Undo', 'Main'],
+        text: `${err}${lines.join('\n')}\n\n⏳ driving the real battle menus…`,
+      }
+    }
     return {
       mode: 'text',
       title: 'FF1 · round ready',
@@ -680,18 +829,23 @@ export class Ff1Controller {
    *  map tile, windowed ±50/±25 around the player. Explored trail = gray-6,
    *  player = white. Advisory (session-lifetime daemon trail). */
   private renderMinimap(data: { player: [number, number]; tiles: [number, number][] }): string {
-    const W = 200, H = 100
+    // 3 px per map tile (2026-08-13): at 2 px on a dim gray4 panel a walked
+    // street was a scatter of near-invisible specks. 68×34 tiles still spans a
+    // whole 64-wide standard map horizontally, and the trail is gray-9 against
+    // black with a white player block.
+    const SCALE = 3
+    const W = 204, H = 102
     const px = new Uint8Array(W * H)
     const [pxx, pyy] = data.player
-    const x0 = pxx - 50, y0 = pyy - 25
+    const x0 = pxx - Math.floor(W / SCALE / 2), y0 = pyy - Math.floor(H / SCALE / 2)
     const plot = (tx: number, ty: number, v: number): void => {
-      const gx = (tx - x0) * 2, gy = (ty - y0) * 2
-      if (gx < 0 || gy < 0 || gx > W - 2 || gy > H - 2) return
-      for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) {
-        px[(gy + dy) * W + gx + dx] = v
+      const gx = (tx - x0) * SCALE, gy = (ty - y0) * SCALE
+      if (gx < 0 || gy < 0 || gx > W - SCALE || gy > H - SCALE) return
+      for (let dy = 0; dy < SCALE; dy++) {
+        for (let dx = 0; dx < SCALE; dx++) px[(gy + dy) * W + gx + dx] = v
       }
     }
-    for (const [tx, ty] of data.tiles) plot(tx, ty, 6)
+    for (const [tx, ty] of data.tiles) plot(tx, ty, 9)
     plot(pxx, pyy, 15)
     const buf = Buffer.alloc(4 + W * H)
     buf.writeUInt16LE(W, 0)
@@ -700,13 +854,20 @@ export class Ff1Controller {
     return encodeGray4Single(buf, 'ff1 minimap').bmpBase64
   }
 
+  /** Minimap verbs (2026-08-13): 'Refresh' + 'Back' are OURS. The old menu was
+   *  ['Reload','Undo','Main'] — fullBleed strips Reload AND Main, so the glass
+   *  showed a single 'Undo' cell: the documented "Reload to grow the trail"
+   *  was gone and there was no way back to the map short of leaving FF1. */
+  private static readonly MINIMAP_MENU = ['Refresh', 'Back', 'Undo', 'Main']
+
   private minimapView(snap: Ff1Snapshot, err: string): WinView {
     const s = snap.state
     const title = `FF1 · minimap · map ${s.pos.mapId} (${s.pos.x},${s.pos.y})`
+    const menu = [...Ff1Controller.MINIMAP_MENU]
     if (!this.miniTile) {
-      return { mode: 'text', title, menu: ['Reload', 'Undo', 'Main'], text: `${err}⏳ trail rendering…` }
+      return { mode: 'text', title, menu, text: `${err}⏳ trail rendering…` }
     }
-    return { mode: 'tile', title, menu: ['Reload', 'Undo', 'Main'], tile: this.miniTile }
+    return { mode: 'tile', title, menu, tile: this.miniTile }
   }
 
   private openMinimap(): void {
@@ -722,18 +883,36 @@ export class Ff1Controller {
     return {
       mode: 'text',
       title: 'FF1 · system',
-      menu: ['SaveSlot', 'Slots', 'Export', 'Back', 'Main'],
+      menu: ['SaveSlot', 'Slots', 'Export', 'New', 'Back', 'Main'],
       text: `${err}In-game save present: ${s.sramSavePresent ? 'YES' : 'no (inn-sleep to create one)'}\n`
         + `Gold ${s.gold} · battles ${s.battlecounter}\n\n`
         + 'SaveSlot stores a labeled savestate slot (PG).\n'
         + 'Slots lists/loads them (Cancel-first).\n'
         + 'Export writes the 8 KB .sav for PC emulators —\n'
-        + 'refused loudly unless an in-game save exists.',
+        + 'refused loudly unless an in-game save exists.\n'
+        + 'New resets the console to the title screen.',
+    }
+  }
+
+  /** Cancel-first NEW GAME (2026-08-13). The engine always boots into the
+   *  stored savestate, so without a console reset the title screen — and with
+   *  it party select and the ring name keyboard — was unreachable for good. */
+  private resetConfirmView(): WinView {
+    const err = this.opError ? `⚠ ${this.opError}\n\n` : ''
+    return {
+      mode: 'text',
+      title: 'FF1 · new game?',
+      menu: ['Cancel', 'Confirm', 'Main'],
+      text: `${err}Reset the console back to the title screen.\n\n`
+        + 'The running party is checkpointed first, so Undo\n'
+        + 'comes straight back to it, and the cartridge save\n'
+        + 'survives — CONTINUE still finds it.\n'
+        + 'Confirm resets · Cancel keeps playing.',
     }
   }
 
   private slotsView(): WinView {
-    const rows = this.slots.map((s2) => `${s2.label} · ${s2.screen} · ${s2.at.slice(5, 16)}`)
+    const rows = this.slots.map((s2) => slotRow(s2))
     const display = rows.length ? rows : ['(no slots saved yet)']
     const paged = browsePageItems(display, this.slotsOffset)
     return {
@@ -811,20 +990,30 @@ export class Ff1Controller {
     if (!snap) { this.ctx.log('[os] ff1: tap before the first snapshot — repainting (LOUD)'); this.requestRender(); return }
 
     // Standing verbs first (§8.4).
-    if (label === 'Undo') { this.openUndo(); return }
+    if (label === 'Undo') { this.opError = null; this.openUndo(); return }
+    // A verb that OPENS a level is the user moving on: drop a stale error so
+    // it stops following them into unrelated views (2026-08-13 — a refused
+    // Drink still headed the magic, target and Go screens three levels later).
+    if (this.opError && ['Magic', 'Fight', 'Sys', 'Mini', 'Cancel', 'Back', 'Continue'].includes(label)) {
+      this.opError = null
+    }
 
     if (this.level === 'undo-confirm') { this.undoConfirmSelect(label); return }
     if (this.level === 'battle-log') { this.battleLogSelect(label); return }
     if (this.level === 'battle-confirm') { this.goConfirmSelect(label); return }
     if (this.level === 'auto-confirm') { this.autoConfirmSelect(label); return }
-    if (this.level === 'battle-magic' || this.level === 'battle-target') {
+    if (this.level === 'battle-magic' || this.level === 'battle-drink' || this.level === 'battle-target') {
       this.ctx.log(`[os] ff1 ${this.level}: menu '${label}' — rows are content taps (Back/Main are WM-handled) (LOUD)`)
       return
     }
     if (this.level === 'sys') { this.sysSelect(snap, label); return }
+    if (this.level === 'reset-confirm') { this.resetConfirmSelect(label); return }
     if (this.level === 'slot-confirm') { this.slotConfirmSelect(label); return }
     if (this.level === 'minimap') {
-      // Reload (the refresh) is WM-handled → onReload routes it here.
+      // 'Refresh' is ours (the reserved 'Reload' is stripped in fullBleed —
+      // the minimap's only refresh used to be unreachable); 'Back' is
+      // WM-handled and pops to the map.
+      if (label === 'Refresh') { this.openMinimap(); return }
       this.ctx.log(`[os] ff1 minimap: unknown verb '${label}' (LOUD)`)
       return
     }
@@ -864,7 +1053,24 @@ export class Ff1Controller {
       })
       return
     }
+    if (label === 'New') { this.pendingReset = true; this.level = 'reset-confirm'; this.requestRender(); return }
     this.ctx.log(`[os] ff1 sys: unknown verb '${label}' (LOUD)`)
+  }
+
+  private resetConfirmSelect(label: string): void {
+    if (label === 'Confirm') {
+      if (!this.pendingReset) { this.level = 'sys'; this.requestRender(); return }
+      if (this.opBusy) { this.ctx.log(`[os] ff1: New Game Confirm while '${this.opBusy}' runs — confirm kept, tap again (LOUD)`); return }
+      this.pendingReset = false
+      this.runOp('new game (reset)', () => ff1.reset(), () => {
+        this.entry = null
+        this.roundPages = []
+        this.level = 'root'
+      })
+      return
+    }
+    if (label === 'Cancel') { this.pendingReset = false; this.level = 'sys'; this.requestRender(); return }
+    this.ctx.log(`[os] ff1 reset-confirm: unknown verb '${label}' (LOUD)`)
   }
 
   private slotConfirmSelect(label: string): void {
@@ -903,7 +1109,12 @@ export class Ff1Controller {
   private screenSelect(snap: Ff1Snapshot, label: string): void {
     const dirs: Record<string, string> = { '↑': 'up', '↓': 'down', '←': 'left', '→': 'right' }
     if (snap.screen === 'ow' || snap.screen === 'sm') {
-      if (dirs[label]) { this.runOp(`step ${dirs[label]}`, () => ff1.steps(dirs[label], STEP_COUNTS[this.stepIdx])); return }
+      if (dirs[label]) {
+        const want = STEP_COUNTS[this.stepIdx]
+        this.runOp(`step ${dirs[label]}`, () => ff1.steps(dirs[label], want),
+          (r) => this.stepDone(r, dirs[label], want))
+        return
+      }
       if (label === '×N') { this.stepIdx = (this.stepIdx + 1) % STEP_COUNTS.length; this.requestRender(); return }
       if (label === 'A') { this.press(['A'], 'A (talk/search)'); return }
       if (label === 'B') { this.press(['B'], 'B'); return }
@@ -924,11 +1135,37 @@ export class Ff1Controller {
         return
       }
       if (label === 'Sys' && snap.screen === 'gamemenu') { this.level = 'sys'; this.requestRender(); return }
+      // scraped-screen paging (the game's own screens are up to 21 lines and
+      // the pane shows ~7 — before this, Sell/Exit and three of four equip
+      // rows had no way to be seen at all)
+      if (label === 'Next') { this.scrapePage++; this.requestRender(); return }
+      if (label === 'Prev') { this.scrapePage = Math.max(0, this.scrapePage - 1); this.requestRender(); return }
       const cursor: Record<string, string> = { ...dirs, A: 'A', B: 'B' }
       const btn = cursor[label] ? { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right', A: 'A', B: 'B' }[label] : null
       if (btn) { this.press([btn], `${snap.screen} ${btn}`); return }
     }
     this.ctx.log(`[os] ff1 ${snap.screen}: menu '${label}' — not a verb here (LOUD)`)
+  }
+
+  /** Step outcome → LOUD report. `stopped`/`committed` rode every steps
+   *  response and were thrown away: walking into a wall changed nothing on
+   *  screen and said nothing, which on glass (where a map push costs seconds)
+   *  is indistinguishable from a dropped tap. 'battle'/'mapchange' speak for
+   *  themselves — the new screen IS the report — so only a short walk is
+   *  surfaced. */
+  private stepDone(r: unknown, dir: string, want: number): void {
+    const resp = r as Ff1Snapshot
+    if (resp.stopped === 'blocked') {
+      const got = resp.committed ?? 0
+      this.opError = got === 0
+        ? `can't go ${dir} — blocked`
+        : `${dir} stopped after ${got}/${want} — blocked`
+      return
+    }
+    if (resp.stopped === 'done' || resp.stopped === undefined) return
+    if ((resp.committed ?? want) < want && resp.stopped !== 'battle' && resp.stopped !== 'mapchange') {
+      this.opError = `${dir}: ${resp.stopped} after ${resp.committed ?? 0}/${want}`
+    }
   }
 
   /** Pace outcome → LOUD report; a battle stop flips to entry via dispatch. */
@@ -964,11 +1201,27 @@ export class Ff1Controller {
         this.requestRender()
         return
       }
-      case 'Drink':
+      case 'Drink': {
+        const p = snap.state.potions
+        if (!p || (p.heal <= 0 && p.pure <= 0)) {
+          this.opError = 'no HEAL or PURE potions — buy some at an item shop'
+          this.ctx.log('[os] ff1: Drink with no potions — refused LOUDLY')
+          this.requestRender()
+          return
+        }
+        this.level = 'battle-drink'
+        this.requestRender()
+        return
+      }
       case 'Item':
-        // Ph-B deferral: the executor needs a potion/item fixture (Ph-E).
-        this.opError = `${label} lands in Ph-E (needs inventory fixtures) — pick Fight/Magic/Run`
-        this.ctx.log(`[os] ff1: ${label} deferred to Ph-E — refused LOUDLY`)
+        // NOT a deferral note any more — a statement of what the verb IS.
+        // FF1's battle ITEM menu casts a spell from the character's own
+        // EQUIPPED gear (Zeus Gauntlet → LIT, Heal staff → HEAL: bank_0C.asm
+        // :: BattleSubMenu_Item walks ch_weapons/ch_armor). With no such item
+        // in the party there is nothing to drive and nothing to verify, so it
+        // stays out rather than shipping unexercised press code.
+        this.opError = 'ITEM casts a spell from EQUIPPED gear — this party has none'
+        this.ctx.log('[os] ff1: Item refused — no spell-casting equipment (LOUD)')
         this.requestRender()
         return
       case 'Run':
@@ -1024,6 +1277,26 @@ export class Ff1Controller {
     this.commitCommand({ char: ch.slot, action: 'magic', level: hit.level, slot: hit.slotIdx })
   }
 
+  /** Potion pick by browse INDEX (0 = HEAL, 1 = PURE — the game's own row
+   *  order, bank_0C BattleSubMenu_Drink `btlcurs_y AND #$01`). */
+  private drinkPick(snap: Ff1Snapshot, index: number): void {
+    const e = this.entry
+    const ch = this.entryChar(snap)
+    if (!e || !ch) { this.level = 'root'; this.requestRender(); return }
+    if (index !== 0 && index !== 1) { this.ctx.log(`[os] ff1 drink: row ${index} out of range (LOUD)`); return }
+    const p = snap.state.potions ?? { heal: 0, pure: 0 }
+    const have = index === 0 ? p.heal : p.pure
+    if (have <= 0) {
+      this.opError = `${index === 0 ? 'HEAL' : 'PURE'}: none left`
+      this.ctx.log(`[os] ff1: drink row ${index} refused — 0 left (LOUD)`)
+      this.requestRender()
+      return
+    }
+    e.pendingAction = { action: 'drink', potion: index }
+    this.level = 'battle-target'
+    this.requestRender()
+  }
+
   /** Target pick by browse INDEX (slot from pickTargets — twins stay distinct). */
   private targetPick(snap: Ff1Snapshot, index: number): void {
     const e = this.entry
@@ -1032,13 +1305,15 @@ export class Ff1Controller {
     if (!e || !ch || !pa) { this.level = 'root'; this.requestRender(); return }
     const slot = this.pickTargets[index]
     if (slot === undefined) { this.ctx.log(`[os] ff1 target: row ${index} out of range (LOUD)`); return }
-    const targetsEnemies = pa.action === 'fight' || pa.spell?.target === 'one-enemy'
+    const targetsEnemies = pa.action === 'fight'
+      || (pa.action === 'magic' && pa.spell?.target === 'one-enemy')
     if (targetsEnemies && !this.aliveEnemies(snap).some((en) => en.slot === slot)) {
       this.ctx.log(`[os] ff1 target: enemy slot ${slot} no longer alive — resyncing (LOUD)`)
       this.requestRender()
       return
     }
     if (pa.action === 'fight') this.commitCommand({ char: ch.slot, action: 'fight', target: slot })
+    else if (pa.action === 'drink') this.commitCommand({ char: ch.slot, action: 'drink', potion: pa.potion, target: slot })
     else this.commitCommand({ char: ch.slot, action: 'magic', level: pa.level, slot: pa.slot, target: slot })
   }
 
@@ -1106,6 +1381,7 @@ export class Ff1Controller {
     if (this.level === 'slots') { this.slotsSelect(index); return }
     const snap = this.snap()
     if (this.level === 'battle-magic') { if (snap) this.magicPick(snap, index); return }
+    if (this.level === 'battle-drink') { if (snap) this.drinkPick(snap, index); return }
     if (this.level === 'battle-target') { if (snap) this.targetPick(snap, index); return }
     if (this.level !== 'undo') { this.ctx.log(`[os] ff1: browse select at ${this.level} — ignored (LOUD)`); return }
     const rows = this.undoList.map((c) => `↩ ${c.label} · ${c.at.slice(11, 19)}`)
@@ -1160,7 +1436,7 @@ export class Ff1Controller {
   }
 
   private slotsSelect(index: number): void {
-    const rows = this.slots.map((s2) => `${s2.label} · ${s2.screen} · ${s2.at.slice(5, 16)}`)
+    const rows = this.slots.map((s2) => slotRow(s2))
     const display = rows.length ? rows : ['(no slots saved yet)']
     const { map, prevOffset, nextOffset } = browsePageItems(display, this.slotsOffset)
     const m = map[index]
@@ -1174,9 +1450,20 @@ export class Ff1Controller {
     this.requestRender()
   }
 
+  /** Ribbon double-tap routing (windows/types.ts :: wantsBackNav). FF1 is a
+   *  hierarchical navigator in every level below root — confirm cards, the
+   *  system menu, the battle log, the minimap, the battle entry pane — but
+   *  most of those are text/twocol/tile views, which ribbon mode used to park
+   *  straight out of the window. That made the whole onBack ladder, including
+   *  the documented "double-tap on a confirm = Cancel", unreachable on glass.
+   *  At root we deliberately return false so double-tap still parks. */
+  wantsBackNav(): boolean { return this.level !== 'root' }
+
   /** Pop one level. false = at root (GamesWindow pops ff1 → games list). */
   async onBack(): Promise<boolean> {
+    this.opError = null   // a pop is the user acknowledging whatever it said
     switch (this.level) {
+      case 'reset-confirm': this.pendingReset = false; this.level = 'sys'; this.requestRender(); return true
       case 'undo-confirm': this.pendingUndo = null; this.level = 'undo'; this.requestRender(); return true
       case 'undo': this.level = this.returnLevel; this.requestRender(); return true
       case 'slot-confirm': this.pendingSlot = null; this.level = 'slots'; this.requestRender(); return true
@@ -1202,13 +1489,16 @@ export class Ff1Controller {
         this.requestRender()
         return true
       case 'battle-magic':
+      case 'battle-drink':
       case 'battle-target':
         if (this.entry) this.entry.pendingAction = null
         this.level = 'root'
         this.requestRender()
         return true
       case 'battle-confirm': {
-        // Double-tap on the Go step = Cancel (never silently fire).
+        // Double-tap on the Go step = Cancel (never silently fire). While the
+        // round is IN FLIGHT there is nothing to cancel — hold the card.
+        if (this.runningCmds) { this.requestRender(); return true }
         const snap = this.snap()
         if (snap) this.beginEntry(snap)
         this.requestRender()
@@ -1218,6 +1508,8 @@ export class Ff1Controller {
         this.battleLogSelect('Continue')
         return true
       default:
+        // Root: the house rule wins — double-tap is exit (the music stuck-trap
+        // lesson). The engine is process-lifetime, so re-entering resumes.
         return false
     }
   }

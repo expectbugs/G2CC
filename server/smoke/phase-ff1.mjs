@@ -21,9 +21,17 @@ await query('DELETE FROM ff1_save WHERE id = $1', ['latest'])
 await query(`DELETE FROM ff1_save WHERE id LIKE 'slot:%'`)
 
 const FIXTURE = `${FF1_DIR}/bridge/harness/fixtures/battle_start.npy`
-if (!existsSync(FIXTURE)) {
-  console.error(`phase-ff1: FIXTURE MISSING (${FIXTURE}) — the committed Ph-A fixture set is gone; that IS a failure`)
-  process.exit(1)
+// Same battle with btl_result = 2 — the state a party is in for EVERY battle
+// after its first (bank_0C.asm zeroes the byte at resolution start, not at
+// battle start). Stage 13 plays a round from it: that is the 2026-08-13
+// showstopper, which nothing in the suite could see because every fixture was
+// a party's first fight.
+const FIXTURE_STALE = `${FF1_DIR}/bridge/harness/fixtures/battle_start_stale.npy`
+for (const f of [FIXTURE, FIXTURE_STALE]) {
+  if (!existsSync(f)) {
+    console.error(`phase-ff1: FIXTURE MISSING (${f}) — the committed fixture set is gone; that IS a failure`)
+    process.exit(1)
+  }
 }
 
 /** Raw savestate bytes out of the .npy container (uint8 1-D array: the payload
@@ -285,6 +293,28 @@ try {
   await games.onMenuSelect('Confirm')
   await settle((x) => menuOf(x).includes('Peek'), 'slot loaded back to the map view')
   console.error('  12. Sys: SaveSlot → Slots → Cancel-first load ✓')
+
+  // --- 13. the SECOND battle (2026-08-13 regression) ---
+  // btl_result holds the previous battle's outcome all through command entry
+  // (bank_0C.asm :: DoBattleRound zeroes it at RESOLUTION start), which used
+  // to desync every round of every battle after a party's first — through the
+  // WINDOW, not just the executor. Stage the stale byte and play a round.
+  await ff1.loadState(npyRawB64(FIXTURE_STALE))   // same battle, btl_result = 2 (just won one)
+  wm.requestRender()
+  sc = await settle((x) => menuOf(x).includes('Fight') && menuOf(x).includes('RunAll'),
+    'battle entry with a stale btl_result')
+  for (let i = 0; i < 4; i++) {
+    await games.onMenuSelect('Fight')
+    sc = await settle((x) => titleOf(x).includes('→ target'), `char ${i} target (stale)`)
+    await games.onBrowseSelect(0)
+  }
+  sc = await settle((x) => titleOf(x).includes('round ready'), 'go confirm (stale)')
+  await games.onMenuSelect('Go')
+  sc = await settle((x) => titleOf(x).includes('round — '), 'round resolved despite the stale byte')
+  assert.ok(!titleOf(sc).includes('round — won'),
+    `a stale btl_result must NOT report an instant win (got "${titleOf(sc)}")`)
+  assert.match(regionText(sc, 'content'), /DMG|AAAA/, 'the round actually fought')
+  console.error('  13. second battle: stale btl_result → round still plays ✓')
 
   console.log('phase-ff1: ALL OK')
 } finally {
