@@ -1,7 +1,6 @@
 {
  "_meta": {
   "generated_by": "bridge/gen_data.py",
-  "date": "2026-08-12",
   "source": "ROM: names lut_ItemNamePtrTbl 0A:$B700 entry $B0+idx (Constants.inc :: MG_START), data 0C:$81E0 8B/spell (MAGDATA_*)",
   "anchors": "spell 0 CURE, spell 7 LIT",
   "obNotation": "ch_spells stores per-level slots 1-8 (0=empty) \u2014 slot value v at level L \u21d2 spell id (L-1)*8 + (v-1) (variables.inc ch_magicdata comment)"

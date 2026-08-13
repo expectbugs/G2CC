@@ -55,6 +55,7 @@ Menu model (reference/bank_0C.asm, fetched 2026-08-12 — see reference/README):
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
@@ -247,6 +248,16 @@ class BattleExecutor:
         missing = [ch for ch in living if ch not in by_char]
         if missing:
             raise BattleDesync(f'no command supplied for living char(s) {missing}')
+        # §8.3 RNG honesty AT THE ROUND BOUNDARY: battle presses use EXACT
+        # fixed holds (the edge-triggered discipline — per-press jitter would
+        # break the 2f/4f windows), which made an undo → re-fight a
+        # frame-identical replay: the same RNG stream, the SAME outcome,
+        # forever (found by the Ph-F acceptance: five identical party wipes
+        # in a row). A 0-9 frame pad before entry re-rolls the stream — the
+        # battle RNG advances per frame — while keeping every press exact.
+        # Tests run rng_jitter=False and stay deterministic.
+        if self.emu.rng_jitter:
+            self.emu.step(random.randint(0, 9))
         expected: dict = {}
         for idx, ch in enumerate(living):
             cmd = by_char[ch]
@@ -467,11 +478,21 @@ class BattleExecutor:
                     continue   # a dead ally enters no command (the game skips them)
                 if cmd.action == 'fight' and not any(e.slot == cmd.target for e in alive):
                     cmd = CharCommand(char=cmd.char, action='fight', target=alive[0].slot)
+                elif cmd.action == 'magic' and cmd.target is not None:
+                    # one-ENEMY spells re-target like fights (Ph-F pass-2 find:
+                    # a dead slot raised mid-entry with the game stranded in
+                    # its own picker); ally targets are party slots — untouched.
+                    meta = self.spell_meta(cmd.level, cmd.slot, cmd.char)
+                    if meta['target'] == 'one-enemy' and not any(e.slot == cmd.target for e in alive):
+                        cmd = CharCommand(char=cmd.char, action='magic', target=alive[0].slot,
+                                          level=cmd.level, slot=cmd.slot)
                 round_cmds.append(cmd)
             # charge stop AFTER the living filter (review find: a dead caster's
             # spent charges must not stop a loop that would drop their command)
             for cmd in round_cmds:
                 if cmd.action == 'magic':
+                    if not (1 <= cmd.level <= 8):
+                        raise BattleDesync(f'fight_until: magic level {cmd.level} out of 1..8')
                     mp = self._r(ramspec.CH_MAGIC + cmd.char * ramspec.CH_STRIDE
                                  + ramspec.CH_CURMP + (cmd.level - 1))
                     if mp <= 0:

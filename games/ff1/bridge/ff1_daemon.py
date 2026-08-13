@@ -60,7 +60,11 @@ class UndoRing:
     def push(self, label: str, state: np.ndarray) -> None:
         self.entries.insert(0, {
             'label': label,
-            'at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            # microseconds, NOT seconds (Ph-F pass-2 find: the server's tail
+            # mirror keys on label|at — two same-label checkpoints inside one
+            # wall-clock second collided and mirrored the OLDER state under
+            # the newer checkpoint's name)
+            'at': datetime.now(timezone.utc).isoformat(timespec='microseconds'),
             'state': state,
         })
         while len(self.entries) > self.depth:
@@ -112,6 +116,20 @@ class Daemon:
         emu = self.need_emu()
         self.undo.push(label, emu.save())
 
+    def decode_state(self, b64: str) -> np.ndarray:
+        """Validate + decode a savestate payload. cynes' load() streams a
+        FIXED byte count from the raw pointer with NO bounds check —
+        Ph-F pass-2 EMPIRICAL find: a 100-byte buffer segfaults the daemon,
+        a 4 KB one returns silent garbage that then overwrites the good PG
+        save. Length is checked against a real save of THIS core."""
+        emu = self.need_emu()
+        raw = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
+        expected = emu.save().nbytes
+        if raw.nbytes != expected:
+            raise ValueError(f'savestate is {raw.nbytes} bytes, this cynes core '
+                             f'expects exactly {expected} — refusing to load')
+        return raw
+
     # ------------------------------------------------------------- snapshot
     def snapshot(self) -> dict:
         emu = self.need_emu()
@@ -129,7 +147,10 @@ class Daemon:
                 'spells': ch.spells, 'weapons': ch.weapons, 'armor': ch.armor,
             })
         x, y = ramspec.player_tile(read)
-        if not ramspec.in_battle(read):
+        if cls.screen in ('ow', 'sm'):
+            # trail breadcrumbs only on REAL map screens (Ph-F pass-2 find:
+            # title/menu screens read power-on zeros and polluted the
+            # overworld trail key with phantom tiles)
             key = (bool(read(ramspec.MAPFLAGS) & 1), read(ramspec.CUR_MAP))
             self.trail.setdefault(key, set()).add((x, y))
         state: dict = {
@@ -185,7 +206,7 @@ class Daemon:
         self.emu = Emu(rom, rng_jitter=self.rng_jitter)
         self.undo = UndoRing(depth)
         if req.get('state'):
-            self.emu.load(np.frombuffer(base64.b64decode(req['state']), dtype=np.uint8))
+            self.emu.load(self.decode_state(req['state']))
             log(f'boot: ROM + savestate restored ({rom})')
         else:
             # advance through the power-on sequence to the first settled screen
@@ -251,7 +272,8 @@ class Daemon:
 
     def op_load(self, req: dict) -> dict:
         emu = self.need_emu()
-        emu.load(np.frombuffer(base64.b64decode(req['state']), dtype=np.uint8))
+        self.checkpoint('before load')   # §8.4: state replacement is undoable
+        emu.load(self.decode_state(req['state']))
         return self.snapshot()
 
     def op_sram(self, req: dict) -> dict:
@@ -260,6 +282,7 @@ class Daemon:
             raw = base64.b64decode(req['set'])
             if len(raw) != ramspec.SRAM_SIZE:
                 raise ValueError(f'sram set: expected {ramspec.SRAM_SIZE} bytes, got {len(raw)}')
+            self.checkpoint('before .sav import')   # §8.4: undoable
             for i, b in enumerate(raw):
                 emu.nes[ramspec.UNSRAM + i] = b
             # a .sav import is only coherent from power-on: reset (RAM persists
@@ -466,7 +489,7 @@ class Daemon:
         if self.undo.entries:
             raise RuntimeError('undo_seed: ring is not empty — seed only right after boot')
         for e in entries:
-            state = np.frombuffer(base64.b64decode(e['state']), dtype=np.uint8)
+            state = self.decode_state(e['state'])
             self.undo.entries.append({'label': str(e['label']), 'at': str(e['at']),
                                       'state': state})
         while len(self.undo.entries) > self.undo.depth:
@@ -524,8 +547,13 @@ class Daemon:
         emu = self.need_emu()
         addr = int(req['addr'])
         n = int(req.get('n', 1))
-        if not (0 <= addr <= 0xFFFF and 1 <= n <= 256 and addr + n <= 0x10000):
-            raise ValueError(f'peek: addr {addr:#x} n {n} out of range')
+        ok_range = ((0x0000 <= addr and addr + n <= 0x0800)
+                    or (0x6000 <= addr and addr + n <= 0x8000))
+        if not (1 <= n <= 256 and ok_range):
+            # RAM/battery only — PPU/APU registers have READ side effects in
+            # the live core (cynes .pyi warns; the op contract says none)
+            raise ValueError(f'peek: addr {addr:#x} n {n} outside side-effect-free '
+                             'ranges ($0000-$07FF, $6000-$7FFF)')
         return {'bytes': [emu.read(addr + i) for i in range(n)]}
 
     def op_ping(self, _req: dict) -> dict:

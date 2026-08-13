@@ -22,7 +22,6 @@ Run from games/ff1: ./venv/bin/python bridge/calibrate_glyphs.py
 from __future__ import annotations
 
 import sys
-from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -156,9 +155,11 @@ def main() -> None:
     f2 = press(nes, NES_INPUT_DOWN)       # cursor on K
     p2 = cell_patterns(f2)
 
+    # no volatile date stamp — a green harness run must leave the committed
+    # data byte-identical (Ph-F pass-2 find: daily 'date' churn dirtied five
+    # tracked files on every run)
     glyphs = GlyphTable({}, {
         'generated_by': 'bridge/calibrate_glyphs.py',
-        'date': str(date.today()),
         'source': 'name-entry grid (two-frame cursor dodge) + probed borders; '
                   'lineage: harness/probe_layout.py coordinates 2026-08-12',
         'binarize': 'luminance>=128 (Rec.601 integer)',

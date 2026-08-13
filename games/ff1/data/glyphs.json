@@ -1,7 +1,6 @@
 {
  "_meta": {
   "generated_by": "bridge/calibrate_glyphs.py",
-  "date": "2026-08-12",
   "source": "name-entry grid (two-frame cursor dodge) + probed borders; lineage: harness/probe_layout.py coordinates 2026-08-12",
   "binarize": "luminance>=128 (Rec.601 integer)",
   "key": "64-bit cell ink pattern, 16 hex chars, bit63=top-left, row-major",

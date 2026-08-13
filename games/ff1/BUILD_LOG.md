@@ -521,6 +521,77 @@ green after each batch.**
 Regression after the full fix batch: ff1 harness 7/7 (131 checks), server
 run-all 37/38 (known calendar red), typecheck/build clean.
 
+### Review PASS 2 (max effort over the fixed state + gap sweep)
+
+15 more findings; 13 CONFIRMED-and-FIXED, 2 REJECTED. Every fix re-verified
+against a concrete trace first; full regression green after the batch.
+
+Fixed:
+1. **Savestate length unvalidated (EMPIRICAL — the reviewer segfaulted the
+   daemon with a 100-byte state; 4 KB returned silent garbage that would
+   overwrite the good PG save)** → daemon `decode_state()` validates against
+   a real save of the running core on boot/load/undo_seed.
+2. **Tail-mirror key collision** (second-resolution stamps + repeated labels
+   → the OLDER state mirrored under a newer checkpoint's name) → checkpoint
+   timestamps now microsecond-resolution.
+3. **Title screens classified 'ow'** (map tiles of the title pushed, step
+   verbs dead) → classifier: no live party (slot-0 maxhp 0) + no pre-game
+   anchor ⇒ 'title'; controller gained the title view (Start-forward). Also
+   hardens the mono-class partyselect fall-through (headers≥1 suffices
+   pre-game).
+4. **No party-dead handling** (game-over halts with $81 still in-battle;
+   entry built a nonsense '1/0' view) → a plain "party has fallen" view:
+   Undo + the §8.4 story.
+5. **fight_until didn't re-target dead one-ENEMY magic targets** (raised
+   mid-entry with the game stranded in its own picker) → magic one-enemy
+   commands re-target the weakest living enemy exactly like fights.
+6. **Watchdog notice lifecycle** (claimed 'respawned' at death; any op —
+   including autonomous flushes — cleared it unseen; consumeDaemonNotice
+   dead) → honest wording, cleared only when the respawn boot succeeds,
+   dead accessor removed.
+7. **Bridge had no dead-latch** (a discarded bridge held by an in-flight
+   capturePersist respawned an ORPHAN unbooted daemon) → `dead` flag;
+   requests on a dead bridge reject; alive() honors it.
+8. **op_load/op_sram replaced the whole state without a checkpoint** →
+   both auto-checkpoint ('before load'/'before .sav import'); the client-
+   side compensation checkpoint removed (single authority).
+9. **undo/slot Confirm discarded the pick before the busy-guard** (the
+   fireRound pattern recurring) → busy pre-guards in both.
+10. **walkRoute off-by-one** (a leg succeeding on the final attempt still
+    threw 'stuck') → arrival re-checked after each leg.
+11. **loadSlot mirrored the NEW state with the OLD snapshot jsonb** →
+    lastSnap assigned before the capture.
+12. **Trail/peek hygiene**: breadcrumbs only on classified ow/sm screens
+    (pre-game zeros polluted the overworld key); peek restricted to
+    side-effect-free ranges ($0000-07FF, $6000-7FFF — PPU reads mutate).
+13. **run_all rewrote committed data/*.json daily** (volatile `date` stamp)
+    → stamps removed; generators verified BYTE-IDENTICAL across runs.
+    Plus: syncMapTiles frameHash gate (two full crops per op even when no
+    pixel changed); fight_until level-range guard (a raw-client level-0
+    magic command read CH_CURMP-1 garbage).
+
+Rejected:
+- statusLine/preview `.slice()` + entry-pane `col()` (re-raised) — same
+  fixed-width single-line-surface rationale as pass 1; approval/confirm
+  bodies now never clamp.
+- `_log_push` losing byte-identical CONSECUTIVE messages — mechanism traced:
+  between two kills the box always redraws the attacker line (differs), and
+  no harness log ever produced the blank-gap identical repeat; the dedup
+  prevents real duplicate-append spam. Recorded, not changed.
+
+Accepted + documented: map-crop geometry triplication (the smoke's size
+asserts ARE the lockstep guard); acceptance-vs-live-server singleton clash
+(the acceptance runs while the server's FF1 window is closed); the pass-1
+accepted list stands.
+
+**Also fixed from acceptance dry-runs** (the §8.3 gauntlet caught it): the
+§8.3/§8.4 contract break — battle presses use EXACT holds (edge-trigger
+discipline), so an undo → re-fight was a FRAME-IDENTICAL replay (five
+consecutive identical wipes observed). RNG-honesty jitter now injects 0-9
+frames at the ROUND BOUNDARY (press discipline untouched; tests stay
+rng_jitter=False deterministic). Acceptance tactics: concentrated fire +
+wipe-retry-via-§8.4 + casualty-free-win enforcement for the handoff party.
+
 ### Ph-B deferrals (intentional, don't chase)
 
 - DRINK/ITEM entry paths: raise loudly; need a potion-holding fixture (buy

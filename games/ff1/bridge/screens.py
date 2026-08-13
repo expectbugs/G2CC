@@ -86,11 +86,22 @@ def classify(read, frame: np.ndarray, patterns: np.ndarray, glyphs: GlyphTable,
     if 'SELECT' in joined and 'NAME' in joined and 'A B C D E' in joined.replace('  ', ' '):
         g = _lines(patterns, glyphs, REGION_NAMEGRID)
         return Classification('nameentry', g.lines, g.unknown)
-    # party select: ≥2 class headers visible in their boxes
+    # party select: class headers in their boxes. Pre-game is decided by the
+    # party NOT existing yet (slot-0 maxhp 0 — a live game always has HP), so
+    # a MONO-class pick (headers==1) can't fall through to the shop branch
+    # (Ph-F pass-2 find).
     headers = sum(1 for h in ('FIGHTER', 'THIEF', 'Bl.BELT', 'RedMAGE', 'Wh.MAGE', 'Bl.MAGE')
                   if h in joined)
-    if headers >= 2 and read(ramspec.MAPFLAGS) & 1 == 0 and not ramspec.in_battle(read):
+    pregame = ramspec.rd16(read, ramspec.CH_STATS + ramspec.CH_MAXHP) == 0
+    if headers >= (1 if pregame else 2) and read(ramspec.MAPFLAGS) & 1 == 0 \
+            and not ramspec.in_battle(read):
         return Classification('partyselect', full.lines, [])
+    if pregame:
+        # No live party and no pre-game anchor matched: the title/story flow
+        # (Ph-F review find: it used to fall through and classify 'ow', so
+        # the controller pushed title pixels as map tiles). 'title' covers
+        # the whole pre-game attract/prologue family.
+        return Classification('title', full.lines, [])
 
     # --- on-map states ---
     on_sm = bool(read(ramspec.MAPFLAGS) & 1)

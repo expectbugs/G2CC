@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
 from pathlib import Path
 
 BRIDGE = Path(__file__).resolve().parent
@@ -48,7 +47,6 @@ def gen_charmap() -> dict:
     return {
         '_meta': {
             'generated_by': 'bridge/gen_data.py',
-            'date': str(date.today()),
             'source': 'reference/table_standard.tbl + reference/table_dte.tbl '
                       '(Disch disassembly TBLs, vendored 2026-08-12)',
             'notes': "standard = menu/name single-tile map; dte = dialogue map "
@@ -176,8 +174,8 @@ def gen_items(rom: Rom, std: dict[int, str]) -> dict:
         raise RuntimeError(f'items anchor FAIL: weapon 40 = {masa} (expected Masmune)')
     return {
         '_meta': {
-            'generated_by': 'bridge/gen_data.py', 'date': str(date.today()),
-            'source': 'ROM (CRC32 AB12ECE6): names lut_ItemNamePtrTbl 0A:$B700, prices '
+            'generated_by': 'bridge/gen_data.py',
+            'romCrc32': 'AB12ECE6 (computed + pinned at load)', 'source': 'ROM: names lut_ItemNamePtrTbl 0A:$B700, prices '
                       'lut_ItemPrices 0D:$BC00, weapon stats lut_Weapons 0C:$8000, armor '
                       'lut_Armor 0C:$8140 (Constants.inc labels)',
             'idSpace': 'TCITYPE_* unified ids: item $00-$1B, weapon $1C-$43 (catId 1-40), '
@@ -216,7 +214,7 @@ def gen_spells(rom: Rom, std: dict[int, str]) -> dict:
         raise RuntimeError(f'spells anchor FAIL: spell 7 = {spells[7]["name"]} (expected LIT)')
     return {
         '_meta': {
-            'generated_by': 'bridge/gen_data.py', 'date': str(date.today()),
+            'generated_by': 'bridge/gen_data.py',
             'source': 'ROM: names lut_ItemNamePtrTbl 0A:$B700 entry $B0+idx (Constants.inc '
                       ':: MG_START), data 0C:$81E0 8B/spell (MAGDATA_*)',
             'anchors': 'spell 0 CURE, spell 7 LIT',
@@ -245,7 +243,7 @@ def gen_enemies(rom: Rom, std: dict[int, str]) -> dict:
         raise RuntimeError(f'enemies anchor FAIL: enemy 0 = {e0} (expected IMP 6exp/6gp/8hp — P0-R canon)')
     return {
         '_meta': {
-            'generated_by': 'bridge/gen_data.py', 'date': str(date.today()),
+            'generated_by': 'bridge/gen_data.py',
             'source': 'ROM: names 0B:$94E0 ptr table (BANK_ENEMYNAMES), stats 0C:$8520 '
                       '20B/enemy (Constants.inc :: ENROMSTAT_*)',
             'anchors': 'enemy 0 IMP 6exp/6gp/8hp (P0-R $6BD3 canon)',

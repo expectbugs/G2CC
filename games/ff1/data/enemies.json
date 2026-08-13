@@ -1,7 +1,6 @@
 {
  "_meta": {
   "generated_by": "bridge/gen_data.py",
-  "date": "2026-08-12",
   "source": "ROM: names 0B:$94E0 ptr table (BANK_ENEMYNAMES), stats 0C:$8520 20B/enemy (Constants.inc :: ENROMSTAT_*)",
   "anchors": "enemy 0 IMP 6exp/6gp/8hp (P0-R $6BD3 canon)"
  },

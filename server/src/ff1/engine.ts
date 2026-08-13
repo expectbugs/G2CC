@@ -113,6 +113,11 @@ class Ff1Engine {
       this.loadOk = true
       this.loadError = null
       if (restored) this.lastStateB64 = restored.stateB64
+      if (this.daemonNotice) {
+        console.log('[ff1] WATCHDOG: respawn boot succeeded — death notice cleared')
+        this.daemonNotice = null
+        if (this.onStatusChange) this.onStatusChange()
+      }
       console.log(`[ff1] engine started (${restored ? 'resumed savestate' : 'fresh boot'}; screen=${snap.screen})`)
     } catch (e) {
       bridge.onDeath = null   // a deliberate cleanup kill is not a watchdog event
@@ -128,8 +133,11 @@ class Ff1Engine {
    *  (Ph-F review find). */
   private handleDaemonDeath(from: Ff1Bridge, err: Error): void {
     if (this.bridge !== from) return
-    this.daemonNotice = `daemon died (${err.message}) — respawned + restored last savestate`
-    console.error(`[ff1] WATCHDOG: ${err.message} — respawning with last savestate (${this.lastStateB64 ? 'in-memory' : 'PG row'})`)
+    // Honest wording (Ph-F pass-2 find: the old text claimed 'respawned +
+    // restored' at DEATH time while the respawn is lazy). Cleared when the
+    // respawn actually boots (start() below) — never by an unrelated op.
+    this.daemonNotice = `daemon died (${err.message}) — respawns on the next action`
+    console.error(`[ff1] WATCHDOG: ${err.message} — will respawn with the last savestate (${this.lastStateB64 ? 'in-memory' : 'PG row'})`)
     this.bridge = null
     this.starting = null
     // Lazy respawn: the next op (or Reload) runs ensureStarted → start() →
@@ -152,13 +160,6 @@ class Ff1Engine {
     }
   }
 
-  /** The window saw the notice (rendered it once) — clear it. */
-  consumeDaemonNotice(): string | null {
-    const n = this.daemonNotice
-    this.daemonNotice = null
-    return n
-  }
-
   /** Cheap in-memory snapshot for preview/summary (NEVER an op). */
   cachedSnapshot(): Ff1Snapshot | null { return this.lastSnap }
 
@@ -175,7 +176,6 @@ class Ff1Engine {
       const out = await fn(bridge)
       const snap = out as unknown as Ff1Snapshot
       if (snap && typeof snap === 'object' && 'state' in snap) this.lastSnap = snap
-      this.daemonNotice = null   // a successful op proves the respawn worked
       if (opts.persist) await this.capturePersist(bridge)
       return out
     }
@@ -432,6 +432,8 @@ class Ff1Engine {
       const row = r.rows[0]
       if (!row?.state?.length) throw new Error(`slot ${id} not found`)
       const snap = await b.request('load', { state: Buffer.from(row.state).toString('base64') }) as unknown as Ff1Snapshot
+      this.lastSnap = snap   // BEFORE the capture — the PG mirror must pair
+                             // the new state with ITS snapshot (pass-2 find)
       await this.capturePersist(b)
       return snap
     })

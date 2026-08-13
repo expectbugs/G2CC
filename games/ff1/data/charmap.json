@@ -1,7 +1,6 @@
 {
  "_meta": {
   "generated_by": "bridge/gen_data.py",
-  "date": "2026-08-12",
   "source": "reference/table_standard.tbl + reference/table_dte.tbl (Disch disassembly TBLs, vendored 2026-08-12)",
   "notes": "standard = menu/name single-tile map; dte = dialogue map (control <$1A, DTE pairs $1A-$69). $FF = pad/space. P0-R live-confirmed 'A'=$8A."
  },

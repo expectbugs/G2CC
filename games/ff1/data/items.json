@@ -1,8 +1,8 @@
 {
  "_meta": {
   "generated_by": "bridge/gen_data.py",
-  "date": "2026-08-12",
-  "source": "ROM (CRC32 AB12ECE6): names lut_ItemNamePtrTbl 0A:$B700, prices lut_ItemPrices 0D:$BC00, weapon stats lut_Weapons 0C:$8000, armor lut_Armor 0C:$8140 (Constants.inc labels)",
+  "romCrc32": "AB12ECE6 (computed + pinned at load)",
+  "source": "ROM: names lut_ItemNamePtrTbl 0A:$B700, prices lut_ItemPrices 0D:$BC00, weapon stats lut_Weapons 0C:$8000, armor lut_Armor 0C:$8140 (Constants.inc labels)",
   "idSpace": "TCITYPE_* unified ids: item $00-$1B, weapon $1C-$43 (catId 1-40), armor $44-$6B (catId 1-40); ch_weapons/ch_armor store catId (+$80 = equipped)",
   "anchors": "weapon 2 \"Short Sword\" 550 G; item $19 HEAL 60 G"
  },

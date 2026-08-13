@@ -103,6 +103,7 @@ export class Ff1Controller {
   private mapTopKey: string | null = null
   private mapBottomKey: string | null = null
   private mapFailed: string | null = null
+  private mapFrameHash: string | null = null
   private mapSeq = 0
   // --- Ph-E state
   private lastCommands: Ff1CharCommand[] | null = null   // fight-until repeats these
@@ -226,7 +227,10 @@ export class Ff1Controller {
   private syncMapTiles(force = false): void {
     const snap = this.snap()
     if (!snap || (snap.screen !== 'ow' && snap.screen !== 'sm')) return
-    if (force) { this.mapTopKey = null; this.mapBottomKey = null }
+    if (force) { this.mapTopKey = null; this.mapBottomKey = null; this.mapFrameHash = null }
+    // frameHash gate (Ph-F pass-2 efficiency find): identical frame ⇒ both
+    // crops are identical — skip the two fetches entirely.
+    if (!force && snap.frameHash && snap.frameHash === this.mapFrameHash && this.mapTop && this.mapBottom) return
     const seq = ++this.mapSeq
     void (async () => {
       const [top, bottom] = await Promise.all([ff1.frameGray4('map-top'), ff1.frameGray4('map-bottom')])
@@ -243,6 +247,7 @@ export class Ff1Controller {
         changed = true
       }
       this.mapFailed = null
+      this.mapFrameHash = snap.frameHash ?? null
       if (changed) this.requestRender()
     })().catch((e: unknown) => {
       if (seq !== this.mapSeq) return
@@ -391,6 +396,18 @@ export class Ff1Controller {
       }
     }
     if (snap.screen === 'battle' && snap.state.battle) {
+      // Party wiped (btl_result 1: the game-over screen halts with $81 still
+      // in-battle — Ph-F pass-2 find: entry with living=[] rendered a
+      // nonsense '1/0' view with every verb dead): the §8.4 net IS the way
+      // out, say so plainly.
+      if (snap.state.battle.result === 1 || !snap.state.party.some((c) => c.alive)) {
+        return {
+          mode: 'text',
+          title: 'FF1 · the party has fallen',
+          menu: ['Undo', 'Main'],
+          text: `${err}Game over — everyone is down.\n\nUndo rewinds to a checkpoint (the battle start\nis always one) and the fight can go differently:\nRNG honesty re-rolls every retry.`,
+        }
+      }
       if (this.level === 'formation') return this.formationView(snap, err)
       // battle-start glance (config toggle, default OFF): once per encounter
       if (this.showFormationTile() && this.formationKey !== snap.state.battlecounter) {
@@ -462,6 +479,14 @@ export class Ff1Controller {
           text: `${err}${(snap.text ?? []).join('\n') || '(no scraped text)'}\n\ncursor mode: arrows move, A confirms, B backs`,
         }
       }
+      case 'title':
+        // the pre-game attract/prologue family (classifier: no live party) —
+        // Start drives it forward; full cursor mode for the menus beyond
+        return {
+          mode: 'text', title: `FF1 · title${busy}`,
+          menu: ['Start', 'A', 'B', 'Undo', 'Main'],
+          text: `${err}${(snap.text ?? []).join('\n') || 'Title / story screen.'}\n\nStart advances · then cursor mode takes over`,
+        }
       case 'transition':
         return {
           mode: 'text', title: `FF1 · …${busy}`, menu: ['A', 'B', 'Reload', 'Undo', 'Main'],
@@ -834,11 +859,11 @@ export class Ff1Controller {
     if (label === 'Confirm') {
       const p = this.pendingSlot
       if (!p) { this.level = 'slots'; this.requestRender(); return }
+      if (this.opBusy) { this.ctx.log(`[os] ff1: slot Confirm while '${this.opBusy}' runs — pick kept, tap again (LOUD)`); return }
       this.pendingSlot = null
-      this.runOp('load slot', async () => {
-        await ff1.checkpoint('before slot load')   // §8.4: the accidental-tap escape
-        return ff1.loadSlot(p.id)
-      }, () => {
+      // (the daemon's load op auto-checkpoints since the pass-2 fix — no
+      // client-side checkpoint needed)
+      this.runOp('load slot', () => ff1.loadSlot(p.id), () => {
         this.entry = null
         this.level = 'root'
       })
@@ -868,6 +893,7 @@ export class Ff1Controller {
       if (label === 'Sys') { this.level = 'sys'; this.requestRender(); return }
     } else {
       // Cursor mode (dialog/shop/gamemenu/title/party/name screens).
+      if (label === 'Start') { this.press(['Start'], `${snap.screen} Start`); return }
       if (label === 'Name' && snap.screen === 'nameentry') {
         this.kbdBuf = ''
         this.kbdGroup = null
@@ -1039,6 +1065,9 @@ export class Ff1Controller {
     if (label === 'Confirm') {
       const p = this.pendingUndo
       if (!p) { this.level = 'undo'; this.requestRender(); return }
+      // busy pre-guard BEFORE discarding the pick (the fireRound pattern —
+      // Ph-F pass-2 find: a busy-rejected Confirm lost the pending pick)
+      if (this.opBusy) { this.ctx.log(`[os] ff1: undo Confirm while '${this.opBusy}' runs — pick kept, tap again (LOUD)`); return }
       this.pendingUndo = null
       this.runOp('undo', () => ff1.undo(p.index), () => {
         this.entry = null           // any battle entry is stale after a rewind

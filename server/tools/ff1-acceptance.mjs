@@ -55,9 +55,10 @@ const ROUTE_INN_TO_GATE = [[11, 21], [16, 21], [16, 22]]   // stop ABOVE the gat
  *  after several. */
 async function walkRoute(route, what) {
   for (const [tx, ty] of route) {
-    for (let attempt = 0; attempt < 8; attempt++) {
+    let arrived = false
+    for (let attempt = 0; attempt < 8 && !arrived; attempt++) {
       const { x, y } = ff1.cachedSnapshot().state.pos
-      if (x === tx && y === ty) break
+      if (x === tx && y === ty) { arrived = true; break }
       assert.ok(x === tx || y === ty, `${what}: waypoint (${tx},${ty}) not axis-aligned from (${x},${y})`)
       const dir = x !== tx ? (tx > x ? 'right' : 'left') : (ty > y ? 'down' : 'up')
       const n = Math.abs(tx - x) + Math.abs(ty - y)
@@ -65,8 +66,13 @@ async function walkRoute(route, what) {
       if (r.stopped === 'battle' || r.stopped === 'mapchange') {
         throw new Error(`ACCEPTANCE: ${what} interrupted by ${r.stopped} en route to (${tx},${ty})`)
       }
+      const p = ff1.cachedSnapshot().state.pos
+      if (p.x === tx && p.y === ty) { arrived = true; break }   // arrival checked AFTER the leg too (review: the 8th success used to throw)
       if (r.stopped === 'blocked') await ff1.press(['B'], `${what}: waiting out an NPC`)
-      if (attempt === 7) throw new Error(`ACCEPTANCE: ${what} stuck before (${tx},${ty}) at (${ff1.cachedSnapshot().state.pos.x},${ff1.cachedSnapshot().state.pos.y})`)
+    }
+    if (!arrived) {
+      const p = ff1.cachedSnapshot().state.pos
+      throw new Error(`ACCEPTANCE: ${what} stuck before (${tx},${ty}) at (${p.x},${p.y})`)
     }
   }
 }
@@ -76,15 +82,41 @@ async function screenIs(...names) {
   return names.includes(snap.screen)
 }
 
-/** Fight-until-won with fight×living commands (overworld interrupts). */
-async function winCurrentBattle(what) {
-  const s = ff1.cachedSnapshot()
-  const alive = s.state.battle.enemies.filter((e) => e.alive).sort((a, b) => a.hp - b.hp)
-  const living = s.state.party.filter((c) => c.alive).map((c) => c.slot)
-  const cmds = living.map((ch, i) => ({ char: ch, action: 'fight', target: alive[Math.min(i, alive.length - 1)].slot }))
-  const r = await ff1.battleAuto(cmds, { minHpPct: 0, maxRounds: 30 })
-  assert.equal(r.battleAuto.outcome, 'won', `${what}: interrupt battle won`)
-  console.log(`  ⚔ ${what}: surprise battle won (${r.battleAuto.rounds} rounds)`)
+/** Fight-until-won with fight×living commands. A level-1 all-mage party CAN
+ *  wipe (authentic 1987 + production RNG jitter — a dry run died to prove
+ *  it): on party-dead this does what a real player does with §8.4 — undo to
+ *  the newest 'battle start' checkpoint and re-fight. LOUD after 5 wipes. */
+async function winCurrentBattle(what, { requireAllAlive = false } = {}) {
+  for (let attempt = 1; attempt <= 8; attempt++) {
+    const s = ff1.cachedSnapshot()
+    const alive = s.state.battle.enemies.filter((e) => e.alive).sort((a, b) => a.hp - b.hp)
+    const living = s.state.party.filter((c) => c.alive).map((c) => c.slot)
+    // CONCENTRATED fire (everyone → the weakest living enemy): spreading 4
+    // L1-mage attacks across 4+ IMPs left every enemy acting for 10+ rounds
+    // and made casualty-free wins near-impossible (dry-run 6: 0/8 clean).
+    // fight_until re-picks the weakest LIVING target per round.
+    const cmds = living.map((ch) => ({ char: ch, action: 'fight', target: alive[0].slot }))
+    const r = await ff1.battleAuto(cmds, { minHpPct: 0, maxRounds: 30 })
+    const out = r.battleAuto.outcome
+    const deadAfter = out === 'won' ? ff1.cachedSnapshot().state.party.filter((c) => !c.alive).map((c) => c.name) : []
+    if (out === 'won' && (!requireAllAlive || deadAfter.length === 0)) {
+      console.log(`  ⚔ ${what}: battle won (${r.battleAuto.rounds} round(s)${attempt > 1 ? `, attempt ${attempt}` : ''})`)
+      return
+    }
+    if (out !== 'party-dead' && out !== 'won') {
+      throw new Error(`ACCEPTANCE: ${what} battle ended '${out}' (${r.battleAuto.stopped})`)
+    }
+    // wiped, OR won with casualties when a clean handoff is required (FF1
+    // inns do NOT revive — a dead ROUX is not "ready to play"): §8.4 rewind
+    // + re-fight; the round-boundary RNG jitter re-rolls each attempt.
+    const cps = await ff1.undoList()
+    const pre = cps.find((c) => c.label.startsWith('battle start'))
+    if (!pre) throw new Error(`ACCEPTANCE: ${what} needs a rewind and no battle-start checkpoint exists`)
+    await ff1.undo(pre.index)
+    const why = out === 'party-dead' ? 'party wiped' : `won but lost ${deadAfter.join('/')}`
+    console.log(`  ☠ ${what}: ${why} (attempt ${attempt}) — §8.4 rewind to "${pre.label}", re-fighting`)
+  }
+  throw new Error(`ACCEPTANCE: ${what} found no clean win in 8 attempts — formation too hot for a L1 party`)
 }
 
 /** Overworld steps that FIGHT THROUGH random encounters (RNG honesty is ON —
@@ -175,19 +207,23 @@ try {
   snap = ff1.cachedSnapshot()
   const preBattleCheckpointExists = (await ff1.undoList()).some((c) => c.label.startsWith('battle start'))
   assert.ok(preBattleCheckpointExists, 'battle start auto-checkpointed')
-  // one full round through the native command path (fight x living)
+  // one full round through the native command path (fight x living), then
+  // finish (wipes rewind + retry via §8.4 inside winCurrentBattle)
   const living = snap.state.party.filter((c) => c.alive).map((c) => c.slot)
   const alive0 = snap.state.battle.enemies.filter((e) => e.alive).sort((a, b) => a.hp - b.hp)
-  const round1 = living.map((ch, i) => ({ char: ch, action: 'fight', target: alive0[Math.min(i, alive0.length - 1)].slot }))
+  const round1 = living.map((ch) => ({ char: ch, action: 'fight', target: alive0[0].slot }))   // concentrated fire
   const rr = await ff1.battleRound(round1)
   console.log(`  2. round 1: ${rr.battleRound.outcome} (${rr.battleRound.log.length} log lines)`)
-  let outcome = rr.battleRound.outcome
-  if (outcome === 'continue') {
-    const auto = await ff1.battleAuto(round1, { minHpPct: 0, maxRounds: 30 })
-    outcome = auto.battleAuto.outcome
-    console.log(`  2. fight-until: ${outcome} after ${auto.battleAuto.rounds} more round(s)`)
-  }
-  assert.equal(outcome, 'won', 'battle WON through the native path')
+  if (rr.battleRound.outcome === 'continue') await winCurrentBattle('first battle', { requireAllAlive: true })
+  else if (rr.battleRound.outcome === 'party-dead') {
+    const cps0 = await ff1.undoList()
+    const pre0 = cps0.find((c) => c.label.startsWith('battle start'))
+    assert.ok(pre0, 'battle-start checkpoint to rewind a round-1 wipe')
+    await ff1.undo(pre0.index)
+    console.log('  ☠ round 1 wiped the party — §8.4 rewind, re-fighting')
+    await winCurrentBattle('first battle', { requireAllAlive: true })
+  } else assert.equal(rr.battleRound.outcome, 'won', 'first battle resolved')
+  assert.ok(!ff1.cachedSnapshot().state.battle || ff1.cachedSnapshot().screen !== 'battle', 'battle over')
   await shot('battle_won')
 
   // --- 3. undo drill: rewind to the pre-battle checkpoint, verify, re-fight ---
@@ -199,8 +235,7 @@ try {
   assert.equal(snap.screen, 'battle', 'rewound INTO the battle start')
   assert.ok(snap.state.battle.enemies.filter((e) => e.alive).length >= 1, 'enemies restored')
   await shot('undo_rewound')
-  const re = await ff1.battleAuto(round1, { minHpPct: 0, maxRounds: 30 })
-  assert.equal(re.battleAuto.outcome, 'won', 're-fight after undo WON (RNG honesty: not a replay)')
+  await winCurrentBattle('re-fight after undo', { requireAllAlive: true })   // RNG honesty: not a replay
   console.log('  3. undo drill: rewind → verified → re-fought ✓')
   await shot('refight_won')
 
@@ -281,6 +316,9 @@ try {
   await ff1.flush()
   await shot('final_overworld')
   const final = ff1.cachedSnapshot().state
+  // The handoff contract, asserted hard: the exact party, in order, ALL alive.
+  assert.deepEqual(final.party.map((c) => c.name), ['ROUX', 'IRIS', 'NOX', 'ZOT'], 'final party names in order')
+  assert.ok(final.party.every((c) => c.alive), `everyone alive for the handoff (${final.party.map((c) => `${c.name}:${c.hp}`).join(' ')})`)
   console.log(`\n=== ACCEPTANCE COMPLETE ===`)
   console.log(`party: ${final.party.map((c) => `${c.name}(${c.class} ${c.hp}/${c.maxhp})`).join(' ')}`)
   console.log(`gold ${final.gold} · pos (${final.pos.x},${final.pos.y}) ow · inn save present: ${final.sramSavePresent}`)

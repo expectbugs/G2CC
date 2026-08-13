@@ -41,18 +41,23 @@ export class Ff1Bridge {
   private queue: Job[] = []
   private inflight: Job | null = null
   private seq = 0
+  /** Latched on death/kill (Ph-F pass-2 find: a discarded bridge held by an
+   *  in-flight capturePersist could re-enter ensureProc and spawn an ORPHAN
+   *  unbooted daemon). A dead bridge rejects every later request. */
+  private dead = false
   /** Called (once per death) when the daemon dies with the spawn generation —
    *  the engine's watchdog respawn hook (PLAN §3). */
   onDeath: ((err: Error) => void) | null = null
 
   constructor(private dir: string = FF1_DIR) {}
 
-  alive(): boolean { return this.proc !== null }
+  alive(): boolean { return this.proc !== null && !this.dead }
 
   /** Send one op. Resolves with the daemon's response object (ok:true) or
    *  rejects: Ff1OpError for an in-protocol failure, plain Error for a dead
    *  daemon (queued + inflight jobs all reject on death — LOUD, no limbo). */
   request(op: string, fields: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    if (this.dead) return Promise.reject(new Error(`ff1 bridge is dead (op ${op}) — the engine owns the respawn`))
     const seq = ++this.seq
     const line = JSON.stringify({ op, seq, ...fields })
     return new Promise((resolve, reject) => {
@@ -93,6 +98,7 @@ export class Ff1Bridge {
     const die = (err: Error): void => {
       if (this.proc !== proc) return
       this.proc = null
+      this.dead = true
       this.buf = ''
       if (this.inflight) { const j = this.inflight; this.inflight = null; j.reject(err) }
       while (this.queue.length) this.queue.shift()!.reject(err)
@@ -137,6 +143,7 @@ export class Ff1Bridge {
       console.error(`[ff1] daemon stdout exceeded ${MAX_BUF} bytes with no complete response — killing (engine reboots via onDeath)`)
       this.buf = ''
       const dying = this.proc; this.proc = null
+      this.dead = true
       const err = new Error('ff1 daemon stdout overflow (no response line)')
       if (this.inflight) { const j = this.inflight; this.inflight = null; j.reject(err) }
       while (this.queue.length) this.queue.shift()!.reject(err)
