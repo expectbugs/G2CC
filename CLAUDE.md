@@ -6,7 +6,10 @@ System-wide rules in `~/.claude/CLAUDE.md` apply here too. This file holds G2CC-
 
 Part D — the **music app** (Spotify-shaped, PC-library streaming, knowledge-base-driven
 fuzzy playlists) — is spec'd in `docs/MUSIC_SPEC.md` and supersedes the rejected earbud
-lane (`docs/EARBUD_SPEC.md`, Part C). The original joined initiatives:
+lane (`docs/EARBUD_SPEC.md`, Part C). The **FF1 game window** (the real NES Final Fantasy
+in a cynes daemon, played ring-only from the Games list — SHIPPED 2026-08-13) is spec'd in
+`games/ff1/PLAN.md` with its operator record in `games/ff1/BUILD_LOG.md`; its project-
+specific rules live in those files, not here. The original joined initiatives:
 
 This project covers TWO joined initiatives Adam is implementing together:
 - **Part A — G2 Custom App.** Direct-BLE Android app that replaces the Even Hub companion-app dance. Talks BLE to the Even G2 glasses and WebSocket to the home server. Server bridges to a **Claude Code subprocess** (vanilla CC initially; swarm Code specialist when the swarm exists). See `g2_custom_app_spec.md` Part A and `/home/user/G2 Custom/PLAN.md`.

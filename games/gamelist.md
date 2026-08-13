@@ -280,21 +280,23 @@ structure. No clock.
 
 ---
 
-## Final Fantasy 1 (NES) — *P0 SPIKE PASSED 2026-08-12 → `games/ff1/PLAN.md`*
+## Final Fantasy 1 (NES) — *✅ SHIPPED 2026-08-13 (5th games-list row; `games/ff1/`)*
 
-The real FF1 USA ROM (Adam's dump, verified MMC1+battery) run headlessly in `cynes` as a
-game engine: battles/shops/menus/dialogue re-rendered as NATIVE firmware text (RAM reads +
-framebuffer tile-scraping — zero images, full speed), imagery only for map navigation
-(two stacked 256×112 tiles at 1:1, pushed once per step-macro). Campaign: the unfinished
-"One White Mage, Three Black Mages" challenge run, authenticity-guarded.
+The real FF1 USA ROM (Adam's dump, CRC32-pinned MMC1+battery) runs headlessly in `cynes`
+as a game engine: battles/shops/menus/dialogue re-rendered as NATIVE firmware text (RAM
+reads + framebuffer tile-scraping — zero images, full speed), imagery only for map
+navigation (two stacked 1:1 tiles, 256×110 + 256×112, pushed once per completed macro).
+Campaign: Adam's challenge party **ROUX(RM)/IRIS(WM)/NOX(BM)/ZOT(BM)** — created, geared,
+and inn-saved by the production acceptance run; authenticity-guarded (hidden enemy HP,
+Ineffective whiffs, round-boundary RNG honesty, §8.4 undo everywhere).
 
 - **Bridge:** persistent Python daemon (`games/ff1/bridge/`, stt.ts stdio pattern) hosting
-  cynes; savestates → Postgres; `.sav` export for full-speed home play. Full spec, RAM map
-  with source lineage, and phase plan in `games/ff1/PLAN.md`.
-- **G2 fit:** excellent — the battle/menu loop is scroll+tap-native once text-scraped; maps
-  ride step macros with declarative stops (battle/dialog interrupts flip to text views).
-- **Effort:** Medium-High (the scraper + verified command entry are the new machinery;
-  window side reuses pc/bj patterns).
+  cynes; savestates + undo tail → Postgres; `.sav` export for full-speed home play. Spec +
+  authority-class findings: `games/ff1/PLAN.md` (§12 P0-R…PF-R); operator record + on-glass
+  checklist: `games/ff1/BUILD_LOG.md`.
+- **G2 fit:** proven off-glass — native battle entry (verified command presses against the
+  disassembly-documented menu RAM), step macros with declarative stops, two-tile maps with
+  macro-boundary pushes. On-glass latency measurements pending (checklist).
 
 ---
 
@@ -303,8 +305,8 @@ framebuffer tile-scraping — zero images, full speed), imagery only for map nav
 - **Slay the Spire** was researched alongside Balatro (its `CommunicationMod` exposes full
   game-state JSON + commands over stdio, with a `spirecomm` Python wrapper) but is **not on this
   list** — not explicitly greenlit. Add on request.
-- None of the candidates are wired yet beyond the existing baseline (rpg-cli, chess) and the
-  in-progress Paperclips. Effort ratings are relative and assume the `OsWindow` plumbing is
-  reused.
+- The wired baseline is now rpg-cli, chess, Universal Paperclips, Blackjack, and FF1 (the
+  five games-list rows). Effort ratings on the remaining candidates are relative and assume
+  the `OsWindow` plumbing is reused.
 </content>
 </invoke>

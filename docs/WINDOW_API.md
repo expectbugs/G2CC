@@ -126,7 +126,7 @@ interface WmContext {
 
 ```ts
 interface WinView {
-  mode: 'text' | 'browse' | 'twocol' | 'tiles' | 'tile' | 'hands'
+  mode: 'text' | 'browse' | 'twocol' | 'tiles' | 'tile' | 'hands' | 'maptiles'
   title: string                       // window title (host appends notification/nav flashes)
   menu?: string[]                     // action rows. Classic: the left menu (focus list in reading
                                       //   windows). fullBleed: the 3-cell top-bar scroller (the host
@@ -143,6 +143,9 @@ interface WinView {
   tiles?: [string, string, string, string]; tilesRect?: { w; h }   // tiles mode: 4 gray4 BMPs
   tile?: string                       // tile mode: one centred BMP
   dealerTile?: string; playerTile?: string  // hands mode (Blackjack): two small independent card tiles
+  topTile?: string; bottomTile?: string     // maptiles mode (FF1 maps): two stacked independent 1:1
+                                            //   tiles (256×110 + 256×112) at FF1_MAP_*_RECT — only a
+                                            //   changed tile's bytes re-push (games/ff1/PLAN.md §7.2)
 }
 ```
 

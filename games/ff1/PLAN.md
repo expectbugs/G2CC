@@ -365,9 +365,14 @@ at full text speed. Better than the original, zero images, NO-TRUNCATION
 honored where the NES itself couldn't.
 
 ### 7.4 Name entry (one-time per file)
-New-game naming drives the letter grid via macro. Input: the existing `_kbd`
-model or dictation → 4-char name (charset-checked, loud on invalid). Nice-to-
-have, P5; manual cursor mode suffices day one.
+New-game naming drives the letter grid via macro; input = the `_kbd` ring
+keyboard (dictation cut, §8.5). **P5-R reality: the vanilla-US grid types
+EXACTLY 4 glyphs** — no space, no early end (the blank cell is the removed
+JP END key; live-probed). Protocol = open + 4 letters + confirm (letters
+verified by the preview box growing, confirm by it emptying; ptygen fills
+per keystroke). Short names (NOX/ZOT) go through the daemon's `rename` op:
+a documented COSMETIC direct write of `ch_name` ($FF pad — the byte the
+game itself renders blank), auto-checkpointed, grid glyphs only.
 
 ### 7.5 Title / continue
 `Continue` = restore latest savestate (suspend-anywhere is free with savestates;
@@ -395,8 +400,12 @@ in-game inn/save remains the authoritative .sav for cross-play §9).
   the same response — "which enemy, how many, where" is the snapshot).
 
 ### 8.3 RNG honesty
-`games.ff1.rngJitter:true` (default): pad every executed press with 0-9 random
-extra frames so battle outcomes aren't frame-replayable (§6.2). Tests set it
+`games.ff1.rngJitter:true` (default): overworld presses pad 0-9 random extra
+frames; **battle rounds pad 0-9 frames at the ROUND BOUNDARY instead** —
+battle presses must keep their EXACT edge-trigger holds (P2-R), and without
+the boundary pad an undo → re-fight was a frame-identical replay (found by
+the Ph-F acceptance: five identical party wipes in a row; the battle RNG
+advances per frame, so the offset re-rolls the stream). Tests set jitter
 false for reproducibility. Encounter pacing needs no jitter (step-counter).
 
 ### 8.4 Undo — accidental-input insurance (Adam 2026-08-12: "losing a run
@@ -652,27 +661,74 @@ with a deliberate accidental-tap drill**. **Exit: full battle + shop visit
 played on the real glasses, text-only, sub-second round updates, and a
 "whoops-tap" undone on glass.**
 
-**P4 — Maps.** Two-tile 1:1 pipeline (reuse existing PNG→gray4 tile machinery —
-function names verified at wiring), step verbs + ×N, interrupt flips
-(battle/dialog), Peek, all-black guard. **Measure real on-glass push times and
-record them here.** **Exit: walk Coneria→shop→overworld→encounter→battle→back,
-map pushes only at macro boundaries.**
+**P3-R — RESULTS (2026-08-12, session 3; commit `f562e10`; off-glass exit —
+on-glass items moved to the BUILD_LOG checklist).** Shipped exactly per §3/§7:
+`server/src/ff1/{types,bridge,engine}.ts` (stt.ts client pattern; paperclips
+process-lifetime engine; restore-throws-on-DB-down + loadOk clobber-guard;
+watchdog death→notice→lazy-respawn-with-savestate, later hardened by the
+Ph-F passes) + `windows/ff1-controller.ts` (screen-adaptive root; §7.1 native
+battle entry with live-RAM charges; Cancel-first Go; paginated full-history
+log; cursor mode for unscripted screens; **Undo standing verb everywhere**)
++ the minimal games.ts delta (5th list row) + `games.ff1.*` config +
+`phase-ff1.mjs` (12 stages incl. the Undo drill, the PG mirror, and the
+kill→respawn→restore watchdog drill). run-all baseline+1; scene renders
+verified via scripts/scene_to_png (client-rule check OK ×7). NEW daemon op
+`undo_state` (+ later `undo_seed`) feeds the §8.4 PG undo-tail mirror.
 
-**P5 — Polish.** `Battle` pace macro, `fight-until` grind loops, name-entry
-macro (ring-driven), `.sav` export verb + slots UI, enemy-formation tile
-toggle (small image, battle-start only, default off), RAM-drawn dungeon
-minimap. NO dictation (§8.5 cut). Each lands independently.
+**P4-R — RESULTS (2026-08-12, session 3; commit `c25c207`).** Two stacked
+1:1 tiles at **256×110 + 256×112** (NOT 2×112 — the 222 px content pane +
+even-BMP-height rule; §7.2 updated). Daemon `frame` op crops
+`map-top`/`map-bottom` in `format:'gray4'` = the exact `encodeGray4Single`
+payload (the existing tile machinery does the encoding + all-black guard);
+compose mode `'maptiles'` (t0/t2 at FF1_MAP_*_RECT, hands-mode independent
+regions, both compose paths). Push policy PROVEN by smoke asserts: initial
+map = ONE push, a steps-×2 macro = ONE boundary push, an entire engine-driven
+battle = ZERO map pushes, post-outro reload = ONE push. Change detection =
+raw-payload keys + a frameHash gate. **On-glass push-time measurements still
+pending** (the checklist item — record them here when taken).
 
-## 13. Open decisions (Adam)
-1. **Enemy HP display** — default hidden (recommended for the challenge run);
-   flip `games.ff1.showEnemyHp` anytime.
-2. **Sub-controller vs own window** — plan says sub-controller in GamesWindow
-   (consistency with pc/bj; Games list stays the hub). Own window only if the
-   controller outgrows the pattern.
-3. **Battle log verbosity** — every message (authentic) vs condensed per-actor
-   lines. Plan default: authentic, paginated.
-4. **Fixture format** — committed savestate binaries vs regeneration script
-   (decide at P1 when we see sizes).
+**P5-R — RESULTS (2026-08-12, session 3; commit `64a5985`).** All shipped,
+each harness-proven (`test_macros.py`, 24 checks): position-verified
+`name_entry` (see the revised §7.4 — the grid types EXACTLY 4 glyphs),
+`pace` (battlestep-delta honesty; NPC blocks stop LOUD), `fight_until`
+(RAM-read stops; entry-time weakest-living retargeting for fights AND
+one-enemy magic), `.sav` export (refused without the SRAM asserts or
+mid-battle), labeled PG slots (Cancel-first load), breadcrumb minimap
+(200×100 tile, ±50/±25 window), formation-glance tile
+(`games.ff1.formationTile`, default off), the `rename` op (§7.4), and the
+battle-log hygiene rules (`_log_push`).
+
+**PF-R — FINAL REVIEW + ACCEPTANCE (2026-08-13; commits
+`e3b762b`/`4bfd6f0`/`0cf60b9`/`bdcdb5c`).** Three max-effort review passes
+fixed 42 confirmed findings (full fixed/rejected/accepted ledger in
+BUILD_LOG "Ph-F"). The battle-model discoveries are AUTHORITY-CLASS addenda
+to §6.2/§12: **fiend/chaos battles (battleType ≥ 3) have NO target picker**
+(confirm-direct entry); **in-battle `ch_spells` is a GLOBAL 1-based index**
+and `ch_level` is 1-based (out-of-battle encodings restored on the wire by
+the daemon); **STUN/SLEEP chars receive no command menu** (commandable ≠
+alive — the input loop masks DEAD|STONE|STUN|SLEEP); **surprised encounters
+run a full enemies-only round before the first menu**; and §8.3's honesty
+jitter lives at the ROUND BOUNDARY (see the revised §8.3). The acceptance
+ran in production with Adam's 2026-08-13 gear doctrine (weapons equipped +
+FIRE-on-full-HP-untargeted-imps → 2-round clean wins): party
+ROUX/IRIS/NOX/ZOT created via the ring name-entry path, geared in Coneria
+(the weapon-shop and menu-EQUIP flows are decoded in BUILD_LOG), inn-saved,
+battle + undo drill + re-fight green, `.sav` exported, savestate + undo
+tail persisted, party on the overworld. 16-screenshot record indexed in
+BUILD_LOG.
+
+## 13. Open decisions (Adam) — all settled at ship
+1. **Enemy HP display** — shipped hidden (`games.ff1.showEnemyHp:false`);
+   still a live config flip anytime.
+2. **Sub-controller vs own window** — DECIDED (P3): sub-controller in
+   GamesWindow, exactly the pc/bj pattern. It fit.
+3. **Battle log verbosity** — DECIDED (P2/P5): authentic + paginated, with
+   the `_log_push` hygiene rules (incremental-draw collapse, condensed-font
+   menu-bleed drop, O/0 digit fold at the wire).
+4. **Fixture format** — DECIDED (P1): BOTH — committed savestate binaries
+   (`bridge/harness/fixtures/`, ~22 KB each) AND the regeneration script
+   (`gen_fixtures.py`, savestate-BFS journey replay, run manually on flow
+   drift).
 
 ## 14. Risks
 - **cynes accuracy on FF1** — mitigated by P0 exit gate + fallback ladder (§2).
