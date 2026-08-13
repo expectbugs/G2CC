@@ -689,6 +689,29 @@ Dry-run 18 (smoke DB): END-TO-END GREEN, exit 0 — party ROUX/IRIS/NOX/ZOT
 full HP, equipped, FIRE+CURE known, inn save present, .sav exported,
 gold 400→50 shopping + 30 battle = 80, finish on the overworld.
 
+## ACCEPTANCE — PRODUCTION RUN COMPLETE (2026-08-13, exit 0)
+
+**Adam's challenge party is live in the production DB and ready to play:**
+
+```
+ROUX  RedMAGE  30/30  Rapier (equipped)
+IRIS  Wh.MAGE  28/28  Iron Hammer (equipped) · CURE
+NOX   Bl.MAGE  17/25  FIRE          (bruised in the re-fight, alive)
+ZOT   Bl.MAGE  25/25  FIRE
+gold 80 · overworld (153,170), south of Coneria · inn save present
+```
+
+- Both battles (first + post-undo re-fight) won CLEAN in 2 rounds each with
+  the doctrine (FIRE ×2 opening on full-HP imps, armed concentration).
+- `.sav` exported: `games/ff1/saves/ff1-20260813-050745.sav` (loads in
+  Mesen-class emulators; content = the Coneria inn save).
+- PG `ff1_save` 'latest' = the post-battle overworld savestate + undo tail.
+- **Screenshot record** (`bridge/spike_out/acceptance/`): 00 boot,
+  01 mainmenu, 02 partyselect, 03 all_named, 04 overworld_named, 05 coneria,
+  06 weapon_shop, 07 equipped, 08 black_shop, 09 shopping_done,
+  10 inn_saved, 11 battle_start, 12 battle_won, 13 undo_rewound,
+  14 refight_won, 15 final_overworld.
+
 ### Ph-B deferrals (intentional, don't chase)
 
 - DRINK/ITEM entry paths: raise loudly; need a potion-holding fixture (buy
