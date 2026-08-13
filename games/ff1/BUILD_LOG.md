@@ -592,6 +592,103 @@ frames at the ROUND BOUNDARY (press discipline untouched; tests stay
 rng_jitter=False deterministic). Acceptance tactics: concentrated fire +
 wipe-retry-via-§8.4 + casualty-free-win enforcement for the handoff party.
 
+## Adam's evening on-glass checklist (HANDOFF §11 — the run can't touch glass)
+
+Open **Games → Final Fantasy** (the 5th games-list row). The engine resumes
+your ROUX/IRIS/NOX/ZOT party from the PG savestate — you should land on the
+overworld outside Coneria, saved at the inn.
+
+1. **Map view**: the two stacked 1:1 tiles render; note the REAL push
+   latency for the first full pair and for a one-step change (PLAN §7.2
+   wants the measured numbers recorded there). Step verbs ↑↓←→, ×N cycle,
+   Peek (forced re-push), A on an NPC → dialog view.
+2. **Battle on glass**: Battle (the pace macro) on the tile-strip south of
+   the spawn row until an encounter → entry menus (Fight/Magic/Run/RunAll +
+   Auto after round 1) → Go → text speed of the paginated round log. Check
+   the twocol entry pane (formation left, `>`-marked party right).
+3. **Magic pick**: IRIS knows CURE — check the browse-row spell list
+   (`L1 CURE n/2`) + the ally target rows (slot-prefixed).
+4. **The whoops-tap drill (§8.4)**: mid-anything, Undo → checkpoint list →
+   Cancel-first confirm → verify the rewind; then Undo again and note the
+   `before undo → …` entry (an undo is itself undoable).
+5. **Sys**: SaveSlot / Slots (Cancel-first load) / Export — a fresh `.sav`
+   should land in `games/ff1/saves/` (the acceptance already left one).
+6. **Minimap**: inside Coneria (sm), Mini → the breadcrumb tile; walk a few
+   streets, Reload on the minimap → the trail grows.
+7. **Formation glance** (optional): flip `games.ff1.formationTile: true` in
+   config → next battle shows the 200×100 tableau tile first; Enter
+   proceeds. Default stays off.
+8. **Ribbon**: the Games preview shows the FF1 line; hovering FF1 previews
+   party HP/gold/position without spawning anything.
+9. **Watchdog**: if you want to see it — `kill -9` the ff1_daemon PID; the
+   status line shows the death notice and the next tap respawns + restores.
+10. **Screenshots**: `games/ff1/bridge/spike_out/acceptance/` has the full
+    party-creation → battle → undo → shop → inn → overworld photo record.
+
+Known deferred (don't chase): DRINK/ITEM battle verbs (Ph-E inventory
+fixtures never landed — LOUD refusal in the entry menu); magic L5-8 page
+flip (needs a leveled party); on-glass gray-ramp legibility of the map
+tiles (the >>4 luma mapping is the tuning knob, daemon op_frame).
+
+### Review PASS 3 (loop cap reached — churn noted per HANDOFF §8.1.5)
+
+Pass 3 still found real bugs: 13 CONFIRMED (+2 PLAUSIBLE hardened anyway).
+The dominant theme: the battle executor was correct for exactly the states
+the harness reached (type-0/1/2 formations, L1 CURE, no ailments, no
+surprise) and wrong for four adjacent states — all verified against the
+in-repo disassembly and FIXED:
+
+1. **Fiend/Chaos battles (type 3/4)** never open a target picker
+   (EnemyTargetMenu_FiendChaos returns immediately) — every boss fight would
+   have desynced. fight/spell one-enemy paths now go confirm-direct on
+   `battleType ≥ 3` (single living enemy asserted). *Asm-derived; live boss
+   verification is on the on-glass list (no type-3/4 fixture exists).*
+2. **In-battle ch_spells switches to a GLOBAL 1-based index** (variables.inc)
+   — the per-level formula misidentified every L2-L4 cast (L1 coincides,
+   which is why CURE tests passed). spell_meta reads the in-battle encoding;
+   snapshots NORMALIZE spells+level back to the OB wire contract.
+3. **STUN/SLEEP chars get no command menu** (the game masks 4 ailments, we
+   masked 2) — commandable_slots() everywhere (entry, round-end gate,
+   fight_until, controller via the new `canInput` snapshot field).
+4. **Surprised encounters run a full enemies-only round before the first
+   menu** — the first-char wait now has resolution-class patience (20000f).
+Plus: boot-window death wedge (alive-check before publishing the bridge);
+protocol corruption (non-JSON/seq-mismatch) = death → engine reboots (was a
+permanent one-behind cascade); restored tail seeds lastGoodTail (a
+post-crash respawn no longer shrinks the PG tail); op_load validates before
+checkpointing; auto-confirm Go mutate-before-guard (the FIFTH copy of that
+bug class — consolidation noted for a cleanup pass); honest idle-death
+statusLine/view text; microsecond checkpoint stamps; trail gated to real map
+screens; peek restricted to side-effect-free ranges; op_press refused
+in-battle; flush dirty-gate. Rejected: `_log_push` identical-consecutive
+(mechanism traced, unobserved); statusLine slicing (twice-adjudicated).
+
+### Acceptance engineering (the §8.3 run — with Adam's live doctrine)
+
+Adam watched the L1 all-mage party lose to 5 IMPs bare-handed and called
+the real strategy (2026-08-13): **gear up first** — Rapier for ROUX + Iron
+Hammer for IRIS (bought AND equipped), FIRE for both black mages, FIRE cast
+only on a FULL-HP imp nobody else targets (instant kill), everyone else
+concentrating the weakest. The acceptance was rebuilt around it:
+- **Shopping chapter decoded live** (all flows probe-verified, every press
+  condition-verified after an eaten pick-A bought a Small Knife): weapon
+  shop stock order probed (Nunchuck 5/Small Knife 5/Wooden Staff 10/
+  Rapier 10/Iron Hammer 10; $62 wraps at 4); the game-menu WEAPON screen
+  decoded (EQUIP/TRADE/DROP mode row → party×weapon grid; A toggles the E-
+  marker; **ch_weapons writes back on menu EXIT** — bits verified after);
+  cursor-position conds beat sprite-flicker spoofing on the grid Down.
+- **Battle doctrine results: 2-round CLEAN wins, first attempt, both the
+  first battle and the post-undo re-fight** (vs 7-12 rounds with wipes and
+  casualty lotteries bare-handed — dry-runs 6-11 document the carnage).
+- Also fixed en route: the §8.3/§8.4 RNG-honesty break (round-boundary
+  jitter; undo → re-fight was a frame-identical replay), the ticking-strip
+  offset from the gate exit (rows 165-169 never tick), NPC gate/street
+  handling (sidestep jiggles + patience), engine.scrapeFull (classifier
+  regions hid the equip grid's row 13).
+Dry-run 18 (smoke DB): END-TO-END GREEN, exit 0 — party ROUX/IRIS/NOX/ZOT
+full HP, equipped, FIRE+CURE known, inn save present, .sav exported,
+gold 400→50 shopping + 30 battle = 80, finish on the overworld.
+
 ### Ph-B deferrals (intentional, don't chase)
 
 - DRINK/ITEM entry paths: raise loudly; need a potion-holding fixture (buy

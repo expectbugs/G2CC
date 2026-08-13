@@ -106,13 +106,24 @@ class Ff1Engine {
           console.error(`[ff1] undo-tail rehydration failed (ring starts empty): ${e instanceof Error ? e.message : String(e)}`)
         })
       }
+      // A death DURING boot/seed is identity-gate-dropped (this.bridge is
+      // still null) — publishing a dead bridge wedged the engine forever
+      // behind the resolved `starting` latch (Ph-F pass-3 find).
+      if (!bridge.alive()) throw new Error('daemon died during boot/seed')
       // Publish the bridge only once the boot SUCCEEDED — a failed boot used
       // to leak a live orphan daemon per retry (Ph-F review find).
       this.bridge = bridge
       this.lastSnap = snap
       this.loadOk = true
       this.loadError = null
-      if (restored) this.lastStateB64 = restored.stateB64
+      if (restored) {
+        this.lastStateB64 = restored.stateB64
+        // Seed the tail memory too (pass-3 find: an in-memory respawn after a
+        // pre-persist crash rehydrated an EMPTY ring and the next persist
+        // overwrote PG's 5-entry tail with 1).
+        this.lastGoodTail = restored.tail
+        this.tailCache = new Map(restored.tail.map((t) => [`${t.label}|${t.at}`, t.state]))
+      }
       if (this.daemonNotice) {
         console.log('[ff1] WATCHDOG: respawn boot succeeded — death notice cleared')
         this.daemonNotice = null
@@ -176,7 +187,7 @@ class Ff1Engine {
       const out = await fn(bridge)
       const snap = out as unknown as Ff1Snapshot
       if (snap && typeof snap === 'object' && 'state' in snap) this.lastSnap = snap
-      if (opts.persist) await this.capturePersist(bridge)
+      if (opts.persist) { this.persistDirty = true; await this.capturePersist(bridge) }
       return out
     }
     const p = this.opChain.then(run, run)
@@ -266,9 +277,16 @@ class Ff1Engine {
     return { stateB64: Buffer.from(row.state).toString('base64'), tail }
   }
 
+  /** True when a persist-tagged op ran since the last flush capture — the
+   *  deactivate/leave/dispose triple used to fire 2-3 identical full
+   *  captures back-to-back (pass-3 efficiency find). */
+  private persistDirty = false
+
   /** Persist now (deactivate/leave/dispose). Fire-and-forget-able; awaits the
    *  capture AND the PG write so smoke tests get a clean write. */
   async flush(): Promise<void> {
+    if (!this.persistDirty) { await this.persistChain; return }
+    this.persistDirty = false
     if (this.bridge?.alive() && this.loadOk) {
       // op({persist:true}) with a no-op body = capture + mirror, serialized.
       try { await this.op(async () => undefined, { persist: true }) }
@@ -376,6 +394,15 @@ class Ff1Engine {
       const r = await b.request('frame', { crop: 'full', format: 'png' })
       if (typeof r['png'] !== 'string') throw new Error('frame: daemon returned no png')
       return r['png']
+    })
+  }
+
+  /** Full-frame text scrape (acceptance/harness verification — the
+   *  classifier's per-screen text regions don't cover every row). */
+  scrapeFull(): Promise<string[]> {
+    return this.op(async (b) => {
+      const r = await b.request('scrape', { row0: 0, row1: 30, col0: 0, col1: 32 })
+      return (r['lines'] as string[] | undefined) ?? []
     })
   }
 

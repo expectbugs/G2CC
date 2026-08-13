@@ -116,6 +116,20 @@ export class Ff1Bridge {
     proc.on('error', (e) => { console.error(`[ff1] daemon spawn error: ${e.message}`); die(e) })
   }
 
+  /** Protocol-level corruption: the stream ordering contract is broken —
+   *  treat exactly like a death (reject all, latch dead, engine reboots). */
+  private dieProtocol(why: string): void {
+    console.error(`[ff1] daemon protocol corruption — killing (engine reboots via onDeath): ${why}`)
+    this.buf = ''
+    const dying = this.proc; this.proc = null
+    this.dead = true
+    const err = new Error(`ff1 daemon protocol corruption: ${why}`)
+    if (this.inflight) { const j = this.inflight; this.inflight = null; j.reject(err) }
+    while (this.queue.length) this.queue.shift()!.reject(err)
+    try { dying?.kill('SIGKILL') } catch { /* already dead */ }
+    if (this.onDeath) this.onDeath(err)
+  }
+
   private pump(): void {
     if (this.inflight || this.queue.length === 0) return
     this.ensureProc()
@@ -160,12 +174,11 @@ export class Ff1Bridge {
       try {
         resp = JSON.parse(line) as Record<string, unknown>
       } catch (e) {
-        // Protocol corruption is fatal for the inflight job — LOUD.
-        console.error(`[ff1] daemon emitted non-JSON on stdout (${line.length} chars): ${line.slice(0, 200)}`)
-        const job = this.inflight; this.inflight = null
-        job?.reject(new Error(`ff1 daemon protocol corruption: ${e instanceof Error ? e.message : String(e)}`))
-        this.pump()
-        continue
+        // Protocol corruption = DEATH (pass-3 find: rejecting + pumping onto
+        // the desynced pipe produced a permanent one-behind seq-mismatch
+        // cascade the watchdog never saw). Same treatment as MAX_BUF.
+        this.dieProtocol(`non-JSON stdout line (${line.length} chars): ${line.slice(0, 120)} — ${e instanceof Error ? e.message : String(e)}`)
+        return
       }
       const job = this.inflight
       if (!job) {
@@ -173,12 +186,10 @@ export class Ff1Bridge {
         continue
       }
       if (resp['seq'] !== job.seq) {
-        // One-response-per-request in order is the protocol; a mismatch means
-        // the streams desynced — fail the job, keep the line count honest.
-        this.inflight = null
-        job.reject(new Error(`ff1 daemon seq mismatch: got ${String(resp['seq'])}, expected ${job.seq} (op ${job.op})`))
-        this.pump()
-        continue
+        // One-response-per-request in order IS the protocol; a mismatch means
+        // the streams desynced — the pipe is unrecoverable (pass-3 find).
+        this.dieProtocol(`seq mismatch: got ${String(resp['seq'])}, expected ${job.seq} (op ${job.op})`)
+        return
       }
       this.inflight = null
       if (typeof resp['error'] === 'string') {

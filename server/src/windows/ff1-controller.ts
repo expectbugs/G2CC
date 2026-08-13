@@ -167,7 +167,10 @@ export class Ff1Controller {
 
   statusLine(): string | null {
     const st = ff1.status()
-    if (st.daemonNotice) return '⚠ ff1 daemon respawned'
+    // the engine's notice text is the honest one ('died — respawns on the
+    // next action'); the old hard-coded 'respawned' claimed a recovery that
+    // hadn't happened (Ph-F pass-3 find)
+    if (st.daemonNotice) return `⚠ ${st.daemonNotice}`.slice(0, 46)
     if (st.loadError) return `⚠ ${st.loadError}`.slice(0, 46)
     if (st.saveError) return '⚠ unsaved'
     // op failures ride the status bar too (Ph-F review find: the maptiles
@@ -266,7 +269,12 @@ export class Ff1Controller {
   private snap(): Ff1Snapshot | null { return ff1.cachedSnapshot() }
 
   private beginEntry(snap: Ff1Snapshot): void {
-    const living = snap.state.party.filter((c) => c.alive).map((c) => c.slot)
+    // canInput (daemon-computed: not DEAD|STONE|STUN|SLEEP) — the game skips
+    // those chars' menus, so collecting a command for them desyncs entry
+    // (Ph-F pass-3 find). Absent field (older snapshot) falls back to alive.
+    const living = snap.state.party
+      .filter((c) => (c.canInput ?? c.alive))
+      .map((c) => c.slot)
     this.entry = { living, idx: 0, commands: [], pendingAction: null, battleKey: snap.state.battlecounter }
     this.level = 'root'
   }
@@ -369,9 +377,13 @@ export class Ff1Controller {
   async view(): Promise<WinView> {
     const st = ff1.status()
     if (!st.running) {
+      // Three honest sub-states (pass-3 find: the spinner used to show for an
+      // idle daemon DEATH, promising progress that wasn't happening):
       const body = st.loadError
         ? `Failed to start:\n${st.loadError}\n\nReload to retry.`
-        : '⏳ starting FF1 (cynes daemon)…'
+        : st.daemonNotice
+          ? `⚠ ${st.daemonNotice}\n\nReload (or any action) respawns the daemon\nand restores the last savestate.`
+          : '⏳ starting FF1 (cynes daemon)…'
       return { mode: 'text', title: 'FF1', menu: ['Reload', 'Main'], text: body }
     }
     const snap = this.snap()
@@ -874,7 +886,16 @@ export class Ff1Controller {
   }
 
   private autoConfirmSelect(label: string): void {
-    if (label === 'Go') { this.level = 'root'; this.fireAuto(); return }
+    if (label === 'Go') {
+      // guards FIRST — flipping the level before them dismissed the confirm
+      // without firing when busy (the mutate-before-guard class, fifth copy;
+      // Ph-F pass-3 find)
+      if (!this.lastCommands) { this.ctx.log('[os] ff1: Auto Go with no last round — ignored (LOUD)'); return }
+      if (this.opBusy) { this.ctx.log(`[os] ff1: Auto Go while '${this.opBusy}' runs — confirm kept, tap again (LOUD)`); return }
+      this.level = 'root'
+      this.fireAuto()
+      return
+    }
     if (label === 'Cancel') { this.level = 'root'; this.requestRender(); return }
     this.ctx.log(`[os] ff1 auto-confirm: unknown verb '${label}' (LOUD)`)
   }

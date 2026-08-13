@@ -13,6 +13,9 @@ export interface Ff1Char {
   classId: number
   ailments: number
   alive: boolean
+  /** The game will prompt this char for a battle command (not DEAD|STONE|
+   *  STUN|SLEEP — the input loop skips all four; Ph-F pass-3). */
+  canInput?: boolean
   hp: number
   maxhp: number
   level: number

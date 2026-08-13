@@ -74,6 +74,8 @@ BPRESS_GAP = 20         # released frames after every press (clean edges)
 PRESS_BUDGET = 150      # frames to wait for a press's verified effect
 PRESS_ATTEMPTS = 4      # eaten-press retries (magic-draw cadence eats 4 f presses)
 MENU_WAIT = 400         # frames for a char's command menu to appear
+SURPRISE_WAIT = 20000   # the FIRST menu of a round: a surprised encounter runs a
+                        # whole enemies-only round before any input (pass-3 find)
 RESOLUTION_BUDGET = 30000   # frames for one round's resolution (respond-rate slow)
 OUTRO_BUDGET = 6000     # frames for the victory/defeat/flee outro to leave battle
 STABLE_FRAMES = 12      # combat-box text stable this long = a message (dwell ≥ ~80 f)
@@ -223,14 +225,41 @@ class BattleExecutor:
         return [i for i in range(4)
                 if ramspec.read_char(self._r, i, lambda b: '').alive()]
 
+    def commandable_slots(self) -> List[int]:
+        """Slots the game will actually PROMPT for a command: the input loop
+        skips DEAD|STONE|STUN|SLEEP (bank_0C.asm :: GetCharacterBattleCommand
+        masks all four — Ph-F pass-3 find: we only masked DEAD|STONE, so a
+        stunned/asleep char made enter_round wait on a menu that never
+        opens)."""
+        skip = ramspec.AIL_DEAD | ramspec.AIL_STONE | ramspec.AIL_STUN | ramspec.AIL_SLEEP
+        return [i for i in range(4)
+                if (self._r(ramspec.CH_STATS + i * ramspec.CH_STRIDE + ramspec.CH_AILMENTS)
+                    & skip) == 0]
+
+    def fiend_chaos(self) -> bool:
+        """battleType 3/4 (fiend/chaos): the enemy target menu variant
+        returns IMMEDIATELY with the single possible target — no picker
+        sprite is ever drawn (bank_0C.asm :: EnemyTargetMenu_FiendChaos,
+        lut_EnemyTargetMenuJumpTbl 3/4; Ph-F pass-3 find). The completing
+        A press goes straight through."""
+        return self._r(ramspec.BTL_BATTLETYPE) >= 3
+
     def spell_meta(self, level: int, slot: int, char: int) -> dict:
-        """Resolve the spell sitting in ch_spells[level][slot] via spells.json."""
+        """Resolve the spell sitting in ch_spells[level][slot] via spells.json.
+        IN BATTLE (always our context) the game has converted ch_magicdata to
+        a GLOBAL 1-based index (variables.inc :: ch_magicdata block — 'in
+        battle... a logical 1-based index where the level simply doesn't
+        matter'; the cmdbuf spell byte is raw-1). The out-of-battle per-level
+        1-8 encoding coincides ONLY at L1 — Ph-F pass-3 find: the old
+        (level-1)*8+(val-1) formula misidentified every L2-L4 cast."""
         val = self._r(ramspec.CH_MAGIC + char * ramspec.CH_STRIDE
                       + ramspec.CH_SPELLS + (level - 1) * 4 + slot)
         if val == 0:
             raise BattleDesync(f'char {char} has no spell at L{level} slot {slot}')
-        spell_id = (level - 1) * 8 + (val - 1)
-        # ch_spells values are 1-8 within the level; ids run 8/level (4W+4B)
+        spell_id = val - 1   # in-battle global index (see docstring)
+        if not (0 <= spell_id < len(self.spells)):
+            raise BattleDesync(f'char {char} L{level}s{slot}: in-battle spell value '
+                               f'{val} out of range')
         return self.spells[spell_id]
 
     def enter_round(self, commands: List[CharCommand]) -> List[Tuple[int, ...]]:
@@ -241,13 +270,14 @@ class BattleExecutor:
             # protocol boundary (Ph-F review find: the dict silently kept only
             # the LAST duplicate and reported ok)
             raise BattleDesync(f'duplicate char in commands: {[c.char for c in commands]}')
-        living = self.living_slots()
+        living = self.commandable_slots()
         extra = [c.char for c in commands if c.char not in living]
         if extra:
-            raise BattleDesync(f'command(s) for non-living/unknown char(s) {extra}')
+            raise BattleDesync(f'command(s) for non-commandable char(s) {extra} '
+                               '(dead/stone/stun/sleep chars get no menu)')
         missing = [ch for ch in living if ch not in by_char]
         if missing:
-            raise BattleDesync(f'no command supplied for living char(s) {missing}')
+            raise BattleDesync(f'no command supplied for commandable char(s) {missing}')
         # §8.3 RNG honesty AT THE ROUND BOUNDARY: battle presses use EXACT
         # fixed holds (the edge-triggered discipline — per-press jitter would
         # break the 2f/4f windows), which made an undo → re-fight a
@@ -262,7 +292,12 @@ class BattleExecutor:
         for idx, ch in enumerate(living):
             cmd = by_char[ch]
             last = idx == len(living) - 1
-            self.emu.wait_until(lambda c=ch: self.at_command_menu(c), MENU_WAIT,
+            # The FIRST menu can sit behind a full enemies-only SURPRISE round
+            # ("Monsters strike first!" jumps straight to combat before any
+            # input — bank_0C.asm; Ph-F pass-3 find): give it resolution-class
+            # patience. Later chars keep the tight bound.
+            budget = SURPRISE_WAIT if idx == 0 else MENU_WAIT
+            self.emu.wait_until(lambda c=ch: self.at_command_menu(c), budget,
                                 f'char {ch} command menu')
             expected[ch] = self._enter_one(ch, cmd, last)
             row = self.cmdbuf(ch)
@@ -287,6 +322,15 @@ class BattleExecutor:
                 raise BattleDesync(f'char {ch}: fight needs an enemy target slot')
             row_before = self.cmdbuf(ch)
             self._nav_command(ch, 'fight')
+            if self.fiend_chaos():
+                # type 3/4: no picker exists — the A on FIGHT completes the
+                # command against the single enemy (pass-3 find; the picker
+                # wait could never fire and retries desynced the round)
+                only = [e.slot for e in ramspec.read_enemy_slots(self._r) if e.alive()]
+                if len(only) != 1:
+                    raise BattleDesync(f'fiend/chaos battle with {len(only)} living enemies?')
+                self._confirm(ch, last, f'char {ch} fight (fiend/chaos direct)')
+                return (0x04, FIGHT_EFFECT_BYTE, only[0], 0x00)
             # PICKER_HOLD: same auto-confirm shape as the spell pickers — this
             # path happened to pass at 4 f (SelectEnemyTarget preps longer) but
             # the resume-note verdict is "do not rely on that".
@@ -381,6 +425,14 @@ class BattleExecutor:
         re-sample the held A as its own confirm — see _assert_picker_live."""
         ttype = meta['target']
         row_before = self.cmdbuf(ch)
+        if ttype == 'one-enemy' and self.fiend_chaos():
+            # type 3/4: SelectEnemyTarget returns immediately — the caller's
+            # confirm A both selects the spell AND completes the command
+            # (exactly the caster/all-enemies shape); pass-3 find.
+            only = [e.slot for e in ramspec.read_enemy_slots(self._r) if e.alive()]
+            if len(only) != 1:
+                raise BattleDesync(f'fiend/chaos battle with {len(only)} living enemies?')
+            return only[0]
         if ttype == 'one-enemy':
             self.bpress_verified('A', self._enemy_picker_reached,
                                  f'char {ch} spell→enemy picker', hold=PICKER_HOLD)
@@ -471,11 +523,11 @@ class BattleExecutor:
                            key=lambda e: e.hp)
             if not alive:
                 raise BattleDesync('fight_until: no living enemies but battle not resolved')
-            living = set(self.living_slots())
+            living = set(self.commandable_slots())
             round_cmds: List[CharCommand] = []
             for cmd in commands:
                 if cmd.char not in living:
-                    continue   # a dead ally enters no command (the game skips them)
+                    continue   # dead/stone/stun/sleep enter no command (the game skips them)
                 if cmd.action == 'fight' and not any(e.slot == cmd.target for e in alive):
                     cmd = CharCommand(char=cmd.char, action='fight', target=alive[0].slot)
                 elif cmd.action == 'magic' and cmd.target is not None:
@@ -500,7 +552,7 @@ class BattleExecutor:
                                 'stopped': f'char {cmd.char} L{cmd.level} charges exhausted',
                                 'log': log}
             missing = [ch for ch in living if not any(c.char == ch for c in round_cmds)]
-            for ch in missing:   # an ally who died and RECOVERED (undo) fights
+            for ch in missing:   # a recovered (or newly-commandable) ally fights
                 round_cmds.append(CharCommand(char=ch, action='fight', target=alive[0].slot))
             self.enter_round(round_cmds)
             rr = self.run_resolution()

@@ -137,14 +137,25 @@ class Daemon:
         cls = screens.classify(read, emu.frame, emu.patterns(), emu.glyphs,
                                emu.uniform_frame())
         party = []
+        in_btl = ramspec.in_battle(read)
+        skip_mask = (ramspec.AIL_DEAD | ramspec.AIL_STONE
+                     | ramspec.AIL_STUN | ramspec.AIL_SLEEP)
         for slot in range(4):
             ch = ramspec.read_char(read, slot, self.decode_name)
+            # IN-BATTLE RAM flips two encodings in place (variables.inc; Ph-F
+            # pass-3 find): ch_level becomes 1-based and ch_spells becomes a
+            # GLOBAL 1-based index. The WIRE contract stays the out-of-battle
+            # form — normalize here so consumers never see the flip.
+            level = ch.level0 + (0 if in_btl else 1)
+            spells = ([[(((v - 1) % 8) + 1) if v else 0 for v in lv] for lv in ch.spells]
+                      if in_btl else ch.spells)
             party.append({
                 'slot': slot, 'name': ch.name, 'class': ch.cls_name, 'classId': ch.cls,
                 'ailments': ch.ailments, 'alive': ch.alive(),
-                'hp': ch.curhp, 'maxhp': ch.maxhp, 'level': ch.level0 + 1,
+                'canInput': (ch.ailments & skip_mask) == 0,
+                'hp': ch.curhp, 'maxhp': ch.maxhp, 'level': level,
                 'exp': ch.exp, 'mp': ch.curmp, 'maxmp': ch.maxmp,
-                'spells': ch.spells, 'weapons': ch.weapons, 'armor': ch.armor,
+                'spells': spells, 'weapons': ch.weapons, 'armor': ch.armor,
             })
         x, y = ramspec.player_tile(read)
         if cls.screen in ('ow', 'sm'):
@@ -223,6 +234,13 @@ class Daemon:
 
     def op_press(self, req: dict) -> dict:
         emu = self.need_emu()
+        if emu.in_battle():
+            # The overworld 8-frame hold profile AUTO-CONFIRMS battle menus at
+            # their home slot (battle.py header; Ph-F pass-3 find) — a raw
+            # press in battle would enter a WRONG command with no desync
+            # raised, the exact failure verified entry exists to prevent.
+            raise RuntimeError('press: raw presses are disabled in battle — '
+                               'use battle_round (verified entry)')
         buttons = req.get('buttons', [])
         if not isinstance(buttons, list) or not buttons:
             raise ValueError('press: buttons must be a non-empty list')
@@ -272,8 +290,11 @@ class Daemon:
 
     def op_load(self, req: dict) -> dict:
         emu = self.need_emu()
+        state = self.decode_state(req['state'])   # validate FIRST (pass-3 find:
+        # a rejected retry used to push a junk checkpoint per attempt,
+        # flushing real recovery entries out of the ring)
         self.checkpoint('before load')   # §8.4: state replacement is undoable
-        emu.load(self.decode_state(req['state']))
+        emu.load(state)
         return self.snapshot()
 
     def op_sram(self, req: dict) -> dict:
