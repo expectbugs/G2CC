@@ -26,6 +26,7 @@ REGION_MAINMENU = (10, 27, 8, 25)      # CONTINUE/NEW GAME/RESPOND RATE + ©-lin
 REGION_NAMEGRID = (9, 27, 5, 26)       # the letter grid box interior
 REGION_PARTYSEL = (0, 30, 0, 32)       # class headers live in per-slot boxes; full scan
 REGION_DIALOG = (1, 10, 1, 31)         # FF1 dialogue box: top-of-screen rows (on-map)
+REGION_LOWBOX = (11, 28, 1, 31)        # lower half: shop bodies AND the tent/rest prompt
 # battle regions (probed via the live resolution scrape, Ph-A):
 REGION_BTL_ROSTER = (19, 27, 2, 10)    # bottom-left enemy roster box interior
 REGION_BTL_PARTY = (3, 27, 26, 31)     # right party pane (AAAA / HP / nn)
@@ -123,12 +124,11 @@ def classify(read, frame: np.ndarray, patterns: np.ndarray, glyphs: GlyphTable,
     # anchor is shop text (box headers/prices) while a shop screen is up.
     # The shop screen replaces the map view (probed in the Ph-A CURE run).
     dlg = _lines(patterns, glyphs, REGION_DIALOG)
-    dialog_words = sum(1 for ln in dlg.lines if len(ln.replace(' ', '')) >= 4)
-    if dialog_words >= 1 and _has_word_run(dlg.lines):
+    if _boxish(dlg.lines):
         # a text box is open over the map — dialog or shop; shops set shop_id
         # and draw price/GP text. Classify shop when the shop screen owns the
         # whole display (no map visible): heuristic = also text in rows 11-27.
-        lower = _lines(patterns, glyphs, (11, 28, 1, 31))
+        lower = _lines(patterns, glyphs, REGION_LOWBOX)
         # NOTE (Ph-F review): the latched entering_shop OR-term is GONE — the
         # branch's own comment calls $50 transient/latched-unreliable; the
         # live anchors (price/GP text in the lower rows, WELCOME) carried the
@@ -146,7 +146,27 @@ def classify(read, frame: np.ndarray, patterns: np.ndarray, glyphs: GlyphTable,
             return Classification('gamemenu', full.lines, [])
         return Classification('dialog', dlg.lines, dlg.unknown)
 
+    # A box drawn LOW with the dialogue rows empty: the rest prompt a
+    # TENT/CABIN/HOUSE opens ("HP recovered. SAVE? / Push A··YES / Push B··NO",
+    # then "Now saving··!"). REGION_DIALOG is rows 1-10 only, so these used to
+    # classify 'ow'/'sm' — and a map screen renders as IMAGE TILES with no text
+    # region, so the prompt was INVISIBLE: the window offered ↑↓←→ and every one
+    # of them answered "can't go … — blocked" while the game sat waiting on an
+    # A/B it never showed you. Found by using a tent outside the Temple of
+    # Fiends (2026-08-13); `facing ?` in the text fallback was the tell.
+    low = _lines(patterns, glyphs, REGION_LOWBOX)
+    if _boxish(low.lines) and not (_priced(low.lines) or _shopish(low.lines)):
+        return Classification('dialog', low.lines, low.unknown)
+
     return Classification('sm' if on_sm else 'ow')
+
+
+def _boxish(lines: List[str]) -> bool:
+    """Is a real text box open in this region? One line of ≥4 glyphs AND a
+    ≥4-glyph contiguous run — the pair that calibration showed raw map
+    graphics can never satisfy."""
+    return (sum(1 for ln in lines if len(ln.replace(' ', '')) >= 4) >= 1
+            and _has_word_run(lines))
 
 
 def _has_word_run(lines: List[str]) -> bool:

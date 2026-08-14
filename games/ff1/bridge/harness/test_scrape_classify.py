@@ -110,6 +110,34 @@ def main() -> None:
     check('equip grid shows ALL FOUR party rows',
           '\n'.join(c.text).count('AAAA') == 4, '\n'.join(c.text))
 
+    # --- the TENT/rest prompt is a DIALOG, not a map (2026-08-13) ---
+    # Using a tent leaves FF1 showing a party-HP box and an A/B prompt drawn
+    # LOW on the screen. REGION_DIALOG covers rows 1-10 only, so both frames
+    # classified 'ow' — and a map screen renders as image tiles with NO text
+    # region, so the prompt was invisible while every arrow reported
+    # "can't go … — blocked" and the game sat waiting on it. Captured outside
+    # the Temple of Fiends during the Garland run.
+    for fx, must in (('tent_prompt.npy', 'SAVE?'), ('tent_saving.npy', 'saving')):
+        emu.load(np.load(FIXTURES / fx))
+        emu.settle(budget=900, allow_animated=True)
+        c = screens.classify(emu.read, emu.frame, emu.patterns(), emu.glyphs, emu.uniform_frame())
+        joined = '\n'.join(c.text)
+        check(f'{fx} classifies dialog (A/B reachable)', c.screen == 'dialog', c.screen)
+        check(f'{fx} scrapes the prompt ({must})', must in joined, joined)
+    emu.load(np.load(FIXTURES / 'tent_prompt.npy'))
+    emu.settle(budget=900, allow_animated=True)
+    c = screens.classify(emu.read, emu.frame, emu.patterns(), emu.glyphs, emu.uniform_frame())
+    joined = '\n'.join(c.text)
+    check('tent prompt offers both answers', 'YES' in joined and 'NO' in joined, joined)
+    # and the plain map must NOT be dragged into 'dialog' by the new low-box rule
+    for fx in ('town_entry.npy', 'town_after_shop.npy'):
+        emu.load(np.load(FIXTURES / fx))
+        emu.settle(budget=900)
+        c = screens.classify(emu.read, emu.frame, emu.patterns(), emu.glyphs, emu.uniform_frame())
+        check(f'{fx} is still a map screen', c.screen in ('sm', 'ow'), c.screen)
+    check('map graphics are not a box', not screens._boxish(['', '  ', ' · ·  ·']))
+    check('a real prompt IS a box', screens._boxish([' HP recovered. SAVE?']))
+
     # --- shop anchor needs a NUMERAL by the G (2026-08-13) ---
     # A bare 'G' also matches the status page's 'AGL.' label, which classified
     # STATUS as a shop.

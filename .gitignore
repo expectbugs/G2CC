@@ -37,3 +37,10 @@ local.properties
 # Build artifacts
 *.tsbuildinfo
 scripts/simtools/*.so
+
+# ff1-play harness runtime output (scenes, logs) — the tool regenerates these
+server/tools/ff1-play/data/play.log
+server/tools/ff1-play/data/mirror.log
+server/tools/ff1-play/data/mirror.stdout
+server/tools/ff1-play/data/scenes.jsonl
+server/tools/ff1-play/data/scene-latest.json

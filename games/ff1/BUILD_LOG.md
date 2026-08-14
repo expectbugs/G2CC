@@ -866,3 +866,100 @@ Suites: ff1 harness 7/7 (46 battle + 29 scrape/classify checks), run-all
   produces that way. First real boss fight is the verification.
 * On-glass image latency for the two 256×110/112 map tiles is still
   unmeasured — the run cannot touch the glasses.
+
+---
+
+# Session 5 — 2026-08-13/14: the boss path, played for real
+
+Adam's order: *"go beat Garland to verify the boss battle path"* — reach level 5
+on regular battles, buy and equip the best gear each class can use, give the Red
+Mage CURE and FIRE, buy a TENT, walk to the temple **without spending spells**,
+tent up outside, then go straight in. Done, on his own save, entirely through
+the ring surface (`server/tools/ff1-play/`, which is the harness that ran it).
+
+## Result
+
+**Garland beaten in 2 rounds, first attempt** (2026-08-13 20:42). Party at
+L5 — ROUX 83, NOX 76, ZOT 74, IRIS 85 HP — Rapier + Chain Armor, Iron Hammer +
+Cloth, two Small Knives + Cloth; ROUX CURE+FIRE, IRIS CURE, NOX/ZOT FIRE; a
+TENT and three HEAL potions bought. 130 grind encounters (L1 → L5), a spell-free
+69-step march, tent outside the door, 8 tiles north, two taps. Gold 3805 → 4055
+(+250, his exact bounty); only NOX was scratched (54/76).
+
+**`btl_battletype` for Garland is 2 (mix), NOT ≥ 3.** So this run does *not*
+close the fiend/chaos item above — that still needs Lich. Recorded here so the
+open list stays honest.
+
+## The trigger, and why it hid for a whole session
+
+Garland is map object 0 of map 12 at **(20,21)** (Princess Sara is object 1 at
+(20,18)), standing in the inner sanctum's doorway. Two things follow:
+
+* he reads to a *walker* as a wall — the interior BFS mapped 558 floor tiles and
+  simply recorded (20,21) as solid;
+* the first **A** opens his speech box, the **second** starts the fight. A probe
+  that pressed A once and immediately tested "am I in a battle?" answered "no"
+  at the exact spot where the answer was yes.
+
+He needs no story flag — talking to the King of Coneria is not required (tested
+both ways). Route: enter the temple, **8 steps north** from the door at (20,30)
+to (20,22), face up, A, A.
+
+## World facts, taken from the ROM (don't re-derive)
+
+* **Overworld tile properties: file offset `0x10`** (bank 0, CPU $8000), 128
+  entries × 2 bytes. Byte 0 bit 0 = impassable on foot; byte 1 bit 7 = teleport,
+  low bits = teleport index, and **index = map id + 1** (verified live: tile
+  `0x49` → 1 → map 0 Coneria town; `0x01`/`0x02` → 9 → map 8 Coneria Castle).
+  Solved by constraint-matching the table against 335 live-walked tiles, so the
+  offset is proven rather than trusted.
+* **World map**: bank `0x01` at file `0x4010` — 256 two-byte row pointers, RLE
+  rows (MSB set ⇒ tile = `b & 0x7F`, count = next byte, 0 ⇒ 256).
+* **Map objects**: bank 0 CPU `$B400` = file `0x3410`, 48 bytes per map, 3 bytes
+  per object (type, x|flags, y); x bit 7 = in-room, bit 6 = static.
+* **Level-up EXP thresholds**: file `0x2D010`, 3-byte LE — L2 40, L3 196,
+  **L4 547, L5 1171**, L6 2146, L7 3550. (Not the 40/96/184/320 curve; that
+  mistake cost an hour of wrong estimates.)
+* From Adam's save spot (153,170) exactly **three** destinations are walkable:
+  Coneria town (9 steps), Coneria Castle (11), and the **Temple of Fiends, 69
+  steps — stand (130,124), step UP onto (130,123)**. Everything else is behind
+  mountain and ocean.
+* The whole starting region is **one battle domain: IMP ×5, 30 exp / 30 G**, so
+  L5 is ~130 fights and there is no better spot to find. Tiles adjacent to
+  Coneria are a no-encounter safe zone — `Battle` (pace) there correctly reports
+  "battlestep NEVER TICKED"; the nearest working spot is **(150,165)**.
+* `$F5 battlestep` is RAM state, not a per-step roll, so a savestate-rewind BFS
+  can never step past a due encounter however many times it retries. A probe
+  that "always battles" is that, not a wall. Zero `$F5`/`$F6` for geometry-only
+  recon.
+
+## Bug found and fixed: the TENT prompt was invisible
+
+Using a TENT/CABIN/HOUSE leaves FF1 showing a party-HP box and an A/B prompt
+(`HP recovered. SAVE? / Push A··YES / Push B··NO`, then `Now saving··!`) drawn
+**low** on the screen. `REGION_DIALOG` is rows 1-10 only, so both frames
+classified as `ow` — and a map screen renders as image tiles with **no text
+region**, so the prompt never reached the glasses while every arrow answered
+"can't go … — blocked" and the game sat waiting on an input it never showed you.
+`facing ?` in the text fallback was the tell; only `Peek` + looking at the tiles
+revealed it.
+
+Fix: `screens.py` gains `REGION_LOWBOX` (rows 11-28) and a `_boxish()` predicate,
+and classifies a low box with the dialogue rows empty as **`dialog`** — which is
+what hands the window its A/B verbs and a text region. Guarded so a shop
+(priced/WELCOME) still wins, and so plain map graphics can't trip it. Pinned by
+`fixtures/tent_prompt.npy` + `tent_saving.npy` and 12 new checks in
+`test_scrape_classify` (now 38), including two that assert the plain town maps
+are still map screens.
+
+## NOT a bug: a blocked step
+
+A townsperson parked on Coneria's south exit and every `↓` answered "can't go
+down — blocked". That is correct — FF1 map objects step only when the *player*
+steps, so bumping the wall forever never frees it, and a human simply walks
+around (or out of one of Coneria's other two exits). The defect was in the
+harness, which retried forever; the window's report was accurate and loud
+throughout. Recorded so the claim isn't repeated as a product fault.
+
+Suites after this session: ff1 harness **7/7** (46 battle + 38 scrape/classify
+checks + 27 daemon + 30 journey + 24 macros).

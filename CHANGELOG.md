@@ -4,6 +4,86 @@ Reverse-chronological. Each entry covers a published APK / server build, with th
 
 ---
 
+## server — 2026-08-14 — **FF1: Garland beaten on the live save; the invisible TENT prompt fixed**
+
+The boss path is no longer asm-derived — it was played. Adam's party went L1 → **L5**
+on 130 real encounters, geared up at Coneria (Rapier + Chain Armor / Iron Hammer / two
+Small Knives, all Cloth; ROUX taught CURE + FIRE, IRIS CURE, NOX + ZOT FIRE), bought a
+TENT, walked the 69 steps to the Temple of Fiends **without casting a single spell**,
+tented outside, and **beat Garland in two rounds, first attempt** (+250 G). Every input
+was a ring event through the `/pc` surface — `focus`, `tap`, `double_tap`, row taps —
+so anything it did is doable on-glass. Operator record: `games/ff1/BUILD_LOG.md`
+§ "Session 5"; the harness that ran it is `server/tools/ff1-play/`.
+
+**Fixed — the TENT/rest prompt was invisible.** Using a tent leaves FF1 showing
+`HP recovered. SAVE? / Push A··YES / Push B··NO` in a box drawn LOW on the screen.
+`REGION_DIALOG` covered rows 1-10 only, so the frame classified as `ow`; a map screen
+renders as image tiles with **no text region**, so the prompt never reached the glasses
+while every arrow answered "can't go … — blocked" and the game sat waiting on an input
+it never displayed. `screens.py` now scans a `REGION_LOWBOX` (rows 11-28) and classifies
+a low box with the dialogue rows empty as `dialog` — which is what gives the window its
+A/B verbs and a text region. Shops still win the tie (priced / WELCOME) and plain map
+graphics can't trip it. Pinned by two new fixtures and 12 checks (`test_scrape_classify`
+29 → 38).
+
+**Not a bug, recorded so it isn't re-reported as one:** a townsperson parking on
+Coneria's south exit makes `↓` answer "blocked" forever — FF1 objects step only when the
+player steps. The window's report was correct; the retry loop in the harness was not.
+
+Also learned and written down (`BUILD_LOG` § "World facts"): the overworld tile-property
+table at file `0x10` (bit 0 = impassable, byte 1 bit 7 = teleport, index = map + 1), the
+map-object table at `0x3410`, the real level-up EXP curve at `0x2D010` (L5 = 1171, not
+320), and that Garland's `btl_battletype` is **2 (mix)** — so the fiend/chaos branch
+(type ≥ 3) is still unverified and now waits on Lich.
+
+---
+
+## server — 2026-08-13 — **Final Fantasy 1: the real NES ROM, playable ring-only from the Games list**
+
+The 5th games-list row ships. Spec: `games/ff1/PLAN.md`; operator record + the on-glass
+checklist: `games/ff1/BUILD_LOG.md`. Commits `0cf60b9` → `fb43ff1`.
+
+**The shape (the Paperclips pattern, applied to a NES game).** The real FF1 USA ROM
+(Adam's dump, CRC32 `0xAB12ECE6`, MMC1+battery, `rom/` gitignored) runs headlessly in
+`cynes` inside a persistent Python daemon (`games/ff1/bridge/`, the `stt.ts` JSON-lines
+stdio pattern). The emulator is a game ENGINE, never a screen — G2CC renders its own
+native UI from RAM reads + deterministic 8×8 font-tile framebuffer scraping.
+
+**Why: the display physics.** Text updates in ~62 ms; image tiles take seconds-to-~10 s
+under work-BT conditions. So the prime directive is that **battles, shops, inns, menus,
+and dialogue NEVER touch an image** — all firmware text, full speed. Imagery is map
+navigation only: two stacked 1:1 tiles (256×110 + 256×112), pushed once per completed
+macro. Input is ring-only (dictation CUT by decision); double-tap is always back/exit —
+the music stuck-trap lesson.
+
+**Wire discipline inside the emulator.** Every RAM address traces to a vendored, cited
+source (`games/ff1/reference/`: Entroper/FF1Disassembly symbol tables + charmaps +
+`bank_0C.asm` for battle-menu semantics, Data Crystal maps, TASVideos RNG). Where Data
+Crystal and the disassembly disagreed, the disassembly won — then live RAM settled it
+anyway. Command entry = real presses on the emulated pad, verified against the game's own
+menu-state variables rather than assumed.
+
+**The lesson of the session — the fixtures were all blind.** The build passed its suite and
+was still unplayable past battle #1: `btl_result` was being zeroed at *resolution* start
+rather than *battle* start, so every fight after the first read a stale result. The harness
+never caught it because **every fixture captured a first battle**. Alongside it: the equip
+and item screens rendered with no arrows, L5–8 magic was unreachable, New Game was missing,
+and the ribbon had dead ends. All fixed and covered (`9208a6d`, `fb43ff1`), with a
+`battle_start_stale.npy` fixture added so the stale-read class can't come back. DRINK, the
+menu-cursor readout, and the geared acceptance gauntlet landed on top.
+
+**Authenticity guards (deliberate, §7.1/§8.3).** Enemy HP hidden by default, Ineffective
+whiffs preserved, round-boundary RNG honesty, no retarget fixes. The bridge is not permitted
+to soften the game. Adam's campaign — the unfinished One White Mage / Three Black Mages
+challenge run, party ROUX(RM)/IRIS(WM)/NOX(BM)/ZOT(BM) — was created, geared, and inn-saved
+by the production acceptance run. Savestates + an undo tail persist to Postgres; `.sav`
+export hands the run back to full-speed PC play.
+
+**Gates.** Off-glass proven end-to-end; smoke `phase-ff1.mjs` green (suite 37/38, the
+standing `phase10-calendar` OAuth red). On-glass latency measurement is Adam's checklist item.
+
+---
+
 ## server — 2026-08-05 (evening) — **The library consolidation: one root, canonical names, identity tooling, on-glass input fix**
 
 Adam's mandate (his decisions inline): consolidate ALL music into /home/user/Music
