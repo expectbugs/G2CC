@@ -25,7 +25,7 @@
 // timeouts anywhere (the pacer is a periodic task, like Main's dashboardPacer —
 // not a time-bounded wait).
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { JSDOM, VirtualConsole, type DOMWindow } from 'jsdom'
 import { query, registerMigration } from './store.js'
@@ -269,6 +269,15 @@ class PaperclipsEngine {
       for (const [k, v] of Object.entries(seed)) dom.window.localStorage.setItem(k, v)
     } catch (e) {
       throw new Error(`seeding localStorage failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    // The engine files are NOT vendored (Frank Lantz's work, no redistribution
+    // licence — games/paperclips/SOURCE.md). Missing = never fetched; say so
+    // usefully instead of leaking a bare ENOENT.
+    const missing = GAME_FILES.filter((f) => !existsSync(join(GAME_DIR, f)))
+    if (missing.length) {
+      throw new Error(
+        `engine files missing (${missing.join(', ')}) — run: node games/paperclips/fetch.mjs`,
+      )
     }
     for (const f of GAME_FILES) {
       const code = readFileSync(join(GAME_DIR, f), 'utf8')

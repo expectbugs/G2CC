@@ -1,21 +1,39 @@
-# Universal Paperclips — vendored game engine
+# Universal Paperclips — the game engine, fetched not vendored
 
 **Source:** https://www.decisionproblem.com/paperclips/ (`combat.js?v3`, `globals.js?v3`,
-`projects.js?v3`, `main.js?v3`), fetched 2026-06-27.
+`projects.js?v3`, `main.js?v3`), first fetched 2026-06-27.
 
 **By:** Frank Lantz / Bennett Foddy / Everybody House Games.
 
-## Why these files are here
+## ⚠ These four files are NOT in this repository — run the fetcher
+
+```bash
+node games/paperclips/fetch.mjs      # fetches + SHA-256-verifies the four engine files
+```
+
+`combat.js`, `globals.js`, `projects.js`, and `main.js` are **gitignored on purpose.** They are
+Frank Lantz's work. He published the game free on the open web, but under no licence that grants
+redistribution — so G2CC does not republish them. What the repo pins instead is the *provenance*:
+each file's URL and SHA-256 live in `fetch.mjs`, which refuses to write a file whose hash doesn't
+match. That preserves the same drift discipline the vendored copies gave us (a silent upstream
+change still can't move under us) without redistributing someone else's game.
+
+If you clone this repo, you fetch the engine from Frank Lantz's site — exactly as if you'd opened
+it in a browser. Go play the real thing there, and buy his other work.
+
+*(History: the four files were committed here from 2026-06-27 until 2026-08-14, when the repo went
+public and redistribution stopped being defensible.)*
+
+## Why the engine is here at all
 
 G2CC drives the *real, unmodified* game logic headlessly (jsdom, in `server/src/paperclips.ts`)
-so Adam can play it on his own G2 glasses. This is a personal, non-distributed, offline instance
-on hardware Adam owns — the same first-party device-interoperability framing as the rest of G2CC.
-We never reimplement or fork the game balance; we read its globals and call its global functions.
+so Adam can play it on his own G2 glasses — an offline, first-party instance on hardware he owns,
+the same device-interoperability framing as the rest of G2CC. We never reimplement or fork the
+game balance; we read its globals and call its global functions.
 
 ## What was changed
 
-**Nothing in the four `.js` files** — they are byte-for-byte upstream (pinned so a site update
-can't silently change the wire/behaviour under us; same drift discipline as the BLE protocol).
+**Nothing in the four `.js` files** — they are used byte-for-byte upstream, hash-pinned.
 
 `index.html` is the upstream `index2.html` **body with every `<script>` tag and HTML comment
 stripped** — the engine injects the four `.js` files itself, in the upstream load order
@@ -55,5 +73,11 @@ demand / creativity bonus) — exactly what a real reload preserves. See `reboot
 
 ## Re-vendoring
 
-If upstream changes and a known-good interaction breaks, re-fetch the four files and re-pin here,
-then re-run `server/smoke/phase-paperclips.mjs`.
+`fetch.mjs` will **loud-fail on a SHA-256 mismatch and write nothing** — that failure is the
+signal that upstream changed, not a bug to work around. When it happens:
+
+1. Diff the new file against your local copy and find what moved.
+2. Re-run `server/smoke/phase-paperclips.mjs` against the new code before trusting it.
+3. Only then update that file's `sha256` in `fetch.mjs`, noting the date.
+
+Never re-pin a hash you haven't diffed — the pin is the whole point.

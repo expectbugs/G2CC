@@ -169,3 +169,26 @@ Three rules run through the codebase, learned the hard way from a wearable that'
 
 Plus a hard *verify‑before‑execute* habit: reverse‑engineered wire values, external‑API types, and hardware
 settings are checked against a real source, never guessed.
+
+---
+
+## License
+
+**G2CC's own code is [AGPL‑3.0](LICENSE).** Fork it, modify it, run it, build on it, take the
+protocol work and go further with it — that's what it's here for. The one condition: if you
+distribute it or run a modified version as a network service, your source has to stay open under
+the same license. Nobody gets to close this up and sell it.
+
+**Third‑party material is not mine to license and is not covered by the AGPL.** Each piece is
+attributed where it lives:
+
+| What | Where | Terms |
+| --- | --- | --- |
+| Universal Paperclips engine (Frank Lantz / Everybody House Games) | `games/paperclips/` | **Not redistributed.** Fetched + hash‑verified from the author's site by `fetch.mjs` — see `SOURCE.md` |
+| FF1 disassembly symbols, constants, charmaps, `bank_0C.asm` (Disch / Entroper) | `games/ff1/reference/` | Informally permissive — *"can be used for whatever means you want"* |
+| cynes API stub + binding (MIT), BizHawk README (MIT), nes‑py tree listing (MIT) | `games/ff1/reference/` | MIT, attributed in that directory's `README.md` |
+| Data Crystal + TASVideos snapshots | `games/ff1/reference/` | Wiki/community reference text, cited with fetch dates |
+
+**No game ROMs, saves, or assets are in this repository, and none ever will be.** `games/ff1/`
+drives a ROM you supply yourself from your own cartridge dump; the directory is gitignored. The
+FF1 bridge is documentation of *addresses*, not distribution of *content*.

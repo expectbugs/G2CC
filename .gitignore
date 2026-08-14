@@ -13,6 +13,14 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Universal Paperclips engine — Frank Lantz's work, published free but under no
+# licence that grants redistribution. Fetched on demand + hash-verified instead:
+#   node games/paperclips/fetch.mjs     (rationale: games/paperclips/SOURCE.md)
+games/paperclips/combat.js
+games/paperclips/globals.js
+games/paperclips/projects.js
+games/paperclips/main.js
+
 # Audio captures (real workplace recordings — keep out of git)
 audio/samples/*.wav
 audio/samples/*.flac

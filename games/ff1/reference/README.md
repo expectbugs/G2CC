@@ -27,18 +27,26 @@ without re-fetching.
 |---|---|---|
 | `cynes-emulator.pyi` | **The cynes Python API authority** — the exact surface `bridge/macros.py` drives: `NES(rom)`, `step(frames)` → `(240,256,3)` RGB, `nes[addr]` read/write across the full CPU bus (incl. cart SRAM `$6000-$7FFF`), `controller` bitmask, `save()`/`load()`, `reset()`, `has_crashed`. Cite as `reference/cynes-emulator.pyi :: <symbol>`. | github.com/Youlixx/cynes, MIT — fetched 2026-08-12 |
 | `cynes-wrapper.cpp` | The pybind11 binding behind that stub: what `save()`/`load()` actually serialise and that `__getitem__`/`__setitem__` go through the bus rather than a RAM copy. | same |
-| `mesen2-CommandLineHelper.cs` | Mesen 2's command-line entry handling, read while judging how headless it could be made. Mesen 2 is also the cross-check emulator PLAN.md §6 names for live-RAM confirmation and the `.sav` export target (§9). | github.com/SourMesen/Mesen2, **GPL-3.0** — fetched 2026-08-12 |
 | `bizhawk-README.md` | BizHawk's project README — cores, features, and the shape of its scripting/CLI surface. | github.com/TASEmulators/BizHawk, MIT — fetched 2026-08-12 |
 | `nespy-tree.json` | GitHub API tree listing (165 paths) for nes-py — a repo inventory, no source code. | github.com/Kautenja/nes-py, MIT — API fetch 2026-08-12 |
 
-License note (emulator sources): each row above states its own upstream licence.
-`mesen2-CommandLineHelper.cs` is the one **copyleft** item (GPL-3.0) — it is
-vendored as unmodified reference text in a private repository, is not linked,
-compiled, or distributed with anything here, and nothing in `bridge/` derives
-from it. The cynes files are MIT; note that upstream's `.pyi` header carries a
-stray `gnu.org/licenses` URL, but the package's own `LICENSE` is MIT (verified
-against the installed wheel's `dist-info`). Only the runtime dependency, cynes,
-is actually used — see `PLAN.md` §2.
+**Removed 2026-08-14: `mesen2-CommandLineHelper.cs`** (Mesen 2's command-line
+entry handling, read while judging how headless Mesen could be made —
+github.com/SourMesen/Mesen2, **GPL-3.0**). It was the one copyleft item here,
+and it stopped being defensible to carry when this repo went public: G2CC is
+AGPL-3.0 and the file is unmodified third-party GPL source that nothing in
+`bridge/` derives from or links against. Deleting it honours the GPL exactly —
+no distribution, no obligation — and costs nothing, since `cynes` won the
+decision it informed. Read it upstream if the comparison ever needs re-running.
+Mesen 2 remains the cross-check emulator `PLAN.md` §6 names for live-RAM
+confirmation and the `.sav` export target (§9); that's a tool you run, not code
+this repo ships.
+
+License note (emulator sources): each row above states its own upstream licence
+and all are MIT — redistributable here with the attribution given. Note that
+cynes' `.pyi` header carries a stray `gnu.org/licenses` URL, but the package's
+own `LICENSE` is MIT (verified against the installed wheel's `dist-info`). Only
+the runtime dependency, cynes, is actually used — see `PLAN.md` §2.
 
 License note (FF1 disassembly): the disassembly ships no LICENSE file; its readme states "This can
 be used for whatever means you want" (Disch, informal permissive). What is
