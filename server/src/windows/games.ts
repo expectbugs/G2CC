@@ -1,4 +1,5 @@
-// windows/games.ts — rpg-cli dungeon + chess vs Stockfish + Universal Paperclips (Phase 1 §1.3).
+// windows/games.ts — rpg-cli dungeon + chess vs Stockfish + Universal Paperclips (Phase 1 §1.3)
+// + Blackjack (2026-06-29) + FF1 (2026-08-13, games/ff1/PLAN.md) — the five games-list rows.
 // Pure move out of os-windows.ts; behaviour unchanged. See docs/WINDOW_API.md.
 
 import { readdirSync } from 'node:fs'

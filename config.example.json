@@ -12,6 +12,7 @@
     "whisperModel": "large-v3",
     "whisperDevice": "cuda",
     "whisperCompute": "float16",
+    "//parakeetModel": "The NeMo ASR model id (env override: G2CC_ASR_MODEL). The value below is the built-in default; the DEPLOYED choice is 'nvidia/canary-qwen-2.5b', which won the 2026-07-23 8-model shootout on real adaptive-filtered captures — set it here to match. Always re-run the shootout when changing this OR the noise filter: they are validated as a pairing.",
     "parakeetModel": "nvidia/parakeet-tdt-0.6b-v2"
   },
   "claude": {
@@ -73,8 +74,8 @@
     "notify": { "call": "speak", "timer": "speak", "sms": "chime+name", "email": "silent", "info": "silent" }
   },
   "music": {
-    "//": "Earbud music lane. format 'opus' = 96k MONO loudnorm transcode, cached (cellular-kind; the one-earbud mono rule enforced at the source); 'raw' = range-served originals.",
-    "libraryDirs": ["/mnt/slug/Music"],
+    "//": "Music app (docs/MUSIC_SPEC.md). format 'opus' = 96k MONO loudnorm transcode, cached (cellular-kind; the one-earbud mono rule enforced at the source); 'raw' = range-served originals. Since the 2026-08-05 consolidation the whole library lives under the single root /home/user/Music (Library/ Collections/ Archive/ Unsorted/); organize.ts is the naming/filing authority.",
+    "libraryDirs": ["/mnt/slug/Music", "/home/user/Music"],
     "format": "opus",
     "cacheDir": "~/.g2cc/media-cache"
   },

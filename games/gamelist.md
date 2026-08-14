@@ -5,7 +5,7 @@ what the game is, why it fits the G2 input/display model, and the concrete bridg
 (how the PC-side game connects to a G2CC window). This is a planning doc; per-game specifics
 get hashed out in a dedicated session.
 
-Last updated 2026-06-28.
+Last updated 2026-08-13 (FF1 shipped).
 
 ## The fit lens (why these and not others)
 

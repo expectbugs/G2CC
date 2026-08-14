@@ -1,7 +1,7 @@
 # G2CC — G2 Control Center
 
 **A custom operating environment for [Even Realities G2](https://www.evenrealities.com/) smart glasses.**
-It replaces the vendor's companion app with a home-built stack that turns the glasses into a small, fully windowed computer you drive from your own PC. The vendor app — and the Even Hub store behind it — already offers apps, games, news, and email; G2CC's edge is a different one: cohesiveness, deep customization, PC-powered capabilities, persistent sessions, more robust connectivity, independence from the vendor's decisions and limits, and privacy — nothing in it touches Even Realities' servers or proprietary stack.
+It replaces the vendor's companion app with a home-built stack that turns the glasses into a small, fully windowed computer you drive from your own PC. The vendor app — and the Even Hub store behind it — already offers apps, games, news, and email; G2CC's edge is a different one: cohesiveness, deep customization, PC-powered capabilities, persistent sessions, more robust connectivity, independence from the vendor's decisions and limits, and privacy — the running system never touches Even Realities' servers or SDK (the one exception is `sdk-demo/`, a throwaway app used only to capture their wire format for decoding).
 
 The trick is a clean split of responsibilities:
 
@@ -40,8 +40,9 @@ strict per‑frame size limits. You navigate with the temple's touch bar and the
 | **Files** | Browse the PC's filesystem, preview text + images, move/copy/rename/trash |
 | **Terminal (Tmux)** | Attach to tmux sessions and watch/drive them live |
 | **Calendar** / **Timers** / **Deliveries** | Agenda, countdowns, and package tracking |
-| **Media** | Now‑playing controls + synced lyrics for whatever's on the phone |
-| **Games** | Blackjack, a text roguelike, and *Universal Paperclips* running in a headless DOM |
+| **Music** | A Spotify‑shaped player for your own PC library — a catalogued music knowledge base, fuzzy requests ("play some hard metal stuff"), playlists, radio, and explicit YouTube grabs |
+| **Media** | Now‑playing controls + synced lyrics for whatever else is playing on the phone |
+| **Games** | *Final Fantasy 1* on the real NES ROM (below), chess vs Stockfish, Blackjack, a text roguelike, and *Universal Paperclips* running in a headless DOM |
 | **Search** | One dictated query across mail, files, conversation history, and notes |
 
 **The desktop ("the ribbon"):** a most‑recently‑used app strip lives in the top bar, driven by the ring —
@@ -70,6 +71,30 @@ whenever you change the font. G2CC's Reader instead:
 
 Your reading position is stored as a real anchor, bookmark‑able from the menu, and survives layout changes.
 
+### Feature spotlight: Final Fantasy 1
+
+The actual 1987 NES game — the real ROM, the real save file — played from the glasses with nothing
+but the ring and the touch bar.
+
+The constraint that shaped it: on the G2, **text updates in ~62 ms and image tiles take seconds**.
+Streaming an emulator's video output would be unplayable. So the emulator isn't a screen — it's a
+*game engine*:
+
+- **`cynes` runs the ROM headlessly** in a persistent Python daemon on the PC.
+- **Battles, shops, inns, menus, and dialogue never touch an image.** The bridge reads the game's own
+  RAM and scrapes its framebuffer with deterministic 8×8 font‑tile matching, then G2CC re‑renders
+  the whole thing as native firmware text — full speed.
+- **Images are for map navigation only**, as two stacked 1:1 tiles pushed once per completed
+  movement macro.
+- **Commands are real controller presses** on the emulated pad, confirmed against the game's own
+  menu‑state variables — every RAM address traced to a cited disassembly, same wire‑format
+  discipline as the Bluetooth work.
+- **Authenticity is guarded on purpose**: enemy HP stays hidden, whiffed spells still whiff, and the
+  RNG is honest at round boundaries. The bridge is not allowed to soften the game.
+
+Savestates and an undo tail live in Postgres, and the `.sav` exports back out so a run started on
+the glasses can be finished at full speed on the PC.
+
 ---
 
 ## How it works
@@ -78,7 +103,7 @@ Your reading position is stored as a real anchor, bookmark‑able from the menu,
   Home PC (the brain)                                Glasses (thin client)
   ┌────────────────────────────────────┐  frame   ┌─────────────────────────────┐
   │ window manager   (navigation/state)│ ───────► │ WebSocket ← phone bridge    │
-  │ 15 windows       (content providers)│          │ scene(JSON) → renderer      │
+  │ 17 windows      (content providers)│          │ scene(JSON) → renderer      │
   │ compositor       (→ display frame) │ ◄─────── │   → Bluetooth LE → lenses   │
   │ AI subprocess bridge · PostgreSQL  │  input   │ ring/touch events           │
   └────────────────────────────────────┘          └─────────────────────────────┘
@@ -99,9 +124,11 @@ Your reading position is stored as a real anchor, bookmark‑able from the menu,
   scene‑to‑PNG renderer for developing UI without the hardware.
 - **Client:** Kotlin / Android — a foreground service, a BLE driver, notification mirroring, and the frame
   renderer. Zero app‑side state.
-- **Audio/STT:** a Python pipeline — noise reduction (learned‑profile spectral subtraction, with a two‑mic
-  adaptive‑filter front end, evidence‑tuned on real captures) + a config‑selected NeMo ASR
-  model (Canary‑Qwen 2.5B today), CUDA‑accelerated.
+- **Audio/STT:** a Python pipeline — per‑utterance adaptive Wiener noise reduction, which beat both
+  learned‑profile spectral subtraction and a two‑mic adaptive filter on real workplace captures
+  (both kept in‑tree as fallbacks) + a config‑selected NeMo ASR model (Canary‑Qwen 2.5B today),
+  CUDA‑accelerated. The filter and the ASR model are always validated as a *pairing* — swapping
+  either one alone has silently wrecked accuracy before.
 
 ## Repository layout
 
@@ -111,8 +138,10 @@ server/          the Node server — window manager, the windows, the compositor
   smoke/         the regression suite
 android/         the Kotlin client (foreground service, BLE, renderer)
 audio/           the Python audio + speech‑to‑text pipeline
+games/           the game bridges — FF1's emulator daemon, Paperclips, the rest
 scripts/         helpers — EPUB/terminal/image → renderable content, scene → PNG
 shared/          the wire contract shared by both ends
+sdk-demo/        the vendor‑SDK capability demonstrator used to decode the wire format
 docs/            protocol notes, the display/UI contract, capability maps (see docs/README.md — the index)
 ```
 
@@ -126,6 +155,9 @@ how most of the UI is actually developed.
 ```bash
 npm run build -w server && node server/smoke/run-all.mjs   # build + the regression gate
 ```
+
+(38 suites; `phase10-calendar` needs Google Calendar OAuth credentials this repo doesn't ship, so
+37/38 is the expected result from a clean clone.)
 
 ## Engineering principles
 

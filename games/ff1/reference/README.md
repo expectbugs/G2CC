@@ -17,8 +17,11 @@ the AUTHORITY for `bridge/ramspec.py` and `data/charmap.json` — cite as
 | `bank_0C.asm` | Battle engine bank source — the battle MENU semantics authority (MenuSelection_2x4 edge-triggered input, SelectPlayerTarget/SelectEnemyTarget, BattleSubMenu_Magic index math, cmdbuf write sites). Vendored at Ph-B when the menu behavior had to be read, not guessed. | github.com/Entroper/FF1Disassembly @ master, fetched 2026-08-12 |
 
 License note: the disassembly ships no LICENSE file; its readme states "This can
-be used for whatever means you want" (Disch, informal permissive). Private-repo
-reference use. Where Data Crystal and the disassembly disagree (MP cur/max
+be used for whatever means you want" (Disch, informal permissive). What is
+vendored here is **text only** — symbol tables, constants, charmaps, and one
+bank of assembly source, each attributed above. **No ROM, no game assets, and
+no assembled binary are in this repository** (`rom/` is gitignored); running the
+bridge requires supplying your own dump. Where Data Crystal and the disassembly disagree (MP cur/max
 order, vehicle addr), **the disassembly wins** — it reassembles to the exact US
 ROM — but PLAN.md flags each conflict for a live-RAM sanity check anyway.
 

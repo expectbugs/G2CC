@@ -50,3 +50,8 @@ Read top-down when fresh; the per-file notes say which is which.
 (DE/WM overhaul, Phases 1–3 + ledger) · `CHANGELOG.md` = the WHY of every change ·
 `upgrades.md` + `UPGRADE_PROGRESS.md` = the (completed) v2 queue + its record ·
 `g2_custom_app_spec.md` = the canonical build spec (wins over everything on conflict).
+
+**Games** live outside `docs/`: `games/gamelist.md` = the candidate list + the fit lens ·
+`games/ff1/PLAN.md` = **the FF1 build contract** (SHIPPED 2026-08-13; the emulator-as-engine
+design, every RAM address cited to `games/ff1/reference/`) · `games/ff1/BUILD_LOG.md` = its
+operator record + the on-glass checklist.
