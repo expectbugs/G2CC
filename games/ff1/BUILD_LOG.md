@@ -16,7 +16,7 @@ started 2026-08-12. Adam reads this in the evening — per-phase entries below.
   `ckpt_named.npy`, `ckpt_all_named.npy`, `ckpt_confirm.npy`,
   `ckpt_postmenu.npy`, `ckpt_poststart.npy` + stage PNGs.
 - cynes API surface re-verified from the spike session's `.pyi` dump
-  (repo root `cynes-emulator.pyi`): controller bit layout (bit0=Right …
+  (`reference/cynes-emulator.pyi`): controller bit layout (bit0=Right …
   bit7=A, P2 high byte), `reset()` KEEPS RAM (→ the .sav import path),
   `save()/load()`, `step(frames)` → (240,256,3) RGB read-only view,
   `has_crashed` flag.
@@ -741,10 +741,12 @@ gold 80 · overworld (153,170), south of Coneria · inn save present
 - Data JSONs load in the daemon at startup (enemy names for formation
   labels; charmap for ch_name decode) — keep that wiring when touching it.
 - The four L1 white spells price 100 G each in Coneria; CURE = list index 0.
-- `git status` baseline oddities that are NOT ours: repo-root untracked
-  bizhawk-README.md, cynes-emulator.pyi, cynes-wrapper.cpp,
-  mesen2-CommandLineHelper.cs, nespy-tree.json (P0 research droppings —
-  leave them; games/gamelist.md modification predates this session too).
+- The P0 research droppings that used to sit loose in the repo root
+  (bizhawk-README.md, cynes-emulator.pyi, cynes-wrapper.cpp,
+  mesen2-CommandLineHelper.cs, nespy-tree.json) were FILED into
+  `reference/` on 2026-08-14, each with its upstream licence — see that
+  directory's README. `cynes-emulator.pyi` is the cynes API authority and is
+  cited from Ph-A onward.
 
 ---
 

@@ -1,0 +1,1305 @@
+{
+  "sha": "301da52f7f75de380e6e195fd36621c3d5b03757",
+  "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/301da52f7f75de380e6e195fd36621c3d5b03757",
+  "tree": [
+    {
+      "path": ".clang_complete",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "14e577af1055c29f61881be569e3bd30408b6eb3",
+      "size": 21,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/14e577af1055c29f61881be569e3bd30408b6eb3"
+    },
+    {
+      "path": ".github",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "82493b14103777e66fb558155ee75a00de9d5879",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/82493b14103777e66fb558155ee75a00de9d5879"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "0ec52e74bd5aea755dfd662d152f12519e79ba5f",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/0ec52e74bd5aea755dfd662d152f12519e79ba5f"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug_report.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1915672c8bc723c38efc9f195620f13bf52c52bc",
+      "size": 741,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/1915672c8bc723c38efc9f195620f13bf52c52bc"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/feature_request.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "954cc21e3969661ab71dd69a240036bc6ff199f1",
+      "size": 586,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/954cc21e3969661ab71dd69a240036bc6ff199f1"
+    },
+    {
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b4076ca233b02e10d49da14aa2b74c3226bae4c3",
+      "size": 1122,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/b4076ca233b02e10d49da14aa2b74c3226bae4c3"
+    },
+    {
+      "path": ".github/workflows",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "b8d9809b53db9adf1fbbe728a016183206c757c9",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/b8d9809b53db9adf1fbbe728a016183206c757c9"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d8d56d0cc3b74948de93374577457e0623d0487f",
+      "size": 3200,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/d8d56d0cc3b74948de93374577457e0623d0487f"
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d4012c467b964b1ecafa8ec591de2697a3535d9d",
+      "size": 4015,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/d4012c467b964b1ecafa8ec591de2697a3535d9d"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cfd974f14b6fd7443d6c44e1eae4e0a3235f72fe",
+      "size": 2487,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/cfd974f14b6fd7443d6c44e1eae4e0a3235f72fe"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e316589476c42430c70ba2b4be7a7b0f38fad894",
+      "size": 13412,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e316589476c42430c70ba2b4be7a7b0f38fad894"
+    },
+    {
+      "path": "CMakeLists.txt",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "54ab223b30b1c5db62b58937ebe70899fbb102c5",
+      "size": 4351,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/54ab223b30b1c5db62b58937ebe70899fbb102c5"
+    },
+    {
+      "path": "LICENSE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "05e741efe22828c8cfca9718427bfc6bb7bafa48",
+      "size": 1073,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/05e741efe22828c8cfca9718427bfc6bb7bafa48"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f4d908f49e88c9076b3b1191631e73fe08bd4735",
+      "size": 15169,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/f4d908f49e88c9076b3b1191631e73fe08bd4735"
+    },
+    {
+      "path": "__main__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d0007d5f2074f80274fcff31d5cbd57720c0aced",
+      "size": 127,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/d0007d5f2074f80274fcff31d5cbd57720c0aced"
+    },
+    {
+      "path": "docs",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "752f6a7a15838c931912b708c27177b65efc193f",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/752f6a7a15838c931912b708c27177b65efc193f"
+    },
+    {
+      "path": "docs/explicit-state-snapshot-api.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eed5398a260bc2610ae5bdeab293861a61c33d03",
+      "size": 2868,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/eed5398a260bc2610ae5bdeab293861a61c33d03"
+    },
+    {
+      "path": "docs/mapper-bank-helper-performance.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9de995eaa8fda810c12ec9ad0ab3375bd7052277",
+      "size": 780,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/9de995eaa8fda810c12ec9ad0ab3375bd7052277"
+    },
+    {
+      "path": "docs/mapper-direct-read-fast-paths.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fd076d48deab69597fedcb360eef3bc0ee00d032",
+      "size": 2979,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/fd076d48deab69597fedcb360eef3bc0ee00d032"
+    },
+    {
+      "path": "docs/ml-observation-fast-paths.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "38f282f610de93963553768e38a407afa40acedb",
+      "size": 2749,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/38f282f610de93963553768e38a407afa40acedb"
+    },
+    {
+      "path": "docs/native-batch-ram-info-reads.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dab964ff5cf0fa85432e571417c529031c1878d6",
+      "size": 2430,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/dab964ff5cf0fa85432e571417c529031c1878d6"
+    },
+    {
+      "path": "docs/native-hot-path-optimization-benchmarks.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0fd8fe454d0209b6a6fac74edb3ea6afc1cf5dd9",
+      "size": 5116,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0fd8fe454d0209b6a6fac74edb3ea6afc1cf5dd9"
+    },
+    {
+      "path": "docs/native-mapper-api-performance-follow-up.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "783fa3b629dd5df88fcf2c6ab796c916b773eaf7",
+      "size": 1470,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/783fa3b629dd5df88fcf2c6ab796c916b773eaf7"
+    },
+    {
+      "path": "docs/native-mapper-capability-gaps.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0151141f4ae0f0721475b22f7ab9e867fa275e92",
+      "size": 2012,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0151141f4ae0f0721475b22f7ab9e867fa275e92"
+    },
+    {
+      "path": "docs/ppu-addressing-render-pipeline-benchmarks.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f7a7e4372aca9fc957aafac41e33fbd46d9dc292",
+      "size": 1069,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/f7a7e4372aca9fc957aafac41e33fbd46d9dc292"
+    },
+    {
+      "path": "docs/ppu-benchmark-suite-baseline.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0be60303c96fdbb1bcf8df2672685f0c9bbe28ec",
+      "size": 4032,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0be60303c96fdbb1bcf8df2672685f0c9bbe28ec"
+    },
+    {
+      "path": "docs/vector-native-emulator.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "60ed865ff3414dea076bfd698949cc83042dd4b7",
+      "size": 4301,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/60ed865ff3414dea076bfd698949cc83042dd4b7"
+    },
+    {
+      "path": "docs/vector-throughput-instrumentation.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "33f5ab7f273c78a1cd66c089fe59bb9a10e2d234",
+      "size": 2768,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/33f5ab7f273c78a1cd66c089fe59bb9a10e2d234"
+    },
+    {
+      "path": "main.sh",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "e0b0323abb791f6f88ca6c8524ef0273b9102734",
+      "size": 4861,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e0b0323abb791f6f88ca6c8524ef0273b9102734"
+    },
+    {
+      "path": "nes_emu",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e5e5cdf4728447e04c8fb577240dda3aa3565959",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/e5e5cdf4728447e04c8fb577240dda3aa3565959"
+    },
+    {
+      "path": "nes_emu/benchmark",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "030b2e57321e005747d88d7078bcee07183b19f5",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/030b2e57321e005747d88d7078bcee07183b19f5"
+    },
+    {
+      "path": "nes_emu/benchmark/nes_emu",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "5b128a2a9eb1ee9d923b6b41d845473e182aed40",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/5b128a2a9eb1ee9d923b6b41d845473e182aed40"
+    },
+    {
+      "path": "nes_emu/benchmark/nes_emu/benchmark_hot_paths.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "42e26b8e77dc973d2e3ab159df682f9378e553fe",
+      "size": 3005,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/42e26b8e77dc973d2e3ab159df682f9378e553fe"
+    },
+    {
+      "path": "nes_emu/benchmark/nes_emu/benchmark_ppu_profiles.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0ca066da7502c07da13f07e5275d205e83249679",
+      "size": 24304,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0ca066da7502c07da13f07e5275d205e83249679"
+    },
+    {
+      "path": "nes_emu/include",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "4ff6259a998da93d83c7e84a1061176311d57b5a",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/4ff6259a998da93d83c7e84a1061176311d57b5a"
+    },
+    {
+      "path": "nes_emu/include/nes_emu",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "d8b6787463101947403ee0cad8a67d080b98e52a",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/d8b6787463101947403ee0cad8a67d080b98e52a"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/cartridge.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8debf304e61431e9fdce8a99f2dd3439b08edc75",
+      "size": 4138,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/8debf304e61431e9fdce8a99f2dd3439b08edc75"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/common.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "828a15010b44f56351f5a04a6fe5a74b97504683",
+      "size": 616,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/828a15010b44f56351f5a04a6fe5a74b97504683"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/controller.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8bb317c5c39ed72e035230a901e6b0bc59397139",
+      "size": 1326,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/8bb317c5c39ed72e035230a901e6b0bc59397139"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/cpu.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a7735e6cadf92c67fd4a82858af3213365857418",
+      "size": 7480,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/a7735e6cadf92c67fd4a82858af3213365857418"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/cpu_opcodes.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0a32bae04a6b3d4195926ee82d7efb2ba59d7b32",
+      "size": 5045,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0a32bae04a6b3d4195926ee82d7efb2ba59d7b32"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/emulator.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4498f898e8ad02d28d9ee78ade0a5c125c121fa3",
+      "size": 5803,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/4498f898e8ad02d28d9ee78ade0a5c125c121fa3"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/log.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "320de8919902a9de48d46dfca7c2df3be00f8fc5",
+      "size": 422,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/320de8919902a9de48d46dfca7c2df3be00f8fc5"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/main_bus.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3079cdf52b7db6196e5ee98da1bbd9ffbeda191c",
+      "size": 5666,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/3079cdf52b7db6196e5ee98da1bbd9ffbeda191c"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mapper.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5987c640b2edad5e604d4178a56cc1a739f784d2",
+      "size": 11341,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/5987c640b2edad5e604d4178a56cc1a739f784d2"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mapper_bank.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8538f74ff091191ef2391a0395eb36ed1a0e33d2",
+      "size": 7602,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/8538f74ff091191ef2391a0395eb36ed1a0e33d2"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mapper_factory.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "316a8440ca16ff72a1f78408d1b81407955b59b3",
+      "size": 647,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/316a8440ca16ff72a1f78408d1b81407955b59b3"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e8180fe4c5918204e18dc8774aa213ca68f247ca",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/e8180fe4c5918204e18dc8774aa213ca68f247ca"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers/mapper_AxROM.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "87abb20095ac5022f8bee6f68551b0c63c0b25ad",
+      "size": 2264,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/87abb20095ac5022f8bee6f68551b0c63c0b25ad"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers/mapper_CNROM.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a9d2d18f41c50e7ff9ecef94c1b852c1828ccd2e",
+      "size": 3526,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/a9d2d18f41c50e7ff9ecef94c1b852c1828ccd2e"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers/mapper_FME7.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0b7e71f44a8e63492ecd3728c4e479269dccfb47",
+      "size": 4265,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0b7e71f44a8e63492ecd3728c4e479269dccfb47"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers/mapper_MMC2.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1eab92bbf0f0a837eb433d7450fd1bbc74fb6bab",
+      "size": 4085,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/1eab92bbf0f0a837eb433d7450fd1bbc74fb6bab"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers/mapper_MMC3.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7e861d692591db6fc0e10ae72f362818ec686ecc",
+      "size": 4413,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/7e861d692591db6fc0e10ae72f362818ec686ecc"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers/mapper_MMC5.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "44964afeef507f7f3bdc92f824cd1db2d562cfdc",
+      "size": 6805,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/44964afeef507f7f3bdc92f824cd1db2d562cfdc"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers/mapper_NROM.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e1a5b371fb6a429805192753a29528286f9de25f",
+      "size": 3427,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e1a5b371fb6a429805192753a29528286f9de25f"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers/mapper_SxROM.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "087958291028931ae56e33497aff539c930b231b",
+      "size": 3447,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/087958291028931ae56e33497aff539c930b231b"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/mappers/mapper_UxROM.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "53c6cf68f4ba8e1753cd0dc42be4fc234322751e",
+      "size": 2492,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/53c6cf68f4ba8e1753cd0dc42be4fc234322751e"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/palette.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2d9a832a070418b0fe791e80e38c959464caa0db",
+      "size": 1098,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/2d9a832a070418b0fe791e80e38c959464caa0db"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/picture_bus.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "08417c524ecdc763f7477771cd067911fe088123",
+      "size": 7708,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/08417c524ecdc763f7477771cd067911fe088123"
+    },
+    {
+      "path": "nes_emu/include/nes_emu/ppu.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fa016fe6ecc45f2a51333c1bb6ee78e1665eb163",
+      "size": 11319,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/fa016fe6ecc45f2a51333c1bb6ee78e1665eb163"
+    },
+    {
+      "path": "nes_emu/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "b6d8628bc78a2c114ecb66449ed2634b43829b2c",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/b6d8628bc78a2c114ecb66449ed2634b43829b2c"
+    },
+    {
+      "path": "nes_emu/src/nes_emu",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "64d5a7bc36fab855e9ff8ca2adc5bc6d87d9f0ac",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/64d5a7bc36fab855e9ff8ca2adc5bc6d87d9f0ac"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/cartridge.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "23e5e4d2d5b8389570fb78b375e219fb0a9f8ce1",
+      "size": 6127,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/23e5e4d2d5b8389570fb78b375e219fb0a9f8ce1"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/controller.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "407d07b086740ae594af6c2eafe958f9b5b65614",
+      "size": 486,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/407d07b086740ae594af6c2eafe958f9b5b65614"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/cpu.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "05fbdde3ed14439670b05d1d6b5c153c5149b077",
+      "size": 21246,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/05fbdde3ed14439670b05d1d6b5c153c5149b077"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/emulator.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b1bf6eeb086dcf1700bafa196a52b08967526083",
+      "size": 5235,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/b1bf6eeb086dcf1700bafa196a52b08967526083"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/lib_nes_env.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c6dd6bbd6c83f629cc9078a559c460d5bf4d728e",
+      "size": 200,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/c6dd6bbd6c83f629cc9078a559c460d5bf4d728e"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/main_bus.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4c08f52a50dde5b9fa828af713e8118834a9560c",
+      "size": 7456,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/4c08f52a50dde5b9fa828af713e8118834a9560c"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mapper_factory.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4315da53448c83c672c762c023b5341d92658ac5",
+      "size": 1930,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/4315da53448c83c672c762c023b5341d92658ac5"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8165d89636be20d2aca08c4cd7877ae6b9392b5c",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/8165d89636be20d2aca08c4cd7877ae6b9392b5c"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers/mapper_AxROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a41fb194ae7b62d9e9a9a5b25874eea1b7cf598b",
+      "size": 1303,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/a41fb194ae7b62d9e9a9a5b25874eea1b7cf598b"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers/mapper_CNROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b2ea5dcded241b9f0a757101b3814e9f8b8abc8e",
+      "size": 374,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/b2ea5dcded241b9f0a757101b3814e9f8b8abc8e"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers/mapper_FME7.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4267eb29ae9143ffdcb377995293801813951728",
+      "size": 6391,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/4267eb29ae9143ffdcb377995293801813951728"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers/mapper_MMC2.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "60d8575b007a2b0ab4952f085ebaea9b78160ca3",
+      "size": 5539,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/60d8575b007a2b0ab4952f085ebaea9b78160ca3"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers/mapper_MMC3.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5d3f5965641d8255f798a8e1e69888d425ee7982",
+      "size": 7836,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/5d3f5965641d8255f798a8e1e69888d425ee7982"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers/mapper_MMC5.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "09b534e9334238d4197338020c1b3e72f17fc76c",
+      "size": 15884,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/09b534e9334238d4197338020c1b3e72f17fc76c"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers/mapper_NROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e18fb13c84359d6149084386d63bc4c8fbc7331d",
+      "size": 770,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e18fb13c84359d6149084386d63bc4c8fbc7331d"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers/mapper_SxROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e3025a9713e54fbf95f7b5ce7907abedc4e33f44",
+      "size": 4251,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e3025a9713e54fbf95f7b5ce7907abedc4e33f44"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/mappers/mapper_UxROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "828f221c14d55c8861ce611ca124c3ab2167ccfd",
+      "size": 2063,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/828f221c14d55c8861ce611ca124c3ab2167ccfd"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/picture_bus.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a8b31b395b873f71c3331a86877f6f29a2491000",
+      "size": 6266,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/a8b31b395b873f71c3331a86877f6f29a2491000"
+    },
+    {
+      "path": "nes_emu/src/nes_emu/ppu.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "10651808b876e138972da0345adad1ce4bed985f",
+      "size": 28246,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/10651808b876e138972da0345adad1ce4bed985f"
+    },
+    {
+      "path": "nes_emu/test",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "083bc2d91196fd2d9de756eb86a729bbbd8e485f",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/083bc2d91196fd2d9de756eb86a729bbbd8e485f"
+    },
+    {
+      "path": "nes_emu/test/nes_emu",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8215197be2d7e478fd9ff7e626c3973434ad5b8b",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/8215197be2d7e478fd9ff7e626c3973434ad5b8b"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "208fcdc3befc12b9ae747e87f32a03e7b3bdd729",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/208fcdc3befc12b9ae747e87f32a03e7b3bdd729"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers/test_mapper_AxROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f3f0aa1a8572dd87574ffd1df9387c775d4a10b9",
+      "size": 6197,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/f3f0aa1a8572dd87574ffd1df9387c775d4a10b9"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers/test_mapper_CNROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5bd6b08086296f873c183530565149098837b78e",
+      "size": 3287,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/5bd6b08086296f873c183530565149098837b78e"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers/test_mapper_FME7.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3ef15105a0b38cd7d48b1af0863a798faa9afd56",
+      "size": 10448,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/3ef15105a0b38cd7d48b1af0863a798faa9afd56"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers/test_mapper_MMC2.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "738dc70373321213e423efff58cef5b6bcecaf50",
+      "size": 5646,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/738dc70373321213e423efff58cef5b6bcecaf50"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers/test_mapper_MMC3.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2ea14a290368720f6506bc3f4c285ddf6dde5587",
+      "size": 11753,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/2ea14a290368720f6506bc3f4c285ddf6dde5587"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers/test_mapper_MMC5.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0421a803b5ff12470ab3fcc0db9ac0c11cdc0e0c",
+      "size": 10147,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0421a803b5ff12470ab3fcc0db9ac0c11cdc0e0c"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers/test_mapper_NROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7f298a631c4a55a5a81166bdc38c4ab25c7c36ed",
+      "size": 3942,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/7f298a631c4a55a5a81166bdc38c4ab25c7c36ed"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers/test_mapper_SxROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "445a47819b76887b9ce560fca45f5168c24b926f",
+      "size": 8685,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/445a47819b76887b9ce560fca45f5168c24b926f"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/mappers/test_mapper_UxROM.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1fafe0ebd3452d2d30b091e74cd825ae17c10532",
+      "size": 3043,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/1fafe0ebd3452d2d30b091e74cd825ae17c10532"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/support",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "27d675431ac8fc0184e9fb47b2e9558ced04ead0",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/27d675431ac8fc0184e9fb47b2e9558ced04ead0"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/support/emulator_inspector.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e3dda70b8c9423244bebeb9ec335bb2d3b626800",
+      "size": 1240,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e3dda70b8c9423244bebeb9ec335bb2d3b626800"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/support/mapper_test_helpers.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5b5dc22e461bf757c765a4d30d7b653b60480ff3",
+      "size": 1640,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/5b5dc22e461bf757c765a4d30d7b653b60480ff3"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/support/synthetic_rom.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6120688125fc1c3c1c0a3ffbc355076406b257f9",
+      "size": 6790,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/6120688125fc1c3c1c0a3ffbc355076406b257f9"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/support/test_mappers.hpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a5d78bf3342a64e63aecb99b0f82e7c8796e0c14",
+      "size": 14684,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/a5d78bf3342a64e63aecb99b0f82e7c8796e0c14"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/test_cartridge.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0bfbf645d22a0a00c7f5caa805d23e1151c5df6f",
+      "size": 11391,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0bfbf645d22a0a00c7f5caa805d23e1151c5df6f"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/test_cpu.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "916217d39620f8292b4ebd574df9f28250d47f56",
+      "size": 14473,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/916217d39620f8292b4ebd574df9f28250d47f56"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/test_emulator_instruction_batching.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e16ff172ed66ebc724783a1de979dea54072690f",
+      "size": 7816,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e16ff172ed66ebc724783a1de979dea54072690f"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/test_main_bus.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "569cca7b22407cd5dcdd43af5b7ee36837ea85f6",
+      "size": 3865,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/569cca7b22407cd5dcdd43af5b7ee36837ea85f6"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/test_mapper_bank_helpers.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "337fef5ba9f448f651ee4710681b09becc22af75",
+      "size": 3013,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/337fef5ba9f448f651ee4710681b09becc22af75"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/test_mapper_hooks.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "54e73e6308b1f528af21d7f72ea6ef631c7164ae",
+      "size": 2823,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/54e73e6308b1f528af21d7f72ea6ef631c7164ae"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/test_picture_bus.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bc305f23756da2a084495529b20eb60cdb89e26e",
+      "size": 6640,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/bc305f23756da2a084495529b20eb60cdb89e26e"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/test_ppu_background_tile_rows.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0c4142a9198feb450d77b3ed37da9bf57d07e072",
+      "size": 8328,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0c4142a9198feb450d77b3ed37da9bf57d07e072"
+    },
+    {
+      "path": "nes_emu/test/nes_emu/test_ppu_sprite_prefetch.cpp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f615b5c9310ef61c58df981da23a8f46227deca8",
+      "size": 7803,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/f615b5c9310ef61c58df981da23a8f46227deca8"
+    },
+    {
+      "path": "nes_py",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "c5045096ab362a4db9fec5465e90d2ae6230ea59",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/c5045096ab362a4db9fec5465e90d2ae6230ea59"
+    },
+    {
+      "path": "nes_py/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fdaf1d9c4e915ca24a2104c96e255168b335b23a",
+      "size": 252,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/fdaf1d9c4e915ca24a2104c96e255168b335b23a"
+    },
+    {
+      "path": "nes_py/_image_viewer.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5492a0d2790a84af40a2008c153a843315adc9ee",
+      "size": 4972,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/5492a0d2790a84af40a2008c153a843315adc9ee"
+    },
+    {
+      "path": "nes_py/_native.pyx",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0c737ac04c9fa20426c580aa0613a62d8dc68703",
+      "size": 30049,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0c737ac04c9fa20426c580aa0613a62d8dc68703"
+    },
+    {
+      "path": "nes_py/_rom.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "68239c0810f5d93391cb6914157ac5bb30972b8c",
+      "size": 11430,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/68239c0810f5d93391cb6914157ac5bb30972b8c"
+    },
+    {
+      "path": "nes_py/nes_env.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f296f4e37a199633c21c048bc13436ad94035e85",
+      "size": 15964,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/f296f4e37a199633c21c048bc13436ad94035e85"
+    },
+    {
+      "path": "nes_py/play.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c46b14614769cecb6b1d1a751524de0b094cd9d1",
+      "size": 6223,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/c46b14614769cecb6b1d1a751524de0b094cd9d1"
+    },
+    {
+      "path": "nes_py/ram.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1256d118f499e2d52a5f61db228a3766cdb2fc4c",
+      "size": 3917,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/1256d118f499e2d52a5f61db228a3766cdb2fc4c"
+    },
+    {
+      "path": "nes_py/speedtest.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cd66976d6191d5405fc9e34910c6516a8ecae75b",
+      "size": 52393,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/cd66976d6191d5405fc9e34910c6516a8ecae75b"
+    },
+    {
+      "path": "nes_py/tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "2b36f592bc8ab9111f733c4f5263ab9aa1c72b97",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/2b36f592bc8ab9111f733c4f5263ab9aa1c72b97"
+    },
+    {
+      "path": "nes_py/tests/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5cacf0d1e8067b83a57f949608ef99e0a6df0fa2",
+      "size": 41,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/5cacf0d1e8067b83a57f949608ef99e0a6df0fa2"
+    },
+    {
+      "path": "nes_py/tests/games",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3881b1cd41f32bbe8a2850550cd2dc63c9f0ecd9",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/3881b1cd41f32bbe8a2850550cd2dc63c9f0ecd9"
+    },
+    {
+      "path": "nes_py/tests/games/adventure-island.nes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "912b4471e72a8829e9852692dae7d51793d3c819",
+      "size": 65552,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/912b4471e72a8829e9852692dae7d51793d3c819"
+    },
+    {
+      "path": "nes_py/tests/games/batman-return-of-the-joker.nes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3bb44d453bf48ace20a7f8d234d9b282c5b92fe2",
+      "size": 393232,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/3bb44d453bf48ace20a7f8d234d9b282c5b92fe2"
+    },
+    {
+      "path": "nes_py/tests/games/battletoads.nes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "459d4f746c5ce70cb1149b894f13736cd229288f",
+      "size": 262160,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/459d4f746c5ce70cb1149b894f13736cd229288f"
+    },
+    {
+      "path": "nes_py/tests/games/blank",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "nes_py/tests/games/castlevania-iii-draculas-curse.nes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "77965c09806763ede80a5114e5325833da432d34",
+      "size": 393232,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/77965c09806763ede80a5114e5325833da432d34"
+    },
+    {
+      "path": "nes_py/tests/games/empty.nes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "size": 0,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "nes_py/tests/games/excitebike.nes",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "fac67b7b03825bd6f6d3644ba5be0c4d2d49188e",
+      "size": 24592,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/fac67b7b03825bd6f6d3644ba5be0c4d2d49188e"
+    },
+    {
+      "path": "nes_py/tests/games/mega-man.nes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a71264aa42c1f4aa7a958efad22c3d37e31094cf",
+      "size": 131088,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/a71264aa42c1f4aa7a958efad22c3d37e31094cf"
+    },
+    {
+      "path": "nes_py/tests/games/mike-tysons-punch-out.nes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "58765e80dd8a6edc1a709e3ecf981df1aab08f1e",
+      "size": 262160,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/58765e80dd8a6edc1a709e3ecf981df1aab08f1e"
+    },
+    {
+      "path": "nes_py/tests/games/super-mario-bros-1.nes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "878ef21b5976a87c2fc19e780381816cbc769a65",
+      "size": 40976,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/878ef21b5976a87c2fc19e780381816cbc769a65"
+    },
+    {
+      "path": "nes_py/tests/games/super-mario-bros-2.nes",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "39e13dfaf1eff512b7e1ac0a256293c8b419e55e",
+      "size": 262160,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/39e13dfaf1eff512b7e1ac0a256293c8b419e55e"
+    },
+    {
+      "path": "nes_py/tests/games/super-mario-bros-3.nes",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "4402e7591960d51ee1d00d20976af950e29e30c5",
+      "size": 393232,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/4402e7591960d51ee1d00d20976af950e29e30c5"
+    },
+    {
+      "path": "nes_py/tests/games/super-mario-bros-lost-levels.nes",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "e69a88988753af63958ca4c5a890fdc51d19254a",
+      "size": 40976,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e69a88988753af63958ca4c5a890fdc51d19254a"
+    },
+    {
+      "path": "nes_py/tests/games/the-legend-of-zelda.nes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d66573d28f220f55bb2f98debca2d665bc3197df",
+      "size": 131088,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/d66573d28f220f55bb2f98debca2d665bc3197df"
+    },
+    {
+      "path": "nes_py/tests/mapper_fixtures.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9707892cd4050994ad554cf23cee8d68a5a3ebd2",
+      "size": 4849,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/9707892cd4050994ad554cf23cee8d68a5a3ebd2"
+    },
+    {
+      "path": "nes_py/tests/mappers",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3a839262f5e666ebe559307fcfb56d7478038552",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/3a839262f5e666ebe559307fcfb56d7478038552"
+    },
+    {
+      "path": "nes_py/tests/mappers/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "924e111692cc84cff5becc0d0204ec1b9ead882e",
+      "size": 72,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/924e111692cc84cff5becc0d0204ec1b9ead882e"
+    },
+    {
+      "path": "nes_py/tests/mappers/common.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "172c88137e1bc65a2d47dde19a4c53f3a790cb51",
+      "size": 3300,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/172c88137e1bc65a2d47dde19a4c53f3a790cb51"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_mapper_000_nrom.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bb8885bf1fb4be076b98316e5b39f2a14dc51014",
+      "size": 3065,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/bb8885bf1fb4be076b98316e5b39f2a14dc51014"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_mapper_001_sxrom.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2b10ebc269931dd49580b06c6d797d3795c64d07",
+      "size": 4543,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/2b10ebc269931dd49580b06c6d797d3795c64d07"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_mapper_002_uxrom.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dd0dc8d239d5977d8828f80a9781cdc261bc9751",
+      "size": 2857,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/dd0dc8d239d5977d8828f80a9781cdc261bc9751"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_mapper_003_cnrom.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ad279a5faa7fc5974e06769a0f5a9152eb6c4b1a",
+      "size": 2644,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/ad279a5faa7fc5974e06769a0f5a9152eb6c4b1a"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_mapper_004_mmc3.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e0e5ab03ca7108d8994dbfc36996903c7b03be7f",
+      "size": 2832,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e0e5ab03ca7108d8994dbfc36996903c7b03be7f"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_mapper_005_mmc5.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e4c2ba0db226d01619966f7a03f846ab48c56b51",
+      "size": 3102,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/e4c2ba0db226d01619966f7a03f846ab48c56b51"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_mapper_007_axrom.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3e01fa1edd7719437d17a807d25d98c1cd264f77",
+      "size": 2825,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/3e01fa1edd7719437d17a807d25d98c1cd264f77"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_mapper_009_mmc2.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0adaf9d09ebfb7a0a72b1cb3ad5dcff2f976fac4",
+      "size": 4192,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/0adaf9d09ebfb7a0a72b1cb3ad5dcff2f976fac4"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_mapper_069_fme7.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9ac04e528e975911a34f2fb74733ee6a02c84827",
+      "size": 2539,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/9ac04e528e975911a34f2fb74733ee6a02c84827"
+    },
+    {
+      "path": "nes_py/tests/mappers/test_registry.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "379eed13d69601345e230bbf4588e8cd3c8c6610",
+      "size": 2604,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/379eed13d69601345e230bbf4588e8cd3c8c6610"
+    },
+    {
+      "path": "nes_py/tests/rom_file_abs_path.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d5a371b0cd9eff3e01ed18b6a333e21e86623156",
+      "size": 676,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/d5a371b0cd9eff3e01ed18b6a333e21e86623156"
+    },
+    {
+      "path": "nes_py/tests/test_app_imports.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "05b2473c7bb0deb26f6f9bb0d2a0062cf3e8b673",
+      "size": 916,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/05b2473c7bb0deb26f6f9bb0d2a0062cf3e8b673"
+    },
+    {
+      "path": "nes_py/tests/test_cartridge_metadata.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "158af1bf80b76b00a377dd6473c6720550817536",
+      "size": 8575,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/158af1bf80b76b00a377dd6473c6720550817536"
+    },
+    {
+      "path": "nes_py/tests/test_joypad_space.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "616d2ecac9ddd4c13b73ad50a8a359de37d243c5",
+      "size": 2690,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/616d2ecac9ddd4c13b73ad50a8a359de37d243c5"
+    },
+    {
+      "path": "nes_py/tests/test_mappers.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1a1b24397caff14959b5a8d62ea250f1136a6b64",
+      "size": 466,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/1a1b24397caff14959b5a8d62ea250f1136a6b64"
+    },
+    {
+      "path": "nes_py/tests/test_multiple_makes.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "31ea4157ec454d9bd44cdf2e8c22095569dd3fec",
+      "size": 3395,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/31ea4157ec454d9bd44cdf2e8c22095569dd3fec"
+    },
+    {
+      "path": "nes_py/tests/test_nes_env.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b32efde0062cd665e86877df64362d23cb3b475e",
+      "size": 23903,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/b32efde0062cd665e86877df64362d23cb3b475e"
+    },
+    {
+      "path": "nes_py/tests/test_play.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9d2a6fd3d09d8c68f8d701a3c5e940654bc6ba2f",
+      "size": 1084,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/9d2a6fd3d09d8c68f8d701a3c5e940654bc6ba2f"
+    },
+    {
+      "path": "nes_py/tests/test_ram_reads.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8c1bdbee12093fcb622c82ac63c6e0f971f53e00",
+      "size": 4042,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/8c1bdbee12093fcb622c82ac63c6e0f971f53e00"
+    },
+    {
+      "path": "nes_py/tests/test_rom.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1ba8550f81ee07415098b12319043bfd2c69b29a",
+      "size": 9707,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/1ba8550f81ee07415098b12319043bfd2c69b29a"
+    },
+    {
+      "path": "nes_py/tests/test_speedtest.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "463076fb743cc70c3cfa13d77f15e4c099583ebf",
+      "size": 12573,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/463076fb743cc70c3cfa13d77f15e4c099583ebf"
+    },
+    {
+      "path": "nes_py/tests/test_vector_env.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "489e582b11386fb8fd326b8bbad3c0eeafb5e90c",
+      "size": 5696,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/489e582b11386fb8fd326b8bbad3c0eeafb5e90c"
+    },
+    {
+      "path": "nes_py/vector_env.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f56f6daef104d4ed705379caf15a3d4fde42940c",
+      "size": 7398,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/f56f6daef104d4ed705379caf15a3d4fde42940c"
+    },
+    {
+      "path": "nes_py/wrappers",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "07f4641450f92846b641cda29874303e90867a95",
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/trees/07f4641450f92846b641cda29874303e90867a95"
+    },
+    {
+      "path": "nes_py/wrappers/__init__.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "896ed203b76eaa13c2fac826e11061e73886937a",
+      "size": 191,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/896ed203b76eaa13c2fac826e11061e73886937a"
+    },
+    {
+      "path": "nes_py/wrappers/joypad_space.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "085c5973def9575e7a76aa6eaeab521ba03eb8d1",
+      "size": 3835,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/085c5973def9575e7a76aa6eaeab521ba03eb8d1"
+    },
+    {
+      "path": "pyproject.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "246f154857ee000dc388d5c16bafd6cb9827e872",
+      "size": 1821,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/246f154857ee000dc388d5c16bafd6cb9827e872"
+    },
+    {
+      "path": "requirements.txt",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ab34f5b3f45c1b9f18b704d8c40cfb84220ff9f0",
+      "size": 98,
+      "url": "https://api.github.com/repos/Kautenja/nes-py/git/blobs/ab34f5b3f45c1b9f18b704d8c40cfb84220ff9f0"
+    }
+  ],
+  "truncated": false
+}
